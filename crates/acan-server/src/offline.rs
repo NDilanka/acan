@@ -1,8 +1,8 @@
 //! The offline model: built-in replies so a server with no routing file still runs its loop.
 //!
 //! Each job kind gets the plainest reply that moves it forward: a split into one task on the
-//! order's machine, a review that matches every witness for every readback, and a generic
-//! clash explanation with no suggestion. Scope and probe drafts get no reply at all. Token counts
+//! order's machine, and a generic clash explanation with no suggestion. Scope, probe and review
+//! requests get no reply at all. Token counts
 //! are estimates, so the usage panel shows the calls a live provider would have taken. Every reply
 //! here is recorded with provider `offline`, and the replies serve tests and the server without a
 //! routing file.
@@ -47,10 +47,12 @@ impl ModelClient for Offline {
             .ok_or(LlmError::NoScriptedReply { role })?;
         let reply = match model::ask_of(&request).ok_or(LlmError::NoScriptedReply { role })? {
             Ask::Split => split(&context),
-            Ask::Review => review(&context),
             Ask::Explain => explain(),
-            // A scope or probe draft gains no authority from a built-in reply, so none is given.
-            Ask::Scope | Ask::Probe => return Err(LlmError::NoScriptedReply { role }),
+            // A scope or probe draft gains no authority from a built-in reply, and a review is
+            // retired, so none is given.
+            Ask::Scope | Ask::Probe | Ask::Review => {
+                return Err(LlmError::NoScriptedReply { role });
+            }
         }
         .to_string();
         let prompt_chars: usize = request.last_user_text().map_or(0, str::len);
@@ -89,16 +91,6 @@ fn split(context: &Value) -> Value {
     })
 }
 
-fn review(context: &Value) -> Value {
-    let witnesses: Vec<Value> = ids(&context["witnesses"], "id")
-        .map(|witness| json!({ "witness": witness, "judgement": { "judgement": "match" } }))
-        .collect();
-    let readbacks: Vec<Value> = ids(&context["readbacks"], "readback")
-        .map(|readback| json!({ "readback": readback, "witnesses": witnesses }))
-        .collect();
-    json!({ "readbacks": readbacks, "question": null })
-}
-
 fn explain() -> Value {
     json!({
         "consequence": "Both tasks change the same code, so whichever lands second would build on code that has moved under it.",
@@ -107,20 +99,8 @@ fn explain() -> Value {
     })
 }
 
-/// The string `field` of every object in the array `list`.
-fn ids<'v>(list: &'v Value, field: &'v str) -> impl Iterator<Item = &'v str> {
-    list.as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(move |item| item[field].as_str())
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-    use std::str::FromStr;
-
-    use acan_core::{Judgement, MachineKey, OrderId, OrderRev, ReadbackId, SystemCmd, WitnessId};
     use acan_llm::Message;
 
     use super::*;
@@ -133,63 +113,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_review_matches_every_witness_for_every_readback() {
-        let offline = Offline::default();
-        let context = json!({
-            "order": "keep the store fast",
-            "witnesses": [{ "id": "w-1" }, { "id": "w-2" }],
-            "readbacks": [{ "readback": "r-1" }, { "readback": "r-2" }],
-        });
-        let reply = offline
-            .chat_json::<model::ReviewReply>(Role::Foreman, request(model::REVIEW_PROMPT, &context))
+    async fn a_review_request_gets_no_offline_reply() {
+        let err = Offline::default()
+            .chat(
+                Role::Foreman,
+                request(model::REVIEW_PROMPT, &json!({ "readbacks": [] })),
+            )
             .await
-            .expect("the offline review parses");
-        let readbacks = |ids: &[&str]| -> BTreeSet<ReadbackId> {
-            ids.iter()
-                .map(|id| ReadbackId::from_str(id).expect("valid readback id"))
-                .collect()
-        };
-        let machine = MachineKey::from_str("model").expect("valid machine key");
-        let order = OrderId::from_str("o-0").expect("valid order id");
-
-        let cmd = model::review_result(
-            order,
-            &machine,
-            OrderRev::new(1),
-            &readbacks(&["r-1", "r-2"]),
-            reply.value,
-        )
-        .expect("the reply becomes a command");
-
-        let SystemCmd::ReadbacksReviewed {
-            verdicts, question, ..
-        } = cmd
-        else {
-            panic!("a review becomes ReadbacksReviewed, got {cmd:?}");
-        };
-        let judged: BTreeSet<ReadbackId> = verdicts.iter().map(|(id, _)| *id).collect();
-        assert_eq!(
-            judged,
-            readbacks(&["r-1", "r-2"]),
-            "every readback is judged"
+            .expect_err("the offline client answers no review");
+        assert!(
+            matches!(err, LlmError::NoScriptedReply { .. }),
+            "got {err:?}"
         );
-        let witnesses: BTreeSet<WitnessId> = ["w-1", "w-2"]
-            .iter()
-            .map(|id| WitnessId::from_str(id).expect("valid witness id"))
-            .collect();
-        for (readback, verdict) in &verdicts {
-            assert_eq!(
-                verdict.per_witness.keys().copied().collect::<BTreeSet<_>>(),
-                witnesses,
-                "{readback} is judged against every witness"
-            );
-            assert!(
-                verdict.per_witness.values().all(|j| *j == Judgement::Match),
-                "{readback} matches"
-            );
-        }
-        assert!(question.is_none(), "matched readbacks raise no question");
-        assert_eq!(offline.ledger().snapshot().len(), 1, "the call is recorded");
     }
 
     #[tokio::test]

@@ -1,12 +1,8 @@
 //! Work the host must do outside the core, derived from state.
 
-use std::collections::BTreeSet;
-
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{
-    ClashId, CommitId, GateRunId, OrderId, OrderRev, ReadbackId, TaskId, Timestamp, WitnessId,
-};
+use crate::ids::{ClashId, CommitId, GateRunId, OrderId, OrderRev, TaskId, Timestamp, WitnessId};
 
 /// A job the host runs and reports back as a `SystemCmd`.
 ///
@@ -22,19 +18,6 @@ pub enum Job {
         order: OrderId,
         /// The revision to split at.
         rev: OrderRev,
-    },
-    /// Ask the foreman to review readbacks. Reported as `ReadbacksReviewed`.
-    ///
-    /// The readback set is part of the key, so a new readback derives a new job. A result is
-    /// accepted for any part of the set current when it arrives, so a job overtaken by a new
-    /// readback still lands its verdicts.
-    Review {
-        /// The order.
-        order: OrderId,
-        /// The revision to judge against.
-        rev: OrderRev,
-        /// The readbacks needing a verdict at `rev`.
-        readbacks: BTreeSet<ReadbackId>,
     },
     /// Ask the foreman to explain a clash. Reported as `ClashExplained`.
     Explain {

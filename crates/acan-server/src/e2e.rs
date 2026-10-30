@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use acan_core::{
     AgentCmd, AgentId, Command, CommitId, DeclarationInput, Event, Fence, FilePath, Generation,
-    HumanCmd, LEASE_TTL_MS, LaneVerdict, MachineKey, OrderId, Origin, ScopeBinding, Stage,
-    Stamped, TaskId, TaskState, World,
+    HumanCmd, LEASE_TTL_MS, LaneVerdict, MachineKey, OrderId, Origin, ScopeBinding, Stage, Stamped,
+    TaskId, TaskState, World,
 };
 use acan_intent::{ItemClass, Scope, ScopeConfirmation};
 use acan_llm::{ChatRequest, ChatResponse, LlmError, ModelClient, Role, UsageLedger};
@@ -1006,7 +1006,9 @@ async fn order_ready(running: &Running, root: &Path, task: TaskId) -> (OrderId, 
     })
     .await;
     member(running, &HumanCmd::RegisterAgent { agent: agent() }).await;
-    let base = git(root, &["rev-parse", PROTECTED_BRANCH]).trim().to_owned();
+    let base = git(root, &["rev-parse", PROTECTED_BRANCH])
+        .trim()
+        .to_owned();
     let scope = scope_for(order, &base);
     member(
         running,

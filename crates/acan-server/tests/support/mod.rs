@@ -212,7 +212,7 @@ impl Demo {
 }
 
 /// Registers the agent pair and posts one readback on each of two tasks. Returns the readback
-/// ids, which the review judges.
+/// ids.
 pub fn read_back(demo: &mut Demo, tasks: [TaskId; 2]) -> BTreeSet<ReadbackId> {
     let agents = agent_pair();
     let mut ids = BTreeSet::new();

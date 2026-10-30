@@ -430,11 +430,8 @@ impl World {
 
     /// The jobs the host should be running now. See [`Job`] for the contract.
     ///
-    /// `Split` for each splitting order; `Review` for each split order without an open
-    /// question whose open or claimed tasks have readbacks lacking a verdict at the current
-    /// revision (a readback on a claimed task is a standby, matched so it can claim when the
-    /// lease ends);
-    /// `Barrier` for each split order whose declare barrier is armed;
+    /// `Split` for each splitting order; `Barrier` for each split order whose declare barrier is
+    /// armed. The legacy model review is not derived: no order gets a `Review` job;
     /// `Explain` for each blocking clash without an explanation; `RunWitness` for each
     /// frozen witness of a current gate run without a result; `Land` for the front of the
     /// land queue only.
@@ -452,17 +449,6 @@ impl World {
                         jobs.push(Job::Barrier {
                             order: order.id,
                             deadline,
-                        });
-                    }
-                    if self.open_question(order.id).is_some() {
-                        continue;
-                    }
-                    let readbacks = self.unreviewed(order);
-                    if !readbacks.is_empty() {
-                        jobs.push(Job::Review {
-                            order: order.id,
-                            rev: order.rev,
-                            readbacks,
                         });
                     }
                 }
@@ -512,8 +498,9 @@ impl World {
         jobs
     }
 
-    /// The readbacks the order's `Review` job covers, ignoring whether a question is open.
-    /// None for a scope-first order: the model review authorizes nothing there.
+    /// The readbacks of the order that the legacy review command may still judge, ignoring
+    /// whether a question is open. None for a scope-first order: the model review authorizes
+    /// nothing there. No job asks for these verdicts any more.
     pub(crate) fn unreviewed(&self, order: &Order) -> BTreeSet<ReadbackId> {
         if self.lanes.contains_key(&order.id) {
             return BTreeSet::new();

@@ -866,14 +866,6 @@ fn the_legacy_model_review_authorizes_nothing_in_the_lane() {
         )
         .unwrap_err();
     assert!(matches!(legacy_readback, Rejection::WrongState { .. }));
-    assert!(
-        !fx.origin
-            .world()
-            .jobs()
-            .iter()
-            .any(|job| matches!(job, Job::Review { order, .. } if *order == fx.order)),
-        "no Review job is derived for a scope-first order"
-    );
     fx.assert_replays();
 }
 

@@ -9,13 +9,12 @@
 //! draft is an error, never an offline answer.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use acan_core::{
-    Clash, ClashId, CodeIndex, Explanation, Judgement, Locus, MachineKey, OrderId, OrderRev,
-    ParseIdError, QuestionDraft, ReadbackId, ReadbackVerdict, Settlement, Stage, SystemCmd, Task,
-    TaskId, TaskSpec, TaskState, Witness, WitnessId, World,
+    Clash, ClashId, CodeIndex, Explanation, MachineKey, OrderId, OrderRev, ParseIdError,
+    Settlement, Stage, SystemCmd, Task, TaskId, TaskSpec, TaskState, Witness, WitnessId, World,
 };
 use acan_intent::{
     Fixture, MachineId, ModelProposal, ModelRef, ProbeProposal, RequestTemplate, RouteEntry,
@@ -80,9 +79,6 @@ pub enum ReplyError {
     /// A split reply has no tasks, so the order would have nothing to do.
     #[error("split reply has no tasks")]
     NoTasks,
-    /// A review question must offer exactly two answers.
-    #[error("review question needs exactly two options, got {0}")]
-    Options(usize),
 }
 
 /// What a draft must fit. The machines are the plant's, the routes and fixtures come from the
@@ -241,37 +237,6 @@ pub fn split_request(
     ))
 }
 
-/// The review prompt for `readbacks` of `order`, or `None` when the order is gone.
-#[must_use]
-pub fn review_request(
-    world: &World,
-    order: OrderId,
-    readbacks: &BTreeSet<ReadbackId>,
-) -> Option<ChatRequest> {
-    let order = world.order(order)?;
-    let reviewed: Vec<Value> = readbacks
-        .iter()
-        .filter_map(|id| world.readback(*id))
-        .filter_map(|readback| {
-            let task = world.task(readback.task)?;
-            Some(json!({
-                "readback": readback.id.to_string(),
-                "task": task_json(task),
-                "summary": readback.summary,
-                "touches": readback.touches,
-            }))
-        })
-        .collect();
-    Some(request(
-        REVIEW_PROMPT,
-        &json!({
-            "order": order.sentence,
-            "witnesses": witnesses_json(world, &order.witnesses),
-            "readbacks": reviewed,
-        }),
-    ))
-}
-
 /// The explain prompt for `clash`, or `None` when the clash or a party to it is gone. It carries
 /// both tasks with their declared footprints, the order's witnesses, and the menu.
 #[must_use]
@@ -356,139 +321,6 @@ fn task_spec(task: SplitTask, machines: &[MachineKey]) -> Result<TaskSpec, Reply
         title: task.title,
         brief: task.brief,
         scope,
-    })
-}
-
-/// A review reply: one entry per readback the foreman judged, and at most one question.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ReviewReply {
-    /// One entry per readback in the context.
-    pub readbacks: Vec<ReviewedReadback>,
-    /// A question for a human, only when the readbacks disagree about what the order means. Null
-    /// otherwise.
-    pub question: Option<ReviewQuestion>,
-}
-
-/// The judgements for one readback.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ReviewedReadback {
-    /// The readback id from the context, such as `r-4`.
-    pub readback: String,
-    /// One judgement per witness of the order, each with its witness id.
-    pub witnesses: Vec<WitnessJudgement>,
-}
-
-/// The judgement of one witness.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct WitnessJudgement {
-    /// The witness id from the context, such as `w-2`.
-    pub witness: String,
-    /// The judgement.
-    pub judgement: JudgementReply,
-}
-
-/// A judgement as the model writes it: `{"judgement": "match"}`, or `disagrees` or `unclear`
-/// with a `reason`. The same tag as the origin's judgement.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(tag = "judgement", rename_all = "snake_case")]
-pub enum JudgementReply {
-    /// The readback respects the witness.
-    Match,
-    /// The readback contradicts the witness.
-    Disagrees {
-        /// Why the readback contradicts the witness, in one sentence.
-        reason: String,
-    },
-    /// The readback does not say enough to tell whether it respects the witness.
-    Unclear {
-        /// What is missing from the readback, in one sentence.
-        reason: String,
-    },
-}
-
-/// A question the foreman drafts for a human.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ReviewQuestion {
-    /// The question, in plain words.
-    pub text: String,
-    /// Exactly two answers, each one a complete choice.
-    pub options: Vec<String>,
-}
-
-/// Maps a review reply to the `ReadbacksReviewed` command for `order` at `rev`.
-///
-/// Off the live path: `Models` refuses review calls, so only the offline replies that tests use
-/// reach this mapping. The core keeps `ReadbacksReviewed` until the UI moves off it.
-///
-/// Only readbacks in `awaiting` get a verdict. A readback the model names twice keeps its first
-/// verdict. Both rules keep the batch to what the origin still accepts, since the origin refuses
-/// the whole batch when any readback in it is not awaiting review. The question, if any, pins on
-/// `machine`, the order's machine.
-///
-/// # Errors
-///
-/// Returns [`ReplyError`] when a readback or witness id is invalid, or the question does not
-/// have two options.
-pub fn review_result(
-    order: OrderId,
-    machine: &MachineKey,
-    rev: OrderRev,
-    awaiting: &BTreeSet<ReadbackId>,
-    reply: ReviewReply,
-) -> Result<SystemCmd, ReplyError> {
-    let mut verdicts: BTreeMap<ReadbackId, ReadbackVerdict> = BTreeMap::new();
-    for reviewed in reply.readbacks {
-        let readback = ReadbackId::from_str(&reviewed.readback)?;
-        if !awaiting.contains(&readback) || verdicts.contains_key(&readback) {
-            continue;
-        }
-        verdicts.insert(readback, verdict(rev, reviewed.witnesses)?);
-    }
-    let question = reply
-        .question
-        .map(|question| question_draft(machine, question))
-        .transpose()?;
-    Ok(SystemCmd::ReadbacksReviewed {
-        order,
-        rev,
-        verdicts: verdicts.into_iter().collect(),
-        question,
-    })
-}
-
-fn verdict(rev: OrderRev, witnesses: Vec<WitnessJudgement>) -> Result<ReadbackVerdict, ReplyError> {
-    let per_witness = witnesses
-        .into_iter()
-        .map(|judged| {
-            let witness = WitnessId::from_str(&judged.witness)?;
-            Ok((witness, judgement(judged.judgement)))
-        })
-        .collect::<Result<BTreeMap<_, _>, ReplyError>>()?;
-    Ok(ReadbackVerdict { rev, per_witness })
-}
-
-fn judgement(reply: JudgementReply) -> Judgement {
-    match reply {
-        JudgementReply::Match => Judgement::Match,
-        JudgementReply::Disagrees { reason } => Judgement::Disagrees { reason },
-        JudgementReply::Unclear { reason } => Judgement::Unclear { reason },
-    }
-}
-
-fn question_draft(
-    machine: &MachineKey,
-    question: ReviewQuestion,
-) -> Result<QuestionDraft, ReplyError> {
-    let [first, second]: [String; 2] = question
-        .options
-        .try_into()
-        .map_err(|options: Vec<String>| ReplyError::Options(options.len()))?;
-    Ok(QuestionDraft {
-        at: Locus::Machine {
-            machine: machine.clone(),
-        },
-        text: question.text,
-        options: [first, second],
     })
 }
 
@@ -917,93 +749,6 @@ mod tests {
         assert!(matches!(err, ReplyError::NoTasks), "got {err:?}");
     }
 
-    fn readback(id: &str) -> ReadbackId {
-        ReadbackId::from_str(id).expect("valid readback id")
-    }
-
-    fn witness_match(witness: &str) -> WitnessJudgement {
-        WitnessJudgement {
-            witness: witness.to_owned(),
-            judgement: JudgementReply::Match,
-        }
-    }
-
-    fn reviewed(id: &str, witnesses: Vec<WitnessJudgement>) -> ReviewedReadback {
-        ReviewedReadback {
-            readback: id.to_owned(),
-            witnesses,
-        }
-    }
-
-    #[test]
-    fn review_question_must_offer_exactly_two_answers() {
-        let reply = ReviewReply {
-            readbacks: Vec::new(),
-            question: Some(ReviewQuestion {
-                text: "Which?".to_owned(),
-                options: vec!["a".into(), "b".into(), "c".into()],
-            }),
-        };
-        let machine = MachineKey::from_str("ui").expect("valid key");
-        let err = review_result(
-            order("o-1"),
-            &machine,
-            OrderRev::new(1),
-            &BTreeSet::new(),
-            reply,
-        )
-        .expect_err("three options");
-        assert!(matches!(err, ReplyError::Options(3)), "got {err:?}");
-    }
-
-    #[test]
-    fn review_keeps_only_awaiting_readbacks_and_each_one_once() {
-        let rev = OrderRev::new(2);
-        let awaiting = BTreeSet::from([readback("r-1"), readback("r-3")]);
-        let reply = ReviewReply {
-            readbacks: vec![
-                reviewed("r-3", vec![witness_match("w-1")]),
-                reviewed("r-2", vec![witness_match("w-1")]),
-                reviewed("r-1", vec![witness_match("w-1")]),
-                reviewed(
-                    "r-3",
-                    vec![WitnessJudgement {
-                        witness: "w-1".to_owned(),
-                        judgement: JudgementReply::Disagrees {
-                            reason: "second answer".to_owned(),
-                        },
-                    }],
-                ),
-            ],
-            question: None,
-        };
-        let machine = MachineKey::from_str("ui").expect("valid key");
-
-        let cmd =
-            review_result(order("o-1"), &machine, rev, &awaiting, reply).expect("valid reply");
-
-        let matched = ReadbackVerdict {
-            rev,
-            per_witness: BTreeMap::from([(
-                WitnessId::from_str("w-1").expect("valid witness id"),
-                Judgement::Match,
-            )]),
-        };
-        assert_eq!(
-            cmd,
-            SystemCmd::ReadbacksReviewed {
-                order: order("o-1"),
-                rev,
-                verdicts: vec![
-                    (readback("r-1"), matched.clone()),
-                    (readback("r-3"), matched),
-                ],
-                question: None,
-            },
-            "only awaiting readbacks are judged, each once, keeping the first verdict"
-        );
-    }
-
     #[test]
     fn explanation_maps_a_suggested_narrow_to_a_task_id() {
         let reply = ExplainReply {
@@ -1037,30 +782,6 @@ mod tests {
             }),
         };
         assert!(explanation(reply).is_err(), "task-2 is not a task id");
-    }
-
-    #[test]
-    fn review_reply_in_the_documented_shape_parses() {
-        let reply: ReviewReply = serde_json::from_value(json!({
-            "readbacks": [{
-                "readback": "r-0",
-                "witnesses": [
-                    { "witness": "w-0", "judgement": { "judgement": "match" } },
-                    { "witness": "w-1", "judgement": {
-                        "judgement": "disagrees", "reason": "the default is dropped"
-                    } }
-                ]
-            }],
-            "question": null
-        }))
-        .expect("the documented shape parses");
-
-        let judged = &reply.readbacks[0].witnesses;
-        assert!(matches!(judged[0].judgement, JudgementReply::Match));
-        assert!(matches!(
-            &judged[1].judgement,
-            JudgementReply::Disagrees { reason } if reason == "the default is dropped"
-        ));
     }
 
     #[test]
