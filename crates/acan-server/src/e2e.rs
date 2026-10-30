@@ -923,6 +923,88 @@ async fn a_scope_draft_that_never_checks_is_recorded_as_a_failure() {
     running.stop().await.expect("the server stops");
 }
 
+/// The confirmation body is the one a member sends as `ConfirmScope`. It is absent until the order
+/// has a scope, an agent token never reads it, and posting the body as the owner confirms the
+/// revision it was read for.
+#[tokio::test]
+async fn a_member_reads_the_confirmation_body_and_sending_it_confirms_the_scope() {
+    let repo = demo_repo();
+    let root = repo.path();
+    let running = start_with(root, TwoTasks::default(), UsageLedger::default()).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+    post_order(&running).await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    settle(&running, "the split", |_, world| world.task(task).map(drop)).await;
+    let path = format!("/api/orders/{order}/scope/confirmation");
+    let unscoped = client()
+        .get(url(&running, &path))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .expect("the body request is sent");
+    assert_eq!(
+        unscoped.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "an order with no scope has no body"
+    );
+    let base = git(root, &["rev-parse", PROTECTED_BRANCH])
+        .trim()
+        .to_owned();
+    let scope = scope_for(order, &base);
+    member(
+        &running,
+        &HumanCmd::ReviseScope {
+            order,
+            scope: Box::new(scope.clone()),
+        },
+    )
+    .await;
+    let refused = client()
+        .get(url(&running, &path))
+        .bearer_auth(AGENT_TOKEN)
+        .send()
+        .await
+        .expect("the agent's body request is sent");
+    assert_eq!(
+        refused.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "an agent token never reads the body"
+    );
+    let response = client()
+        .get(url(&running, &path))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .expect("the body request is sent");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.expect("the body is JSON");
+    let binding = ScopeBinding::of(&scope).expect("the scope binds");
+    assert_eq!(body["scope_rev"], 1, "the body is for the current revision");
+    assert_eq!(body["by"], "owner", "the body is signed by the reader");
+    assert_eq!(body["selector_hashes"], json!(binding.selector_hashes));
+    assert_eq!(body["example_hashes"], json!(binding.example_hashes));
+    let confirmation: ScopeConfirmation =
+        serde_json::from_value(body).expect("the body is a confirmation");
+    member(
+        &running,
+        &HumanCmd::ConfirmScope {
+            order,
+            confirmation: Box::new(confirmation),
+        },
+    )
+    .await;
+    let (_, origin) = snapshot(&running).await;
+    let lane = origin.world().lane(order).expect("the lane is open");
+    assert!(
+        lane.confirmation.is_some(),
+        "posting the body confirms the scope"
+    );
+    running.stop().await.expect("the server stops");
+}
+
 /// The offline models, except that a split makes two tasks on the order's machine.
 #[derive(Default)]
 struct TwoTasks {

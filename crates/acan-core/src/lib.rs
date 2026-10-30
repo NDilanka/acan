@@ -44,7 +44,7 @@ pub use index::{Belt, CodeIndex, IndexedFile, IndexedSymbol, Locus};
 pub use job::Job;
 pub use lane::{
     LaneRun, MAX_PREDICTIONS, PendingContrast, ScopeBinding, ScopeDraftOutcome, ScopeLane,
-    ScopedReadback,
+    ScopedReadback, confirmation_body,
 };
 pub use lease::{Claim, DECLARE_BARRIER_MS, Fence, LEASE_TTL_MS, Lease, LeaseEnd};
 pub use member::{AgentPrincipal, Member, Role, SettleRight};

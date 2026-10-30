@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use acan_core::{
     AgentId, Command, Generation, HumanCmd, MemberId, OrderId, OrderRev, Rejection,
-    ScopeDraftOutcome, Seq, Stamped, TaskId, TaskState,
+    ScopeConfirmation, ScopeDraftOutcome, Seq, Stamped, TaskId, TaskState,
 };
 use acan_intent::{
     GetReceiptRequest, GetReceiptResponse, GetRulingsRequest, GetRulingsResponse, GetScopeRequest,
@@ -51,7 +51,11 @@ pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<Public
         .route("/api/tasks/{task}/scope", get(get_scope::<C>))
         .route("/api/tasks/{task}/rulings", get(get_rulings::<C>))
         .route("/api/tasks/{task}/receipt", get(get_receipt::<C>))
-        .route("/api/orders/{order}/scope-draft", get(get_scope_draft::<C>));
+        .route("/api/orders/{order}/scope-draft", get(get_scope_draft::<C>))
+        .route(
+            "/api/orders/{order}/scope/confirmation",
+            get(get_scope_confirmation::<C>),
+        );
     let router = match web {
         Some(root) => {
             let root = Arc::new(root);
@@ -393,6 +397,27 @@ async fn get_scope_draft<C: ModelClient + 'static>(
             .ok_or(ApiError::NotFound("no scope draft for this order yet"))
     })?;
     Ok(Json(view))
+}
+
+/// The body a member sends as `ConfirmScope` for an order's current scope revision. It carries
+/// the hashes and bindings the origin checks, read from the lane and the ledger, so a script and
+/// a UI send the same bytes. It confirms nothing. The member sends it, and the origin accepts it
+/// only if the open choices and broad items are answered in it.
+async fn get_scope_confirmation<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+    Path(order): Path<String>,
+) -> Result<Json<ScopeConfirmation>, ApiError> {
+    let member = member(&host, &headers)?;
+    let order: OrderId = order.parse().map_err(|_| ApiError::NotFound("order"))?;
+    let body = host.read(|world| {
+        if world.lane(order).is_none() {
+            return Err(ApiError::NotFound("scope for this order"));
+        }
+        acan_core::confirmation_body(world, order, &member, crate::host::now())
+            .map_err(ApiError::Rejected)
+    })?;
+    Ok(Json(body))
 }
 
 /// The latest receipt of a task's gate runs.

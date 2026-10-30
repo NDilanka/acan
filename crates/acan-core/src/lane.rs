@@ -23,14 +23,17 @@ use std::collections::BTreeMap;
 
 use acan_intent::{
     BroadGrantAck, CanonicalError, ChoiceAnswer, CommitSha, Contest, ContestId, ContestStatus,
-    EpisodeId, ExampleHash, GateContext, GateState, InvalidValue, ItemId, McpV1, OrderRef,
-    PostReadbackResponse, Prediction, PreparedCommit, RepairBudget, RepairRound, Scope,
-    ScopeConfirmation, ScopeDraft, ScopeHash, ScopeRev, ScopeRevision, SelectorHash,
+    EpisodeId, ExampleHash, GateContext, GateState, HumanRef, InvalidValue, ItemId, McpV1,
+    OrderRef, PostReadbackResponse, Prediction, PreparedCommit, RepairBudget, RepairRound,
+    RepairRounds, Scope, ScopeConfirmation, ScopeConfirmationV1, ScopeDraft, ScopeHash, ScopeRev,
+    ScopeRevision, SelectorHash, UnixMillis,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, Rejection};
-use crate::ids::{AgentId, CommitId, GateRunId, MemberId, OrderId, OrderRev, ReadbackId, TaskId};
+use crate::ids::{
+    AgentId, CommitId, GateRunId, MemberId, OrderId, OrderRev, ReadbackId, TaskId, Timestamp,
+};
 use crate::lease::LeaseEnd;
 use crate::member::Role;
 use crate::order::{self, Order, OrderPhase, OrderState, TaskState};
@@ -424,6 +427,62 @@ pub(crate) fn decide_confirm(
         order,
         confirmation: Box::new(confirmation),
     }])
+}
+
+/// The body a human sends as `ConfirmScope` for the lane's current revision. Every field the
+/// origin checks is filled in from the lane, the ledger and the scope: the revision and hash, the
+/// base commit, the ruling versions in force, the selector and example hashes, and the repair
+/// budget the order already fixed or else the offered one. The body confirms nothing. The
+/// answers to open choices and the broad-item acknowledgements are the human's own decisions, so
+/// they come back empty, and the origin refuses the body until they are added.
+///
+/// # Errors
+///
+/// Returns a [`Rejection`] if the order has no scope, if `by` is not a human reference, or if a
+/// part of the scope cannot be hashed.
+pub fn confirmation_body(
+    world: &World,
+    order: OrderId,
+    by: &MemberId,
+    at: Timestamp,
+) -> Result<ScopeConfirmation, Rejection> {
+    let lane = world
+        .lane(order)
+        .ok_or_else(|| Rejection::wrong_state("order", "without a scope"))?;
+    let binding = ScopeBinding::of(&lane.scope).map_err(hash_failed)?;
+    let mut ruling_versions = world.ledger().ruling_versions();
+    ruling_versions.sort();
+    let by = HumanRef::try_from(by.as_str().to_owned())
+        .map_err(|_| Rejection::invalid("the member id is not a human reference"))?;
+    Ok(ScopeConfirmation {
+        version: ScopeConfirmationV1,
+        order: order_ref(order)?,
+        scope_rev: lane.scope.rev,
+        scope_hash: lane.scope_hash,
+        semantic_scope_hash: Some(lane.scope.semantic_scope_hash().map_err(hash_failed)?),
+        base_commit: lane.scope.base_commit.clone(),
+        ruling_versions,
+        selector_hashes: binding.selector_hashes,
+        example_hashes: binding.example_hashes,
+        answers: Vec::new(),
+        broad_grants: Vec::new(),
+        budget: lane.budget.unwrap_or_else(offered_budget),
+        by,
+        at: UnixMillis(at.as_millis()),
+    })
+}
+
+/// The repair budget a body offers before the order's first confirmation fixes one: two repair
+/// rounds, the most v1 allows, ten minutes of wall time, a two-dollar model cost cap, and four
+/// new episodes.
+fn offered_budget() -> RepairBudget {
+    RepairBudget {
+        repair_rounds: RepairRounds::try_from(RepairRounds::MAX)
+            .expect("the largest repair round count is in range"),
+        wall_time_ms: 600_000,
+        model_cost_micros: 2_000_000,
+        max_episodes: 4,
+    }
 }
 
 fn mismatch(what: &str, lane: &ScopeLane) -> Rejection {
