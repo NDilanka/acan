@@ -19,7 +19,7 @@ use crate::ids::{
 };
 use crate::index::CodeIndex;
 use crate::job::Job;
-use crate::lane::{self, LaneRun, PendingContrast, ScopeLane, ScopedReadback};
+use crate::lane::{self, LaneRun, PendingContrast, ScopeDraftOutcome, ScopeLane, ScopedReadback};
 use crate::lease::{self, Claim, DECLARE_BARRIER_MS};
 use crate::member::{self, AgentPrincipal, Member, Role, SettleRight};
 use crate::order::{
@@ -111,6 +111,9 @@ pub struct World {
     pub(crate) gates: BTreeMap<GateRunId, GateRun>,
     pub(crate) usage: ModelUsage,
     pub(crate) lanes: BTreeMap<OrderId, ScopeLane>,
+    // What the scope-draft job reported, by order and the order revision it was derived at. A
+    // drafted scope carries no authority; the lane holds the only scope a claim may rest on.
+    pub(crate) scope_drafts: BTreeMap<(OrderId, OrderRev), ScopeDraftOutcome>,
     // Shares the readback id counter with the legacy readbacks, so a claim's readback id
     // names exactly one readback of either kind.
     pub(crate) scoped_readbacks: BTreeMap<ReadbackId, ScopedReadback>,
@@ -227,6 +230,25 @@ impl World {
     #[must_use]
     pub fn lane(&self, order: OrderId) -> Option<&ScopeLane> {
         self.lanes.get(&order)
+    }
+
+    /// The latest scope-draft outcome of an order, with the order revision it was for. A drafted
+    /// scope confirms nothing: the scope a claim rests on is [`World::lane`]'s.
+    #[must_use]
+    pub fn scope_draft(&self, order: OrderId) -> Option<(OrderRev, &ScopeDraftOutcome)> {
+        self.scope_drafts
+            .range((order, OrderRev::ZERO)..=(order, OrderRev::new(u32::MAX)))
+            .next_back()
+            .map(|((_, rev), outcome)| (*rev, outcome))
+    }
+
+    /// The scope-draft outcome recorded for an order at one of its revisions.
+    pub(crate) fn scope_draft_at(
+        &self,
+        order: OrderId,
+        rev: OrderRev,
+    ) -> Option<&ScopeDraftOutcome> {
+        self.scope_drafts.get(&(order, rev))
     }
 
     /// Every scope-first order's lane, in order id order.
@@ -431,10 +453,11 @@ impl World {
     /// The jobs the host should be running now. See [`Job`] for the contract.
     ///
     /// `Split` for each splitting order; `Barrier` for each split order whose declare barrier is
-    /// armed. The legacy model review is not derived: no order gets a `Review` job;
-    /// `Explain` for each blocking clash without an explanation; `RunWitness` for each
-    /// frozen witness of a current gate run without a result; `Land` for the front of the
-    /// land queue only.
+    /// armed; `DraftScope` for each order that still needs a scope draft (see
+    /// `wants_scope_draft`). The legacy model review is not derived: no order gets a `Review`
+    /// job. `Explain` for each blocking clash without an explanation; `RunWitness` for each
+    /// frozen witness of a current gate run without a result; `Land` for the front of the land
+    /// queue only.
     #[must_use]
     pub fn jobs(&self) -> Vec<Job> {
         let mut jobs = Vec::new();
@@ -453,6 +476,12 @@ impl World {
                     }
                 }
                 OrderState::Cancelled => {}
+            }
+            if self.wants_scope_draft(order) {
+                jobs.push(Job::DraftScope {
+                    order: order.id,
+                    rev: order.rev,
+                });
             }
         }
         jobs.extend(
@@ -496,6 +525,22 @@ impl World {
             });
         }
         jobs
+    }
+
+    /// Whether an order needs a scope draft: it is not cancelled, has no scope, has no drafted
+    /// scope at its current revision, and has no claimed or landed work. A draft is requested
+    /// once per revision; a failed draft is retried by the job loop and not stored as a draft.
+    fn wants_scope_draft(&self, order: &Order) -> bool {
+        order.state != OrderState::Cancelled
+            && self.lane(order.id).is_none()
+            && !matches!(
+                self.scope_draft_at(order.id, order.rev),
+                Some(ScopeDraftOutcome::Drafted { .. })
+            )
+            && matches!(
+                self.phase(order.id),
+                Some(OrderPhase::Splitting | OrderPhase::ReadingBack)
+            )
     }
 
     /// The readbacks of the order that the legacy review command may still judge, ignoring
@@ -620,6 +665,7 @@ impl World {
             gates: BTreeMap::new(),
             usage: ModelUsage::default(),
             lanes: BTreeMap::new(),
+            scope_drafts: BTreeMap::new(),
             scoped_readbacks: BTreeMap::new(),
             ledger: Ledger::default(),
         }
@@ -772,6 +818,23 @@ impl World {
                     _ => Ok(()),
                 }
             }
+            Event::ScopeDrafted { order, rev, draft } => {
+                known(&self.orders, order, "order")?;
+                if draft.order.as_str() != order.to_string() {
+                    return Err(format!("the draft of order {order} names another order"));
+                }
+                if self.lanes.contains_key(order) {
+                    return Err(format!("order {order} is drafted after it has a scope"));
+                }
+                if matches!(
+                    self.scope_draft_at(*order, *rev),
+                    Some(ScopeDraftOutcome::Drafted { .. })
+                ) {
+                    return Err(format!("order {order} is drafted twice at {rev:?}"));
+                }
+                Ok(())
+            }
+            Event::ScopeDraftFailed { order, .. } => known(&self.orders, order, "order"),
             Event::ScopeConfirmed {
                 order,
                 confirmation,
@@ -1170,6 +1233,22 @@ impl World {
                 count.input += u64::from(*input_tokens);
                 count.output += u64::from(*output_tokens);
                 count.calls = count.calls.saturating_add(1);
+            }
+            Event::ScopeDrafted { order, rev, draft } => {
+                self.scope_drafts.insert(
+                    (*order, *rev),
+                    ScopeDraftOutcome::Drafted {
+                        draft: draft.clone(),
+                    },
+                );
+            }
+            Event::ScopeDraftFailed { order, rev, reason } => {
+                self.scope_drafts.insert(
+                    (*order, *rev),
+                    ScopeDraftOutcome::Failed {
+                        reason: reason.clone(),
+                    },
+                );
             }
             Event::ScopeRevised {
                 order,
@@ -1698,5 +1777,11 @@ fn decide_system(world: &World, ctx: &Ctx<'_>, cmd: SystemCmd) -> Result<Vec<Eve
             base,
             context,
         } => lane::decide_rebind(world, order, &base, &context),
+        SystemCmd::ScopeDrafted { order, rev, draft } => {
+            lane::decide_drafted(world, order, rev, *draft)
+        }
+        SystemCmd::ScopeDraftFailed { order, rev, reason } => {
+            lane::decide_draft_failed(world, order, rev, reason)
+        }
     }
 }

@@ -19,6 +19,15 @@ pub enum Job {
         /// The revision to split at.
         rev: OrderRev,
     },
+    /// Ask the foreman to draft the scope of an order that has none. Reported as `ScopeDrafted`,
+    /// or as `ScopeDraftFailed` after the last attempt. A draft carries no authority: a human
+    /// revises and confirms the scope.
+    DraftScope {
+        /// The order.
+        order: OrderId,
+        /// The order revision the draft is for.
+        rev: OrderRev,
+    },
     /// Ask the foreman to explain a clash. Reported as `ClashExplained`.
     Explain {
         /// The clash.

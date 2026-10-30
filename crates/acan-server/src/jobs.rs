@@ -22,14 +22,19 @@
 //! A `Barrier` job sleeps until its order's declare barrier is due and then sends a `Tick`,
 //! the same command the lease expiry runs on.
 //!
+//! A `DraftScope` job asks the foreman for a scope of an order that has none. The draft is stored
+//! as `ScopeDrafted` and confirms nothing. A failed draft is retried and then recorded as
+//! `ScopeDraftFailed`; no offline draft stands in for it.
+//!
 //! A scope-first run is not a job: the core derives no key for it. The loop reads
 //! `World::pending_contrasts` instead. Each pending run is prepared once (`CandidatePrepared`),
 //! observed and judged (`ReceiptReady`). A run already running is never started again. The
 //! state lives in the origin, so a restart reads the same pending runs and continues each from
 //! the recorded step: a run with a recorded preparation is judged, never prepared again. A
 //! scope-first land runs the final gate and installs the tested merged commit only when the gate
-//! passes. An order with no scope lane keeps the legacy path. A scope-first land whose evidence
-//! is missing or no longer confirmed is refused, so nothing installs.
+//! passes. An order with no scope lane cannot claim: a claim needs a legacy verdict, and no job
+//! produces one any more. A scope-first land whose evidence is missing or no longer confirmed is
+//! refused, so nothing installs.
 
 use std::collections::HashMap;
 use std::fs;
@@ -47,8 +52,9 @@ use acan_core::{
 };
 use acan_git::{Preparation, PrepareOutcome, Repo};
 use acan_intent::{
-    AppContract, CommitSha, ContainerPolicy, DiscrepancyEpisode, GateContext, PreparedCommit,
-    ProbeCorpus, Scope, ScopeConfirmation,
+    AppContract, CommitSha, ContainerPolicy, DiscrepancyEpisode, GateContext, MachineId, ModelRef,
+    OrderRef, PreparedCommit, ProbeCorpus, Scope, ScopeConfirmation, ScopeDraft, ScopeDraftV1,
+    ScopeRev, UnixMillis,
 };
 use acan_llm::{CallRecord, LlmError, ModelClient, Role};
 use acan_witness::RunnerConfig;
@@ -83,6 +89,11 @@ const OBSERVATIONS_DIR: &str = "observations";
 
 /// The state directory's folder that holds one protected-head snapshot per commit.
 const SNAPSHOT_DIR: &str = "snapshots";
+
+/// The scope revision a draft proposes for an order that has no scope yet. The first scope of
+/// every order is revision 1 (the take and the lane tests write it so), and a new lane accepts
+/// any revision. The draft's outcome is keyed by the order's own revision, not by this one.
+const FIRST_SCOPE_REV: ScopeRev = ScopeRev(1);
 
 /// Starts the job loop for `host`.
 pub fn spawn<C: ModelClient + 'static>(host: Host<C>) -> JoinHandle<()> {
@@ -498,23 +509,31 @@ async fn run_one<C: ModelClient>(
     (job, result)
 }
 
-/// Reports a git failure that used up every attempt as the job's own result. The origin then
-/// moves the land queue or the gate on, instead of waiting for a change that may never come.
+/// Reports a failure that used up every attempt as the job's own result. A git failure moves the
+/// land queue or the gate on, instead of waiting for a change that may never come. A scope draft
+/// that never checked is recorded as `ScopeDraftFailed`, so the failure is visible and nothing
+/// stands in for it.
 async fn report_exhausted<C: ModelClient>(host: &Host<C>, job: &Job, err: &JobError) {
-    if !matches!(err, JobError::Git(_)) {
-        return;
-    }
-    let detail = format!("git failed on every attempt: {err}");
     let command = match job {
-        Job::Land { task, head } => SystemCmd::LandResult {
+        Job::Land { task, head } if matches!(err, JobError::Git(_)) => SystemCmd::LandResult {
             task: *task,
             head: head.clone(),
-            result: Err(detail),
+            result: Err(format!("git failed on every attempt: {err}")),
         },
-        Job::RunWitness { run, witness } => SystemCmd::WitnessResult {
-            run: *run,
-            witness: *witness,
-            outcome: WitnessOutcome::Error { detail },
+        Job::RunWitness { run, witness } if matches!(err, JobError::Git(_)) => {
+            SystemCmd::WitnessResult {
+                run: *run,
+                witness: *witness,
+                outcome: WitnessOutcome::Error {
+                    detail: format!("git failed on every attempt: {err}"),
+                },
+            }
+        }
+        // A draft that never checked is recorded, so the member sees why no scope came.
+        Job::DraftScope { order, rev } => SystemCmd::ScopeDraftFailed {
+            order: *order,
+            rev: *rev,
+            reason: format!("the scope draft failed on every attempt: {err}"),
         },
         _ => return,
     };
@@ -530,6 +549,7 @@ async fn report_exhausted<C: ModelClient>(host: &Host<C>, job: &Job, err: &JobEr
 async fn execute<C: ModelClient>(host: &Host<C>, job: &Job) -> Result<Option<SystemCmd>, JobError> {
     match job {
         Job::Split { order, rev } => split(host, job, *order, *rev).await,
+        Job::DraftScope { order, rev } => draft_scope(host, job, *order, *rev).await,
         Job::Explain { clash } => explain(host, job, *clash).await,
         Job::Barrier { deadline, .. } => {
             sleep_until(*deadline).await;
@@ -573,6 +593,81 @@ async fn split<C: ModelClient>(
         &machines,
         reply.value,
     )?))
+}
+
+/// Asks the foreman to draft the scope of `order` at `rev`. The reply is checked against the
+/// plant's machines, the protected route table and the protected limits, then reported as
+/// `ScopeDrafted`. The draft confirms nothing: a human revises and confirms the scope. No offline
+/// draft stands in for a failed call; a failure is retried and then reported as
+/// `ScopeDraftFailed`.
+async fn draft_scope<C: ModelClient>(
+    host: &Host<C>,
+    job: &Job,
+    order: OrderId,
+    rev: OrderRev,
+) -> Result<Option<SystemCmd>, JobError> {
+    let Some(workspace) = host.workspace() else {
+        return Err(JobError::Unavailable(
+            "the server has no git repository to draft a scope against".to_owned(),
+        ));
+    };
+    let Some((sentence, machine)) = host.read(|world| draft_facts(world, job, order)) else {
+        return Ok(None);
+    };
+    let order_ref = OrderRef::from_str(&order.to_string()).map_err(|err| {
+        JobError::Unavailable(format!("the order id has no contract spelling: {err}"))
+    })?;
+    let machine_id = MachineId::from_str(&machine)
+        .map_err(|err| JobError::Unavailable(format!("the order's machine: {err}")))?;
+    let base = protected_sha(workspace.repo()).await?;
+    let snapshot = protected_snapshot(workspace.repo(), &host.repo().join(STATE_DIR))
+        .await
+        .map_err(|err| JobError::Unavailable(format!("the protected snapshot: {err}")))?;
+    let (app, corpus) = observe::read_protected(&snapshot)?;
+    let machines = model::plant_machines(&host.scan().index);
+    let bounds = model::DraftBounds {
+        machines: &machines,
+        routes: &corpus.routes,
+        fixtures: &corpus.fixtures,
+        limits: app.limits,
+    };
+    let request = model::scope_request(order_ref.as_str(), &bounds);
+    let reply = host
+        .client()
+        .chat_json::<model::DraftReply>(Role::Foreman, request)
+        .await?;
+    // The draft's usage is not a `ModelUsed` event: `Step` has no scope variant, and the usage
+    // panel matches `Step` exhaustively in a crate this change does not touch. The client's own
+    // ledger still counts the call.
+    let model = ModelRef::from_str(&reply.call.model)
+        .map_err(|err| JobError::Unavailable(format!("the model id: {err}")))?;
+    let proposal = model::scope_from_reply(reply.value, model, &bounds)
+        .map_err(|err| JobError::Unavailable(format!("the scope draft does not check: {err}")))?;
+    let draft = ScopeDraft {
+        version: ScopeDraftV1,
+        order: order_ref,
+        rev: FIRST_SCOPE_REV,
+        base_commit: base,
+        sentence,
+        machine_id,
+        draft: proposal,
+        drafted_at: UnixMillis(host::now().as_millis()),
+    };
+    Ok(Some(SystemCmd::ScopeDrafted {
+        order,
+        rev,
+        draft: Box::new(draft),
+    }))
+}
+
+/// What a scope draft of `order` is written from: the order's sentence and machine. None when
+/// the job is no longer derived, so no draft is asked for a scoped or superseded order.
+fn draft_facts(world: &World, job: &Job, order: OrderId) -> Option<(String, String)> {
+    if !world.jobs().contains(job) {
+        return None;
+    }
+    let found = world.order(order)?;
+    Some((found.sentence.clone(), found.machine.as_str().to_owned()))
 }
 
 async fn explain<C: ModelClient>(

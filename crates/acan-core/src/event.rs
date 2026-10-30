@@ -8,7 +8,8 @@ use std::fmt;
 
 use acan_intent::{
     CommitSha, Contest, ContestId, ContestKind, ContestStatus, EpisodeId, GateContext, LedgerEvent,
-    Prediction, PreparedCommit, ProbeHash, Receipt, Scope, ScopeConfirmation, ScopeHash, ScopeRev,
+    Prediction, PreparedCommit, ProbeHash, Receipt, Scope, ScopeConfirmation, ScopeDraft,
+    ScopeHash, ScopeRev,
 };
 use serde::{Deserialize, Serialize};
 
@@ -285,6 +286,24 @@ pub enum SystemCmd {
         /// The gate context computed on `base` with the current scope and rulings.
         context: Box<GateContext>,
     },
+    /// The foreman drafted the scope of an order revision.
+    ScopeDrafted {
+        /// The order.
+        order: OrderId,
+        /// The revision the job was derived at.
+        rev: OrderRev,
+        /// The draft, checked against the plant and the route table.
+        draft: Box<ScopeDraft>,
+    },
+    /// The scope draft of an order revision failed after its last attempt.
+    ScopeDraftFailed {
+        /// The order.
+        order: OrderId,
+        /// The revision the job was derived at.
+        rev: OrderRev,
+        /// Why the draft failed.
+        reason: String,
+    },
 }
 
 /// Who caused an event.
@@ -497,6 +516,27 @@ pub enum Event {
     /// A human ruling appended to the ruling log.
     RulingRecorded {
         event: Box<LedgerEvent>,
+    },
+    /// The foreman drafted a scope for an order revision. The draft carries no authority: it
+    /// never confirms a scope and never sets a verdict, count, class, mask or observed value.
+    /// Only a human's `ReviseScope` and `ConfirmScope` do that.
+    ScopeDrafted {
+        /// The order.
+        order: OrderId,
+        /// The order revision the draft was for.
+        rev: OrderRev,
+        /// The draft, with the model that proposed it.
+        draft: Box<ScopeDraft>,
+    },
+    /// The scope draft of an order revision failed after every attempt. Nothing was drafted and
+    /// nothing falls back to an offline draft.
+    ScopeDraftFailed {
+        /// The order.
+        order: OrderId,
+        /// The order revision the draft was for.
+        rev: OrderRev,
+        /// Why the draft failed.
+        reason: String,
     },
 }
 

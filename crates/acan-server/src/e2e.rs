@@ -23,7 +23,9 @@ use acan_core::{
     TaskId, TaskState, World,
 };
 use acan_intent::{ItemClass, Scope, ScopeConfirmation};
-use acan_llm::{ChatRequest, ChatResponse, LlmError, ModelClient, Role, UsageLedger};
+use acan_llm::{
+    CallRecord, ChatRequest, ChatResponse, LlmError, ModelClient, Role, Usage, UsageLedger,
+};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
@@ -705,6 +707,219 @@ async fn a_serialized_waiter_builds_on_its_landed_predecessor_and_lands_cleanly(
         "the waiter fast-forwarded the protected branch"
     );
     assert_eq!(git(root, &["show", "main:landed.txt"]), second_content);
+    running.stop().await.expect("the server stops");
+}
+
+/// The scope the scripted foreman drafts for the signup order: one may-change item on the signup
+/// route, in the shape the live foreman returns.
+fn drafted_scope_body() -> Value {
+    json!({
+        "may": [{
+            "id": "i-signup",
+            "selector": {
+                "surface": "http",
+                "method": "POST",
+                "route_template": "/api/signup",
+                "step_context": { "kind": "step", "step_id": "s1" },
+                "principal": { "kind": "anonymous" },
+                "channel": "body"
+            },
+            "change": "add",
+            "acceptance": [{
+                "obligation_id": "obl-signup-may",
+                "predicate": {
+                    "predicate": "equals_base",
+                    "step_id": "s1",
+                    "path": "body",
+                    "anchor": { "kind": "fresh" }
+                },
+                "text": "The signup answer's body matches the base run"
+            }],
+            "provenance": "model",
+            "example": {
+                "kind": "target",
+                "step_id": "s1",
+                "path": "status",
+                "after": { "state": "present", "value": 201 }
+            },
+            "machine_ids": ["auth"]
+        }],
+        "must_keep": [],
+        "open": []
+    })
+}
+
+/// The offline models, except that a split makes two tasks and a scope request is answered with
+/// `draft`. A stand-in for the live foreman in this test only: the job checks the reply the same
+/// way it checks a live one.
+struct Drafting {
+    inner: TwoTasks,
+    draft: Value,
+}
+
+impl ModelClient for Drafting {
+    async fn chat(&self, role: Role, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        if model::ask_of(&request) != Some(Ask::Scope) {
+            return self.inner.chat(role, request).await;
+        }
+        Ok(ChatResponse {
+            content: Some(self.draft.to_string()),
+            tool_calls: Vec::new(),
+            finish_reason: None,
+            call: CallRecord {
+                role,
+                provider: "scripted".to_owned(),
+                model: "scripted-foreman".to_owned(),
+                usage: Usage::default(),
+                latency: Duration::ZERO,
+            },
+        })
+    }
+}
+
+/// Polls the latest scope draft of `order` until the draft job stores its outcome, and returns
+/// the view. A failed draft is a stored outcome too, so the caller checks the state.
+async fn scope_draft_of(running: &Running, order: OrderId) -> Value {
+    timeout(WAIT, async {
+        loop {
+            let response = client()
+                .get(url(running, &format!("/api/orders/{order}/scope-draft")))
+                .bearer_auth(OWNER_TOKEN)
+                .send()
+                .await
+                .expect("the draft request is sent");
+            if response.status() == reqwest::StatusCode::OK {
+                return response.json::<Value>().await.expect("the draft is JSON");
+            }
+            sleep(POLL).await;
+        }
+    })
+    .await
+    .expect("the scope draft is stored in time")
+}
+
+/// The scope the owner adopts from a stored draft: the proposal the model wrote, at the draft's
+/// revision and base commit.
+fn adopted_scope(draft: &Value) -> Scope {
+    serde_json::from_value(json!({
+        "version": "acan-scope/1",
+        "order": draft["order"],
+        "rev": draft["rev"],
+        "base_commit": draft["base_commit"],
+        "body": draft["draft"]["proposal"],
+    }))
+    .expect("the adopted scope decodes")
+}
+
+/// A scope draft is stored without authority. The owner sees it, and a confirmation before
+/// adoption is refused. Adopting it (revising and confirming the scope) opens the lane, and only
+/// then does the agent's readback and claim rest on it.
+#[tokio::test]
+async fn a_scope_draft_is_stored_without_authority_until_the_owner_adopts_it() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let foreman = Drafting {
+        inner: TwoTasks::default(),
+        draft: drafted_scope_body(),
+    };
+    let running = start_with(root, foreman, UsageLedger::default()).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+    post_order(&running).await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let view = scope_draft_of(&running, order).await;
+    assert_eq!(view["state"], "drafted", "the draft is stored: {view}");
+    assert_eq!(
+        view["rev"], 0,
+        "the draft is for the order's first revision"
+    );
+    let draft = &view["draft"];
+    assert_eq!(draft["draft"]["model"], "scripted-foreman");
+    assert_eq!(draft["draft"]["provenance"], "model_proposal");
+    let (_, origin) = snapshot(&running).await;
+    assert!(
+        origin.world().lane(order).is_none(),
+        "a draft opens no lane"
+    );
+    let scope = adopted_scope(draft);
+    let refused = client()
+        .post(url(&running, "/api/commands"))
+        .bearer_auth(OWNER_TOKEN)
+        .json(&HumanCmd::ConfirmScope {
+            order,
+            confirmation: Box::new(confirmation_for(&scope)),
+        })
+        .send()
+        .await
+        .expect("the confirmation is sent");
+    assert_eq!(
+        refused.status(),
+        reqwest::StatusCode::CONFLICT,
+        "a draft cannot be confirmed before the owner adopts it"
+    );
+    settle(&running, "the split", |_, world| world.task(task).map(drop)).await;
+    member(&running, &HumanCmd::RegisterAgent { agent: agent() }).await;
+    member(
+        &running,
+        &HumanCmd::ReviseScope {
+            order,
+            scope: Box::new(scope.clone()),
+        },
+    )
+    .await;
+    member(
+        &running,
+        &HumanCmd::ConfirmScope {
+            order,
+            confirmation: Box::new(confirmation_for(&scope)),
+        },
+    )
+    .await;
+    read_back(&running, task, &scope).await;
+    let _fence = claim(&running, task).await;
+    let (log, _) = snapshot(&running).await;
+    let drafted_at = log
+        .iter()
+        .position(|stamped| matches!(stamped.event, Event::ScopeDrafted { .. }));
+    let revised_at = log
+        .iter()
+        .position(|stamped| matches!(stamped.event, Event::ScopeRevised { .. }));
+    assert!(
+        drafted_at.is_some() && drafted_at < revised_at,
+        "the draft is stored before the owner adopts it"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A draft that never checks is recorded as a failure the owner can see. Nothing stands in for it,
+/// so the lane stays closed.
+#[tokio::test]
+async fn a_scope_draft_that_never_checks_is_recorded_as_a_failure() {
+    let repo = demo_repo();
+    let root = repo.path();
+    let foreman = Drafting {
+        inner: TwoTasks::default(),
+        draft: json!({ "may": [], "must_keep": [], "open": [] }),
+    };
+    let running = start_with(root, foreman, UsageLedger::default()).await;
+    post_order(&running).await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let view = scope_draft_of(&running, order).await;
+    assert_eq!(view["state"], "failed", "the failure is stored: {view}");
+    assert!(
+        view["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("no may-change items")),
+        "the reason names the check: {view}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert!(origin.world().lane(order).is_none(), "no scope is opened");
     running.stop().await.expect("the server stops");
 }
 

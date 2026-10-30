@@ -2,12 +2,15 @@
 
 mod common;
 
+use std::str::FromStr;
+
 use acan_core::{
     AgentCmd, Blocker, DeclarationInput, EpisodeId, EpisodeState, Event, GateRunId, GateState,
-    HumanCmd, Job, Judgement, LEASE_TTL_MS, LaneVerdict, LeaseEnd, Origin, ReadbackId, Rejection,
-    Scope, ScopeBinding, ScopeConfirmation, ScopeRev, ScoreOutcome, Stage, Stamped, SystemCmd,
-    TaskId, TaskState,
+    HumanCmd, Job, Judgement, LEASE_TTL_MS, LaneVerdict, LeaseEnd, OrderRev, Origin, ReadbackId,
+    Rejection, Scope, ScopeBinding, ScopeConfirmation, ScopeDraftOutcome, ScopeRev, ScoreOutcome,
+    Stage, Stamped, SystemCmd, TaskId, TaskState,
 };
+use acan_intent::{HumanRef, HumanSpec, ScopeDraft, ScopeV1, UnixMillis};
 use common::{Fx, events, stored, sym};
 use serde_json::{Value, json};
 
@@ -1582,4 +1585,199 @@ fn fixed_means_the_original_obligation_passes_fresh() {
     let (_, state) = fx.lane_episode(10);
     assert_eq!(state, EpisodeState::Fixed);
     fx.assert_replays();
+}
+
+/// The draft a model returns for the fixture order: the body `scope_json(1)` holds, at revision
+/// 1, with the model that proposed it.
+fn draft_of(fx: &Fx) -> ScopeDraft {
+    let scope = fx.scope_json(1, narrow_selector());
+    from(json!({
+        "version": "acan-scope-draft/1",
+        "order": fx.order.to_string(),
+        "rev": 1,
+        "base_commit": BASE,
+        "sentence": "limit failed logins to five a minute",
+        "machine_id": "api",
+        "draft": {
+            "provenance": "model_proposal",
+            "model": "muse-spark",
+            "proposal": scope["body"].clone()
+        },
+        "drafted_at": 1000
+    }))
+}
+
+fn drafted(fx: &Fx) -> SystemCmd {
+    SystemCmd::ScopeDrafted {
+        order: fx.order,
+        rev: OrderRev::new(0),
+        draft: Box::new(draft_of(fx)),
+    }
+}
+
+fn draft_job(fx: &Fx) -> Job {
+    Job::DraftScope {
+        order: fx.order,
+        rev: OrderRev::new(0),
+    }
+}
+
+#[test]
+fn a_scopeless_order_derives_a_scope_draft_job() {
+    let fx = Fx::new();
+    let world = fx.origin.world();
+    assert!(
+        world.jobs().contains(&draft_job(&fx)),
+        "a scope-less order asks for a draft: {:?}",
+        world.jobs()
+    );
+}
+
+#[test]
+fn a_stored_draft_confirms_nothing_and_ends_the_draft_job() {
+    let mut fx = Fx::new();
+    fx.system(drafted(&fx)).expect("the draft is stored");
+    let owner = fx.owner.clone();
+    let scope: Scope = from(fx.scope_json(1, narrow_selector()));
+    let confirmation = fx.confirmation_for(&scope);
+    let world = fx.origin.world();
+    assert!(
+        !world.jobs().contains(&draft_job(&fx)),
+        "the draft ends the job"
+    );
+    assert!(world.lane(fx.order).is_none(), "a draft opens no lane");
+    let Some((rev, ScopeDraftOutcome::Drafted { draft })) = world.scope_draft(fx.order) else {
+        panic!("the draft is stored: {:?}", world.scope_draft(fx.order));
+    };
+    assert_eq!(rev, OrderRev::new(0));
+    assert_eq!(draft.draft.proposal().may.len(), 1, "the proposal is kept");
+    let confirm = fx.human(
+        &owner,
+        HumanCmd::ConfirmScope {
+            order: fx.order,
+            confirmation: Box::new(confirmation),
+        },
+    );
+    assert!(confirm.is_err(), "a draft cannot be confirmed: {confirm:?}");
+    let agent = fx.agent_a.clone();
+    let claim = fx.agent(&agent, AgentCmd::Claim { task: fx.task1 });
+    assert!(claim.is_err(), "a draft grants no claim: {claim:?}");
+    assert!(matches!(
+        fx.origin.world().task(fx.task1).map(|t| &t.state),
+        Some(TaskState::Open)
+    ));
+    fx.assert_replays();
+}
+
+#[test]
+fn a_human_adopts_the_draft_by_revising_and_confirming_it() {
+    let mut fx = Fx::new();
+    let draft = draft_of(&fx);
+    let adopted = HumanSpec::adopt(
+        draft.draft.clone(),
+        HumanRef::from_str("owner").expect("a member id"),
+        UnixMillis(2000),
+    );
+    assert_eq!(
+        adopted.value(),
+        draft.draft.proposal(),
+        "adoption keeps the proposal's payload"
+    );
+    let drafted_cmd = SystemCmd::ScopeDrafted {
+        order: fx.order,
+        rev: OrderRev::new(0),
+        draft: Box::new(draft.clone()),
+    };
+    fx.system(drafted_cmd).expect("the draft is stored");
+    let scope = Scope {
+        version: ScopeV1,
+        order: draft.order.clone(),
+        rev: draft.rev,
+        base_commit: draft.base_commit.clone(),
+        body: adopted.value().clone(),
+    };
+    fx.revise(&scope);
+    fx.confirm(&scope);
+    fx.readback(fx.task1, &scope, vec![]);
+    fx.claim_scoped(fx.task1);
+    assert!(matches!(
+        fx.origin.world().task(fx.task1).map(|t| &t.state),
+        Some(TaskState::Claimed { .. })
+    ));
+    assert!(
+        matches!(
+            fx.origin.world().scope_draft(fx.order),
+            Some((_, ScopeDraftOutcome::Drafted { .. }))
+        ),
+        "the draft stays the record of what the model proposed"
+    );
+    fx.assert_replays();
+}
+
+#[test]
+fn a_draft_for_a_scoped_order_or_an_old_revision_is_refused() {
+    let mut fx = Fx::new();
+    let old = SystemCmd::ScopeDrafted {
+        order: fx.order,
+        rev: OrderRev::new(3),
+        draft: Box::new(draft_of(&fx)),
+    };
+    assert!(matches!(
+        fx.system(old),
+        Err(Rejection::StaleRevision { .. })
+    ));
+    fx.open_lane();
+    let late = fx.system(drafted(&fx));
+    assert!(late.is_err(), "a scoped order takes no draft: {late:?}");
+    fx.assert_replays();
+}
+
+#[test]
+fn a_failed_draft_is_recorded_and_the_job_stays_derived() {
+    let mut fx = Fx::new();
+    fx.system(SystemCmd::ScopeDraftFailed {
+        order: fx.order,
+        rev: OrderRev::new(0),
+        reason: "the foreman's reply did not decode".to_owned(),
+    })
+    .expect("the failure is recorded");
+    let world = fx.origin.world();
+    assert!(
+        matches!(
+            world.scope_draft(fx.order),
+            Some((_, ScopeDraftOutcome::Failed { reason })) if reason.contains("did not decode")
+        ),
+        "the failure is visible"
+    );
+    assert!(world.lane(fx.order).is_none());
+    assert!(
+        world.jobs().contains(&draft_job(&fx)),
+        "a restart asks the foreman again"
+    );
+    fx.assert_replays();
+}
+
+#[test]
+fn the_draft_events_keep_their_log_encoding() {
+    let fx = Fx::new();
+    let drafted = Event::ScopeDrafted {
+        order: fx.order,
+        rev: OrderRev::new(0),
+        draft: Box::new(draft_of(&fx)),
+    };
+    let value = serde_json::to_value(&drafted).expect("the draft encodes");
+    assert_eq!(value["type"], "scope_drafted");
+    let back: Event = serde_json::from_value(value).expect("the draft decodes");
+    assert_eq!(back, drafted);
+    let failed = Event::ScopeDraftFailed {
+        order: fx.order,
+        rev: OrderRev::new(0),
+        reason: "no reply".to_owned(),
+    };
+    let value = serde_json::to_value(&failed).expect("the failure encodes");
+    assert_eq!(value["type"], "scope_draft_failed");
+    assert_eq!(
+        serde_json::from_value::<Event>(value).expect("the failure decodes"),
+        failed
+    );
 }

@@ -25,15 +25,15 @@ use acan_intent::{
     BroadGrantAck, CanonicalError, ChoiceAnswer, CommitSha, Contest, ContestId, ContestStatus,
     EpisodeId, ExampleHash, GateContext, GateState, InvalidValue, ItemId, McpV1, OrderRef,
     PostReadbackResponse, Prediction, PreparedCommit, RepairBudget, RepairRound, Scope,
-    ScopeConfirmation, ScopeHash, ScopeRev, ScopeRevision, SelectorHash,
+    ScopeConfirmation, ScopeDraft, ScopeHash, ScopeRev, ScopeRevision, SelectorHash,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, Rejection};
-use crate::ids::{AgentId, CommitId, GateRunId, MemberId, OrderId, ReadbackId, TaskId};
+use crate::ids::{AgentId, CommitId, GateRunId, MemberId, OrderId, OrderRev, ReadbackId, TaskId};
 use crate::lease::LeaseEnd;
 use crate::member::Role;
-use crate::order::{self, Order, OrderPhase, TaskState};
+use crate::order::{self, Order, OrderPhase, OrderState, TaskState};
 use crate::repair::{Episode, LaneVerdict, ReceiptRecord};
 use crate::world::World;
 
@@ -226,6 +226,78 @@ impl ScopeLane {
             None => latest.prepared.as_ref().map(|_| GateState::Running),
         }
     }
+}
+
+/// What the scope-draft job reported for one order revision. A draft is a proposal: it does not
+/// open the lane, confirm anything, or authorize a claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ScopeDraftOutcome {
+    /// The foreman's draft. A human adopts it by sending `ReviseScope` and `ConfirmScope`.
+    Drafted {
+        /// The draft, with the model that proposed it.
+        draft: Box<ScopeDraft>,
+    },
+    /// The last attempt failed. Nothing was drafted and nothing falls back to another draft.
+    Failed {
+        /// Why the draft failed.
+        reason: String,
+    },
+}
+
+/// `ScopeDrafted`: stores a foreman's draft for an order revision that still has no scope.
+pub(crate) fn decide_drafted(
+    world: &World,
+    order: OrderId,
+    rev: OrderRev,
+    draft: ScopeDraft,
+) -> Result<Vec<Event>, Rejection> {
+    check_draft_target(world, order, rev)?;
+    if draft.order != order_ref(order)? {
+        return Err(Rejection::invalid("the draft names another order"));
+    }
+    Ok(vec![Event::ScopeDrafted {
+        order,
+        rev,
+        draft: Box::new(draft),
+    }])
+}
+
+/// `ScopeDraftFailed`: records that the draft for an order revision failed after its last
+/// attempt.
+pub(crate) fn decide_draft_failed(
+    world: &World,
+    order: OrderId,
+    rev: OrderRev,
+    reason: String,
+) -> Result<Vec<Event>, Rejection> {
+    check_draft_target(world, order, rev)?;
+    Ok(vec![Event::ScopeDraftFailed { order, rev, reason }])
+}
+
+/// A draft result is accepted only for an open order at its current revision, with no scope and
+/// no drafted scope yet at that revision.
+fn check_draft_target(world: &World, order: OrderId, rev: OrderRev) -> Result<(), Rejection> {
+    let o = world
+        .order(order)
+        .ok_or_else(|| Rejection::unknown("order", order))?;
+    if o.state == OrderState::Cancelled {
+        return Err(Rejection::wrong_state("order", "cancelled"));
+    }
+    check_open(world, order)?;
+    if world.lane(order).is_some() {
+        return Err(Rejection::wrong_state("order", "with a scope"));
+    }
+    if rev != o.rev {
+        return Err(Rejection::StaleRevision { current: o.rev });
+    }
+    if matches!(
+        world.scope_draft_at(order, rev),
+        Some(ScopeDraftOutcome::Drafted { .. })
+    ) {
+        return Err(Rejection::wrong_state("order", "drafted at this revision"));
+    }
+    Ok(())
 }
 
 pub(crate) fn order_ref(order: OrderId) -> Result<OrderRef, Rejection> {

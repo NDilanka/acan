@@ -10,7 +10,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use acan_core::{
-    AgentId, Command, Generation, HumanCmd, MemberId, Rejection, Seq, Stamped, TaskId, TaskState,
+    AgentId, Command, Generation, HumanCmd, MemberId, OrderId, OrderRev, Rejection,
+    ScopeDraftOutcome, Seq, Stamped, TaskId, TaskState,
 };
 use acan_intent::{
     GetReceiptRequest, GetReceiptResponse, GetRulingsRequest, GetRulingsResponse, GetScopeRequest,
@@ -49,7 +50,8 @@ pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<Public
         .route("/api/tasks/{task}/worktree", get(get_worktree::<C>))
         .route("/api/tasks/{task}/scope", get(get_scope::<C>))
         .route("/api/tasks/{task}/rulings", get(get_rulings::<C>))
-        .route("/api/tasks/{task}/receipt", get(get_receipt::<C>));
+        .route("/api/tasks/{task}/receipt", get(get_receipt::<C>))
+        .route("/api/orders/{order}/scope-draft", get(get_scope_draft::<C>));
     let router = match web {
         Some(root) => {
             let root = Arc::new(root);
@@ -356,6 +358,41 @@ async fn get_rulings<C: ModelClient + 'static>(
         machine_ids,
     };
     Ok(Json(intent_api::get_rulings(&host, &request)?))
+}
+
+/// The latest scope draft of an order: the draft the foreman returned, or the failure that
+/// ended its last attempt, with the order revision it was for. Members only, since a human
+/// adopts a draft. The draft confirms nothing; the order's scope is the one a human revises and
+/// confirms.
+#[derive(Serialize)]
+pub(crate) struct ScopeDraftView {
+    order: String,
+    rev: OrderRev,
+    #[serde(flatten)]
+    outcome: ScopeDraftOutcome,
+}
+
+async fn get_scope_draft<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+    Path(order): Path<String>,
+) -> Result<Json<ScopeDraftView>, ApiError> {
+    member(&host, &headers)?;
+    let order: OrderId = order.parse().map_err(|_| ApiError::NotFound("order"))?;
+    let view = host.read(|world| {
+        if world.order(order).is_none() {
+            return Err(ApiError::NotFound("order"));
+        }
+        world
+            .scope_draft(order)
+            .map(|(rev, outcome)| ScopeDraftView {
+                order: order.to_string(),
+                rev,
+                outcome: outcome.clone(),
+            })
+            .ok_or(ApiError::NotFound("no scope draft for this order yet"))
+    })?;
+    Ok(Json(view))
 }
 
 /// The latest receipt of a task's gate runs.

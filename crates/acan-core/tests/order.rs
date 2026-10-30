@@ -51,10 +51,13 @@ fn a_split_order_reads_back_and_derives_no_review_job() {
     );
     let a = fx.agent_a.clone();
     fx.read_back(&a, fx.task1);
-    assert!(
-        fx.origin.world().jobs().is_empty(),
-        "the legacy review is retired, so a readback derives no job: {:?}",
-        fx.origin.world().jobs()
+    assert_eq!(
+        fx.origin.world().jobs(),
+        vec![Job::DraftScope {
+            order: fx.order,
+            rev: OrderRev::new(0)
+        }],
+        "the legacy review is retired: a readback derives no review job, only the scope draft"
     );
 }
 
