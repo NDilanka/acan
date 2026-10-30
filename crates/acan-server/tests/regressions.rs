@@ -15,8 +15,8 @@ use acan_core::{
 };
 use acan_llm::{ChatRequest, ChatResponse, LlmError, ModelClient, Reply, Role, Stub, UsageLedger};
 use acan_server::{
-    DEFAULT_WITNESS_CONCURRENCY, EventStore, Host, HostParts, Running, ServerConfig, Tokens, scan,
-    start,
+    DEFAULT_PROBE_CONCURRENCY, DEFAULT_WITNESS_CONCURRENCY, EventStore, Host, HostParts, Running,
+    ServerConfig, Tokens, scan, start,
 };
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, SqliteConnection};
@@ -100,6 +100,7 @@ async fn host_for(dir: &tempfile::TempDir) -> (Host<Stub>, EventStore) {
         git: None,
         witness_http_base_url: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
+        probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
     });
     (host, store)
 }

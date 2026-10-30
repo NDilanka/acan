@@ -88,9 +88,15 @@ const OWNER: &str = "owner";
 /// read the log and write to their socket, so a wedged one cannot hold a write hostage.
 const STREAM_DRAIN: Duration = Duration::from_secs(2);
 
-/// How many witness runs may run at once unless configured otherwise. Each run is a test command
-/// or an HTTP check, so the default keeps a laptop responsive while a few tasks gate together.
-pub const DEFAULT_WITNESS_CONCURRENCY: usize = 2;
+/// How many witness runs may run at once unless configured otherwise. Each run is a test command,
+/// an HTTP check or one contrast container. A contrast probe runs base A, base B and the candidate
+/// together, so fewer than three permits makes every contrast slower than one probe at a time.
+pub const DEFAULT_WITNESS_CONCURRENCY: usize = 3;
+
+/// How many probes of one contrast run at once. Every container run also takes a permit from the
+/// witness pool, so the pool, not this value, bounds how many containers run at once. Three passed
+/// the intent gate suite three times in a row.
+pub const DEFAULT_PROBE_CONCURRENCY: usize = 3;
 
 /// What to serve, and where.
 #[derive(Debug, Clone)]
@@ -245,6 +251,7 @@ pub async fn start<C: ModelClient + 'static>(
         git,
         witness_http_base_url: config.witness_http_base_url.clone(),
         witness_concurrency: config.witness_concurrency,
+        probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
     });
     if let Err(err) = host.submit(Command::System(SystemCmd::IndexUpdated)).await {
         let _ = host.shutdown().await;

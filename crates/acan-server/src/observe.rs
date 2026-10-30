@@ -16,10 +16,13 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::future::{Future, pending};
+use std::future::{Future, pending, poll_fn};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
 
 use acan_git::{Preparation, ProtectedPaths, Repo};
 use acan_intent::admit::AdmitError;
@@ -36,6 +39,7 @@ use acan_intent::{
 };
 use acan_witness::{RunnerConfig, SequenceInput, run_sequence};
 use serde::de::DeserializeOwned;
+use tokio::sync::Semaphore;
 
 use crate::land;
 use crate::observations::{self, ObservationError};
@@ -188,6 +192,11 @@ pub(crate) struct Plan<'a> {
     pub(crate) policy: &'a ContainerPolicy,
     /// How the host reaches docker and the app.
     pub(crate) runner: &'a RunnerConfig,
+    /// The host's container permits. A container run holds one for as long as it runs. The witness
+    /// runs take from the same pool, so the containers of every task together stay within it.
+    pub(crate) slots: &'a Semaphore,
+    /// How many probes of the contrast are in flight at once. One runs them in corpus order.
+    pub(crate) probes_at_once: usize,
 }
 
 /// The order a candidate is judged against: its confirmed scope, the confirmation of that scope,
@@ -292,45 +301,148 @@ pub(crate) fn lockfile_hash(worktree: &Path) -> Result<ArtifactHash, ObserveErro
 }
 
 /// Runs every probe of the corpus: base A, base B, and the candidate, each in its own container
-/// and its own worktree, with the three of one probe at once. A run that does not set up is
-/// started again by [`settle`], up to [`SETUP_RETRIES`] times, and each start is logged.
+/// and its own worktree, with the three of one probe at once. Up to `probes_at_once` probes are in
+/// flight, and each container run takes one of the host's permits in `plan.slots`. A run that does
+/// not set up is started again by [`settle`], up to [`SETUP_RETRIES`] times, and each start is
+/// logged.
+///
+/// A probe that fails stops the pass. No probe that has not started yet starts, the probes already
+/// running finish, and the first failure in corpus order is returned. No partial result is built.
 ///
 /// # Errors
 ///
 /// Returns [`ObserveError`] when a worktree cannot be written, a record does not admit, or a run
 /// still does not set up after its last start. A run that did not complete for any other reason
 /// is not an error: its outcome is in the record.
+///
+/// # Panics
+///
+/// Panics when `plan.probes_at_once` is zero, because no probe could ever start.
 pub(crate) async fn observe(plan: &Plan<'_>) -> Result<Vec<ProbeRuns>, ObserveError> {
+    assert!(
+        plan.probes_at_once > 0,
+        "a contrast needs at least one probe in flight, got {}",
+        plan.probes_at_once
+    );
     let corpus: &ProbeCorpus = plan.corpus;
+    let turns = Semaphore::new(plan.probes_at_once);
+    let failed = AtomicBool::new(false);
+    let outcomes = join_all(
+        corpus
+            .probes
+            .iter()
+            .enumerate()
+            .map(|(index, probe)| observe_probe(plan, index, probe, &turns, &failed)),
+    )
+    .await;
     let mut runs = Vec::with_capacity(corpus.probes.len());
-    for (index, probe) in corpus.probes.iter().enumerate() {
-        let fixture = fixture_of(corpus, probe)?;
-        let probe_dir = plan.scratch.join(format!("probe-{index}"));
-        let (dir_a, dir_b, dir_c) = (
-            probe_dir.join("base-a"),
-            probe_dir.join("base-b"),
-            probe_dir.join("candidate"),
-        );
-        let (base_a, base_b, candidate) = tokio::join!(
-            settled(plan, probe, fixture, plan.base, &dir_a, RunRole::BaseA),
-            settled(plan, probe, fixture, plan.base, &dir_b, RunRole::BaseB),
-            settled(
-                plan,
-                probe,
-                fixture,
-                plan.candidate,
-                &dir_c,
-                RunRole::Candidate
-            ),
-        );
-        runs.push(ProbeRuns {
-            probe: probe.clone(),
-            base_a: base_a?,
-            base_b: base_b?,
-            candidate: candidate?,
-        });
+    for outcome in outcomes {
+        // A probe is skipped only after another probe failed. That failure is an `Err` in this
+        // list, and `?` returns it before the loop can finish, so a finished loop has no skips.
+        if let Some(probe_runs) = outcome? {
+            runs.push(probe_runs);
+        }
     }
     Ok(runs)
+}
+
+/// Runs the probe at `index` unless another probe has already failed. The probe holds one of
+/// `turns` for its whole run, so no more than `probes_at_once` probes run at once.
+///
+/// # Errors
+///
+/// Returns the error of the probe's own runs. A skipped probe is `Ok(None)`.
+async fn observe_probe(
+    plan: &Plan<'_>,
+    index: usize,
+    probe: &CorpusProbe,
+    turns: &Semaphore,
+    failed: &AtomicBool,
+) -> Result<Option<ProbeRuns>, ObserveError> {
+    let _turn = turns
+        .acquire()
+        .await
+        .expect("the probe turns are never closed");
+    if failed.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    let result = probe_runs(plan, index, probe).await;
+    if result.is_err() {
+        failed.store(true, Ordering::Release);
+    }
+    result.map(Some)
+}
+
+/// Runs base A, base B and the candidate of the probe at `index`, each in its own worktree.
+///
+/// # Errors
+///
+/// Returns [`ObserveError`] when the fixture is missing or one of the runs fails.
+async fn probe_runs(
+    plan: &Plan<'_>,
+    index: usize,
+    probe: &CorpusProbe,
+) -> Result<ProbeRuns, ObserveError> {
+    let fixture = fixture_of(plan.corpus, probe)?;
+    let probe_dir = plan.scratch.join(format!("probe-{index}"));
+    let (dir_a, dir_b, dir_c) = (
+        probe_dir.join("base-a"),
+        probe_dir.join("base-b"),
+        probe_dir.join("candidate"),
+    );
+    let (base_a, base_b, candidate) = tokio::join!(
+        settled(plan, probe, fixture, plan.base, &dir_a, RunRole::BaseA),
+        settled(plan, probe, fixture, plan.base, &dir_b, RunRole::BaseB),
+        settled(
+            plan,
+            probe,
+            fixture,
+            plan.candidate,
+            &dir_c,
+            RunRole::Candidate
+        ),
+    );
+    Ok(ProbeRuns {
+        probe: probe.clone(),
+        base_a: base_a?,
+        base_b: base_b?,
+        candidate: candidate?,
+    })
+}
+
+/// Polls every future until each one has finished, and returns the outputs in the order given.
+/// This crate does not depend on `futures`, so the probe fan-out polls its futures itself.
+async fn join_all<F: Future>(futures: impl IntoIterator<Item = F>) -> Vec<F::Output> {
+    let mut running: Vec<Option<Pin<Box<F>>>> = futures
+        .into_iter()
+        .map(|future| Some(Box::pin(future)))
+        .collect();
+    let mut outputs: Vec<Option<F::Output>> = running.iter().map(|_| None).collect();
+    poll_fn(|cx| {
+        let mut waiting = false;
+        for (slot, output) in running.iter_mut().zip(outputs.iter_mut()) {
+            let Some(future) = slot.as_mut() else {
+                continue;
+            };
+            match future.as_mut().poll(cx) {
+                Poll::Ready(value) => {
+                    *output = Some(value);
+                    *slot = None;
+                }
+                Poll::Pending => waiting = true,
+            }
+        }
+        if waiting {
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    })
+    .await;
+    outputs
+        .into_iter()
+        .map(|output| output.expect("every future finished before the join returned"))
+        .collect()
 }
 
 /// Runs one role of `probe` on `preparation` and records it. Every start stages its own worktree
@@ -349,7 +461,16 @@ async fn settled(
         |attempt| async move {
             let staged = stage(plan.repo, preparation, &dir.join(attempt.to_string())).await?;
             let input = sequence(plan, probe, fixture, &staged, role);
-            let run = run_sequence(&input, pending::<()>()).await?;
+            // The permit covers the container run only. A run waiting for it has not started, and
+            // its budget starts inside `run_sequence`, so the wait never spends that budget.
+            let run = {
+                let _slot = plan
+                    .slots
+                    .acquire()
+                    .await
+                    .expect("the container permits are never closed");
+                run_sequence(&input, pending::<()>()).await?
+            };
             record(plan.observations, run)
         },
         |run: &RecordedRun| {

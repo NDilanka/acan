@@ -36,6 +36,11 @@ pub const APP_PORT: u16 = 3000;
 /// to it.
 const DEMO_DIR_VAR: &str = "ACAN_DEMO_DIR";
 
+/// Serializes the Docker tests of one test binary. Tests in a binary run in parallel by default,
+/// so without this lock a run that is still starting can spend its 30 second budget while the
+/// others hold containers. One test at a time keeps each run inside the budget.
+pub static DOCKER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// The signup response line the changed candidate rewrites: the username in the response is
 /// upper-cased, and the stored user is not, so only the response differs.
 const SIGNUP_RESPONSE: &str = "return { id: user.id, username: user.username };";

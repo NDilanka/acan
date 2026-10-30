@@ -36,6 +36,7 @@ async fn run_three(
 
 #[tokio::test]
 async fn a_changed_candidate_response_is_the_one_difference_compare_reports() {
+    let _docker = support::DOCKER.lock().await;
     let base_a = Setup::base();
     let base_b = Setup::base();
     let candidate = Setup::changed_candidate();
@@ -91,6 +92,7 @@ async fn a_changed_candidate_response_is_the_one_difference_compare_reports() {
 
 #[tokio::test]
 async fn an_unchanged_candidate_compares_as_unchanged() {
+    let _docker = support::DOCKER.lock().await;
     let base_a = Setup::base();
     let base_b = Setup::base();
     let candidate = Setup::unchanged_candidate();

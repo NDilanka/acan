@@ -61,6 +61,10 @@ pub struct HostParts<C> {
     pub witness_http_base_url: Option<String>,
     /// How many witness runs may run at once.
     pub witness_concurrency: usize,
+    /// How many probes of one contrast run at once. Must be at least 1, and 1 runs the probes one
+    /// after another. Their container runs still take permits from the witness pool, so this does
+    /// not raise how many containers run at once.
+    pub probe_concurrency: usize,
 }
 
 /// One world's host. Cloning shares the same writer, log and broadcast.
@@ -83,6 +87,7 @@ struct Inner<C> {
     workspace: Option<Arc<Workspace>>,
     witness_http_base_url: Option<String>,
     witness_slots: Arc<Semaphore>,
+    probe_concurrency: usize,
     /// Held by a land from its final check through its install, and by every command that
     /// [`invalidates_landing`]. A command cannot change what a land is checking while the land
     /// checks and installs.
@@ -103,9 +108,14 @@ impl<C: ModelClient> Host<C> {
     ///
     /// # Panics
     ///
-    /// Panics when called outside a Tokio runtime.
+    /// Panics when called outside a Tokio runtime, or when `probe_concurrency` is zero.
     #[must_use]
     pub fn new(parts: HostParts<C>) -> Self {
+        assert!(
+            parts.probe_concurrency > 0,
+            "probe_concurrency must allow at least one probe, got {}",
+            parts.probe_concurrency
+        );
         let (events, _) = broadcast::channel(LIVE_BUFFER);
         let wake = Arc::new(Notify::new());
         let scan = Arc::new(parts.scan);
@@ -137,6 +147,7 @@ impl<C: ModelClient> Host<C> {
                 workspace: parts.git.map(|repo| Arc::new(Workspace::new(repo))),
                 witness_http_base_url: parts.witness_http_base_url,
                 witness_slots: Arc::new(Semaphore::new(parts.witness_concurrency)),
+                probe_concurrency: parts.probe_concurrency,
                 landing: tokio::sync::Mutex::new(()),
             }),
         }
@@ -175,9 +186,14 @@ impl<C: ModelClient> Host<C> {
         }
     }
 
-    /// One permit per witness run allowed at once.
+    /// One permit per witness run allowed at once. A contrast's container runs take from it too.
     pub(crate) fn witness_slots(&self) -> Arc<Semaphore> {
         Arc::clone(&self.inner.witness_slots)
+    }
+
+    /// How many probes of one contrast run at once.
+    pub(crate) fn probe_concurrency(&self) -> usize {
+        self.inner.probe_concurrency
     }
 
     /// The bearer tokens.

@@ -41,6 +41,7 @@ fn status_of(observed: &ObservedRun, step: &str) -> u16 {
 
 #[tokio::test]
 async fn a_stateful_sequence_runs_against_the_demo_and_admits_its_records() {
+    let _docker = support::DOCKER.lock().await;
     let setup = Setup::base();
     let config = runner_config();
     let probe = setup.probe("links-create-list-delete");
@@ -111,6 +112,7 @@ async fn a_stateful_sequence_runs_against_the_demo_and_admits_its_records() {
 
 #[tokio::test]
 async fn a_step_past_its_deadline_times_out_and_leaves_no_container() {
+    let _docker = support::DOCKER.lock().await;
     let setup = Setup::base();
     let config = runner_config();
     // One millisecond cannot cover a round trip through the container, so the step always
@@ -148,6 +150,7 @@ async fn a_step_past_its_deadline_times_out_and_leaves_no_container() {
 
 #[tokio::test]
 async fn cancelling_a_run_removes_its_container() {
+    let _docker = support::DOCKER.lock().await;
     let setup = Setup::base();
     let config = runner_config();
     let probe = setup.probe("links-create-list-delete");
@@ -171,6 +174,7 @@ async fn cancelling_a_run_removes_its_container() {
 
 #[tokio::test]
 async fn cancelling_at_once_starts_nothing_and_leaves_no_container() {
+    let _docker = support::DOCKER.lock().await;
     let setup = Setup::base();
     let config = runner_config();
     let probe = setup.probe("links-create-list-delete");
@@ -192,6 +196,7 @@ async fn cancelling_at_once_starts_nothing_and_leaves_no_container() {
 
 #[tokio::test]
 async fn a_missing_docker_program_is_isolation_unavailable_and_nothing_runs_on_the_host() {
+    let _docker = support::DOCKER.lock().await;
     let setup = Setup::base();
     let missing = std::env::temp_dir()
         .join("acan-h01-no-such-directory")
@@ -219,6 +224,7 @@ async fn a_missing_docker_program_is_isolation_unavailable_and_nothing_runs_on_t
 
 #[tokio::test]
 async fn the_request_budget_ends_the_run_as_an_error_after_the_bound() {
+    let _docker = support::DOCKER.lock().await;
     let mut setup = Setup::base();
     setup.app.limits.max_requests = 1;
     let config = runner_config();
@@ -249,6 +255,7 @@ async fn the_request_budget_ends_the_run_as_an_error_after_the_bound() {
 
 #[tokio::test]
 async fn the_output_bound_marks_a_truncated_body_incomplete() {
+    let _docker = support::DOCKER.lock().await;
     let mut setup = Setup::base();
     setup.app.limits.max_output_bytes = 8;
     let config = runner_config();
@@ -283,6 +290,7 @@ async fn the_output_bound_marks_a_truncated_body_incomplete() {
 
 #[tokio::test]
 async fn a_second_client_address_and_the_controlled_clock_run_in_one_sequence() {
+    let _docker = support::DOCKER.lock().await;
     let setup = Setup::base();
     let config = runner_config();
     let probe = setup.probe("link-quota-window");
@@ -331,6 +339,7 @@ async fn a_second_client_address_and_the_controlled_clock_run_in_one_sequence() 
 
 #[tokio::test]
 async fn a_probe_request_is_labelled_with_its_route_template() {
+    let _docker = support::DOCKER.lock().await;
     let setup = Setup::base();
     let config = runner_config();
     let probe = setup.probe("login-failures");

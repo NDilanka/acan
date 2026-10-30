@@ -33,7 +33,7 @@ mod observe;
 )]
 mod land;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
@@ -48,15 +48,18 @@ use acan_core::{
 use acan_git::{InstallOutcome, Preparation, PrepareOutcome, ProtectedPaths, Repo};
 use acan_intent::{
     AppContract, CommitSha, ContainerPolicy, CoreDerived, DiscrepancyEpisode, EpisodeId,
-    EpisodeKey, FoldedLedger, ItemClass, ItemState, LedgerEvent, Outcome, ProbeCorpus, Receipt,
-    Scope, ScopeConfirmation, canonical_episode_selector, fold,
+    EpisodeKey, FixtureId, FoldedLedger, ItemClass, ItemState, LedgerEvent, Outcome, ProbeCorpus,
+    Receipt, Scope, ScopeConfirmation, canonical_episode_selector, fold,
 };
 use acan_llm::{Reply, Role, Stub, UsageLedger};
-use acan_server::{EventStore, Host, HostParts, Tokens, scan, spawn_jobs};
+use acan_server::{
+    DEFAULT_PROBE_CONCURRENCY, DEFAULT_WITNESS_CONCURRENCY, EventStore, Host, HostParts, Tokens,
+    scan, spawn_jobs,
+};
 use acan_witness::RunnerConfig;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 
 /// The environment variable that names the acan-demo checkout. The tests only read it.
@@ -185,6 +188,33 @@ struct Gate {
     confirmation: ScopeConfirmation,
     ledger: CoreDerived<FoldedLedger>,
     episodes: Vec<DiscrepancyEpisode>,
+    /// The container permits the contrast takes, as the host's witness pool gives them.
+    slots: Semaphore,
+    /// How many probes the contrast runs at once.
+    probes_at_once: usize,
+}
+
+/// The size of the container pool the gate tests use. The host gives its witness runs
+/// `DEFAULT_WITNESS_CONCURRENCY` permits, so that is the default. `ACAN_OBSERVE_POOL` overrides it
+/// for timing runs.
+fn pool_size() -> usize {
+    env_count("ACAN_OBSERVE_POOL", DEFAULT_WITNESS_CONCURRENCY)
+}
+
+/// How many probes the gate tests run at once. `ACAN_OBSERVE_PROBES` overrides the host default
+/// for timing runs.
+fn probes_at_once() -> usize {
+    env_count("ACAN_OBSERVE_PROBES", DEFAULT_PROBE_CONCURRENCY)
+}
+
+/// A count from the environment variable `name`, or `default` when the variable is unset.
+fn env_count(name: &str, default: usize) -> usize {
+    match std::env::var(name) {
+        Ok(text) => text
+            .parse()
+            .unwrap_or_else(|_| panic!("{name} must be a count, got {text:?}")),
+        Err(_) => default,
+    }
 }
 
 impl Gate {
@@ -215,22 +245,37 @@ impl Gate {
             confirmation,
             ledger,
             episodes: Vec::new(),
+            slots: Semaphore::new(pool_size()),
+            probes_at_once: probes_at_once(),
             _dir: dir,
         }
     }
 
     fn plan<'a>(&'a self, repo: &'a Repo) -> observe::Plan<'a> {
+        self.plan_at(repo, &self.scratch, self.probes_at_once)
+    }
+
+    /// The plan of this gate that writes into `scratch` and keeps `probes_at_once` probes in
+    /// flight. A pass never reuses a scratch directory another pass wrote, so each needs its own.
+    fn plan_at<'a>(
+        &'a self,
+        repo: &'a Repo,
+        scratch: &'a Path,
+        probes_at_once: usize,
+    ) -> observe::Plan<'a> {
         observe::Plan {
             repo,
             base: &self.base,
             candidate: &self.candidate,
             snapshot: &self.snapshot,
-            scratch: &self.scratch,
+            scratch,
             observations: &self.observations,
             app: &self.app,
             corpus: &self.corpus,
             policy: &self.policy,
             runner: &self.runner,
+            slots: &self.slots,
+            probes_at_once,
         }
     }
 
@@ -486,6 +531,104 @@ async fn a_runtime_that_cannot_isolate_a_run_never_installs() {
         "the gate refuses an unisolated candidate"
     );
     assert_eq!(demo.head(), before, "nothing was installed");
+}
+
+/// The contrast of `gate` in `scratch`, with `probes_at_once` probes in flight.
+async fn judge_at(
+    gate: &Gate,
+    demo: &Demo,
+    scratch: &Path,
+    probes_at_once: usize,
+) -> observe::Judged {
+    observe::judge(
+        &gate.plan_at(&demo.repo, scratch, probes_at_once),
+        &gate.order(),
+    )
+    .await
+    .expect("the candidate is judged")
+}
+
+#[tokio::test]
+async fn a_contrast_with_one_probe_in_flight_and_with_three_has_the_same_receipt() {
+    let _docker = DOCKER.lock().await;
+    let demo = Demo::pinned().await;
+    let candidate = demo.candidate("concurrent", touch_notes);
+    let gate = Gate::new(&demo, &candidate, runner()).await;
+    let sequential_dir =
+        tempfile::tempdir().expect("a temporary directory for the sequential pass");
+    let concurrent_dir =
+        tempfile::tempdir().expect("a temporary directory for the concurrent pass");
+
+    let sequential = judge_at(&gate, &demo, &sequential_dir.path().join("scratch"), 1).await;
+    let concurrent = judge_at(&gate, &demo, &concurrent_dir.path().join("scratch"), 3).await;
+
+    assert_eq!(
+        renamed_receipt(&concurrent.receipt),
+        renamed_receipt(&sequential.receipt),
+        "the receipt does not depend on how many probes run at once"
+    );
+}
+
+/// The receipt as JSON, with each run id and each hash renamed in order of first appearance. A
+/// run id is a fresh uuid, and every hash the receipt holds for a run covers that id, so two
+/// passes over the same inputs never agree on either. Renaming them leaves the rest of the
+/// receipt as it is: two receipts are equal here exactly when they say the same things about the
+/// same runs.
+fn renamed_receipt(receipt: &Receipt) -> Value {
+    let mut value = serde_json::to_value(receipt).expect("the receipt serializes");
+    rename_run_bound(&mut value, &mut BTreeMap::new());
+    value
+}
+
+fn rename_run_bound(value: &mut Value, names: &mut BTreeMap<String, String>) {
+    match value {
+        Value::String(text) if is_run_bound(text) => {
+            let next = format!("run-bound-{}", names.len());
+            *text = names.entry(text.clone()).or_insert(next).clone();
+        }
+        Value::Array(items) => {
+            for item in items {
+                rename_run_bound(item, names);
+            }
+        }
+        Value::Object(fields) => {
+            for field in fields.values_mut() {
+                rename_run_bound(field, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `text` is a run id (a canonical uuid) or a `sha256:` hash.
+fn is_run_bound(text: &str) -> bool {
+    let uuid = text.len() == 36
+        && text.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        });
+    uuid || text.starts_with("sha256:")
+}
+
+#[tokio::test]
+async fn a_probe_that_cannot_start_ends_the_contrast_with_its_error() {
+    let _docker = DOCKER.lock().await;
+    let demo = Demo::pinned().await;
+    let candidate = demo.candidate("unknown-fixture", touch_notes);
+    let mut gate = Gate::new(&demo, &candidate, runner()).await;
+    gate.corpus.probes[0].spec.fixture =
+        FixtureId::from_str("fixture-not-in-the-corpus").expect("a valid fixture id");
+
+    let error = observe::judge(&gate.plan(&demo.repo), &gate.order())
+        .await
+        .expect_err("a contrast whose probe cannot start builds no receipt");
+    assert!(
+        matches!(error, observe::ObserveError::MissingFixture { .. }),
+        "the failing probe's own error is returned: {error:?}"
+    );
 }
 
 #[tokio::test]
@@ -933,6 +1076,7 @@ async fn host_over(root: &Path, client: Stub) -> Host<Stub> {
         git,
         witness_http_base_url: None,
         witness_concurrency: 2,
+        probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
     })
 }
 

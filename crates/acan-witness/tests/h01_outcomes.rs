@@ -22,6 +22,7 @@ const CRASHING_APP: &str = r#"Bun.serve({
 
 #[tokio::test]
 async fn an_app_that_exits_on_a_request_is_crashed() {
+    let _docker = support::DOCKER.lock().await;
     let mut setup = Setup::base();
     std::fs::write(setup.worktree.join("crashing-app.ts"), CRASHING_APP)
         .expect("the crashing app can be written into the worktree");
@@ -48,6 +49,7 @@ async fn an_app_that_exits_on_a_request_is_crashed() {
 
 #[tokio::test]
 async fn an_app_that_never_answers_its_ready_check_is_a_setup_failure() {
+    let _docker = support::DOCKER.lock().await;
     let mut setup = Setup::base();
     // The app is not listening one millisecond after it starts, so the ready check cannot pass.
     setup.app.ready.timeout_ms = 1;
@@ -73,6 +75,7 @@ async fn an_app_that_never_answers_its_ready_check_is_a_setup_failure() {
 
 #[tokio::test]
 async fn a_pinned_image_the_runtime_does_not_hold_is_isolation_unavailable() {
+    let _docker = support::DOCKER.lock().await;
     let mut setup = Setup::base();
     // No image has this digest. The runner never pulls, so the runtime must refuse the create.
     let absent = format!("sha256:{}", "0".repeat(64));
