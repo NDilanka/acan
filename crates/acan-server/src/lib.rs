@@ -12,15 +12,11 @@ mod git;
 mod host;
 mod http;
 mod index;
-#[allow(
-    dead_code,
-    reason = "the scope-first lane is disabled: no route or job reaches it yet"
-)]
 mod intent_api;
 mod jobs;
 #[allow(
     dead_code,
-    reason = "the ruling answer path and its folds have no route yet; intent_api owns the route"
+    reason = "the ruling answer path and its folds have no caller yet; intent_api owns the route"
 )]
 mod land;
 mod mcp;
@@ -36,20 +32,17 @@ mod offline;
 mod public;
 #[allow(
     dead_code,
-    reason = "the scope-first lane is disabled: no route or job reaches it yet"
+    reason = "the receipt document renderer has no caller in the server yet; the receipt route serves the stored receipt"
 )]
 mod receipt;
 #[allow(
     dead_code,
-    reason = "the scope-first lane is disabled: no route or job reaches it yet"
+    reason = "the receipt command line has no caller in the server yet; it renders the receipt renderer, which has none"
 )]
 mod receipt_cli;
 mod store;
 mod stream;
-#[allow(
-    dead_code,
-    reason = "the scope-first lane is disabled: no route or job reaches it yet"
-)]
+#[allow(dead_code, reason = "the guided tour has no caller in the server yet")]
 mod tour;
 mod writer;
 
