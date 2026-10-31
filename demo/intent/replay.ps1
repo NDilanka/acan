@@ -5,8 +5,8 @@ demo/intent/mutants.json, run once each through the real Acan server with live M
 
 .DESCRIPTION
 -DryRun reads orders.json and mutants.json only, checks their shape, and prints the plan. It starts
-nothing, clones nothing, calls no model, and draws no seeded orders. The seed is generated at the
-start of a live run, and a dry run never shows which orders it draws.
+nothing, clones nothing, calls no model, and draws nothing. The seed is generated at the start of a
+live run, and a dry run never shows which orders it draws.
 
 A live run refuses to start offline, writes the draw (seed and drawn orders) and hashes it before the
 first candidate exists, and writes one results.jsonl line per order and per control into a new run
@@ -122,14 +122,15 @@ function Show-Plan {
     Write-Output '     demo/intent/rulings/<id>-rulings.json (acan-demo-intent-rulings/1) are read where an order needs them.'
     Write-Output '     A missing file pauses the run (exit 3): needs_scope_decision or needs_ruling is printed with the'
     Write-Output '     draft to read. A coordinator decision says so in decided_by; o-1 is the human''s own decision.'
-    Write-Output '     demo/intent/seeded/<id>.json (acan-demo-control/1) for all 12, hashed before the draw.'
-    Write-Output '  2. Draw: a seed from the OS random source, then 4 of 12 by SHA-256 of "seed|id". The seed and'
-    Write-Output '     the drawn list go to draw.json, its SHA-256 goes into summary.json, all before any clone.'
+    Write-Output '  2. Draw: a seed from the OS random source, then 4 of 12 by SHA-256 of "seed|id". The seed, the drawn'
+    Write-Output '     list and one generated injected bundle per drawn order (a header on GET /health) go to draw.json,'
+    Write-Output '     whose SHA-256 goes into summary.json, all before any clone.'
     Write-Output '  3. Clone the demo at the pin, write tokens (owner, worker-r, control-seeded), start acan serve'
     Write-Output "     on port $Port, register worker-r and control-seeded."
     Write-Output '  4. Each order once: post, split, draft, scope edits and confirm, worker-r (model), receipts,'
-    Write-Output '     rulings, and the seeded control when the draw picked the order. Paused orders resume with'
+    Write-Output '     rulings, and the injected candidate when the draw picked the order. Paused orders resume with'
     Write-Output '     -ResumeRun <run folder>; an order that finished in an earlier invocation is not run again.'
+    Write-Output '     The injected candidate of a drawn order runs after that order, on the pinned base.'
     Write-Output '  5. Controls after o-1: m-overfit and m-harmless-difference. m-broad-scope: a separate order with the'
     Write-Output '     o-1 sentence, revised with one broad item (ANY on /api/*), confirmation tried with no broad'
     Write-Output '     acknowledgement. m-missing-fixture: the f-accounts copy without f5 and its static prediction;'
@@ -157,7 +158,7 @@ $script:Outcomes = @{}
 $script:RulingOwners = @{}
 $script:OidByOrder = @{}
 $script:TasksByOrder = @{}
-$script:SeedBundleHashes = @{}
+$script:InjectedHashes = @{}
 $script:ResultRecords = [System.Collections.Generic.List[object]]::new()
 $script:Tokens = @{}
 $script:Routes = $null
@@ -379,16 +380,99 @@ function Get-ReceiptItems {
     @($Body.receipt.items | Where-Object { $null -ne $_ })
 }
 
+# ---- the injector: one out-of-scope change for each drawn order ------------------------------------
+# The change is one response header on GET /health, a route that no order's scope names. It is generated
+# from the pinned src/server.ts, so no file is kept per order. The anchor is the whole health handler; it
+# must occur exactly once in the pinned file, and the preflight checks that before any write.
+$script:InjectorId = 'header-on-health/1'
+$script:InjectorHeader = 'x-replay-injected'
+$script:InjectorRoute = 'GET /health'
+$script:InjectorFile = 'src/server.ts'
+$script:AnchorSha = $null
+
+function Get-PinnedText {
+    param([string]$Path)
+    $lines = & git -C $DemoRepo show "${Pin}:$Path"
+    if ($LASTEXITCODE -ne 0) { throw "git show ${Pin}:$Path failed" }
+    [string]::Join("`n", $lines) + "`n"
+}
+
+function Get-InjectorEdit {
+    # The one edit for an order: the health handler, with the header added to its response.
+    param([string]$OrderId)
+    [ordered]@{
+        old = "function health(ctx: Context): void {`n  sendJson(ctx.res, 200, { ok: true });`n}"
+        new = "function health(ctx: Context): void {`n  sendJson(ctx.res, 200, { ok: true }, { '$script:InjectorHeader': '$OrderId' });`n}"
+    }
+}
+
+function Get-InjectorAnchorSha {
+    # The anchor must occur exactly once in the pinned file, or the bundle would edit nothing or the wrong place.
+    $text = Get-PinnedText -Path $script:InjectorFile
+    $anchor = [string](Get-InjectorEdit -OrderId 'x').old
+    $at = $text.IndexOf($anchor, [StringComparison]::Ordinal)
+    if ($at -lt 0) { throw "the injector's anchor is not in ${Pin}:$($script:InjectorFile); the pin changed" }
+    if ($text.IndexOf($anchor, $at + 1, [StringComparison]::Ordinal) -ge 0) { throw "the injector's anchor occurs twice in ${Pin}:$($script:InjectorFile)" }
+    Get-TextSha256 -Text $anchor
+}
+
+function New-InjectedChangeRecord {
+    param([string]$OrderId)
+    [ordered]@{
+        injector = $script:InjectorId; route = $script:InjectorRoute; header = $script:InjectorHeader; value = $OrderId
+        placement = 'pinned base, through control.ps1; the worker-r head is not used'
+    }
+}
+
+function New-InjectedBundle {
+    # The acan-demo-control/1 bundle for one drawn order. control.ps1 applies it to the pinned base.
+    param([string]$OrderId)
+    $edit = Get-InjectorEdit -OrderId $OrderId
+    [ordered]@{
+        schema         = 'acan-demo-control/1'
+        id             = "inject-$OrderId"
+        kind           = 'injected_out_of_scope'
+        applies_to     = $OrderId
+        base           = $Pin
+        control_of     = "mutants.json seeded_mutants: one out-of-scope change for each drawn order (injector $($script:InjectorId))"
+        description    = "One response header on $($script:InjectorRoute), an unrelated route: $($script:InjectorHeader): $OrderId. No status or body byte changes."
+        injector       = [ordered]@{ id = $script:InjectorId; route = $script:InjectorRoute; header = $script:InjectorHeader; value = $OrderId; anchor_sha256 = $script:AnchorSha }
+        declared_files = @($script:InjectorFile)
+        files          = @([ordered]@{ path = $script:InjectorFile; edits = @($edit) })
+    }
+}
+
+function Test-SeededLine {
+    param([string]$Id)
+    @($script:ResultRecords | Where-Object { $_.kind -eq 'seeded' -and [string]$_.order -eq $Id }).Count -gt 0
+}
+
+function New-SeededNotRun {
+    param([string]$OrderId, [string]$RunId, [string]$Reason)
+    [ordered]@{
+        schema = $ResultsSchema; run_id = $RunId; kind = 'seeded'; id = "seeded-$OrderId"; order = $OrderId
+        injected_change = (New-InjectedChangeRecord -OrderId $OrderId)
+        bundle_sha256 = $script:InjectedHashes[$OrderId]; actor = 'control-seeded (control identity, not a model)'
+        provider = 'none'; scope = 'not_applicable'; attempt = 1; outcome = 'not_run'; reason = $Reason
+        receipt_hash = $null; merged_sha = $null; gate_state = $null; model_calls = 0; wall_seconds = $null
+        catch_natural_ruling = $false; catch_seeded = $false; catch_base_only = $false; errors = @()
+        finished = (Get-Date).ToString('o')
+    }
+}
+
 function Invoke-SeededCandidate {
-    # A drawn order gets one seeded out-of-scope bundle, run as a control on the order's first task.
-    # The control applies the bundle to the pinned base, so the candidate is the bundle alone. The
-    # gate sees no ruling from the replay: a seeded item that stays unruled is judged as blocked.
+    # A drawn order gets one injected out-of-scope change, run as a control on the order's first task.
+    # control.ps1 writes the bundle onto the pinned base, not onto the worker-r head, so the candidate is
+    # the base with the injected header alone. The gate sees no ruling from the replay: an injected item
+    # that stays unruled is judged as blocked.
     param([string]$OrderId, [string]$Task, [string]$RunId)
-    $bundle = Join-Path $intentDir "seeded\$OrderId.json"
+    $bundle = Join-Path $script:CtrlDir "injected-$OrderId.json"
     $out = Join-Path $script:CtrlDir "seeded-$OrderId.json"
     $line = [ordered]@{
         schema = $ResultsSchema; run_id = $RunId; kind = 'seeded'; id = "seeded-$OrderId"; order = $OrderId
-        bundle_sha256 = $script:SeedBundleHashes[$OrderId]; actor = 'control-seeded (control identity, not a model)'
+        injected_change = (New-InjectedChangeRecord -OrderId $OrderId)
+        bundle = "controls\injected-$OrderId.json"; bundle_sha256 = $script:InjectedHashes[$OrderId]
+        actor = 'control-seeded (control identity, not a model)'
         provider = 'none'; scope = 'not_applicable'; attempt = 1; outcome = 'not_run'
         receipt_hash = $null; merged_sha = $null; gate_state = $null; model_calls = 0; wall_seconds = $null
         catch_natural_ruling = $false; catch_seeded = $false; catch_base_only = $false; errors = @()
@@ -400,6 +484,7 @@ function Invoke-SeededCandidate {
         & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $script:Tokens['control-seeded'] -Repo $script:Repo -Task $Task -Bundle $bundle -Out $out -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec
         $r = Read-ControlResult -Path $out
         if ($null -eq $r) { throw 'error: the seeded control wrote no result file' }
+        if (-not $r.receipt_hash) { throw "error: the seeded control got no receipt; its error: $([string]$r.error)" }
         $gate = [string]$r.gate_state
         $blocking = @($r.items | Where-Object { $_.class -in @('out_of_scope', 'violates_ruling', 'obligation_failed') })
         $line['receipt_hash'] = [string]$r.receipt_hash
@@ -897,19 +982,9 @@ if (-not $DryRun) {
     foreach ($path in @($AcanExe, $WorkerExe, $LlmSource, $EnvSource, (Join-Path $intentDir 'orders.json'), (Join-Path $intentDir 'mutants.json'))) {
         if (-not (Test-Path -LiteralPath $path)) { throw "missing input: $path" }
     }
-    $missingInputs = [System.Collections.Generic.List[string]]::new()
-    foreach ($o in $orderList) {
-        $bundlePath = Join-Path $intentDir "seeded\$($o.id).json"
-        if (-not (Test-Path -LiteralPath $bundlePath)) { $missingInputs.Add($bundlePath); continue }
-        $bundle = Read-JsonFile -Path $bundlePath
-        if ($bundle.schema -ne 'acan-demo-control/1' -or [string]$bundle.applies_to -ne [string]$o.id -or [string]$bundle.base -ne $Pin) {
-            throw "$bundlePath must be acan-demo-control/1 for $($o.id) at the pin"
-        }
-        $script:SeedBundleHashes[[string]$o.id] = Get-FileSha256 -Path $bundlePath
-    }
-    if ($missingInputs.Count -gt 0) {
-        throw "missing inputs, nothing was drawn or started: $($missingInputs -join '; ')"
-    }
+    # The injector needs no file per order. Its anchor must sit once in the pinned src/server.ts; the bundles
+    # of the drawn orders are generated after the draw and before any clone or candidate.
+    $script:AnchorSha = Get-InjectorAnchorSha
     # A decision file is optional until the run needs it. A file that is there must be well formed.
     foreach ($o in $selected) {
         $editsPath = Join-Path $intentDir "$($o.id)-edits.json"
@@ -949,7 +1024,14 @@ if (-not $DryRun) {
         if ((Get-FileSha256 -Path $drawPath) -ne [string]$script:Summary['draw_sha256']) {
             throw 'draw.json no longer matches the hash recorded before the first candidate; the run cannot resume'
         }
-        $drawn = @((Read-JsonFile -Path $drawPath).drawn)
+        $drawRec = Read-JsonFile -Path $drawPath
+        $drawn = @($drawRec.drawn)
+        foreach ($id in $drawn) {
+            $bundlePath = Join-Path $script:CtrlDir "injected-$id.json"
+            $sha = Get-FileSha256 -Path $bundlePath
+            if ($sha -ne [string]$drawRec.injected_bundles.$id) { throw "the injected bundle for $id no longer matches draw.json; the run cannot resume" }
+            $script:InjectedHashes[$id] = $sha
+        }
         Assert-OwnRepo
         $head = (Invoke-Git rev-parse HEAD | Out-String).Trim()
         if ($head -ne $Pin) { throw "the resumed clone's HEAD is $head, not the pin $Pin" }
@@ -1002,13 +1084,22 @@ if (-not $DryRun) {
         if (-not $ResumeRun) {
             $seed = [string][System.Security.Cryptography.RandomNumberGenerator]::GetInt32(1, [int]::MaxValue)
             $drawn = @(Get-DrawnOrders -Seed $seed -Ids $orderIds -Count $DrawCount)
+            # one generated bundle per drawn order, written into the run folder before the draw record names it
+            $injectedRecord = [ordered]@{}
+            foreach ($id in $drawn) {
+                $bundlePath = Join-Path $script:CtrlDir "injected-$id.json"
+                Write-JsonFile -Path $bundlePath -Object (New-InjectedBundle -OrderId $id)
+                $script:InjectedHashes[$id] = Get-FileSha256 -Path $bundlePath
+                $injectedRecord[$id] = $script:InjectedHashes[$id]
+            }
             $drawRecord = [ordered]@{
                 schema = $DrawSchema; run_id = $script:RunId; drawn_at = (Get-Date).ToString('o')
                 algorithm = 'the orders with the smallest SHA-256 of "<seed>|<order id>", first 4, in orders.json order'
                 seed = $seed; pool = $orderIds; drawn = $drawn
+                injector = [ordered]@{ id = $script:InjectorId; route = $script:InjectorRoute; header = $script:InjectorHeader; file = $script:InjectorFile; anchor_sha256 = $script:AnchorSha; placement = 'pinned base, through control.ps1' }
+                injected_bundles = $injectedRecord
                 orders_json_sha256 = Get-FileSha256 -Path (Join-Path $intentDir 'orders.json')
                 mutants_json_sha256 = Get-FileSha256 -Path (Join-Path $intentDir 'mutants.json')
-                seeded_bundle_sha256 = $script:SeedBundleHashes
             }
             $drawPath = Join-Path $run 'draw.json'
             Write-JsonFile -Path $drawPath -Object $drawRecord
@@ -1067,6 +1158,11 @@ if (-not $DryRun) {
             if (-not ($selected | Where-Object { [string]$_.id -eq 'o-1' }) -and -not (Test-ControlLine -Id 'm-overfit')) {
                 foreach ($c in @('m-overfit', 'm-harmless-difference')) {
                     Add-ResultLine -Record (New-ControlLine -Id $c -AppliesTo 'o-1' -Expected (Get-ControlExpectation -Id $c) -Outcome 'not_run' -Result $null -Reason 'o-1 is not in this run')
+                }
+            }
+            foreach ($id in $drawn) {
+                if (-not ($selected | Where-Object { [string]$_.id -eq $id }) -and -not (Test-SeededLine -Id $id)) {
+                    Add-ResultLine -Record (New-SeededNotRun -OrderId $id -RunId $script:RunId -Reason 'the drawn order is not in this rehearsal (-Only); its injected change was not run')
                 }
             }
             if (-not (Test-ControlLine -Id 'm-broad-scope')) { Invoke-BroadScopeControl }
