@@ -589,6 +589,75 @@ fn a_masked_field_still_passes_through_its_uniqueness_relation() {
 }
 
 #[test]
+fn a_declared_maskable_field_the_candidate_changes_in_the_bases_format_is_masked() {
+    // The bases agree on the session cookie at s8; the candidate's cookie differs but keeps the
+    // base's token format. The plan declares cookie.session maskable, so the change is masked.
+    let base_a = with_cookie(sequence(SIX_FAILURES), "s8", "aaaa1111bbbb22");
+    let base_b = with_cookie(sequence(SIX_FAILURES), "s8", "aaaa1111bbbb22");
+    let candidate = with_cookie(sequence(SIX_FAILURES), "s8", "cccc3333dddd44");
+    let trio = Trio::new(base_a, base_b, candidate);
+    let masks = trio.masks();
+    assert_eq!(masks.len(), 1, "the declared maskable field is not masked");
+    assert_eq!(masks[0].value().selector.step_id.as_str(), "s8");
+    assert_eq!(masks[0].value().selector.path.as_str(), "cookie.session");
+    assert!(
+        differences(&trio.comparison()).is_empty(),
+        "a masked change was reported: {:?}",
+        differences(&trio.comparison())
+    );
+    // The receipt lists the mask, and no item reports the field as a difference.
+    let scope = scope();
+    let confirmation = confirmation_for(&scope);
+    let receipt = receipt_of(&scope, &confirmation, &trio);
+    assert_eq!(
+        receipt.masks.len(),
+        1,
+        "the receipt does not count the mask"
+    );
+    let reported = receipt
+        .items
+        .iter()
+        .any(|item| match &item.evaluation.outcome {
+            Outcome::Changed { differences } => differences.iter().any(|difference| {
+                difference.step_id.as_str() == "s8" && difference.path.as_str() == "cookie.session"
+            }),
+            _ => false,
+        });
+    assert!(!reported, "a masked field was reported as a difference");
+}
+
+#[test]
+fn a_declared_maskable_field_is_a_difference_when_the_candidate_changes_its_format() {
+    let base_a = with_cookie(sequence(SIX_FAILURES), "s8", "aaaa1111bbbb22");
+    let base_b = with_cookie(sequence(SIX_FAILURES), "s8", "aaaa1111bbbb22");
+    let candidate = with_cookie(
+        sequence(SIX_FAILURES),
+        "s8",
+        "3f2b8c1e-5d4a-4b6c-8d9e-0f1a2b3c4d5e",
+    );
+    let trio = Trio::new(base_a, base_b, candidate);
+    assert!(trio.masks().is_empty(), "a format change was masked");
+    assert!(
+        differences(&trio.comparison()).contains(&("s8".to_owned(), "cookie.session".to_owned())),
+        "a uuid where the base holds a token is a difference"
+    );
+}
+
+#[test]
+fn a_declared_maskable_field_absent_in_the_base_is_a_difference_not_a_mask() {
+    let candidate = with_cookie(sequence(SIX_FAILURES), "s8", "aaaa1111bbbb22");
+    let trio = Trio::new(sequence(SIX_FAILURES), sequence(SIX_FAILURES), candidate);
+    assert!(
+        trio.masks().is_empty(),
+        "a field the base does not have was masked"
+    );
+    assert!(
+        differences(&trio.comparison()).contains(&("s8".to_owned(), "cookie.session".to_owned())),
+        "a field absent in the base is a difference that needs a ruling"
+    );
+}
+
+#[test]
 fn a_status_difference_between_bases_is_unstable_and_never_masks() {
     let trio = Trio::new(
         sequence(SIX_FAILURES),
