@@ -1,0 +1,751 @@
+{
+  "schema": "acan-demo-intent-edits/2",
+  "order": "o-1",
+  "decided_by": "coordinator, delegated by the owner",
+  "note": "Written for the draft in run D:\\dev\\acan-takes\\d02k-fresh-o1-20261101-004215 (scope-draft-o-1.json, rev 1). Each edit names the draft item it acts on by id; draft_mapping maps each drafted id to the decision it follows. Items follow the coordinator decisions D1 to D19 in coordinator-decisions-d02t.json. take.ps1 applies scope_edits to the draft in order, then choice_rules to the open choices, then sends the result as one revise_scope, and logs each edit as a human step. An op whose id is not in the draft stops the take (fail closed). Nothing here is a verdict: the edits state the order's rules and the gate checks them.",
+  "choice_rules": [
+    {
+      "id": "cr-bucket-scope",
+      "question_match": "(?i)shared across (the|all) link API",
+      "option_label_match": "(?i)^One shared\\b",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The order says ten requests per 60 seconds on the link API, one budget for the API, not one per route."
+    },
+    {
+      "id": "cr-window-boundary",
+      "question_match": "(?i)exactly at the 60s window end",
+      "option_label_match": "(?i)^Outside\\b",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "A request at 60 s is outside the first window, as in the window items (boundary exclusive) and probe s17 at 60000 ms."
+    }
+  ],
+  "scope_edits": [
+    {
+      "op": "remove_may",
+      "id": "limit-get-links",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The drafted item (limit-get-links) names no probe step. The over-limit GET /api/links is anchored on probe step s14 of login-over-quota by i-quota-get-links, which is kept."
+    },
+    {
+      "op": "remove_may",
+      "id": "limit-post-links",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The drafted item covers every POST /api/links at any step. The same rule is anchored on the corpus steps that send the 11th request, a relogin, a request inside the window, and bob's own quota (i-quota-window, i-quota-relogin, i-quota-inside-window, mk-bob-quota). Boundary is exclusive: a request at 60 s starts a new window."
+    },
+    {
+      "op": "remove_may",
+      "id": "limit-delete-links",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "No probe sends more than ten DELETE requests, so this item cannot be judged; a DELETE status change stays out of scope and is reported. Coordinator decision 4: DELETE /api/links/:code is accepted as is and is named in the window items' text."
+    },
+    {
+      "op": "replace_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "Standing rule 2: the drafted must-keep names step health-probe, which is not a corpus step. Re-anchored on the first corpus step with GET /health and principal kind any (probe health, step s1), equals_base on status.",
+      "rule": {
+        "id": "keep-health",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/health",
+          "step_context": { "kind": "step", "step_id": "s1" },
+          "principal": { "kind": "any" },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "ob-health-same",
+            "predicate": { "predicate": "equals_base", "step_id": "s1", "path": "status", "anchor": { "kind": "fresh" } },
+            "text": "Health status unchanged from base."
+          }
+        ],
+        "text": "Health endpoint must keep working.",
+        "machine_ids": ["server", "middleware", "ratelimit", "auth", "errors"]
+      }
+    },
+    {
+      "op": "replace_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "Login is not part of the link API, so it is not limited, even after a user's link quota is used up.",
+      "rule": {
+        "id": "keep-login",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/login",
+          "step_context": { "kind": "step", "step_id": "s11" },
+          "principal": { "kind": "any" },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "ob-login-same",
+            "predicate": { "predicate": "equals_base", "step_id": "s11", "path": "status", "anchor": { "kind": "fresh" } },
+            "text": "Login status unchanged from base."
+          }
+        ],
+        "text": "Login behavior must keep working.",
+        "machine_ids": ["server", "middleware", "ratelimit", "auth", "store", "errors"]
+      }
+    },
+    {
+      "op": "replace_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "Earlier coordinator decision: redirect keep re-anchored on probe step s3 (GET /${link_code}, route /:code, anonymous, status equals base). The drafted redirect-probe step is not a corpus step.",
+      "rule": {
+        "id": "keep-redirect",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/:code",
+          "step_context": { "kind": "step", "step_id": "s3" },
+          "principal": { "kind": "anonymous" },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "obl-redirect-same",
+            "predicate": { "predicate": "equals_base", "step_id": "s3", "path": "status", "anchor": { "kind": "fresh" } },
+            "text": "Public redirect status remains as in base."
+          }
+        ],
+        "text": "Public short-link redirect stays outside the signed-in link limit.",
+        "machine_ids": ["server", "links", "store"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "One shared budget across the link API, as answered in bucket-scope.",
+      "item": {
+        "id": "i-quota-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s13" },
+          "principal": { "kind": "actor", "name": "alice" },
+          "channel": "status"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-quota-alice-window",
+            "predicate": {
+              "predicate": "window",
+              "policy": {
+                "event_filter": {
+                  "run": "candidate",
+                  "method": "ANY",
+                  "route_template": "/api/links",
+                  "principal": { "kind": "actor", "name": "alice" }
+                },
+                "group_by": "principal",
+                "anchor": { "kind": "first_match" },
+                "duration_ms": 60000,
+                "allowed_count": 10,
+                "boundary": "exclusive",
+                "rejected_attempts": { "status_in": [429], "counted": "counted" },
+                "obligations": [{ "kind": "first_allowed" }, { "kind": "recovers" }]
+              }
+            },
+            "text": "Each user's first 10 requests to /api/links in 60 s, any method, are allowed; the 11th and later get 429; rejected attempts count; the first request at or after 60 s is allowed again. DELETE /api/links/:code shares the budget in the order but is not machine-checked; no probe sends more than ten deletes."
+          },
+          {
+            "obligation_id": "obl-quota-alice-429",
+            "predicate": { "predicate": "status_in", "step_id": "s13", "statuses": [429] },
+            "text": "alice's 11th link request, sent from client-b, is answered 429"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s13",
+          "path": "status",
+          "before": { "state": "present", "value": 201 },
+          "after": { "state": "present", "value": 429 }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "A second session of the same user shares that user's quota: the relogin session's 11th request is answered 429. The actor label alice_relogin is a separate window group, so this is a status check, not a window.",
+      "item": {
+        "id": "i-quota-relogin",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s11" },
+          "principal": { "kind": "actor", "name": "alice_relogin" },
+          "channel": "status"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-quota-relogin-429",
+            "predicate": { "predicate": "status_in", "step_id": "s11", "statuses": [429] },
+            "text": "alice's relogin session shares her quota: its request is answered 429"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s11",
+          "path": "status",
+          "before": { "state": "present", "value": 201 },
+          "after": { "state": "present", "value": 429 }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The request sent at 59999 ms after the window opened is still inside the window and is answered 429. Covers the probe step s15 so its difference has an owner.",
+      "item": {
+        "id": "i-quota-inside-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s15" },
+          "principal": { "kind": "actor", "name": "alice" },
+          "channel": "status"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-quota-inside-429",
+            "predicate": { "predicate": "status_in", "step_id": "s15", "statuses": [429] },
+            "text": "A request 59999 ms into the window is still answered 429"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s15",
+          "path": "status",
+          "before": { "state": "present", "value": 201 },
+          "after": { "state": "present", "value": 429 }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The order limits the whole link API, so a signed-in user's over-limit GET /api/links is answered 429.",
+      "item": {
+        "id": "i-quota-get-links",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s14" },
+          "principal": { "kind": "actor", "name": "alice_fresh" },
+          "channel": "status"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-quota-get-links-429",
+            "predicate": { "predicate": "status_in", "step_id": "s14", "statuses": [429] },
+            "text": "A signed-in user's over-limit GET /api/links is answered 429"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s14",
+          "path": "status",
+          "before": { "state": "present", "value": 200 },
+          "after": { "state": "present", "value": 429 }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "One shared budget across the link API, as answered in bucket-scope.",
+      "rule": {
+        "id": "mk-bob-quota",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s12" },
+          "principal": { "kind": "actor", "name": "bob" },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "obl-bob-quota-window",
+            "predicate": {
+              "predicate": "window",
+              "policy": {
+                "event_filter": {
+                  "run": "candidate",
+                  "method": "ANY",
+                  "route_template": "/api/links",
+                  "principal": { "kind": "actor", "name": "bob" }
+                },
+                "group_by": "principal",
+                "anchor": { "kind": "first_match" },
+                "duration_ms": 60000,
+                "allowed_count": 10,
+                "boundary": "exclusive",
+                "rejected_attempts": { "status_in": [429], "counted": "counted" },
+                "obligations": [{ "kind": "first_allowed" }]
+              }
+            },
+            "text": "bob's first 10 requests to /api/links in 60 s, any method, are allowed, even after alice has used up her quota. DELETE /api/links/:code shares the budget in the order but is not machine-checked; no probe sends more than ten deletes."
+          }
+        ],
+        "text": "Each user keeps a separate link quota: bob's requests are not limited by alice's",
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-add-relogin",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s11" },
+          "principal": { "kind": "actor", "name": "alice_relogin" },
+          "channel": "body"
+        },
+        "change": "add",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-add-429-relogin",
+            "predicate": { "predicate": "status_in", "step_id": "s11", "statuses": [429] },
+            "text": "The relogin session's over-limit POST /api/links is answered 429, so its body may gain an error"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s11",
+          "path": "body.error",
+          "before": { "state": "missing" },
+          "after": { "state": "present", "value": "too many requests" }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-modify-relogin",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s11" },
+          "principal": { "kind": "actor", "name": "alice_relogin" },
+          "channel": "body"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-modify-429-relogin",
+            "predicate": { "predicate": "status_in", "step_id": "s11", "statuses": [429] },
+            "text": "The relogin session's over-limit POST /api/links is answered 429, so its body may change"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s11",
+          "path": "status",
+          "before": { "state": "present", "value": 201 },
+          "after": { "state": "present", "value": 429 }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-remove-relogin",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s11" },
+          "principal": { "kind": "actor", "name": "alice_relogin" },
+          "channel": "body"
+        },
+        "change": "remove",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-remove-429-relogin",
+            "predicate": { "predicate": "status_in", "step_id": "s11", "statuses": [429] },
+            "text": "The relogin session's over-limit POST /api/links is answered 429, so its body may lose the link fields"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s11",
+          "path": "body.code",
+          "before": { "state": "present", "value": "QxMNooK" },
+          "after": { "state": "missing" }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-add-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s13" },
+          "principal": { "kind": "actor", "name": "alice" },
+          "channel": "body"
+        },
+        "change": "add",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-add-429-window",
+            "predicate": { "predicate": "status_in", "step_id": "s13", "statuses": [429] },
+            "text": "alice's 11th POST /api/links is answered 429, so its body may gain an error"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s13",
+          "path": "body.error",
+          "before": { "state": "missing" },
+          "after": { "state": "present", "value": "too many requests" }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-modify-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s13" },
+          "principal": { "kind": "actor", "name": "alice" },
+          "channel": "body"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-modify-429-window",
+            "predicate": { "predicate": "status_in", "step_id": "s13", "statuses": [429] },
+            "text": "alice's 11th POST /api/links is answered 429, so its body may change"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s13",
+          "path": "status",
+          "before": { "state": "present", "value": 201 },
+          "after": { "state": "present", "value": 429 }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-remove-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s13" },
+          "principal": { "kind": "actor", "name": "alice" },
+          "channel": "body"
+        },
+        "change": "remove",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-remove-429-window",
+            "predicate": { "predicate": "status_in", "step_id": "s13", "statuses": [429] },
+            "text": "alice's 11th POST /api/links is answered 429, so its body may lose the link fields"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s13",
+          "path": "body.code",
+          "before": { "state": "present", "value": "mPCJpY8" },
+          "after": { "state": "missing" }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-add-inside-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s15" },
+          "principal": { "kind": "actor", "name": "alice" },
+          "channel": "body"
+        },
+        "change": "add",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-add-429-inside",
+            "predicate": { "predicate": "status_in", "step_id": "s15", "statuses": [429] },
+            "text": "A POST /api/links 59999 ms into the window is answered 429, so its body may gain an error"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s15",
+          "path": "body.error",
+          "before": { "state": "missing" },
+          "after": { "state": "present", "value": "too many requests" }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-modify-inside-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s15" },
+          "principal": { "kind": "actor", "name": "alice" },
+          "channel": "body"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-modify-429-inside",
+            "predicate": { "predicate": "status_in", "step_id": "s15", "statuses": [429] },
+            "text": "A POST /api/links 59999 ms into the window is answered 429, so its body may change"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s15",
+          "path": "status",
+          "before": { "state": "present", "value": 201 },
+          "after": { "state": "present", "value": 429 }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-remove-inside-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s15" },
+          "principal": { "kind": "actor", "name": "alice" },
+          "channel": "body"
+        },
+        "change": "remove",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-remove-429-inside",
+            "predicate": { "predicate": "status_in", "step_id": "s15", "statuses": [429] },
+            "text": "A POST /api/links 59999 ms into the window is answered 429, so its body may lose the link fields"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s15",
+          "path": "body.code",
+          "before": { "state": "present", "value": "qWTcBuy" },
+          "after": { "state": "missing" }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-add-get-links",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s14" },
+          "principal": { "kind": "actor", "name": "alice_fresh" },
+          "channel": "body"
+        },
+        "change": "add",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-add-429-get-links",
+            "predicate": { "predicate": "status_in", "step_id": "s14", "statuses": [429] },
+            "text": "The signed-in user's over-limit GET /api/links is answered 429, so its body may gain an error"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s14",
+          "path": "body.error",
+          "before": { "state": "missing" },
+          "after": { "state": "present", "value": "too many requests" }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-modify-get-links",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s14" },
+          "principal": { "kind": "actor", "name": "alice_fresh" },
+          "channel": "body"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-modify-429-get-links",
+            "predicate": { "predicate": "status_in", "step_id": "s14", "statuses": [429] },
+            "text": "The signed-in user's over-limit GET /api/links is answered 429, so its body may change"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s14",
+          "path": "status",
+          "before": { "state": "present", "value": 200 },
+          "after": { "state": "present", "value": 429 }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-remove-get-links",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s14" },
+          "principal": { "kind": "actor", "name": "alice_fresh" },
+          "channel": "body"
+        },
+        "change": "remove",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-remove-429-get-links",
+            "predicate": { "predicate": "status_in", "step_id": "s14", "statuses": [429] },
+            "text": "The signed-in user's over-limit GET /api/links is answered 429, so its body may lose the link fields"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s14",
+          "path": "body.links",
+          "before": {
+            "state": "present",
+            "value": [
+              { "clicks": 0, "code": "sAh86ab", "createdAt": "2026-01-01T00:00:00.000Z", "target": "https://example.test/q10" },
+              { "clicks": 0, "code": "M7NHZVy", "createdAt": "2026-01-01T00:00:00.000Z", "target": "https://example.test/q9" },
+              { "clicks": 0, "code": "SbVnKM7", "createdAt": "2026-01-01T00:00:00.000Z", "target": "https://example.test/q8" },
+              { "clicks": 0, "code": "J6BY9TX", "createdAt": "2026-01-01T00:00:00.000Z", "target": "https://example.test/q7" },
+              { "clicks": 0, "code": "HgvAx96", "createdAt": "2026-01-01T00:00:00.000Z", "target": "https://example.test/q6" },
+              { "clicks": 0, "code": "N4M7lmA", "createdAt": "2026-01-01T00:00:00.000Z", "target": "https://example.test/q5" },
+              { "clicks": 0, "code": "2cPWDov", "createdAt": "2026-01-01T00:00:00.000Z", "target": "https://example.test/q4" },
+              { "clicks": 0, "code": "Ekn0rvf", "createdAt": "2026-01-01T00:00:00.000Z", "target": "https://example.test/q3" },
+              { "clicks": 0, "code": "DAVcLGc", "createdAt": "2026-01-01T00:00:00.000Z", "target": "https://example.test/q2" },
+              { "clicks": 0, "code": "Jsfnxze", "createdAt": "2026-01-01T00:00:00.000Z", "target": "https://example.test/q1" }
+            ]
+          },
+          "after": { "state": "missing" }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    }
+  ],
+  "draft_mapping": {
+    "run": "D:\\dev\\acan-takes\\d02k-fresh-o1-20261101-004215",
+    "draft_file": "D:\\dev\\acan-takes\\d02k-fresh-o1-20261101-004215\\scope-draft-o-1.json",
+    "draft_rev": 1,
+    "decided_by": "coordinator, delegated by the owner",
+    "items": [
+      { "draft_id": "limit-get-links", "kind": "may", "action": "remove_may", "decision": "replaced by i-quota-get-links (s14, alice_fresh, 429)" },
+      { "draft_id": "limit-post-links", "kind": "may", "action": "remove_may", "decision": "replaced by i-quota-window (s13), i-quota-relogin (s11), i-quota-inside-window (s15), must-keep mk-bob-quota (s12)" },
+      { "draft_id": "limit-delete-links", "kind": "may", "action": "remove_may", "decision": "removed (decision 4); no probe sends more than ten DELETEs" },
+      { "draft_id": "keep-health", "kind": "must_keep", "action": "replace_must_keep", "decision": "standing rule 2: drafted step health-probe is not a corpus step; re-anchored on s1 (GET /health, principal any, equals_base status)" },
+      { "draft_id": "keep-login", "kind": "must_keep", "action": "replace_must_keep", "decision": "decision 1: re-anchored on login-over-quota s11 (POST /api/login, equals_base status); drafted step login-probe is not a corpus step" },
+      { "draft_id": "keep-redirect", "kind": "must_keep", "action": "replace_must_keep", "decision": "earlier decision: re-anchored on s3 (GET /:code, anonymous, equals_base status); drafted step redirect-probe is not a corpus step" },
+      { "draft_id": "quota-scope", "kind": "open", "action": "answered by choice rule cr-bucket-scope: One shared 10-per-60s budget across all link routes", "decision": "bucket-scope = shared (earlier decision)" },
+      { "draft_id": "window-boundary", "kind": "open", "action": "answered by choice rule cr-window-boundary: Outside, starting a new window", "decision": "window-boundary = exclusive (coordinator answer 1, decision D17)" }
+    ],
+    "standing_rule_log": [
+      "keep-health: drafted step health-probe not in corpus; first corpus GET /health with principal kind any is s1 (health probe).",
+      "keep-login: drafted step login-probe not in corpus; decision 1 names login-over-quota s11 (standing rule would pick login-failures s1; decision 1 is more specific).",
+      "keep-redirect: drafted step redirect-probe not in corpus; earlier decision names s3 with principal anonymous (standing rule would give principal any; the earlier decision is used).",
+      "limit-delete-links: DELETE route /api/links/:code, removed under decision 4 (no DELETE item is machine-checked)."
+    ],
+    "examples": "D18. Add items: body.error before missing, after 'too many requests' (observed at s11, s12, s13, s14, s15 in both runs). Remove items: body.code at s11 (QxMNooK), s13 (mPCJpY8), s15 (qWTcBuy); body.links at s14 (10 observed links, deterministic across runs). Modify items: no field present in base and candidate with a changed value at these steps in either run, so the status example is used (before 201 at POST steps, 200 at s14; after 429).",
+    "window_filter": "Event filters use method ANY on route /api/links for i-quota-window and mk-bob-quota (ANY branch of decision 2). The DELETE route is named in both window texts (decision 4).",
+    "decisions_applied": "D14 whole-body items (12); D15 no Retry-After item (the draft has no Retry-After question); D17 window-boundary exclusive; D18 examples; D19 questions answered from recorded decisions and logged here."
+  },
+  "answers": []
+}
