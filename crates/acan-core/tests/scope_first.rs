@@ -946,6 +946,37 @@ fn a_moved_probe_or_runner_with_recorded_inputs_needs_the_scope_confirmed_again(
 }
 
 #[test]
+fn a_moved_overlay_with_recorded_inputs_needs_the_scope_confirmed_again() {
+    let mut fx = Fx::new();
+    let scope = fx.open_lane();
+    // No candidate is prepared on the confirmed base, so the record is the only thing the moved
+    // head is checked against. Only the protected files moved: the probes, runner and rulings did
+    // not, so nothing else in the record can refuse the re-bind.
+    let prepared = fx.prepared_json(&scope, &commit(9));
+    record_inputs(&mut fx, &scope, &prepared["context"]).expect("the inputs are recorded");
+    let moved = commit(7);
+    let mut overlay = context_on(&prepared, &moved);
+    overlay["overlay_hash"] = json!(sha(9));
+    let refused = fx
+        .system(SystemCmd::RebindBase {
+            order: fx.order,
+            base: moved.parse().expect("a commit sha"),
+            context: Box::new(from(overlay)),
+        })
+        .unwrap_err();
+    assert!(
+        matches!(refused, Rejection::StaleEvidence { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(
+        confirmed_base(&fx).as_deref(),
+        Some(BASE),
+        "nothing was re-bound"
+    );
+    fx.assert_replays();
+}
+
+#[test]
 fn a_record_for_an_older_revision_needs_the_scope_confirmed_again() {
     let mut fx = Fx::new();
     let scope = fx.open_lane();

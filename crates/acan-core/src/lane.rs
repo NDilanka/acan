@@ -27,10 +27,10 @@ use std::collections::BTreeMap;
 use acan_intent::{
     BroadGrantAck, CanonicalError, ChoiceAnswer, CommitSha, Contest, ContestId, ContestStatus,
     EnvHash, EpisodeId, EvaluatorVersion, ExampleHash, FixtureSetHash, GateContext, GateState,
-    HumanRef, InvalidValue, ItemId, LedgerHead, McpV1, OrderRef, PostReadbackResponse, Prediction,
-    PreparedCommit, ProbeSetHash, RepairBudget, RepairRound, RepairRounds, RunnerHash, RuntimeId,
-    SandboxPolicyHash, Scope, ScopeConfirmation, ScopeConfirmationV1, ScopeDraft, ScopeHash,
-    ScopeRev, ScopeRevision, SelectorHash, UnixMillis,
+    HumanRef, InvalidValue, ItemId, LedgerHead, McpV1, OrderRef, OverlayHash, PostReadbackResponse,
+    Prediction, PreparedCommit, ProbeSetHash, RepairBudget, RepairRound, RepairRounds, RunnerHash,
+    RuntimeId, SandboxPolicyHash, Scope, ScopeConfirmation, ScopeConfirmationV1, ScopeDraft,
+    ScopeHash, ScopeRev, ScopeRevision, SelectorHash, UnixMillis,
 };
 use serde::{Deserialize, Serialize};
 
@@ -133,10 +133,13 @@ impl ScopeBinding {
 }
 
 /// The protected inputs a scope was confirmed under: the gate-context inputs that no candidate
-/// decides. The protected head, the merged commit, the scope hash, and the candidate's own overlay
-/// and artifacts are left out, because a re-bind changes them or derives them from the candidate.
+/// decides. The protected head, the merged commit, the scope hash and the candidate's artifacts
+/// are left out, because a re-bind changes them or derives them from the candidate. The overlay is
+/// kept: it hashes the protected files of the base, which no candidate decides.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtectedInputs {
+    /// The protected files of the base, as the overlay hash names them.
+    pub overlay_hash: OverlayHash,
     /// The ruling log revision in force.
     pub ledger_head: LedgerHead,
     /// The effective probes with their normalization plans.
@@ -163,7 +166,7 @@ impl ProtectedInputs {
         let GateContext {
             protected_head: _,
             merged_commit: _,
-            overlay_hash: _,
+            overlay_hash,
             effective_artifact_hashes: _,
             scope_hash: _,
             ledger_head,
@@ -176,6 +179,7 @@ impl ProtectedInputs {
             sandbox_policy_hash,
         } = context;
         Self {
+            overlay_hash: *overlay_hash,
             ledger_head: *ledger_head,
             probe_set_hash: *probe_set_hash,
             fixture_set_hash: *fixture_set_hash,

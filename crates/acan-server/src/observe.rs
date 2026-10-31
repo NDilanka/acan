@@ -832,9 +832,10 @@ pub(crate) async fn current(
     Ok(order.context(&facts, plan.candidate))
 }
 
-/// The protected inputs of the scope `order` is confirmed under, from `plan`'s protected snapshot
-/// and the ruling log. No candidate is needed: the candidate's own overlay and artifacts are left
-/// out, so the result matches the protected part of any context judged under the same inputs.
+/// The protected inputs of the scope `order` is confirmed under, from `plan`'s base preparation,
+/// its protected snapshot and the ruling log. No candidate is needed: the candidate's artifacts are
+/// left out, and the overlay is the base's own, so the result matches the protected part of any
+/// context judged under the same inputs.
 ///
 /// # Errors
 ///
@@ -845,6 +846,7 @@ pub(crate) fn protected_inputs(
 ) -> Result<ProtectedInputs, ObserveError> {
     let facts = Facts::of(plan, order, BTreeMap::new())?;
     Ok(ProtectedInputs {
+        overlay_hash: plan.base.overlay_hash(),
         ledger_head: order.ledger.value().head,
         probe_set_hash: facts.probe_set,
         fixture_set_hash: facts.fixture_set,
