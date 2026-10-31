@@ -751,6 +751,8 @@ fn drafted_scope_body() -> Value {
 struct Drafting {
     inner: TwoTasks,
     draft: Value,
+    /// The user message of every scope request, as the foreman received it.
+    asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl ModelClient for Drafting {
@@ -758,6 +760,13 @@ impl ModelClient for Drafting {
         if model::ask_of(&request) != Some(Ask::Scope) {
             return self.inner.chat(role, request).await;
         }
+        self.asked
+            .lock()
+            .expect("the asked lock is not poisoned")
+            .extend(request.messages.iter().filter_map(|message| match message {
+                acan_llm::Message::User { content } => Some(content.clone()),
+                _ => None,
+            }));
         Ok(ChatResponse {
             content: Some(self.draft.to_string()),
             tool_calls: Vec::new(),
@@ -818,6 +827,7 @@ async fn a_scope_draft_is_stored_without_authority_until_the_owner_adopts_it() {
     let foreman = Drafting {
         inner: TwoTasks::default(),
         draft: drafted_scope_body(),
+        asked: std::sync::Arc::default(),
     };
     let running = start_with(root, foreman, UsageLedger::default()).await;
     let task = TaskId::from_str("t-0").expect("valid task id");
@@ -896,9 +906,11 @@ async fn a_scope_draft_is_stored_without_authority_until_the_owner_adopts_it() {
 async fn a_scope_draft_that_never_checks_is_recorded_as_a_failure() {
     let repo = demo_repo();
     let root = repo.path();
+    let asked = std::sync::Arc::<std::sync::Mutex<Vec<String>>>::default();
     let foreman = Drafting {
         inner: TwoTasks::default(),
         draft: json!({ "may": [], "must_keep": [], "open": [] }),
+        asked: std::sync::Arc::clone(&asked),
     };
     let running = start_with(root, foreman, UsageLedger::default()).await;
     post_order(&running).await;
@@ -914,6 +926,17 @@ async fn a_scope_draft_that_never_checks_is_recorded_as_a_failure() {
             .is_some_and(|reason| reason.contains("no may-change items")),
         "the reason names the check: {view}"
     );
+    // The request the job sent carries the order's sentence, which is what the human asked for.
+    // The order ref is only the draft's key, so it is not what the foreman drafts from.
+    let sent = asked.lock().expect("the asked lock is not poisoned").clone();
+    assert!(!sent.is_empty(), "the foreman was asked for a scope");
+    for message in &sent {
+        let context: Value = serde_json::from_str(message).expect("the request is JSON");
+        assert_eq!(
+            context["order"], "land the agent's file",
+            "the scope request names the order's sentence: {message}"
+        );
+    }
     let (_, origin) = snapshot(&running).await;
     assert!(origin.world().lane(order).is_none(), "no scope is opened");
     running.stop().await.expect("the server stops");

@@ -418,14 +418,14 @@ fn schema_value<T: JsonSchema>() -> Value {
     serde_json::to_value(schemars::schema_for!(T)).expect("a schema serializes to JSON")
 }
 
-/// The scope draft prompt for `order`, with the plant's machines, the routes a scope may name,
-/// and the schema of the scope body.
+/// The scope draft prompt for an order's `sentence`, the order as the human wrote it, with the
+/// plant's machines, the routes a scope may name, and the schema of the scope body.
 #[must_use]
-pub fn scope_request(order: &str, bounds: &DraftBounds<'_>) -> ChatRequest {
+pub fn scope_request(sentence: &str, bounds: &DraftBounds<'_>) -> ChatRequest {
     draft_request(
         SCOPE_PROMPT,
         &json!({
-            "order": order,
+            "order": sentence,
             "machines": bounds.machines,
             "routes": bounds.routes,
             "schema": schema_value::<ScopeBody>(),

@@ -633,7 +633,9 @@ async fn draft_scope<C: ModelClient>(
         fixtures: &corpus.fixtures,
         limits: app.limits,
     };
-    let request = model::scope_request(order_ref.as_str(), &bounds);
+    // The foreman drafts from the order's sentence, what the human asked for. The order ref is
+    // only the draft's key, so it never stands in for the request.
+    let request = model::scope_request(&sentence, &bounds);
     let reply = host
         .client()
         .chat_json::<model::DraftReply>(Role::Foreman, request)
