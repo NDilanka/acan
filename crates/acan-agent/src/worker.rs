@@ -1286,6 +1286,26 @@ async fn wait_for_build(
     }
 }
 
+/// The edit loop's last calls, when the model is told to wrap up: run the tests and commit, or
+/// say what blocks it.
+const WRAP_UP_CALLS: usize = 3;
+
+/// Adds the budget note for one turn to the request's last message: how many model calls
+/// remain, and at the last [`WRAP_UP_CALLS`] a push to run the tests and commit, or to report
+/// blocked. The note is not part of the conversation the next turn sees.
+fn note_budget(messages: &mut [Message], remaining: usize, max: usize) {
+    let note = if remaining <= WRAP_UP_CALLS {
+        format!(
+            "\n\nBudget: {remaining} of {max} model calls remain. Run the tests, then call commit once with a short message. If you cannot finish, reply with what blocks you instead of calling a tool."
+        )
+    } else {
+        format!("\n\nBudget: {remaining} of {max} model calls remain.")
+    };
+    if let Some(Message::User { content } | Message::Tool { content, .. }) = messages.last_mut() {
+        content.push_str(&note);
+    }
+}
+
 /// The tool-calling loop. The model edits through the local tools. A write or a commit waits
 /// for build clearance first, so no change lands before the origin allows it.
 async fn edit<C: ModelClient>(
@@ -1301,9 +1321,11 @@ async fn edit<C: ModelClient>(
     let mut specs = Worktree::specs();
     specs.push(get_task_spec());
     let mut tally = Tally::default();
-    for _ in 0..config.max_steps {
+    for step in 0..config.max_steps {
+        let mut turn = messages.clone();
+        note_budget(&mut turn, config.max_steps - step, config.max_steps);
         let request = ChatRequest {
-            messages: messages.clone(),
+            messages: turn,
             tools: specs.clone(),
             ..ChatRequest::default()
         };
@@ -2095,6 +2117,136 @@ mod tests {
         .await
         .expect("the given-up files are not required");
         assert_eq!(planned.footprint, vec!["src/ratelimit.ts".to_owned()]);
+    }
+
+    /// A model that answers from a script and records the last message of every request, so a
+    /// test sees each turn as the model saw it.
+    struct Turns {
+        script: Stub,
+        seen: StdMutex<Vec<String>>,
+    }
+
+    impl Turns {
+        fn of(script: Stub) -> Self {
+            Self {
+                script,
+                seen: StdMutex::new(Vec::new()),
+            }
+        }
+
+        fn seen(&self) -> Vec<String> {
+            self.seen
+                .lock()
+                .expect("the turn log is not poisoned")
+                .clone()
+        }
+    }
+
+    impl ModelClient for Turns {
+        async fn chat(&self, role: Role, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            let last = request
+                .messages
+                .last()
+                .map(|message| match message {
+                    Message::System { content }
+                    | Message::User { content }
+                    | Message::Tool { content, .. } => content.clone(),
+                    Message::Assistant { content, .. } => content.clone().unwrap_or_default(),
+                })
+                .unwrap_or_default();
+            self.seen
+                .lock()
+                .expect("the turn log is not poisoned")
+                .push(last);
+            self.script.chat(role, request).await
+        }
+    }
+
+    /// A worktree with one declared file on disk, for edit-loop tests that never reach the
+    /// origin.
+    fn edit_rig() -> (tempfile::TempDir, Worktree) {
+        let root = tempfile::tempdir().expect("a worktree");
+        fs::create_dir_all(root.path().join("src")).expect("the src directory");
+        fs::write(root.path().join("src/a.ts"), "let a = 1;\n").expect("the file");
+        let declared = vec!["src/a.ts".to_owned()];
+        let tools = Worktree::new(root.path().to_path_buf(), &declared, None);
+        (root, tools)
+    }
+
+    /// A worker config for edit-loop tests: no server, no test command, `max_steps` steps.
+    fn edit_config(max_steps: usize) -> WorkerConfig {
+        WorkerConfig {
+            server: String::new(),
+            token: String::new(),
+            repo: PathBuf::new(),
+            test_command: None,
+            max_steps,
+            wait: Duration::ZERO,
+            receipt_wait: Duration::ZERO,
+            heartbeat: Duration::from_secs(1),
+            poll: Duration::from_millis(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn each_turn_says_how_many_calls_remain_and_the_last_three_push_for_a_commit() {
+        let (_root, mut tools) = edit_rig();
+        let mut script = Stub::default();
+        for turn in 0..3_usize {
+            script = script.when(
+                Role::Worker,
+                move |request| replies(request) == turn,
+                Reply {
+                    tool_calls: vec![tool_call("read_file", json!({ "path": "src/a.ts" }))],
+                    ..Reply::default()
+                },
+            );
+        }
+        let script = script.when(
+            Role::Worker,
+            |_| true,
+            Reply::text("blocked: nothing left to try"),
+        );
+        let model = Turns::of(script);
+        let mcp = McpClient::new("http://127.0.0.1:9", String::new());
+        let mut steps = Vec::new();
+        let end = edit(
+            &edit_config(4),
+            &model,
+            &mcp,
+            &mut claim(),
+            &mut tools,
+            "Task t-1.".to_owned(),
+            &mut steps,
+        )
+        .await
+        .expect("the edit runs");
+        let Edit::Stopped(reason) = end else {
+            panic!("the model reported blocked, so the edit stops");
+        };
+        assert_eq!(reason, "blocked: nothing left to try");
+        let seen = model.seen();
+        assert_eq!(seen.len(), 4, "{seen:?}");
+        assert!(
+            seen[0].contains("Budget: 4 of 4 model calls remain."),
+            "{}",
+            seen[0]
+        );
+        assert!(!seen[0].contains("Run the tests"), "{}", seen[0]);
+        for (turn, remaining) in [(1_usize, 3_usize), (2, 2), (3, 1)] {
+            assert!(
+                seen[turn].contains(&format!("Budget: {remaining} of 4 model calls remain")),
+                "{}",
+                seen[turn]
+            );
+            assert!(seen[turn].contains("Run the tests"), "{}", seen[turn]);
+        }
+        // The note is per-turn: no earlier turn's note survives in the conversation.
+        assert!(
+            !seen[3].contains("3 of 4") && !seen[3].contains("2 of 4"),
+            "{}",
+            seen[3]
+        );
     }
 
     fn claim() -> Claim {
