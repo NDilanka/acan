@@ -1,58 +1,85 @@
 <#
 .SYNOPSIS
 One intent take: the real Acan server on a clean, disposable clone of the acan-demo repository,
-driven only through the member HTTP API, with live Meta models.
+driven only through the member HTTP API, with live Meta models for the foreman and the workers.
 
 .DESCRIPTION
 Every run gets its own folder under -RunsRoot. The clone is the only git repository the script
 runs git in. Its top level is checked after the clone and before every git call, so a clone
 that failed can never send git up to a parent repository.
 
-Keys are copied from crates/acan-llm/.env into the run folder and handed to the server through
-its environment only. They are never printed, never written to summary.json, and never put in
-the clone. The owner and agent tokens live in the clone's ignored .acan/tokens.json.
+Keys are copied from crates/acan-llm/.env into the run folder and handed to the server and the
+workers through their environment or their --env file only. They are never printed, never written
+to summary.json, and never put in the clone. The member and agent tokens live in the clone's ignored
+.acan/tokens.json.
 
-There is no offline mode. Each model call is a live call through the provider the routing file
-names, and summary.json records that provider for every step.
+Phases, one order at a time:
+  1. New run with -DraftOnly -Order o-1: clone, server, post the order, wait for the foreman's draft,
+     stop. A person writes the edits for that draft into the order's edits file.
+  2. -ResumeRun <run> -Order o-1 -EditsFile <edits>: apply the edits as one revise_scope, confirm
+     the scope (the owner raises the repair budget's max_episodes, logged), register the agents,
+     then: worker A (model), the seeded regression m-overfit (control), the seeded harmless
+     difference m-harmless-difference (control) with its human rulings, and the land check.
+  3. -ResumeRun <run> -Order o-8 -DraftOnly, then the same with -EditsFile: worker B (model), then
+     the seeded ruling violation m-ruling-violation (control).
 
-Steps that are not built yet are written as not_run with the reason. They are never reported as
-passed. summary.json is written even when the take fails.
+Each human step is a member HTTP call and is logged in summary.json. Each control is a seeded
+bundle run through the MCP tools with its own agent token, never a model. A model call that fails
+stops the take and is logged.
+
+Steps that are not run are written as not_run with the reason. They are never reported as passed.
+summary.json is written even when the take fails.
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
-    [string]$Label,
+    [string]$Label = 'take',
+    [ValidateSet('o-1', 'o-8')]
+    [string]$Order = 'o-1',
     [int]$Port = 7411,
     [string]$RunsRoot = 'D:\dev\acan-takes',
     [string]$DemoRepo = 'D:\dev\acan-demo',
     [string]$Pin = 'f91962156841332d5753d869554839f7c4cdea79',
     [string]$AcanRepo = 'D:\dev\acan-wt\d02',
     [string]$AcanExe = 'C:\cargo-targets\acan-d02\debug\acan.exe',
+    [string]$WorkerExe = 'C:\cargo-targets\acan-d02\debug\acan-worker.exe',
     [string]$LlmSource = 'D:\dev\acan\crates\acan-llm\llm.toml',
     [string]$EnvSource = 'D:\dev\acan\crates\acan-llm\.env',
     [string]$EditsFile = '',
+    [string]$RulesFile = '',
+    # The repair budget's cap on new episodes, set at the order's first confirmation. The offered
+    # cap is four, and every differing field of a route is one episode, so the seeded differences
+    # need more room. The value is a human decision and is logged as one.
+    [int]$MaxEpisodes = 40,
     [int]$HealthWaitSec = 90,
     [int]$StepWaitSec = 900,
-    # Phase one: stop right after the foreman's draft, so a person can read it and write the edits
-    # for that draft. The draft is kept in the run folder and nothing is applied.
+    [int]$WorkerWaitSec = 2700,
+    [int]$ControlWaitSec = 1500,
+    [int]$RulingWaitSec = 1200,
     [switch]$DraftOnly,
-    # Phase two: resume a run folder from phase one. Its clone, database and draft are reused; the
-    # draft is read back from the server, not drafted again.
-    [string]$ResumeRun = ''
+    [string]$ResumeRun = '',
+    [switch]$SkipWorkers
 )
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-if (-not $EditsFile) { $EditsFile = Join-Path $AcanRepo 'demo\intent\o-1-edits.json' }
-if ($DraftOnly -and $ResumeRun) { throw 'use either -DraftOnly or -ResumeRun, not both' }
+if (-not $EditsFile) { $EditsFile = Join-Path $AcanRepo "demo\intent\$Order-edits.json" }
+if (-not $RulesFile) { $RulesFile = Join-Path $AcanRepo 'demo\intent\rulings\o-1-rulings.json' }
+$intentDir = Join-Path $AcanRepo 'demo\intent'
 
 $script:Steps = [System.Collections.Generic.List[object]]::new()
 $script:Secrets = [System.Collections.Generic.List[string]]::new()
 $script:Proc = $null
-$script:DraftReady = $false
 $script:Base = ''
 $script:Repo = ''
-$script:Summary = $null
+$script:OwnerToken = ''
+$script:Tokens = @{}
+$script:Evidence = @{ orders = @{}; workers = @{}; controls = @{}; rulings = @{}; lands = @{} }
+$script:HumanSteps = 0
+$script:MemberCalls = 0
+$script:DraftReady = $false
+$script:Routes = $null
+$script:LlmPath = ''
+$script:EnvPath = ''
 $demoBefore = $null
 $started = (Get-Date).ToString('o')
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -61,7 +88,8 @@ $outcome = 'incomplete'
 $failure = $null
 
 function Add-Step {
-    param([string]$Name, [string]$Actor, [string]$Provider, [string]$Result, [hashtable]$Evidence = @{})
+    param([string]$Name, [string]$Actor, [string]$Provider, [string]$Result, [hashtable]$Evidence = @{}, [switch]$Human)
+    if ($Human) { $script:HumanSteps++ }
     $script:Steps.Add([ordered]@{
             at       = (Get-Date).ToString('o')
             step     = $Name
@@ -71,6 +99,11 @@ function Add-Step {
             evidence = $Evidence
         })
     Write-Output "[$Result] $Name"
+}
+
+function Save-State {
+    $state = [ordered]@{ label = $Label; run = $run; evidence = $script:Evidence; updated = (Get-Date).ToString('o') }
+    ConvertTo-Json -Depth 40 $state | Set-Content -LiteralPath (Join-Path $run 'run-state.json') -Encoding utf8
 }
 
 function Assert-OutsideGit {
@@ -157,6 +190,7 @@ function Invoke-Api404Tolerant {
 
 function Send-Command {
     param($Cmd)
+    $script:MemberCalls++
     $body = ConvertTo-Json -Depth 60 -Compress $Cmd
     try {
         Invoke-RestMethod -Method Post -Uri "$script:Base/api/commands" -Headers @{ Authorization = "Bearer $script:OwnerToken" } -ContentType 'application/json' -Body $body -TimeoutSec 120
@@ -193,20 +227,94 @@ function Test-Forbidden {
     }
 }
 
+function Find-Value {
+    # The first property with this name anywhere in a parsed JSON tree.
+    param($Node, [string]$Name)
+    if ($null -eq $Node) { return $null }
+    if ($Node -is [System.Collections.IDictionary]) {
+        foreach ($key in $Node.Keys) {
+            if ($key -eq $Name) { return $Node[$key] }
+            $found = Find-Value -Node $Node[$key] -Name $Name
+            if ($null -ne $found) { return $found }
+        }
+        return $null
+    }
+    if ($Node -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($prop in $Node.PSObject.Properties) {
+            if ($prop.Name -eq $Name) { return $prop.Value }
+            $found = Find-Value -Node $prop.Value -Name $Name
+            if ($null -ne $found) { return $found }
+        }
+        return $null
+    }
+    if ($Node -is [System.Collections.IEnumerable] -and $Node -isnot [string]) {
+        foreach ($item in $Node) {
+            $found = Find-Value -Node $item -Name $Name
+            if ($null -ne $found) { return $found }
+        }
+    }
+    return $null
+}
+
+function Get-OrderTasks {
+    # The task ids the foreman's split made for one order, as the MCP tools name them (t-N).
+    param($Events, [string]$Raw)
+    $split = @($Events | Where-Object { $_.event.type -eq 'order_split' -and "$($_.event.order)" -eq $Raw })
+    if ($split.Count -eq 0) { return @() }
+    @($split[0].event.tasks | ForEach-Object { "t-$($_[0])" })
+}
+
+function Start-Worker {
+    param([string]$Name, [string]$Token, [string]$Tag)
+    $argLine = "--server $script:Base --token $Token --repo `"$script:Repo`" --llm `"$script:LlmPath`" --env `"$script:EnvPath`" --test-command `"bun test`" --wait-secs 600 --max-steps 30 --heartbeat-secs 20"
+    $p = Start-Process -FilePath $WorkerExe -ArgumentList $argLine `
+        -RedirectStandardOutput (Join-Path $run "logs\$Name.$Tag.out.log") `
+        -RedirectStandardError (Join-Path $run "logs\$Name.$Tag.err.log") -PassThru -WindowStyle Hidden
+    if (-not $p.WaitForExit($WorkerWaitSec * 1000)) {
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        return [ordered]@{ exited = $false; exit_code = $null }
+    }
+    [ordered]@{ exited = $true; exit_code = $p.ExitCode }
+}
+
+function Get-AgentEvents {
+    param($Events, [string]$Agent)
+    @($Events | Where-Object { (ConvertTo-Json -Depth 8 -Compress $_) -like "*`"$Agent`"*" } | ForEach-Object {
+            [ordered]@{ seq = $_.seq; type = [string]$_.event.type; task = "$($_.event.task)" }
+        })
+}
+
+function Get-LandCheck {
+    param([string]$ReceiptFile, [string]$What)
+    $rec = Get-Content -LiteralPath $ReceiptFile -Raw | ConvertFrom-Json
+    $merged = [string](Find-Value -Node $rec -Name 'merged_commit')
+    $head = [string]((Invoke-Git rev-parse main | Out-String).Trim())
+    [ordered]@{ what = $What; receipt_merged_sha = $merged; protected_head = $head; equal = ($merged -ne '' -and $merged -eq $head) }
+}
+
+function Read-ControlResult {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+}
+
 try {
     # ---- preflight -----------------------------------------------------------------------
     $freeGb = [math]::Round((Get-PSDrive C).Free / 1GB, 1)
     if ($freeGb -lt 5) { throw "C: has $freeGb GB free; the take stops below 5 GB" }
     docker info *> $null
     if ($LASTEXITCODE -ne 0) { throw 'Docker is not running; start Docker Desktop before the take' }
-    foreach ($path in @($AcanExe, $LlmSource, $EnvSource, $EditsFile, (Join-Path $AcanRepo 'demo\intent\orders.json'))) {
+    foreach ($path in @($AcanExe, $WorkerExe, $LlmSource, $EnvSource, (Join-Path $intentDir 'orders.json'), $RulesFile)) {
         if (-not (Test-Path -LiteralPath $path)) { throw "missing input: $path" }
     }
     Assert-OutsideGit -Path $RunsRoot
     $demoBefore = Get-DemoRefs
+    $orders = Get-Content -LiteralPath (Join-Path $intentDir 'orders.json') -Raw | ConvertFrom-Json
+    $ord = $orders.orders | Where-Object { $_.id -eq $Order }
+    if (-not $ord) { throw "order $Order is not in orders.json" }
 
-    # ---- run folder and clone -----------------------------------------------------------
-    # Nothing is created inside the clone before git clone succeeds. The clone is the only repo.
+    # ---- run folder and clone, or the resumed run -----------------------------------------
+    $priorSteps = @()
     if ($ResumeRun) {
         $run = (Resolve-Path -LiteralPath $ResumeRun).Path
         $script:Repo = Join-Path $run 'repo'
@@ -214,76 +322,76 @@ try {
         Assert-OwnRepo
         $head = (Invoke-Git rev-parse HEAD | Out-String).Trim()
         if ($head -ne $Pin) { throw "the resumed clone's HEAD is $head, not the pin $Pin" }
-        Add-Step -Name 'resume the run on its clone at the pin' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ repo = $script:Repo; head = $head; resumed_from = $run }
+        $priorSummary = Join-Path $run 'summary.json'
+        if (Test-Path -LiteralPath $priorSummary) {
+            $prev = Get-Content -LiteralPath $priorSummary -Raw | ConvertFrom-Json -AsHashtable
+            $priorSteps = @($prev.steps)
+            Move-Item -LiteralPath $priorSummary -Destination (Join-Path $run ("summary.prev-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json'))
+        }
+        $statePath = Join-Path $run 'run-state.json'
+        if (Test-Path -LiteralPath $statePath) {
+            $prevState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json -AsHashtable
+            $script:Evidence = $prevState.evidence
+        }
+        foreach ($k in @('orders', 'workers', 'controls', 'rulings', 'lands')) { if (-not $script:Evidence.ContainsKey($k)) { $script:Evidence[$k] = @{} } }
     } else {
-    New-Item -ItemType Directory -Path $run | Out-Null
-    $script:Repo = Join-Path $run 'repo'
-    & git clone --no-hardlinks -q $DemoRepo $script:Repo
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $script:Repo '.git'))) {
-        throw 'the clone failed; the run folder has no repository and nothing else ran'
+        New-Item -ItemType Directory -Path $run | Out-Null
+        $script:Repo = Join-Path $run 'repo'
+        & git clone --no-hardlinks -q $DemoRepo $script:Repo
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $script:Repo '.git'))) {
+            throw 'the clone failed; the run folder has no repository and nothing else ran'
+        }
+        Assert-OwnRepo
+        Invoke-Git checkout -q -B main $Pin | Out-Null
+        $head = (Invoke-Git rev-parse HEAD | Out-String).Trim()
+        if ($head -ne $Pin) { throw "the clone's HEAD is $head, not the pin $Pin" }
+        Add-Step -Name 'clone the demo at the pin' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ repo = $script:Repo; head = $head }
     }
-    Assert-OwnRepo
-    Invoke-Git checkout -q -B main $Pin | Out-Null
-    $head = (Invoke-Git rev-parse HEAD | Out-String).Trim()
-    if ($head -ne $Pin) { throw "the clone's HEAD is $head, not the pin $Pin" }
-    Add-Step -Name 'clone the demo at the pin' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ repo = $script:Repo; head = $head }
 
-    # ---- keys, routing and tokens: outside the repository except the ignored tokens file ----
+    # ---- keys, routing and tokens: outside the repository except the ignored tokens file --
     $keysDir = Join-Path $run 'keys'
     $configDir = Join-Path $run 'config'
-    New-Item -ItemType Directory -Path $keysDir, $configDir, (Join-Path $run 'logs') | Out-Null
-    Copy-Item -LiteralPath $EnvSource -Destination (Join-Path $keysDir '.env')
-    Copy-Item -LiteralPath $LlmSource -Destination (Join-Path $configDir 'llm.toml')
+    if (-not $ResumeRun) {
+        New-Item -ItemType Directory -Path $keysDir, $configDir, (Join-Path $run 'logs'), (Join-Path $run 'controls') | Out-Null
+        Copy-Item -LiteralPath $EnvSource -Destination (Join-Path $keysDir '.env')
+        Copy-Item -LiteralPath $LlmSource -Destination (Join-Path $configDir 'llm.toml')
+        $script:Tokens = @{
+            owner          = 'acan_owner_' + [guid]::NewGuid().ToString('N')
+            'worker-a'     = 'acan_agent_a_' + [guid]::NewGuid().ToString('N')
+            'control-seeded' = 'acan_agent_c_' + [guid]::NewGuid().ToString('N')
+            'worker-b'     = 'acan_agent_b_' + [guid]::NewGuid().ToString('N')
+        }
+        $tokenEntries = @(
+            @{ token = $script:Tokens.owner; principal = @{ kind = 'member'; id = 'owner' } },
+            @{ token = $script:Tokens['worker-a']; principal = @{ kind = 'agent'; id = 'worker-a' } },
+            @{ token = $script:Tokens['control-seeded']; principal = @{ kind = 'agent'; id = 'control-seeded' } },
+            @{ token = $script:Tokens['worker-b']; principal = @{ kind = 'agent'; id = 'worker-b' } }
+        )
+        Set-Content -LiteralPath (Join-Path $script:Repo '.acan\tokens.json') -Value (ConvertTo-Json -Depth 5 $tokenEntries) -Encoding utf8
+        Add-Step -Name 'write the run configuration' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ tokens = 'written to .acan/tokens.json (ignored), not printed' }
+    } else {
+        $existing = Get-Content -LiteralPath (Join-Path $script:Repo '.acan\tokens.json') -Raw | ConvertFrom-Json
+        $script:Tokens = @{
+            owner            = [string](@($existing | Where-Object { $_.principal.kind -eq 'member' })[0].token)
+            'worker-a'       = [string](@($existing | Where-Object { $_.principal.id -eq 'worker-a' })[0].token)
+            'control-seeded' = [string](@($existing | Where-Object { $_.principal.id -eq 'control-seeded' })[0].token)
+            'worker-b'       = [string](@($existing | Where-Object { $_.principal.id -eq 'worker-b' })[0].token)
+        }
+    }
     $keys = Read-KeyFile -Path (Join-Path $keysDir '.env')
-    foreach ($value in $keys.Values) {
-        if ($value.Length -ge 8) { $script:Secrets.Add($value) }
-    }
-    $routes = Read-Routing -Text (Get-Content -LiteralPath (Join-Path $configDir 'llm.toml') -Raw)
-    $script:OwnerToken = 'acan_owner_' + [guid]::NewGuid().ToString('N')
-    $agentA = 'acan_agent_a_' + [guid]::NewGuid().ToString('N')
-    $control = 'acan_agent_c_' + [guid]::NewGuid().ToString('N')
-    $agentB = 'acan_agent_b_' + [guid]::NewGuid().ToString('N')
-    $script:Secrets.Add($script:OwnerToken)
-    $script:Secrets.Add($agentA)
-    $script:Secrets.Add($control)
-    $script:Secrets.Add($agentB)
-    $tokens = @(
-        @{ token = $script:OwnerToken; principal = @{ kind = 'member'; id = 'owner' } },
-        @{ token = $agentA; principal = @{ kind = 'agent'; id = 'worker-a' } },
-        @{ token = $control; principal = @{ kind = 'agent'; id = 'control-seeded' } },
-        @{ token = $agentB; principal = @{ kind = 'agent'; id = 'worker-b' } }
-    )
-    Set-Content -LiteralPath (Join-Path $script:Repo '.acan\tokens.json') -Value (ConvertTo-Json -Depth 5 $tokens) -Encoding utf8
-    Add-Step -Name 'write the run configuration' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{
-        keys_loaded = @($keys.Keys); routing = $routes; tokens = 'written to .acan/tokens.json (ignored), not printed'
-    }
-    }
-    if ($ResumeRun) {
-        # The resumed run keeps its own keys, routing and tokens; nothing is copied or rewritten.
-        $keysDir = Join-Path $run 'keys'
-        $configDir = Join-Path $run 'config'
-        $keys = Read-KeyFile -Path (Join-Path $keysDir '.env')
-        foreach ($value in $keys.Values) {
-            if ($value.Length -ge 8) { $script:Secrets.Add($value) }
-        }
-        $routes = Read-Routing -Text (Get-Content -LiteralPath (Join-Path $configDir 'llm.toml') -Raw)
-        $existingTokens = Get-Content -LiteralPath (Join-Path $script:Repo '.acan\tokens.json') -Raw | ConvertFrom-Json
-        $script:OwnerToken = [string](@($existingTokens | Where-Object { $_.principal.kind -eq 'member' })[0].token)
-        $agentA = [string](@($existingTokens | Where-Object { $_.principal.id -eq 'worker-a' })[0].token)
-        $control = [string](@($existingTokens | Where-Object { $_.principal.id -eq 'control-seeded' })[0].token)
-        $agentB = [string](@($existingTokens | Where-Object { $_.principal.id -eq 'worker-b' })[0].token)
-        foreach ($tok in @($script:OwnerToken, $agentA, $control, $agentB)) { $script:Secrets.Add($tok) }
-        Add-Step -Name 'reuse the run configuration (resume)' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{
-            keys_loaded = @($keys.Keys); routing = $routes; tokens = 'read from the clone, not printed'
-        }
-    }
+    foreach ($value in $keys.Values) { if ($value.Length -ge 8) { $script:Secrets.Add($value) } }
+    foreach ($tok in $script:Tokens.Values) { $script:Secrets.Add([string]$tok) }
+    $script:OwnerToken = $script:Tokens.owner
+    $script:Routes = Read-Routing -Text (Get-Content -LiteralPath (Join-Path $configDir 'llm.toml') -Raw)
+    $script:LlmPath = Join-Path $configDir 'llm.toml'
+    $script:EnvPath = Join-Path $keysDir '.env'
 
     # ---- server ----------------------------------------------------------------------------
     $script:Base = "http://127.0.0.1:$Port"
     $serverArgs = @('serve', '--repo', $script:Repo, '--port', "$Port", '--bind', '127.0.0.1',
-        '--protected-branch', 'main', '--llm', (Join-Path $configDir 'llm.toml'))
+        '--protected-branch', 'main', '--llm', $script:LlmPath)
     foreach ($name in $keys.Keys) { Set-Item -Path "Env:$name" -Value $keys[$name] }
-    $logTag = if ($ResumeRun) { 'resume' } else { 'first' }
+    $logTag = if ($ResumeRun) { "resume-$Order-$(Get-Date -Format 'HHmmss')" } else { 'first' }
     try {
         $script:Proc = Start-Process -FilePath $AcanExe -ArgumentList $serverArgs `
             -RedirectStandardOutput (Join-Path $run "logs\server.$logTag.out.log") `
@@ -298,155 +406,280 @@ try {
         if ((Get-Date) -gt $healthEnd) { throw 'the server did not answer /health in time' }
         try { $null = Invoke-RestMethod -Uri "$script:Base/health" -TimeoutSec 5; $up = $true } catch { Start-Sleep -Milliseconds 500 }
     }
-    Add-Step -Name 'start the server on the clone' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ port = $Port; pid = $script:Proc.Id }
+    Add-Step -Name "start the server on the clone ($logTag)" -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ port = $Port; pid = $script:Proc.Id }
+    for ($i = 0; $i -lt $priorSteps.Count; $i++) { $script:Steps.Insert($i, $priorSteps[$i]) }
 
-    # ---- order o-1: post, split, draft, adopt, answer, confirm -------------------------------
-    $orders = Get-Content -LiteralPath (Join-Path $AcanRepo 'demo\intent\orders.json') -Raw | ConvertFrom-Json
-    $o1 = $orders.orders | Where-Object { $_.id -eq 'o-1' }
-    if ($ResumeRun) {
-        $state = Get-Content -LiteralPath (Join-Path $run 'run-state.json') -Raw | ConvertFrom-Json
+    # ---- the order: post or read back, split, draft -----------------------------------------
+    $stateFile = Join-Path $run "order-$Order.json"
+    if (Test-Path -LiteralPath $stateFile) {
+        $state = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
         $raw = [string]$state.raw
         $oid = [string]$state.oid
-        Add-Step -Name 'resume: the order posted in phase one is read back' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ order = $oid; machine = $state.machine }
+        Add-Step -Name "${Order}: read back the order posted earlier" -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ order = $oid }
     } else {
-        $posted = Send-Command @{ cmd = 'post_order'; machine = $o1.machine; sentence = $o1.sentence; witnesses = @() }
+        $posted = Send-Command @{ cmd = 'post_order'; machine = $ord.machine; sentence = $ord.sentence; witnesses = @() }
         $postedEvent = $posted | Where-Object { $_.event.type -eq 'order_posted' } | Select-Object -First 1
         if (-not $postedEvent) { throw 'post_order returned no order_posted event' }
         $raw = "$($postedEvent.event.order)"
         $oid = if ($raw -like 'o-*') { $raw } else { "o-$raw" }
-        Set-Content -LiteralPath (Join-Path $run 'run-state.json') -Value (ConvertTo-Json @{ raw = $raw; oid = $oid; machine = $o1.machine }) -Encoding utf8
-        Add-Step -Name 'post order o-1' -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{ order = $oid; machine = $o1.machine }
+        ConvertTo-Json @{ raw = $raw; oid = $oid; machine = $ord.machine; sentence = $ord.sentence } | Set-Content -LiteralPath $stateFile -Encoding utf8
+        Add-Step -Name "${Order}: post the order" -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{ order = $oid; machine = $ord.machine } -Human
+    }
+    $null = Wait-Until -What "the split of $Order" -Probe {
+        $events = Invoke-Api -Path '/api/events'
+        $events | Where-Object { $_.event.type -eq 'order_split' -and "$($_.event.order)" -eq $raw } | Select-Object -First 1
+    } -Terminal { $null }
+    $splitEvents = Invoke-Api -Path '/api/events'
+    $tasks = @(Get-OrderTasks -Events $splitEvents -Raw $raw)
+    if ($tasks.Count -eq 0) { throw "the split of $Order made no task" }
+    Add-Step -Name "${Order}: the foreman splits the order into tasks" -Actor 'foreman' -Provider "$($script:Routes.foreman.provider) / $($script:Routes.foreman.model)" -Result 'pass' -Evidence @{ tasks = $tasks }
 
-        $null = Wait-Until -What 'the order split' -Probe {
+    $confirmed = $script:Evidence.orders.ContainsKey($Order) -and [bool]$script:Evidence.orders[$Order].confirmed
+    if (-not $confirmed) {
+        $view = Wait-Until -What "the foreman draft for $Order" -Probe { Invoke-Api404Tolerant -Path "/api/orders/$oid/scope-draft" } -Terminal { $null }
+        if ($view.state -ne 'drafted') { throw "the foreman draft did not check: $($view.reason | ConvertTo-Json -Compress)" }
+        $d = $view.draft
+        $proposal = $d.draft.proposal
+        Set-Content -LiteralPath (Join-Path $run "scope-draft-$Order.json") -Value ($d | ConvertTo-Json -Depth 60) -Encoding utf8
+        Add-Step -Name "${Order}: the foreman drafts the scope" -Actor 'foreman' -Provider "$($script:Routes.foreman.provider) / $($d.draft.model)" -Result 'pass' -Evidence @{
+            provenance = $d.draft.provenance; rev = $d.rev; may = @($proposal.may).Count; must_keep = @($proposal.must_keep).Count
+            may_ids = @($proposal.may | ForEach-Object { $_.id }); must_keep_ids = @($proposal.must_keep | ForEach-Object { $_.id }); open_ids = @($proposal.open | ForEach-Object { $_.id })
+        }
+        if ($DraftOnly) {
+            $script:DraftReady = $true
+            throw "draft recorded for human review; write the edits for this draft in $EditsFile, then resume with -ResumeRun $run -Order $Order -EditsFile <that file>"
+        }
+
+        # ---- the human scope: edits, one revise_scope, then confirm ---------------------------
+        $edits = Get-Content -LiteralPath $EditsFile -Raw | ConvertFrom-Json
+        if ($edits.schema -ne 'acan-demo-intent-edits/2') {
+            throw "the edits file must have schema acan-demo-intent-edits/2, found '$($edits.schema)'"
+        }
+        if ($edits.order -and $edits.order -ne $Order) { throw "the edits file is for $($edits.order), not $Order" }
+        $humanEdits = [System.Collections.Generic.List[object]]::new()
+        $humanAnswers = [System.Collections.Generic.List[object]]::new()
+        foreach ($edit in @($edits.scope_edits)) {
+            if ($edit.op -eq 'remove_may') {
+                if (@($proposal.may | Where-Object { $_.id -eq $edit.id }).Count -ne 1) {
+                    throw "remove_may: may item $($edit.id) is not in the draft; the edits file must match the draft"
+                }
+                $proposal.may = @($proposal.may | Where-Object { $_.id -ne $edit.id })
+                $humanEdits.Add(@{ op = $edit.op; id = $edit.id; result = 'removed'; reason = $edit.reason })
+            } elseif ($edit.op -eq 'replace_must_keep') {
+                if (@($proposal.must_keep | Where-Object { $_.id -eq $edit.rule.id }).Count -ne 1) {
+                    throw "replace_must_keep: must-keep $($edit.rule.id) is not in the draft; the edits file must match the draft"
+                }
+                $proposal.must_keep = @($proposal.must_keep | ForEach-Object { if ($_.id -eq $edit.rule.id) { $edit.rule } else { $_ } })
+                $humanEdits.Add(@{ op = $edit.op; id = $edit.rule.id; result = 'replaced'; reason = $edit.reason })
+            } elseif ($edit.op -eq 'add_must_keep') {
+                if (@($proposal.must_keep | Where-Object { $_.id -eq $edit.rule.id }).Count -gt 0) {
+                    throw "must-keep $($edit.rule.id) is already in the draft"
+                }
+                $proposal.must_keep = @($proposal.must_keep) + @($edit.rule)
+                $humanEdits.Add(@{ op = $edit.op; id = $edit.rule.id; result = 'added'; reason = $edit.reason })
+            } elseif ($edit.op -eq 'add_may') {
+                if (@($proposal.may | Where-Object { $_.id -eq $edit.item.id }).Count -gt 0) {
+                    throw "may item $($edit.item.id) is already in the draft"
+                }
+                $proposal.may = @($proposal.may) + @($edit.item)
+                $humanEdits.Add(@{ op = $edit.op; id = $edit.item.id; result = 'added'; reason = $edit.reason })
+            } else {
+                throw "unknown scope edit op '$($edit.op)' in $EditsFile"
+            }
+        }
+        # Choice rules match an open choice by its question text, because the foreman's question ids
+        # and wording change between drafts. A choice matched by no rule is left for an explicit answer.
+        foreach ($choice in @($proposal.open)) {
+            $matched = @($edits.choice_rules | Where-Object { $choice.question -match $_.question_match })
+            if ($matched.Count -eq 0) { continue }
+            if ($matched.Count -gt 1) { throw "more than one choice rule matches $($choice.id)" }
+            $rule = $matched[0]
+            $keep = @($choice.options | Where-Object { $_.label -match $rule.option_label_match })
+            if ($keep.Count -gt 1) { throw "choice rule $($rule.id) matches more than one option of $($choice.id)" }
+            if ($keep.Count -eq 1) {
+                $humanAnswers.Add(@{ choice_id = $choice.id; option = $keep[0].key })
+                $humanEdits.Add(@{ op = 'answer_choice'; id = $choice.id; rule = $rule.id; option_label = $keep[0].label; result = 'answered'; reason = $rule.reason })
+            } elseif ($rule.when_no_option_matches -eq 'remove') {
+                $proposal.open = @($proposal.open | Where-Object { $_.id -ne $choice.id })
+                $humanEdits.Add(@{ op = 'remove_open'; id = $choice.id; rule = $rule.id; question = $choice.question; result = 'removed'; reason = $rule.reason })
+            } else {
+                throw "choice $($choice.id) matches rule $($rule.id) but no option matches '$($rule.option_label_match)'"
+            }
+        }
+        $scope = @{ version = 'acan-scope/1'; order = $d.order; rev = $d.rev; base_commit = $d.base_commit; body = $proposal }
+        $null = Send-Command @{ cmd = 'revise_scope'; order = [int]$raw; scope = $scope }
+        Add-Step -Name "${Order}: the owner revises the draft with the logged human edits (revise_scope)" -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{ rev = $d.rev; human_edits = $humanEdits.Count; open_after = @($proposal.open).Count; may_after = @($proposal.may).Count; must_keep_after = @($proposal.must_keep).Count } -Human
+        foreach ($entry in $humanEdits) {
+            Add-Step -Name "$Order human scope edit: $($entry.op) $($entry.id)" -Actor "human ($(Split-Path -Leaf $EditsFile), applied by the owner through revise_scope)" -Provider 'none' -Result 'pass' -Evidence $entry -Human
+        }
+
+        $body = Invoke-Api -Path "/api/orders/$oid/scope/confirmation"
+        $offeredCap = [int]$body.budget.max_episodes
+        $body.budget.max_episodes = [uint32]([math]::Max($MaxEpisodes, $offeredCap))
+        $answers = @()
+        foreach ($choice in @($proposal.open)) {
+            $fromKeep = @($humanAnswers | Where-Object { $_.choice_id -eq $choice.id })
+            if ($fromKeep.Count -eq 1) {
+                $answers += @{ choice_id = $choice.id; option = $fromKeep[0].option }
+                continue
+            }
+            $given = @($edits.answers | Where-Object { $_.choice_id -eq $choice.id })
+            if ($given.Count -ne 1) {
+                throw "open choice $($choice.id) needs exactly one human answer in $EditsFile; options: $((@($choice.options) | ForEach-Object { $_.label }) -join ' | ')"
+            }
+            $option = @($choice.options | Where-Object { $_.label -eq $given[0].option_label })
+            if ($option.Count -ne 1) {
+                throw "answer '$($given[0].option_label)' for $($choice.id) matches no option label"
+            }
+            $answers += @{ choice_id = $choice.id; option = $option[0].key }
+        }
+        $body.answers = $answers
+        $confirmed = Send-Command @{ cmd = 'confirm_scope'; order = [int]$raw; confirmation = $body }
+        $scopeConfirmed = @($confirmed | Where-Object { $_.event.type -eq 'scope_confirmed' }).Count
+        if ($scopeConfirmed -lt 1) { throw 'confirm_scope returned no scope_confirmed event' }
+        Add-Step -Name "${Order}: the owner raises the repair budget's episode cap at confirmation" -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{
+            offered_max_episodes = $offeredCap; set_max_episodes = [int]$body.budget.max_episodes
+            reason = 'every differing field of a route is one discrepancy episode, and the offered cap of four stops the order at the first receipt with more; the owner sets the cap for this order'
+        } -Human
+        Add-Step -Name "${Order}: the owner confirms the scope (member HTTP)" -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{
+            scope_confirmed = $scopeConfirmed; answers = $answers; scope_hash = "$($body.scope_hash)"; budget = $body.budget
+        } -Human
+        $script:Evidence.orders[$Order] = @{ oid = $oid; raw = $raw; confirmed = $true; scope_hash = "$($body.scope_hash)"; max_episodes = [int]$body.budget.max_episodes }
+        Save-State
+    } else {
+        Add-Step -Name "${Order}: the scope was confirmed in an earlier invocation" -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ order = $oid }
+    }
+
+    if ($Order -eq 'o-1' -and -not $script:Evidence.orders.ContainsKey('refusals')) {
+        # Refusals: an agent token must not reach the member routes.
+        $agentHeaders = @{ Authorization = "Bearer $($script:Tokens['worker-a'])" }
+        $confirmStatus = Test-Forbidden -Call { Invoke-RestMethod -Uri "$script:Base/api/orders/$oid/scope/confirmation" -Headers $agentHeaders }
+        $commandStatus = Test-Forbidden -Call { Invoke-RestMethod -Method Post -Uri "$script:Base/api/commands" -Headers $agentHeaders -ContentType 'application/json' -Body "{`"cmd`":`"cancel_order`",`"order`":$raw}" }
+        $refusalOk = ($confirmStatus -eq 403 -and $commandStatus -eq 403)
+        Add-Step -Name 'agent token refused on member routes' -Actor 'worker-a token' -Provider 'none' -Result $(if ($refusalOk) { 'pass' } else { 'fail' }) -Evidence @{ confirmation_status = $confirmStatus; command_status = $commandStatus }
+        $script:Evidence.orders['refusals'] = @{ confirmation_status = $confirmStatus; command_status = $commandStatus; ok = $refusalOk }
+        Save-State
+    }
+
+    # ---- agents: register the three identities the take uses, once each ---------------------
+    $events = Invoke-Api -Path '/api/events'
+    foreach ($name in @('worker-a', 'control-seeded', 'worker-b')) {
+        $already = @($events | Where-Object { $_.event.type -eq 'agent_registered' -and (ConvertTo-Json -Depth 8 -Compress $_) -like "*`"$name`"*" }).Count
+        if ($already -eq 0) {
+            $null = Send-Command @{ cmd = 'register_agent'; agent = $name }
+            Add-Step -Name "register agent $name" -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{ agent = $name } -Human
+        }
+    }
+
+    $ctrlRoot = Join-Path $run 'controls'
+    New-Item -ItemType Directory -Path $ctrlRoot -Force | Out-Null
+    $controlToken = $script:Tokens['control-seeded']
+
+    if ($Order -eq 'o-1') {
+        $t0 = $tasks[0]
+        # ---- step 1: worker A, model, honest attempt --------------------------------------------
+        if (-not $SkipWorkers) {
+            $wa = Start-Worker -Name 'worker-a' -Token $script:Tokens['worker-a'] -Tag 'o1'
             $events = Invoke-Api -Path '/api/events'
-            $events | Where-Object { $_.event.type -eq 'order_split' -and "$($_.event.order)" -eq $raw } | Select-Object -First 1
-        } -Terminal { $null }
-        Add-Step -Name 'split the order into tasks' -Actor 'foreman' -Provider "$($routes.foreman.provider) / $($routes.foreman.model)" -Result 'pass'
-    }
-
-    $view = Wait-Until -What 'the foreman draft' -Probe { Invoke-Api404Tolerant -Path "/api/orders/$oid/scope-draft" } -Terminal { $null }
-    if ($view.state -ne 'drafted') { throw "the foreman draft did not check: $($view.reason | ConvertTo-Json -Compress)" }
-    $d = $view.draft
-    $proposal = $d.draft.proposal
-    # The model's draft as the foreman returned it, kept in the run folder for review. It holds no key.
-    Set-Content -LiteralPath (Join-Path $run 'scope-draft.json') -Value ($d | ConvertTo-Json -Depth 60) -Encoding utf8
-    Add-Step -Name 'foreman drafts the scope' -Actor 'foreman' -Provider "$($routes.foreman.provider) / $($d.draft.model)" -Result 'pass' -Evidence @{
-        provenance = $d.draft.provenance
-        rev = $d.rev
-        may = @($proposal.may).Count
-        must_keep = @($proposal.must_keep).Count
-        open = $proposal.open
-    }
-    if ($DraftOnly) {
-        $script:DraftReady = $true
-        throw "draft recorded for human review; write the edits for this draft in $EditsFile, then resume with -ResumeRun $run"
-    }
-
-    # Human edits apply to the draft before the one revise_scope, so the scope the owner confirms is
-    # the draft plus the logged edits. Each edit is logged as a human step; an unknown op stops the take.
-    $edits = Get-Content -LiteralPath $EditsFile -Raw | ConvertFrom-Json
-    if ($edits.schema -ne 'acan-demo-intent-edits/2') {
-        throw "the edits file must have schema acan-demo-intent-edits/2, found '$($edits.schema)'"
-    }
-    $humanEdits = [System.Collections.Generic.List[object]]::new()
-    $humanAnswers = [System.Collections.Generic.List[object]]::new()
-    foreach ($edit in @($edits.scope_edits)) {
-        if ($edit.op -eq 'remove_may') {
-            if (@($proposal.may | Where-Object { $_.id -eq $edit.id }).Count -ne 1) {
-                throw "remove_may: may item $($edit.id) is not in the draft; the edits file must match the draft"
-            }
-            $proposal.may = @($proposal.may | Where-Object { $_.id -ne $edit.id })
-            $humanEdits.Add(@{ op = $edit.op; id = $edit.id; result = 'removed'; reason = $edit.reason })
-        } elseif ($edit.op -eq 'replace_must_keep') {
-            if (@($proposal.must_keep | Where-Object { $_.id -eq $edit.rule.id }).Count -ne 1) {
-                throw "replace_must_keep: must-keep $($edit.rule.id) is not in the draft; the edits file must match the draft"
-            }
-            $proposal.must_keep = @($proposal.must_keep | ForEach-Object { if ($_.id -eq $edit.rule.id) { $edit.rule } else { $_ } })
-            $humanEdits.Add(@{ op = $edit.op; id = $edit.rule.id; result = 'replaced'; reason = $edit.reason })
-        } elseif ($edit.op -eq 'add_must_keep') {
-            if (@($proposal.must_keep | Where-Object { $_.id -eq $edit.rule.id }).Count -gt 0) {
-                throw "must-keep $($edit.rule.id) is already in the draft"
-            }
-            $proposal.must_keep = @($proposal.must_keep) + @($edit.rule)
-            $humanEdits.Add(@{ op = $edit.op; id = $edit.rule.id; result = 'added'; reason = $edit.reason })
-        } elseif ($edit.op -eq 'add_may') {
-            if (@($proposal.may | Where-Object { $_.id -eq $edit.item.id }).Count -gt 0) {
-                throw "may item $($edit.item.id) is already in the draft"
-            }
-            $proposal.may = @($proposal.may) + @($edit.item)
-            $humanEdits.Add(@{ op = $edit.op; id = $edit.item.id; result = 'added'; reason = $edit.reason })
+            $waEvents = Get-AgentEvents -Events $events -Agent 'worker-a'
+            $script:Evidence.workers['o-1-worker-a'] = @{ process = $wa; events = $waEvents }
+            Save-State
+            $waTypes = @($waEvents | ForEach-Object { $_.type } | Select-Object -Unique)
+            Add-Step -Name 'o-1 step 1: worker A builds the order (honest attempt, model)' -Actor 'worker-a (model worker)' -Provider "$($script:Routes.worker.provider) / $($script:Routes.worker.model)" -Result $(if ($waTypes -contains 'build_reported' -or $waTypes -contains 'landed') { 'pass' } else { 'fail' }) -Evidence @{ process = $wa; event_types = $waTypes; events = $waEvents.Count; note = 'a model worker run that does not commit is recorded as is' }
         } else {
-            throw "unknown scope edit op '$($edit.op)' in $EditsFile"
+            Add-Step -Name 'o-1 step 1: worker A (skipped by -SkipWorkers)' -Actor 'worker-a (model worker)' -Provider 'none' -Result 'not_run' -Evidence @{ reason = '-SkipWorkers' }
         }
-    }
 
-    # Choice rules match an open choice by its question text, because the foreman's question ids and
-    # wording change between drafts. A choice matched by no rule is left for an explicit answer below.
-    foreach ($choice in @($proposal.open)) {
-        $matched = @($edits.choice_rules | Where-Object { $choice.question -match $_.question_match })
-        if ($matched.Count -eq 0) { continue }
-        if ($matched.Count -gt 1) { throw "more than one choice rule matches $($choice.id): $((@($matched) | ForEach-Object { $_.id }) -join ', ')" }
-        $rule = $matched[0]
-        $keep = @($choice.options | Where-Object { $_.label -match $rule.option_label_match })
-        if ($keep.Count -gt 1) { throw "choice rule $($rule.id) matches more than one option of $($choice.id)" }
-        if ($keep.Count -eq 1) {
-            $humanAnswers.Add(@{ choice_id = $choice.id; option = $keep[0].key })
-            $humanEdits.Add(@{ op = 'answer_choice'; id = $choice.id; rule = $rule.id; option_label = $keep[0].label; result = 'answered; choice stays open until the answer is confirmed'; reason = $rule.reason })
-        } elseif ($rule.when_no_option_matches -eq 'remove') {
-            $proposal.open = @($proposal.open | Where-Object { $_.id -ne $choice.id })
-            $humanEdits.Add(@{ op = 'remove_open'; id = $choice.id; rule = $rule.id; question = $choice.question; result = 'removed'; reason = $rule.reason })
+        # ---- step 2: seeded regression m-overfit, control ----------------------------------------
+        $mo = Join-Path $ctrlRoot 'm-overfit.json'
+        & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $controlToken -Repo $script:Repo -Task $t0 `
+            -Bundle (Join-Path $intentDir 'controls\m-overfit.json') -Out $mo -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec
+        $r2 = Read-ControlResult -Path $mo
+        $r2Obl = @($r2.items | Where-Object { $_.class -eq 'obligation_failed' }).Count
+        $r2Ok = ($r2.gate_state -eq 'blocked' -and $r2Obl -ge 1)
+        $script:Evidence.controls['m-overfit'] = @{ task = $t0; result = $mo; receipt_hash = $r2.receipt_hash; gate_state = $r2.gate_state; counts = $r2.counts; head = $r2.head; ok = $r2Ok }
+        Save-State
+        Add-Step -Name 'o-1 step 2: seeded regression m-overfit (control, not a model)' -Actor 'control-seeded (control identity, not a model)' -Provider 'none' -Result $(if ($r2Ok) { 'pass' } else { 'fail' }) -Evidence @{ task = $t0; receipt_hash = $r2.receipt_hash; gate_state = $r2.gate_state; counts = $r2.counts; result_file = $mo }
+
+        # ---- step 3: seeded harmless difference m-harmless-difference, rulings, land ------------
+        $mh = Join-Path $ctrlRoot 'm-harmless-difference.json'
+        $done = Join-Path $ctrlRoot 'rulings-done.flag'
+        $rulingsOut = Join-Path $ctrlRoot 'rulings-o-1.json'
+        if (Test-Path -LiteralPath $done) { Remove-Item -LiteralPath $done }
+        $ctlArgs = "-NoProfile -File `"$(Join-Path $intentDir 'control.ps1')`" -Server $script:Base -Token $controlToken -Repo `"$script:Repo`" -Task $t0 -Bundle `"$(Join-Path $intentDir 'controls\m-harmless-difference.json')`" -Out `"$mh`" -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -AwaitRuling -RulingWaitSec $RulingWaitSec -RulingsDone `"$done`""
+        $ctl = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList $ctlArgs -RedirectStandardOutput "$mh.log" -RedirectStandardError "$mh.err.log" -PassThru -WindowStyle Hidden
+        $recEnd = (Get-Date).AddSeconds(300 + $ControlWaitSec)
+        while (-not (Test-Path -LiteralPath "$mh.receipt.json")) {
+            if ($ctl.HasExited) { break }
+            if ((Get-Date) -gt $recEnd) { break }
+            Start-Sleep -Seconds 3
+        }
+        $rulingErr = $null
+        if (Test-Path -LiteralPath "$mh.receipt.json") {
+            # The control writes the receipt file in one call; give the write time to finish.
+            Start-Sleep -Seconds 5
+            try {
+                & (Join-Path $intentDir 'ruling.ps1') -Server $script:Base -OwnerToken $script:OwnerToken -Order $Order -OrderId $oid `
+                    -ReceiptFile "$mh.receipt.json" -RulesFile $RulesFile -Out $rulingsOut
+                $rl = Get-Content -LiteralPath $rulingsOut -Raw | ConvertFrom-Json
+                $script:Evidence.rulings[$Order] = @{ log = $rulingsOut; count = @($rl.rulings).Count; ids = @($rl.rulings | ForEach-Object { $_.ruling_id }) }
+                Add-Step -Name 'o-1 rulings: the owner rules on the out-of-scope episodes (record_ruling, member HTTP)' -Actor 'owner (member HTTP; rules file applied by ruling.ps1)' -Provider 'none' -Result 'pass' -Evidence @{ rulings = @($rl.rulings | ForEach-Object { [ordered]@{ ruling_id = $_.ruling_id; episode_id = $_.episode_id; fields = $_.fields; result = $_.result; ledger_seq = $_.ledger_seq } }); log = $rulingsOut } -Human
+                Save-State
+            } catch {
+                $rulingErr = $_.Exception.Message
+                Add-Step -Name 'o-1 rulings: the owner rules on the out-of-scope episodes (record_ruling, member HTTP)' -Actor 'owner (member HTTP)' -Provider 'none' -Result 'fail' -Evidence @{ error = $rulingErr }
+            }
         } else {
-            throw "choice $($choice.id) matches rule $($rule.id) but no option matches '$($rule.option_label_match)': $((@($choice.options) | ForEach-Object { $_.label }) -join ' | ')"
+            Add-Step -Name 'o-1 rulings: the control produced no receipt to rule on' -Actor 'script' -Provider 'none' -Result 'fail' -Evidence @{ control_exited = $ctl.HasExited }
         }
+        Set-Content -LiteralPath $done -Value 'rulings finished' -Encoding utf8
+        if (-not $ctl.WaitForExit(($RulingWaitSec + 300) * 1000)) {
+            Stop-Process -Id $ctl.Id -Force -ErrorAction SilentlyContinue
+        }
+        $r3 = Read-ControlResult -Path $mh
+        $landedNow = ($null -ne $r3 -and $r3.gate_state -eq 'landed')
+        if ($landedNow -and (Test-Path -LiteralPath "$mh.receipt.json")) {
+            $lc = Get-LandCheck -ReceiptFile "$mh.receipt.json" -What 'o-1'
+            $script:Evidence.lands['o-1'] = $lc
+        }
+        $script:Evidence.controls['m-harmless-difference'] = @{ task = $t0; result = $mh; receipt_hash = $r3.receipt_hash; gate_state = $r3.gate_state; counts = $r3.counts; head = $r3.head; ruling_error = $rulingErr; receipts_saved = $r3.receipts_saved }
+        Save-State
+        Add-Step -Name 'o-1 step 3: seeded harmless difference m-harmless-difference (control) lands after the ruling' -Actor 'control-seeded (control identity, not a model)' -Provider 'none' -Result $(if ($landedNow) { 'pass' } else { 'fail' }) -Evidence @{ task = $t0; receipt_hash = $r3.receipt_hash; gate_state = $r3.gate_state; counts = $r3.counts; land = $script:Evidence.lands['o-1']; result_file = $mh }
+        $outcome = $(if ($landedNow) { 'o1_landed' } else { 'o1_not_landed' })
     }
 
-    $scope = @{ version = 'acan-scope/1'; order = $d.order; rev = $d.rev; base_commit = $d.base_commit; body = $proposal }
-    $null = Send-Command @{ cmd = 'revise_scope'; order = [int]$raw; scope = $scope }
-    Add-Step -Name 'owner revises the draft with the logged human edits (revise_scope)' -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{ rev = $d.rev; human_edits = $humanEdits.Count; open_after = @($proposal.open).Count; may_after = @($proposal.may).Count; must_keep_after = @($proposal.must_keep).Count }
-    foreach ($entry in $humanEdits) {
-        Add-Step -Name "human scope edit: $($entry.op) $($entry.id)" -Actor 'human (o-1-edits.json, applied by the owner through revise_scope)' -Provider 'none' -Result 'pass' -Evidence $entry
-    }
-
-    $body = Invoke-Api -Path "/api/orders/$oid/scope/confirmation"
-    $answers = @()
-    foreach ($choice in @($proposal.open)) {
-        $fromKeep = @($humanAnswers | Where-Object { $_.choice_id -eq $choice.id })
-        if ($fromKeep.Count -eq 1) {
-            $answers += @{ choice_id = $choice.id; option = $fromKeep[0].option }
-            continue
+    if ($Order -eq 'o-8') {
+        $lastTask = $tasks[-1]
+        $controlFirst = ($tasks.Count -lt 2)
+        $viol = Join-Path $ctrlRoot 'm-ruling-violation.json'
+        if ($controlFirst) {
+            # One task only: the seeded violation runs first; the model worker builds after it releases the task.
+            & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $controlToken -Repo $script:Repo -Task $lastTask `
+                -Bundle (Join-Path $intentDir 'controls\m-ruling-violation.json') -Out $viol -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec
         }
-        $given = @($edits.answers | Where-Object { $_.choice_id -eq $choice.id })
-        if ($given.Count -ne 1) {
-            throw "open choice $($choice.id) needs exactly one human answer in $EditsFile; options: $((@($choice.options) | ForEach-Object { $_.label }) -join ' | ')"
+        if (-not $SkipWorkers) {
+            $wb = Start-Worker -Name 'worker-b' -Token $script:Tokens['worker-b'] -Tag 'o8'
+            $events = Invoke-Api -Path '/api/events'
+            $wbEvents = Get-AgentEvents -Events $events -Agent 'worker-b'
+            $script:Evidence.workers['o-8-worker-b'] = @{ process = $wb; events = $wbEvents }
+            Save-State
+            $wbTypes = @($wbEvents | ForEach-Object { $_.type } | Select-Object -Unique)
+            Add-Step -Name 'o-8 step 4: worker B builds Retry-After (model)' -Actor 'worker-b (model worker)' -Provider "$($script:Routes.worker.provider) / $($script:Routes.worker.model)" -Result $(if ($wbTypes -contains 'build_reported' -or $wbTypes -contains 'landed') { 'pass' } else { 'fail' }) -Evidence @{ process = $wb; event_types = $wbTypes; events = $wbEvents.Count }
+        } else {
+            Add-Step -Name 'o-8 step 4: worker B (skipped by -SkipWorkers)' -Actor 'worker-b (model worker)' -Provider 'none' -Result 'not_run' -Evidence @{ reason = '-SkipWorkers' }
         }
-        $option = @($choice.options | Where-Object { $_.label -eq $given[0].option_label })
-        if ($option.Count -ne 1) {
-            throw "answer '$($given[0].option_label)' for $($choice.id) matches no option label; options: $((@($choice.options) | ForEach-Object { $_.label }) -join ' | ')"
+        if (-not $controlFirst) {
+            & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $controlToken -Repo $script:Repo -Task $lastTask `
+                -Bundle (Join-Path $intentDir 'controls\m-ruling-violation.json') -Out $viol -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec
         }
-        $answers += @{ choice_id = $choice.id; option = $option[0].key }
+        $r5 = Read-ControlResult -Path $viol
+        $violated = @($r5.items | Where-Object { $_.class -eq 'violates_ruling' })
+        $r5Ok = ($violated.Count -ge 1)
+        $script:Evidence.controls['m-ruling-violation'] = @{ task = $lastTask; result = $viol; receipt_hash = $r5.receipt_hash; gate_state = $r5.gate_state; counts = $r5.counts; violates_ruling = $violated.Count; ruling_ids = @($violated | ForEach-Object { $_.ruling_id } | Select-Object -Unique); ok = $r5Ok }
+        Save-State
+        Add-Step -Name 'o-8 step 5: seeded ruling violation m-ruling-violation (control) is blocked by the step 3 ruling' -Actor 'control-seeded (control identity, not a model)' -Provider 'none' -Result $(if ($r5Ok) { 'pass' } else { 'fail' }) -Evidence @{ task = $lastTask; receipt_hash = $r5.receipt_hash; gate_state = $r5.gate_state; counts = $r5.counts; ruling_ids = $script:Evidence.controls['m-ruling-violation'].ruling_ids; control_first = $controlFirst; result_file = $viol }
+        $outcome = $(if ($r5Ok) { 'o8_violation_blocked' } else { 'o8_violation_not_blocked' })
     }
-    $body.answers = $answers
-    $confirmed = Send-Command @{ cmd = 'confirm_scope'; order = [int]$raw; confirmation = $body }
-    $scopeConfirmed = @($confirmed | Where-Object { $_.event.type -eq 'scope_confirmed' }).Count
-    if ($scopeConfirmed -lt 1) { throw 'confirm_scope returned no scope_confirmed event' }
-    Add-Step -Name 'owner confirms the scope (member HTTP)' -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{
-        scope_confirmed = $scopeConfirmed
-        answers = $answers
-        scope_hash = "$($body.scope_hash)"
-    }
-
-    # Refusals: an agent token must not reach the member routes.
-    $agentHeaders = @{ Authorization = "Bearer $agentA" }
-    $confirmStatus = Test-Forbidden -Call { Invoke-RestMethod -Uri "$script:Base/api/orders/$oid/scope/confirmation" -Headers $agentHeaders }
-    # A well-formed command, so the request reaches the member check and not the body parser.
-    $commandStatus = Test-Forbidden -Call { Invoke-RestMethod -Method Post -Uri "$script:Base/api/commands" -Headers $agentHeaders -ContentType 'application/json' -Body '{"cmd":"cancel_order","order":1}' }
-    Add-Step -Name 'agent token refused on member routes' -Actor 'worker-a token' -Provider 'none' -Result $(if ($confirmStatus -eq 403 -and $commandStatus -eq 403) { 'pass' } else { 'fail' }) -Evidence @{
-        confirmation_status = $confirmStatus
-        command_status = $commandStatus
-    }
-
-    $outcome = 'stopped_before_workers'
-    $failure = 'the workers, the gate, the land and the ruling are not part of this take yet; see checks'
 }
 catch {
     $failure = $_.Exception.Message
@@ -463,10 +696,11 @@ finally {
     if ($script:Proc -and -not $script:Proc.HasExited) {
         Stop-Process -Id $script:Proc.Id -Force -ErrorAction SilentlyContinue
     }
+    if (-not (Test-Path -LiteralPath $run)) { New-Item -ItemType Directory -Path $run | Out-Null }
+    try { Save-State } catch { Write-Output "state not saved: $($_.Exception.Message)" }
     $demoAfter = $null
     try { $demoAfter = Get-DemoRefs } catch { $demoAfter = "unreadable: $($_.Exception.Message)" }
     $demoUnchanged = if ($null -eq $demoBefore) { 'not_read' } else { ($demoBefore -eq $demoAfter) }
-    if (-not (Test-Path -LiteralPath $run)) { New-Item -ItemType Directory -Path $run | Out-Null }
 
     # Secret scan: the logs and the summary must not hold any token or key value.
     $scanHits = @()
@@ -479,40 +713,60 @@ finally {
         }
     }
 
+    # Checks. Each one is computed from the evidence of this run, and is not_run until its evidence exists.
+    $wA = $script:Evidence.workers['o-1-worker-a']
+    $wB = $script:Evidence.workers['o-8-worker-b']
+    $agentsClaimed = @()
+    foreach ($ev in @($wA, $wB)) {
+        if ($null -eq $ev) { continue }
+        foreach ($e in @($ev.events)) { if ($e.type -eq 'lease_granted') { $agentsClaimed += $e } }
+    }
+    $claimantIds = @($agentsClaimed | ForEach-Object { $_.task } | Select-Object -Unique)
+    $c1 = if ($null -ne $wA -and $null -ne $wB) {
+        $aClaim = @($wA.events | Where-Object { $_.type -eq 'lease_granted' }).Count
+        $bClaim = @($wB.events | Where-Object { $_.type -eq 'lease_granted' }).Count
+        [ordered]@{ status = $(if ($aClaim -ge 1 -and $bClaim -ge 1) { 'pass' } else { 'fail' }); worker_a_lease_granted = $aClaim; worker_b_lease_granted = $bClaim; ids = @('worker-a', 'worker-b') }
+    } else { [ordered]@{ status = 'not_run'; reason = 'worker A and worker B have not both run in this take' } }
+    $m2 = $script:Evidence.controls['m-overfit']
+    $c2 = if ($null -ne $m2) { [ordered]@{ status = $(if ($m2.ok) { 'pass' } else { 'fail' }); receipt_hash = $m2.receipt_hash; gate_state = $m2.gate_state; counts = $m2.counts; result_file = $m2.result } } else { [ordered]@{ status = 'not_run'; reason = 'm-overfit has not run' } }
+    $rl = $script:Evidence.rulings['o-1']
+    $c3 = if ($null -ne $rl) { [ordered]@{ status = $(if ($rl.count -ge 1 -and $script:Evidence.lands.ContainsKey('o-1')) { 'pass' } else { 'fail' }); rulings = $rl.ids; land = $script:Evidence.lands['o-1'] } } else { [ordered]@{ status = 'not_run'; reason = 'no rulings recorded' } }
+    $m8 = $script:Evidence.controls['m-ruling-violation']
+    $c4 = if ($null -ne $m8) { [ordered]@{ status = $(if ($m8.ok) { 'pass' } else { 'fail' }); receipt_hash = $m8.receipt_hash; violates_ruling = $m8.violates_ruling; ruling_ids = $m8.ruling_ids } } else { [ordered]@{ status = 'not_run'; reason = 'm-ruling-violation has not run' } }
+    $lands = @($script:Evidence.lands.Values)
+    $c5 = if ($lands.Count -gt 0) { [ordered]@{ status = $(if (@($lands | Where-Object { -not $_.equal }).Count -eq 0) { 'pass' } else { 'fail' }); lands = $lands } } else { [ordered]@{ status = 'not_run'; reason = 'no land in this take yet' } }
+    $c6 = [ordered]@{ status = 'not_run'; reason = 'a clean rerun is a second take folder; compare its summary classes with this one' }
+    $c7 = [ordered]@{ status = $(if ($script:HumanSteps -gt 0 -and $script:MemberCalls -ge $script:HumanSteps) { 'partial' } else { 'not_run' }); human_steps = $script:HumanSteps; member_http_calls = $script:MemberCalls; note = 'every human step is a member HTTP call logged in steps; the take does not claim the rerun check' }
     $checks = [ordered]@{
-        '1_two_worker_identities'           = @{ status = 'not_run'; reason = 'worker phase not built in this take' }
-        '2_seeded_regression_bounced'       = @{ status = 'not_run'; reason = 'worker and control phase not built in this take' }
-        '3_real_ruling_through_member_http' = @{ status = 'not_run'; reason = 'ruling-draft route is not built: contrast examples are not retained (see report)' }
-        '4_second_order_blocked_by_ruling'  = @{ status = 'not_run'; reason = 'depends on check 3' }
-        '5_protected_head_equals_receipt'   = @{ status = 'not_run'; reason = 'no land in this take' }
-        '6_clean_rerun_same_classes'        = @{ status = 'not_run'; reason = 'one take has run; no rerun yet' }
-        '7_human_steps_via_member_http'     = @{ status = $(if ($outcome -eq 'failed') { 'fail' } else { 'partial' }); reason = 'o-1 steps so far: post, adopt, confirm, refusals' }
+        '1_two_worker_identities'           = $c1
+        '2_seeded_regression_bounced'       = $c2
+        '3_real_ruling_through_member_http' = $c3
+        '4_second_order_blocked_by_ruling'  = $c4
+        '5_protected_head_equals_receipt'   = $c5
+        '6_clean_rerun_same_classes'        = $c6
+        '7_human_steps_via_member_http'     = $c7
     }
     $script:Summary = [ordered]@{
-        schema          = 'acan-take/1'
+        schema          = 'acan-take/2'
         label           = $Label
         run             = $run
+        order           = $Order
         started         = $started
         finished        = (Get-Date).ToString('o')
         outcome         = $outcome
         failure         = $failure
-        complete        = $false
         repo            = $script:Repo
         pin             = $Pin
         demo            = [ordered]@{ path = $DemoRepo; refs_before = $demoBefore; refs_after = $demoAfter; unchanged = $demoUnchanged }
-        providers       = $routes
-        server          = [ordered]@{ binary = $AcanExe; port = $Port; protected_branch = 'main'; logs = (Join-Path $run 'logs') }
-        inputs          = [ordered]@{ edits_file = $EditsFile; edits_sha256 = (Get-FileHash -LiteralPath $EditsFile -Algorithm SHA256).Hash }
-        steps           = $script:Steps
+        providers       = $script:Routes
+        server          = [ordered]@{ binary = $AcanExe; worker_binary = $WorkerExe; port = $Port; protected_branch = 'main'; logs = (Join-Path $run 'logs') }
+        inputs          = [ordered]@{ edits_file = $EditsFile; edits_sha256 = $(if (Test-Path -LiteralPath $EditsFile) { (Get-FileHash -LiteralPath $EditsFile -Algorithm SHA256).Hash } else { 'none' }); rules_file = $RulesFile; rules_sha256 = (Get-FileHash -LiteralPath $RulesFile -Algorithm SHA256).Hash; max_episodes = $MaxEpisodes }
+        steps           = @($script:Steps)
         checks          = $checks
         secret_scan     = $(if ($scanHits.Count -eq 0) { 'clean' } else { "hits: $($scanHits -join ', ')" })
     }
     $summaryPath = Join-Path $run 'summary.json'
-    # A resumed run keeps the summary of the run it resumes, so no earlier step is lost.
-    if (Test-Path -LiteralPath $summaryPath) {
-        Move-Item -LiteralPath $summaryPath -Destination (Join-Path $run ("summary.prev-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json'))
-    }
-    $summaryText = $script:Summary | ConvertTo-Json -Depth 30
+    $summaryText = $script:Summary | ConvertTo-Json -Depth 40
     foreach ($secret in $script:Secrets) {
         if ($summaryText.Contains($secret)) { $scanHits += 'summary.json' }
     }
