@@ -288,4 +288,94 @@ mod tests {
             Verdict::Unclear
         );
     }
+
+    /// The live two-image check on the o-7 dashboard pair. It spends one real Muse Spark call per
+    /// candidate, so it runs only when `ACAN_LIVE_PROOF` is set and `ACAN_VISION_PAIR` names a
+    /// folder holding `baseline.html`, `keep.html` and `break.html`. Each page is rendered with the
+    /// installed browser, as the witness renders it. The keys come from the `.env` copied into the
+    /// worktree, and nothing is printed except the verdicts and receipt fields.
+    #[tokio::test]
+    async fn the_live_vision_call_reads_the_dashboard_pair() {
+        use crate::vision::{browser, sha256_hex};
+        use acan_llm::{ApiKeys, LlmConfig, OpenAiCompatible};
+        use std::path::{Path, PathBuf};
+
+        let (Some(_), Some(pair)) = (
+            std::env::var_os("ACAN_LIVE_PROOF"),
+            std::env::var_os("ACAN_VISION_PAIR"),
+        ) else {
+            eprintln!("skipped: set ACAN_LIVE_PROOF and ACAN_VISION_PAIR to spend live calls");
+            return;
+        };
+        let llm_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../acan-llm"));
+        dotenvy::from_path(llm_dir.join(".env")).expect("the worktree holds a copy of .env");
+        let config = LlmConfig::load(llm_dir.join("llm.toml"))
+            .expect("the worktree holds a copy of llm.toml");
+        let keys = ApiKeys::from_env(&config);
+        let client = OpenAiCompatible::new(config, keys).expect("the client builds");
+
+        let pair = PathBuf::from(pair);
+        let browser_path = browser::default_browser();
+        let shot = |name: &'static str| {
+            let page = pair.join(name);
+            let browser_path = browser_path.clone();
+            async move {
+                let html = std::fs::read_to_string(&page).expect("the page is readable");
+                browser::render(&browser_path, &html)
+                    .await
+                    .expect("the page renders")
+            }
+        };
+        let baseline = shot("baseline.html").await;
+        let items = vec![
+            MustKeepItem {
+                id: "total-clicks-column".to_owned(),
+                text: "The total clicks column stays".to_owned(),
+            },
+            MustKeepItem {
+                id: "summary-line".to_owned(),
+                text: "The summary line stays".to_owned(),
+            },
+        ];
+        println!(
+            "LIVE_PROOF_VISION baseline_sha256={} baseline={}x{}",
+            sha256_hex(&baseline.png),
+            baseline.width,
+            baseline.height
+        );
+        for (file, expected) in [
+            ("keep.html", Verdict::Consistent),
+            ("break.html", Verdict::Inconsistent),
+        ] {
+            let candidate = shot(file).await;
+            let judged = judge(
+                &client,
+                &Pair {
+                    route: "/dashboard",
+                    must_keep: &items,
+                    baseline: Some(&baseline.png),
+                    candidate: &candidate.png,
+                },
+            )
+            .await;
+            let call = judged.call.as_ref();
+            println!(
+                "LIVE_PROOF_VISION file={file} verdict={:?} expected={expected:?} reason={:?} raw_reply={:?} not_checked={:?} request_id={:?} provider={:?} model={:?} prompt_tokens={:?} completion_tokens={:?} latency_ms={:?} candidate_sha256={} candidate={}x{}",
+                judged.verdict,
+                judged.reason,
+                judged.raw_reply,
+                judged.not_checked_reason,
+                judged.request_id,
+                call.map(|call| call.provider.as_str()),
+                judged.model,
+                call.map(|call| call.usage.prompt_tokens),
+                call.map(|call| call.usage.completion_tokens),
+                call.map(|call| call.latency.as_millis()),
+                sha256_hex(&candidate.png),
+                candidate.width,
+                candidate.height,
+            );
+            assert_eq!(judged.verdict, expected, "the live verdict for {file}");
+        }
+    }
 }
