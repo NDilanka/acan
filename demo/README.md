@@ -87,21 +87,42 @@ Human edits live in `demo/intent/o-1-edits.json` (schema `acan-demo-intent-edits
 
 The replay runs the 12 orders in `demo/intent/orders.json` once each, and the four controls in `demo/intent/mutants.json`, through the real server with live models. Every outcome goes into the results, failures included. Nothing is curated, and no expected value is changed to finish a run.
 
-`pwsh demo/intent/replay.ps1 -DryRun` reads only `orders.json` and `mutants.json` and prints the plan. It starts nothing and draws nothing. A live run is `pwsh demo/intent/replay.ps1 -Label <name>`. It needs Docker running, the built `acan.exe` and `acan-worker.exe`, and `crates/acan-llm/.env` and `llm.toml`. `-Only o-1` runs one order as a rehearsal; that run is reported partial. The default port is 7413. Ports 7411 and 7412 are refused.
+`pwsh demo/intent/replay.ps1 -DryRun` reads only `orders.json` and `mutants.json` and prints the plan. It starts nothing and draws nothing. A live run is `pwsh demo/intent/replay.ps1 -Label <name>`. It needs Docker running, the built `acan.exe` and `acan-worker.exe` at `C:\cargo-targets\acan-x01\debug\`, and `crates/acan-llm/.env` and `llm.toml`. `-Only o-1` runs one order as a rehearsal; that run is reported partial. The default port is 7413. Ports 7411 and 7412 are refused.
 
-The script refuses to start, before it writes anything, when any of these hold: the foreman is not Muse Spark on `meta`; the worker is not Muse Spark Open on `baseten`; either host does not answer on TCP 443; a key variable is missing from `.env` (names are checked, values are never read out); an input file is missing; or `take.ps1` has no `-LibraryOnly` guard. The replay dot-sources `take.ps1` for its helpers, so the guard and the five functions it calls must exist in `take.ps1` before a live run.
+The script refuses to start, before it writes anything, when any of these hold: the foreman is not Muse Spark on `meta`; the worker is not Muse Spark Open on `baseten`; either host does not answer on TCP 443; a key variable is missing from `.env` (names are checked, values are never read out); an input file is missing; the injector's anchor is not in the pinned `src/server.ts` exactly once; or `take.ps1` lacks the `-LibraryOnly` guard or any helper the replay calls.
 
-Inputs, all checked before the draw:
+The live path has not been run. `take.ps1` has no `-LibraryOnly` guard yet, and it does not define five functions the replay calls by name: `New-TakeClone`, `Start-TakeServer`, `Invoke-ScopeEdits`, `Invoke-ScopeConfirm` and `Invoke-ControlWithRuling`. They are the take's inline steps, to be lifted into functions. X01 does not edit `take.ps1`; D02 owns it. Until it lands, a live start stops in the preflight, before the run folder is written.
+
+Decision inputs. A file that is present is checked before the draw (schema, order id, `decided_by`). A file that is missing pauses the run when its order needs it.
 
 - `demo/intent/<id>-edits.json`, schema `acan-demo-intent-edits/2`, for each order that runs. To accept a draft as it is, use an edits file with empty `scope_edits`, `choice_rules` and `answers`.
-- `demo/intent/rulings/<id>-rulings.json`, schema `acan-demo-intent-rulings/1`, for each order that runs.
-- `demo/intent/seeded/<id>.json`, schema `acan-demo-control/1`, with `applies_to` set to the order and `base` set to the pin, for all 12 orders. Each is hashed before the draw.
+- `demo/intent/rulings/<id>-rulings.json`, schema `acan-demo-intent-rulings/1`, needed only when a receipt has an out-of-scope item that no rule covers.
 
-The draw happens after the preflight and before the clone. The seed comes from the OS random source at live start. The drawn orders are the four with the smallest SHA-256 of `<seed>|<order id>`, in `orders.json` order. `draw.json` in the run folder holds the seed, the pool, the drawn list, and the hashes of `orders.json`, `mutants.json` and the bundles. Its SHA-256 goes into `summary.json` (status `drawn`) before any candidate exists. The seed and the drawn list are copied into `summary.json` only at the end of the run. A dry run never shows the draw.
+No file is needed per order for the injected change. The replay generates it (see Injected change).
 
-Run folder: `<RunsRoot>\<label>-<stamp>\`, default `D:\dev\acan-demo-runs\intent`. It holds `results.jsonl`, `summary.json`, `draw.json`, `logs\`, `controls\` and one folder per order.
+### Who decides
 
-Each line of `results.jsonl` is one of: an order (`kind: order`), a seeded candidate for a drawn order (`kind: seeded`), or a control (`kind: control`). An order line records the actor, provider, `scope` (`drafted` or `human_edits`), `outcome`, `receipt_hash`, `merged_sha`, `wall_seconds`, `model_calls` (the `model_used` events of that order), `errors`, and three catch flags. Outcome values are `landed`, `blocked_out_of_scope`, `blocked_obligation_failed`, `blocked_violates_ruling`, `blocked_other`, `incomplete`, `setup_failed`, `draft_not_ready`, `needs_human_scope`, `needs_human_ruling`, `worker_timeout` and `worker_no_build`. Seeded lines use `caught`, `landed_not_caught` or `not_caught`. Control lines use `as_expected`, `not_as_expected`, `not_run` or `error`, with the expected outcome from `mutants.json` beside them.
+Scope and ruling decisions for o-2 to o-12 are delegated by the owner to the coordinator, which is an AI. They are not human decisions, and the replay never records them as human. Each such file names its decider in `decided_by`: `coordinator, delegated by the owner`. The record then carries the label `coordinator (delegated by the owner)`. Only o-1's scope edits and rulings are the owner's own decisions, labelled `human (owner)`; o-1's files may omit `decided_by`. Any other value, or no value for an order other than o-1, stops the run.
+
+The replay decides nothing itself. It sends the decisions the coordinator wrote, using the owner's member token. The files it writes are controls, labelled as controls and not as decisions: the m-broad-scope edits and the injected bundles.
+
+### Pauses and resume
+
+An order that needs a decision the replay does not have pauses the run. For a missing scope decision, the replay writes the foreman's draft to `<run folder>\<id>\scope-draft.json` and prints `needs_scope_decision <id> <draft path>`. For an out-of-scope difference that no rule covers, it writes the ruling draft for that episode to `<run folder>\<id>\ruling-draft-<episode>.json` and prints `needs_ruling <id> <episode> <draft path>`. It then stops the server, writes `summary.json` with status `paused`, and exits with code 3.
+
+The coordinator writes `demo/intent/<id>-edits.json` or `demo/intent/rulings/<id>-rulings.json`, with `decided_by`, and runs `pwsh demo/intent/replay.ps1 -ResumeRun <run folder>`. The resume reuses the run's clone, tokens and draw (their hashes are checked) and continues the paused order from its `state.json` checkpoint. It does not post, split, draft or run a worker again. If the foreman's draft has changed since the pause, the resume stops with `draft_changed`, because the decision was written for the old draft.
+
+### Injected change
+
+Each drawn order gets one out-of-scope change: the response header `x-replay-injected: <order id>` on `GET /health`, a route that no order's scope names. The replay generates the bundle (`acan-demo-control/1`) from the pinned `src/server.ts`. Its anchor is the whole health handler, which must occur exactly once in the pin; the preflight checks that. The bundle goes to `<run folder>\controls\injected-<id>.json`, and its SHA-256 goes into `draw.json` before any candidate exists.
+
+`control.ps1` applies the bundle to the pinned base, not to worker-r's head. So the injected candidate is the base with that one header, and it runs after its order, on the order's first task. If the control cannot claim that task, the line is `error`. The gate has no ruling for the header, so an unruled injected item blocks the candidate. A catch therefore shows that the gate blocks that header. It does not show that the gate would catch a change in worker-r's own build. The placement is an open decision: the gate runs when a worker reports, and the replay has no hook before that point.
+
+The draw happens after the preflight and before the clone. The seed comes from the OS random source at live start. The drawn orders are the four with the smallest SHA-256 of `<seed>|<order id>`, in `orders.json` order. The replay then writes one injected bundle for each drawn order. `draw.json` in the run folder holds the seed, the pool, the drawn list, the injector spec, the SHA-256 of each drawn order's bundle, and the hashes of `orders.json` and `mutants.json`. Its SHA-256 goes into `summary.json` (status `drawn`) before any clone or candidate exists. The seed and the drawn list are copied into `summary.json` only at the end of the run. A dry run never shows the draw.
+
+Run folder: `<RunsRoot>\<label>-<stamp>\`, default `D:\dev\acan-demo-runs\intent`. It holds `results.jsonl`, `summary.json`, `draw.json`, `logs\`, `controls\` (the injected bundles, the injected results and the m-missing-fixture copy) and one folder per order (its `state.json` checkpoint, the scope draft, ruling drafts and receipts).
+
+Each line of `results.jsonl` is one of: an order (`kind: order`), the injected candidate of a drawn order (`kind: seeded`), or a control (`kind: control`). An order line records the actor, provider, `scope` (`drafted`, `human_edits` or `delegated_edits`), `scope_decided_by`, `rulings_decided_by`, `outcome`, `receipt_hash`, `merged_sha`, `wall_seconds`, `model_calls` (the `model_used` events of that order), `resumed_after_pause`, `errors`, and three catch flags. Order outcome values are `landed`, `blocked_out_of_scope`, `blocked_obligation_failed`, `blocked_violates_ruling`, `blocked_other`, `incomplete`, `setup_failed`, `draft_not_ready`, `draft_changed`, `needs_human_scope` (raised by a take step that needs a person), `ruling_refused`, `worker_timeout` and `worker_no_build`. Seeded lines use `caught`, `landed_not_caught`, `not_caught`, `not_run` or `error`. Control lines use `as_expected`, `not_as_expected`, `not_run` or `error`, with the expected outcome from `mutants.json` beside them. An order that pauses has no line until it finishes.
 
 `summary.json` holds the three catch counts, computed separately from the flags on each line:
 
@@ -113,8 +134,18 @@ One line can count in more than one of the three.
 
 Supersedes: `o-9` supersedes `o-2`, and `o-12` supersedes `o-1`. `HumanCmd::PostOrder` has no supersedes field (`crates/acan-core/src/event.rs:75-82`), so each is posted as an independent order. The line for each carries `supersedes_handling`: the target's outcome in the run, and any event whose type contains "supersed". None is expected.
 
-Attempts: one per order. The replay never posts an order twice, and it has no resume. The product's own bounce and repair loop runs inside the attempt. An interrupted run is reported incomplete, and a new start is a new run folder.
+Attempts: one per order in a run. The replay never posts an order twice. A pause is not a failed attempt: the order resumes from its checkpoint with `-ResumeRun`. The product's own bounce and repair loop runs inside the attempt. A run that stopped on a failure is reported `incomplete`; it cannot be resumed, so a new start is a new run folder.
 
-Controls: `m-overfit` and `m-harmless-difference` run on the first task of `o-1`, the same way the take runs them. `m-broad-scope` and `m-missing-fixture` have no driver or bundle in `demo/intent`, so they are reported `not_run` and never as passed.
+Controls. `m-overfit` and `m-harmless-difference` run on the first task of `o-1` through `control.ps1`. `m-harmless-difference` is out of scope at first; its rulings are the owner's, labelled `human (owner)`.
 
-`summary.json` has `status: complete` only when all 12 orders have a verdict or a recorded failure, all four controls have a result that is not `not_run` or `error`, and the run was not a rehearsal. Otherwise `incomplete_reasons` lists each reason.
+`m-broad-scope` is a separate order, `control-m-broad-scope`, with o-1's sentence. Its draft is revised with one broad item (method `ANY` on `/api/*`), and confirmation is tried with no broad acknowledgement. It is `as_expected` only when the refusal says the broad item `needs its own acknowledgement` (`crates/acan-core/src/lane.rs:461`), no `scope_confirmed` event exists, and no claim, build or land event exists on its tasks. Its edits file is labelled `control (m-broad-scope), not a decision`. No worker starts for it. It has not been run.
+
+`m-missing-fixture` writes a copy of the pinned f-accounts recipe without step `f5`, with its SHA-256 and a static prediction of the steps that would be missing. The gate is not run on the copy: the probe corpus is read from the protected snapshot, and no run repository carries the copy. So the control is `not_run` with that reason, never a pass. For the same reason a run cannot reach `complete`.
+
+The expected outcome of all four controls is taken from `mutants.json`. None is changed here.
+
+`summary.json` has `status: complete` only when all 12 orders have a verdict or a recorded failure, all four controls have a result that is not `not_run` or `error`, and the run was not a rehearsal. Otherwise `incomplete_reasons` lists each reason. A paused run has `status: paused` and its pause in `pause`.
+
+The `decisions` block counts scope and ruling decisions by decider: `scope_human`, `scope_delegated`, `rulings_human` and `rulings_delegated`. Every count is per order that made the decision, and the coordinator's decisions are never counted as human.
+
+Exit codes: 0 when the run finished (complete or incomplete), 1 when it stopped on a failure, 2 when the secret scan found a token or key in a log or result, and 3 when it paused for a decision.
