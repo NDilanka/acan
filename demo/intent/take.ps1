@@ -50,6 +50,10 @@ param(
     # cap is four, and every differing field of a route is one episode, so the seeded differences
     # need more room. The value is a human decision and is logged as one.
     [int]$MaxEpisodes = 40,
+    # The repair budget's rounds for the order, set at its first confirmation: 0 to 4 (the type's bound).
+    # 0 keeps the offered value. The value is a human decision and is logged as one.
+    [ValidateRange(0, 4)]
+    [int]$RepairRounds = 0,
     # The most model calls the worker's edit loop may make. Set by a human decision, logged in the summary.
     [int]$WorkerMaxSteps = 80,
     # A JSON file of the coordinator's decisions, written into summary.json as coordinator_decisions.
@@ -521,6 +525,8 @@ try {
         $body = Invoke-Api -Path "/api/orders/$oid/scope/confirmation"
         $offeredCap = [int]$body.budget.max_episodes
         $body.budget.max_episodes = [uint32]([math]::Max($MaxEpisodes, $offeredCap))
+        $offeredRounds = [int]$body.budget.repair_rounds
+        if ($RepairRounds -gt 0) { $body.budget.repair_rounds = [uint32]$RepairRounds }
         $answers = @()
         foreach ($choice in @($proposal.open)) {
             $fromKeep = @($humanAnswers | Where-Object { $_.choice_id -eq $choice.id })
@@ -544,6 +550,7 @@ try {
         if ($scopeConfirmed -lt 1) { throw 'confirm_scope returned no scope_confirmed event' }
         Add-Step -Name "${Order}: the owner raises the repair budget's episode cap at confirmation" -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{
             offered_max_episodes = $offeredCap; set_max_episodes = [int]$body.budget.max_episodes
+            offered_repair_rounds = $offeredRounds; set_repair_rounds = [int]$body.budget.repair_rounds
             reason = 'every differing field of a route is one discrepancy episode, and the offered cap of four stops the order at the first receipt with more; the owner sets the cap for this order'
         } -Human
         Add-Step -Name "${Order}: the owner confirms the scope (member HTTP)" -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{
