@@ -36,6 +36,7 @@ $mcpUrl = "$($Server.TrimEnd('/'))/mcp"
 $authHeaders = @{ Authorization = "Bearer $Token" }
 $script:RpcId = 0
 $steps = [System.Collections.Generic.List[object]]::new()
+$script:LastReply = $null
 $result = [ordered]@{
     schema     = 'acan-control-run/1'
     actor      = 'control identity (control-seeded agent token), not a model'
@@ -53,6 +54,8 @@ function Add-Step {
             evidence = $Evidence
         })
     Write-Output "[$(if ($Ok) { 'pass' } else { 'fail' })] $Name"
+    # Saved after every step, so a run that is killed at its wait still leaves its evidence.
+    Save-Result
 }
 
 function Post-Mcp {
@@ -62,6 +65,14 @@ function Post-Mcp {
 }
 
 function Call-Tool {
+    param([string]$Name, [hashtable]$Arguments)
+    $reply = Invoke-Tool -Name $Name -Arguments $Arguments
+    $text = [string]$reply.text
+    $script:LastReply = [ordered]@{ tool = $Name; ok = [bool]$reply.ok; text = $text.Substring(0, [Math]::Min(400, $text.Length)); at = (Get-Date).ToString('o') }
+    $reply
+}
+
+function Invoke-Tool {
     param([string]$Name, [hashtable]$Arguments)
     $script:RpcId++
     try {
@@ -99,10 +110,15 @@ function Apply-Edits {
     $Text
 }
 
+function Save-Result {
+    $result['steps'] = $steps
+    $result['last_reply'] = $script:LastReply
+    $result | ConvertTo-Json -Depth 60 | Set-Content -LiteralPath $Out -Encoding utf8
+}
+
 function Write-Result {
     $result['finished'] = (Get-Date).ToString('o')
-    $result['steps'] = $steps
-    $result | ConvertTo-Json -Depth 60 | Set-Content -LiteralPath $Out -Encoding utf8
+    Save-Result
 }
 
 $bundleObj = Get-Content -LiteralPath $Bundle -Raw | ConvertFrom-Json
@@ -189,8 +205,9 @@ try {
 
     # ---- report and wait for the receipt -----------------------------------------------------
     # Without -AwaitRuling the control stops at its first new receipt. With it, the control keeps
-    # its claim while a human rules: each new receipt is saved, and the control waits until the gate
-    # lands the candidate, the claim ends, or -RulingWaitSec passes with no new receipt.
+    # its claim while a human rules: each new receipt is saved, and the control waits while the
+    # receipt is blocked. A receipt that is not blocked, a refused report, a claim that ends, or
+    # -RulingWaitSec with no new receipt ends the wait; the claim is then released without a land.
     $before = Call-Tool -Name 'get_receipt' -Arguments @{ version = 'acan-mcp/1'; task = $Task }
     $lastHash = if ($before.ok) { [string]$before.value.receipt_hash } else { '' }
     $rep = Call-Tool -Name 'report_built' -Arguments @{ task = $Task; generation = $generation; head = $head }
@@ -209,7 +226,9 @@ try {
             $gr.value | ConvertTo-Json -Depth 80 | Set-Content -LiteralPath "$Out.receipt.json" -Encoding utf8
             $gate = [string]$gr.value.receipt.gate_state
             Write-Output "receipt $lastHash gate_state $gate"
-            if ($gate -eq 'landed' -or -not $AwaitRuling) { break }
+            # A blocked receipt waits for the rulings. Any other receipt is the answer to them (a
+            # passing gate records prepared, a land records landed): the control stops and releases.
+            if ($gate -ne 'blocked' -or -not $AwaitRuling) { break }
             $deadline = (Get-Date).AddSeconds($RulingWaitSec)
         }
         if ($null -ne $latest -and $AwaitRuling) {
@@ -221,6 +240,8 @@ try {
                 $reReported = $true
                 $again = Call-Tool -Name 'report_built' -Arguments @{ task = $Task; generation = $generation; head = $head }
                 Add-Step -Name 'control reports the same build again after the rulings' -Ok $again.ok -Evidence @{ refused = $(if ($again.ok) { $null } else { $again.text }) }
+                # A refused report gives no new receipt, so waiting for one only runs out the clock.
+                if (-not $again.ok) { break }
                 $deadline = (Get-Date).AddSeconds($ReceiptWaitSec)
             }
         }

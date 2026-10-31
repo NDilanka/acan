@@ -287,6 +287,16 @@ function Start-Worker {
     [ordered]@{ exited = $true; exit_code = $p.ExitCode }
 }
 
+function Get-WorkerFinish {
+    # The worker's own last line about how it ended, from its error log, without ANSI colour codes.
+    param([string]$Name, [string]$Tag)
+    $log = Join-Path $run "logs\$Name.$Tag.err.log"
+    if (-not (Test-Path -LiteralPath $log)) { return $null }
+    $line = Get-Content -LiteralPath $log | Where-Object { $_ -match 'the worker finished' } | Select-Object -Last 1
+    if ($null -eq $line) { return $null }
+    ($line -replace "`e\[[0-9;]*m", '')
+}
+
 function Get-AgentEvents {
     param($Events, [string]$Agent)
     @($Events | Where-Object { (ConvertTo-Json -Depth 8 -Compress $_) -like "*`"$Agent`"*" } | ForEach-Object {
@@ -598,7 +608,7 @@ try {
             $script:Evidence.workers['o-1-worker-a'] = @{ process = $wa; events = $waEvents }
             Save-State
             $waTypes = @($waEvents | ForEach-Object { $_.type } | Select-Object -Unique)
-            Add-Step -Name 'o-1 step 1: worker A builds the order (honest attempt, model)' -Actor 'worker-a (model worker)' -Provider "$($script:Routes.worker.provider) / $($script:Routes.worker.model)" -Result $(if ($wa.exited -and ($waTypes -contains 'build_reported' -or $waTypes -contains 'landed')) { 'pass' } else { 'fail' }) -Evidence @{ process = $wa; event_types = $waTypes; events = $waEvents.Count; note = 'pass only when the worker process exited and a build was reported; a worker still running at the wait is recorded as fail' }
+            Add-Step -Name 'o-1 step 1: worker A builds the order (honest attempt, model)' -Actor 'worker-a (model worker)' -Provider "$($script:Routes.worker.provider) / $($script:Routes.worker.model)" -Result $(if ($wa.exited -and $wa.exit_code -eq 0 -and ($waTypes -contains 'build_reported' -or $waTypes -contains 'landed')) { 'pass' } else { 'fail' }) -Evidence @{ process = $wa; worker_finished = (Get-WorkerFinish -Name 'worker-a' -Tag 'o1'); event_types = $waTypes; events = $waEvents.Count; note = 'pass only when the worker exited with code 0 (its build was committed and reported) and a build was reported; a worker still running at the wait, or one that ended without a commit, is recorded as fail' }
         } else {
             Add-Step -Name 'o-1 step 1: worker A (skipped by -SkipWorkers)' -Actor 'worker-a (model worker)' -Provider 'none' -Result 'not_run' -Evidence @{ reason = '-SkipWorkers' }
         }
@@ -646,8 +656,13 @@ try {
             Add-Step -Name 'o-1 rulings: the control produced no receipt to rule on' -Actor 'script' -Provider 'none' -Result 'fail' -Evidence @{ control_exited = $ctl.HasExited }
         }
         Set-Content -LiteralPath $done -Value 'rulings finished' -Encoding utf8
+        $ctlKilled = $false
         if (-not $ctl.WaitForExit(($RulingWaitSec + 300) * 1000)) {
+            # The control saves its result after every step, so its evidence survives the kill. A
+            # killed control runs no release, so its claim is not released by this run.
+            $ctlKilled = $true
             Stop-Process -Id $ctl.Id -Force -ErrorAction SilentlyContinue
+            Write-Output "control m-harmless-difference was killed at its wait; its result so far is $mh"
         }
         $r3 = Read-ControlResult -Path $mh
         $landedNow = ($null -ne $r3 -and $r3.gate_state -eq 'landed')
@@ -655,7 +670,7 @@ try {
             $lc = Get-LandCheck -ReceiptFile "$mh.receipt.json" -What 'o-1'
             $script:Evidence.lands['o-1'] = $lc
         }
-        $script:Evidence.controls['m-harmless-difference'] = @{ task = $t0; result = $mh; receipt_hash = $r3.receipt_hash; gate_state = $r3.gate_state; counts = $r3.counts; head = $r3.head; ruling_error = $rulingErr; receipts_saved = $r3.receipts_saved }
+        $script:Evidence.controls['m-harmless-difference'] = @{ task = $t0; result = $mh; receipt_hash = $r3.receipt_hash; gate_state = $r3.gate_state; counts = $r3.counts; head = $r3.head; ruling_error = $rulingErr; receipts_saved = $r3.receipts_saved; killed_at_wait = $ctlKilled; last_reply = $r3.last_reply; control_error = $r3.error }
         Save-State
         Add-Step -Name 'o-1 step 3: seeded harmless difference m-harmless-difference (control) lands after the ruling' -Actor 'control-seeded (control identity, not a model)' -Provider 'none' -Result $(if ($landedNow) { 'pass' } else { 'fail' }) -Evidence @{ task = $t0; receipt_hash = $r3.receipt_hash; gate_state = $r3.gate_state; counts = $r3.counts; land = $script:Evidence.lands['o-1']; result_file = $mh }
         $outcome = $(if ($landedNow) { 'o1_landed' } else { 'o1_not_landed' })
@@ -677,7 +692,7 @@ try {
             $script:Evidence.workers['o-8-worker-b'] = @{ process = $wb; events = $wbEvents }
             Save-State
             $wbTypes = @($wbEvents | ForEach-Object { $_.type } | Select-Object -Unique)
-            Add-Step -Name 'o-8 step 4: worker B builds Retry-After (model)' -Actor 'worker-b (model worker)' -Provider "$($script:Routes.worker.provider) / $($script:Routes.worker.model)" -Result $(if ($wb.exited -and ($wbTypes -contains 'build_reported' -or $wbTypes -contains 'landed')) { 'pass' } else { 'fail' }) -Evidence @{ process = $wb; event_types = $wbTypes; events = $wbEvents.Count; note = 'pass only when the worker process exited and a build was reported; a worker still running at the wait is recorded as fail' }
+            Add-Step -Name 'o-8 step 4: worker B builds Retry-After (model)' -Actor 'worker-b (model worker)' -Provider "$($script:Routes.worker.provider) / $($script:Routes.worker.model)" -Result $(if ($wb.exited -and $wb.exit_code -eq 0 -and ($wbTypes -contains 'build_reported' -or $wbTypes -contains 'landed')) { 'pass' } else { 'fail' }) -Evidence @{ process = $wb; worker_finished = (Get-WorkerFinish -Name 'worker-b' -Tag 'o8'); event_types = $wbTypes; events = $wbEvents.Count; note = 'pass only when the worker exited with code 0 (its build was committed and reported) and a build was reported; a worker still running at the wait, or one that ended without a commit, is recorded as fail' }
         } else {
             Add-Step -Name 'o-8 step 4: worker B (skipped by -SkipWorkers)' -Actor 'worker-b (model worker)' -Provider 'none' -Result 'not_run' -Evidence @{ reason = '-SkipWorkers' }
         }
