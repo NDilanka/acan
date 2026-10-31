@@ -928,7 +928,10 @@ async fn a_scope_draft_that_never_checks_is_recorded_as_a_failure() {
     );
     // The request the job sent carries the order's sentence, which is what the human asked for.
     // The order ref is only the draft's key, so it is not what the foreman drafts from.
-    let sent = asked.lock().expect("the asked lock is not poisoned").clone();
+    let sent = asked
+        .lock()
+        .expect("the asked lock is not poisoned")
+        .clone();
     assert!(!sent.is_empty(), "the foreman was asked for a scope");
     for message in &sent {
         let context: Value = serde_json::from_str(message).expect("the request is JSON");
