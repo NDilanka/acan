@@ -26,9 +26,14 @@ use acan_intent::{ContrastExample, ItemClass, LedgerEvent, Scope, ScopeConfirmat
 use acan_llm::{
     CallRecord, ChatRequest, ChatResponse, LlmError, ModelClient, Role, Usage, UsageLedger,
 };
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
 use crate::model::{self, Ask};
 use crate::offline::Offline;
@@ -942,6 +947,166 @@ async fn a_scope_draft_that_never_checks_is_recorded_as_a_failure() {
     }
     let (_, origin) = snapshot(&running).await;
     assert!(origin.world().lane(order).is_none(), "no scope is opened");
+    running.stop().await.expect("the server stops");
+}
+
+/// Text only the stored scope draft carries. It is the obligation id of the draft's one check, so
+/// the agent's views never contain it.
+const DRAFT_MARKER: &str = "obl-signup-may";
+
+/// The events route as `token` reads it from `from`: the status, and the body as text.
+async fn events_as(running: &Running, token: &str, from: u64) -> (reqwest::StatusCode, String) {
+    let response = client()
+        .get(url(running, &format!("/api/events?from={from}")))
+        .bearer_auth(token)
+        .send()
+        .await
+        .expect("the events request is sent");
+    let status = response.status();
+    (
+        status,
+        response.text().await.expect("the events body is text"),
+    )
+}
+
+/// The stream as `token` reads it from `from`, until an event of type `kind` arrives. Returns each
+/// frame as text, in the order the stream sent them.
+async fn stream_until(running: &Running, token: &str, from: u64, kind: &str) -> Vec<String> {
+    let mut request = format!("ws://{}/api/stream?from={from}", running.local_addr)
+        .into_client_request()
+        .expect("the stream URL");
+    let header = HeaderValue::from_str(&format!("Bearer {token}")).expect("the token header");
+    request.headers_mut().insert(AUTHORIZATION, header);
+    let (mut socket, _response) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("the stream connects");
+    let mut frames = Vec::new();
+    timeout(WAIT, async {
+        loop {
+            let message = socket
+                .next()
+                .await
+                .expect("the stream stays open")
+                .expect("the stream reads");
+            let WsMessage::Text(text) = message else {
+                continue;
+            };
+            let frame: &str = &text;
+            let event: Value = serde_json::from_str(frame).expect("a stream event");
+            let found = event["event"]["type"] == kind;
+            frames.push(frame.to_owned());
+            if found {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("the stream sends the event in time");
+    frames
+}
+
+/// The event of type `kind` in a view of the log, if the view has one.
+fn event_of_type<'a>(log: &'a [Value], kind: &str) -> Option<&'a Value> {
+    log.iter().find(|stamped| stamped["event"]["type"] == kind)
+}
+
+/// The agent's view of each event is the member's view with a scope draft's payload set to null.
+/// Every other field, the seq, time and actor included, is the same, so a cursor holds.
+fn assert_redacted(agent: &[Value], member: &[Value]) {
+    assert_eq!(agent.len(), member.len(), "the agent reads every event");
+    for (seen, stored) in agent.iter().zip(member) {
+        let mut expected = stored.clone();
+        if stored["event"]["type"] == "scope_drafted" {
+            expected["event"]["draft"] = Value::Null;
+        }
+        assert_eq!(seen, &expected, "the agent's view of an event");
+    }
+}
+
+/// An agent token never reads a scope draft. The events route and the stream both carry the
+/// member's events with the draft set to null, so the agent sees the same log and the same cursor.
+/// The member reads the draft through both routes.
+#[tokio::test]
+async fn an_agent_never_reads_a_scope_draft_through_the_events_or_the_stream() {
+    let repo = demo_repo();
+    let root = repo.path();
+    let foreman = Drafting {
+        inner: TwoTasks::default(),
+        draft: drafted_scope_body(),
+        asked: std::sync::Arc::default(),
+    };
+    let running = start_with(root, foreman, UsageLedger::default()).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+    post_order(&running).await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let view = scope_draft_of(&running, order).await;
+    assert_eq!(view["state"], "drafted", "the draft is stored: {view}");
+    // The split adds events after the draft, so wait for it. Once the task exists the log is
+    // quiet until a human adopts the draft, and the views below are taken from the same log.
+    settle(&running, "the split", |_, world| world.task(task).map(drop)).await;
+
+    let (status, body) = events_as(&running, OWNER_TOKEN, 0).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "the owner reads the log");
+    assert!(body.contains(DRAFT_MARKER), "the member reads the draft");
+    let member_log: Vec<Value> = serde_json::from_str(&body).expect("the log is JSON");
+    let member_drafted = event_of_type(&member_log, "scope_drafted").expect("the draft is logged");
+    assert_eq!(
+        member_drafted["event"]["draft"], view["draft"],
+        "the member's event holds the draft the route serves"
+    );
+
+    let (status, body) = events_as(&running, AGENT_TOKEN, 0).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "an agent reads the log");
+    assert!(
+        !body.contains(DRAFT_MARKER),
+        "the agent reads no draft: {body}"
+    );
+    let agent_log: Vec<Value> = serde_json::from_str(&body).expect("the log is JSON");
+    assert_redacted(&agent_log, &member_log);
+
+    // A cursor taken at the draft holds for the agent too: the tail is the member's tail, redacted.
+    let index = member_log
+        .iter()
+        .position(|stamped| stamped["event"]["type"] == "scope_drafted")
+        .expect("the draft is logged");
+    let from = member_log[index]["seq"]
+        .as_u64()
+        .expect("the seq is a number");
+    let (_, body) = events_as(&running, AGENT_TOKEN, from).await;
+    let agent_tail: Vec<Value> = serde_json::from_str(&body).expect("the tail is JSON");
+    assert_eq!(
+        agent_tail[0]["seq"], from,
+        "the agent's tail starts at the cursor"
+    );
+    let (_, body) = events_as(&running, OWNER_TOKEN, from).await;
+    let member_tail: Vec<Value> = serde_json::from_str(&body).expect("the tail is JSON");
+    assert_redacted(&agent_tail, &member_tail);
+
+    // The stream sends the same frames the events route does.
+    let frames = stream_until(&running, AGENT_TOKEN, 0, "scope_drafted").await;
+    assert!(
+        frames.iter().all(|frame| !frame.contains(DRAFT_MARKER)),
+        "the agent's stream carries no draft: {frames:?}"
+    );
+    let streamed: Vec<Value> = frames
+        .iter()
+        .map(|frame| serde_json::from_str(frame).expect("a stream event"))
+        .collect();
+    assert_eq!(
+        streamed.as_slice(),
+        &agent_log[..streamed.len()],
+        "the agent's stream matches the agent's events route"
+    );
+    let frames = stream_until(&running, OWNER_TOKEN, 0, "scope_drafted").await;
+    let last = frames.last().expect("the member's stream sent the draft");
+    let streamed: Value = serde_json::from_str(last).expect("a stream event");
+    assert_eq!(
+        streamed["event"]["draft"], view["draft"],
+        "the member's stream carries the draft"
+    );
     running.stop().await.expect("the server stops");
 }
 

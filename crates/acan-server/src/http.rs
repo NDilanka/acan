@@ -28,7 +28,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::auth::Principal;
 use crate::examples;
@@ -37,7 +37,7 @@ use crate::intent_api::{self, IntentError};
 use crate::jobs;
 use crate::mcp;
 use crate::public::{self, PublicRoot};
-use crate::{STATE_DIR, stream};
+use crate::{STATE_DIR, redact, stream};
 
 /// Builds the router. The public files are served for every path the API does not claim.
 pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<PublicRoot>) -> Router {
@@ -212,14 +212,20 @@ struct EventsQuery {
     from: u64,
 }
 
+/// The log from `from`, as the caller's principal may read it. A member gets each event as stored;
+/// an agent gets the member-only fields redacted, with the same seq, time and actor.
 async fn get_events<C: ModelClient + 'static>(
     State(host): State<Host<C>>,
     headers: HeaderMap,
     Query(query): Query<EventsQuery>,
-) -> Result<Json<Vec<Stamped>>, ApiError> {
-    authenticate(&host, bearer(&headers))?;
+) -> Result<Json<Vec<Value>>, ApiError> {
+    let principal = authenticate(&host, bearer(&headers))?;
     let events = host.store().load_from(Seq::new(query.from)).await?;
-    Ok(Json(events))
+    let views = events
+        .iter()
+        .map(|stamped| redact::view(&principal, stamped))
+        .collect::<anyhow::Result<Vec<Value>>>()?;
+    Ok(Json(views))
 }
 
 async fn get_plant<C: ModelClient + 'static>(
