@@ -1330,16 +1330,19 @@ fn ruling(
             .iter()
             .filter(|claim| claim.probe == index && claim.covered_by(&expectation.selector))
             .collect();
+        // A violation names no obligation, so its episode is the one keyed by its selector alone.
+        // Without one the origin refuses the failing item and the candidate cannot be recorded.
+        let episode = episode_for(inputs.episodes, &expectation.selector, &[]);
         items.push(ReceiptItem {
             item_id: minted("ruling", &(&expectation.ruling_id, hashes[index]))?,
             class: ItemClass::ViolatesRuling,
-            state: ItemState::Open,
+            state: state_of(episode),
             machine_id: expectation.machine_ids.first().clone(),
             selector: Some(canonical_episode_selector(&expectation.selector)),
             probe_hash: hashes[index],
-            episode_id: None,
+            episode_id: episode.map(|episode| episode.id),
             ruling_id: Some(expectation.ruling_id.clone()),
-            attempts: 0,
+            attempts: attempts_of(episode),
             budget: budget(inputs),
             route_path: inputs.results[index].contrast.probe.route_path.clone(),
             sequence: sequence(&inputs.results[index]),

@@ -11,10 +11,11 @@ use acan_intent::predicate::RetainedExample;
 use acan_intent::receipt::{self, ProbeResult, ReceiptError, ReceiptInputs};
 use acan_intent::{
     CaptureOutcome, Channels, Comparison, Completeness, ContentHash, Contest, ContrastExample,
-    CoreDerived, CorpusProbe, Fixture, FixtureSetManifest, FoldedLedger, GateState, HttpMethod,
-    ItemClass, LedgerEvent, Mask, MaskablePath, Observation, ObservationHash, ObservedRun, Outcome,
-    PreparedCommit, ProbeCorpus, ProbeHash, ProbeSetManifest, Receipt, ReceiptItem, RequestRecord,
-    RulingStatus, Run, RunOutcome, RunRole, Scope, ScopeConfirmation,
+    CoreDerived, CorpusProbe, DiscrepancyEpisode, EpisodeKey, Fixture, FixtureSetManifest,
+    FoldedLedger, GateState, HttpMethod, ItemClass, LedgerEvent, Mask, MaskablePath, Observation,
+    ObservationHash, ObservedRun, Outcome, PreparedCommit, ProbeCorpus, ProbeHash,
+    ProbeSetManifest, Receipt, ReceiptItem, RequestRecord, RulingStatus, Run, RunOutcome, RunRole,
+    Scope, ScopeConfirmation, Selector, canonical_episode_selector,
 };
 use acan_intent::{admit, fold};
 use serde::Serialize;
@@ -29,6 +30,7 @@ const CONFIRMATION: &str = include_str!("../fixtures/scope-confirmation.json");
 const RECEIPT: &str = include_str!("../fixtures/receipt.json");
 const LEDGER_DECISION: &str = include_str!("../fixtures/ledger-decision.json");
 const CONTEST: &str = include_str!("../fixtures/contest.json");
+const EPISODE: &str = include_str!("../fixtures/episode.json");
 
 /// The base commit scope.json confirms against.
 const BASE: &str = "178c1b07097a9f510882d139061ed50b4b44b1d4";
@@ -984,6 +986,91 @@ fn a_standing_approval_runs_on_new_evidence() {
         ruling_status(&receipt, "r-login"),
         RulingStatus::Held {}
     ));
+}
+
+#[test]
+fn a_violated_standing_ruling_names_the_episode_its_selector_keys() {
+    let scope = scope();
+    let confirmation = confirmation_for(&scope);
+    let ledger = fold::fold(&[login_ruling(
+        login_plan(),
+        "standing_predicate_approval",
+        json!([]),
+    )])
+    .expect("the ruling folds");
+    let context = prepared_context(&confirmation, &ledger);
+    let limited = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        sequence(FIVE_THEN_LIMITED),
+    );
+    let episodes = [open_episode(&scope, &login_selector())];
+    let results = [limited.result()];
+    let corpus: ProbeCorpus = parse(PROBE_CORPUS);
+    let inputs = ReceiptInputs {
+        scope: &scope,
+        confirmation: &confirmation,
+        prepared: &context,
+        ledger: &ledger,
+        corpus: &corpus,
+        results: &results,
+        anchors: &[],
+        episodes: &episodes,
+        contests: &[],
+        gate_state: GateState::Blocked,
+    };
+    let receipt = receipt::build_receipt(&inputs)
+        .expect("the receipt builds")
+        .value()
+        .clone();
+    let violation = receipt
+        .items
+        .iter()
+        .find(|item| item.class == ItemClass::ViolatesRuling)
+        .expect("the violation is a receipt item");
+    assert_eq!(
+        violation.episode_id.as_ref(),
+        Some(&episodes[0].id),
+        "a violated ruling names no episode, so the origin refuses the failing item"
+    );
+}
+
+/// The selector of the login ruling: the sixth login's status, on any login request.
+fn login_selector() -> Selector {
+    serde_json::from_value(json!({
+        "surface": "http",
+        "method": "POST",
+        "route_template": "/api/login",
+        "step_context": { "kind": "any" },
+        "principal": { "kind": "anonymous" },
+        "channel": "status"
+    }))
+    .expect("the selector decodes")
+}
+
+/// The open episode the order holds for `selector`, keyed as a violation of a ruling on it is: no
+/// obligation, and the canonical selector.
+fn open_episode(scope: &Scope, selector: &Selector) -> DiscrepancyEpisode {
+    let canonical = canonical_episode_selector(selector);
+    let id = EpisodeKey {
+        order: scope.order.clone(),
+        selector: canonical.clone(),
+        obligation_id: None,
+    }
+    .episode_id()
+    .expect("the key hashes");
+    let mut value: Value = parse(EPISODE);
+    value["id"] = to_value(&id);
+    value["order"] = to_value(&scope.order);
+    value["selector"] = to_value(&canonical);
+    value["state"] = json!("open");
+    value["bounce_count"] = json!(0);
+    value
+        .as_object_mut()
+        .expect("the episode is an object")
+        .remove("obligation_id");
+    serde_json::from_value(value).expect("the episode decodes")
 }
 
 #[test]
