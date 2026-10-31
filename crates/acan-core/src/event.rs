@@ -22,7 +22,7 @@ use crate::ids::{
     OrderRev, QuestionId, ReadbackId, Seq, TaskId, Timestamp, WitnessId,
 };
 use crate::index::Locus;
-use crate::lane::ScopedReadback;
+use crate::lane::{ProtectedInputs, ScopedReadback};
 use crate::lease::{Fence, Lease, LeaseEnd};
 use crate::member::{AgentPrincipal, Member, Role};
 use crate::order::{
@@ -286,6 +286,19 @@ pub enum SystemCmd {
         /// The gate context computed on `base` with the current scope and rulings.
         context: Box<GateContext>,
     },
+    /// The host records the protected inputs of a scope revision the human just confirmed, at the
+    /// base the confirmation names. The origin refuses it when the revision or base is no longer
+    /// current.
+    RecordConfirmedInputs {
+        /// The order.
+        order: OrderId,
+        /// The scope revision the confirmation covers.
+        revision: ScopeRev,
+        /// The base the confirmation names.
+        base: CommitSha,
+        /// The protected inputs at that base.
+        inputs: Box<ProtectedInputs>,
+    },
     /// The host could not merge a gating run's candidate onto the protected head. The run is
     /// refused: the task reopens with the conflicting files named, and nothing is installed.
     CandidateConflicted {
@@ -495,6 +508,19 @@ pub enum Event {
         scope_hash: ScopeHash,
         confirmation: Box<ScopeConfirmation>,
         runs: Vec<GateRunId>,
+    },
+    /// The protected inputs a confirmed scope revision was confirmed under, at the base it names.
+    /// The host records them when the human confirms, so a re-bind of that revision can check a
+    /// moved head against them when no candidate was prepared on the base.
+    ConfirmedInputsRecorded {
+        /// The order.
+        order: OrderId,
+        /// The confirmed scope revision.
+        revision: ScopeRev,
+        /// The base the confirmation names.
+        base: CommitSha,
+        /// The protected inputs at that base.
+        inputs: Box<ProtectedInputs>,
     },
     /// An agent read back a scope-first task; the acknowledgement is derived from it.
     ScopedReadbackPosted {

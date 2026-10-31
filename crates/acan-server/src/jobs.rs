@@ -950,18 +950,19 @@ struct Pass {
 }
 
 impl Pass {
-    /// Starts a pass for `run` on the protected head as it is now.
+    /// Starts a pass on the protected head as it is now. `label` names the pass directory, so a
+    /// gate run and a scope confirmation each get their own.
     async fn new<C: ModelClient>(
         host: &Host<C>,
         repo: &Repo,
-        run: GateRunId,
+        label: impl std::fmt::Display,
     ) -> Result<Self, JobError> {
         let policy = observe::runner_policy();
         let base = protected_base(repo, &policy).await?;
         let state = host.repo().join(STATE_DIR);
         let dir = state
             .join(CONTRAST_DIR)
-            .join(format!("{run}-{}", unique_suffix()));
+            .join(format!("{label}-{}", unique_suffix()));
         let snapshot = dir.join("snapshot");
         observe::snapshot(repo, &base, &snapshot).await?;
         let (app, corpus) = observe::read_protected(&snapshot)?;
@@ -1137,6 +1138,47 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
     }))
     .await?;
     Ok(())
+}
+
+/// The command that records the protected inputs of the scope `order` was just confirmed under, at
+/// the base the confirmation names. `None` when nothing is recorded: there is no repository, or
+/// the protected head is no longer that base, so the inputs would describe another commit.
+///
+/// # Errors
+///
+/// Returns an error when git or the ruling log cannot be read.
+pub(crate) async fn confirmed_inputs_command<C: ModelClient>(
+    host: &Host<C>,
+    order: OrderId,
+    confirmation: &ScopeConfirmation,
+) -> anyhow::Result<Option<SystemCmd>> {
+    let Some(workspace) = host.workspace() else {
+        return Ok(None);
+    };
+    let repo = workspace.repo();
+    let pass = Pass::new(host, repo, format!("confirm-{order}")).await?;
+    if pass.base.protected_head() != &confirmation.base_commit {
+        tracing::info!(%order, "the protected head moved after the scope was confirmed: nothing is recorded");
+        return Ok(None);
+    }
+    let Some(scope) = host.read(|world| world.lane(order).map(|lane| lane.scope.clone())) else {
+        return Ok(None);
+    };
+    let ledger = host.folded_rulings().map_err(JobError::Rulings)?;
+    let plan = pass.plan(repo, &pass.base, &pass.scratch);
+    let view = Order {
+        scope: &scope,
+        confirmation,
+        ledger: &ledger,
+        episodes: &[],
+    };
+    let inputs = observe::protected_inputs(&plan, &view)?;
+    Ok(Some(SystemCmd::RecordConfirmedInputs {
+        order,
+        revision: confirmation.scope_rev,
+        base: confirmation.base_commit.clone(),
+        inputs: Box::new(inputs),
+    }))
 }
 
 /// Lands a scope-first task. The delivery is checked again under the landing fence before any

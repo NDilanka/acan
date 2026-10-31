@@ -19,7 +19,9 @@ use crate::ids::{
 };
 use crate::index::CodeIndex;
 use crate::job::Job;
-use crate::lane::{self, LaneRun, PendingContrast, ScopeDraftOutcome, ScopeLane, ScopedReadback};
+use crate::lane::{
+    self, ConfirmedInputs, LaneRun, PendingContrast, ScopeDraftOutcome, ScopeLane, ScopedReadback,
+};
 use crate::lease::{self, Claim, DECLARE_BARRIER_MS};
 use crate::member::{self, AgentPrincipal, Member, Role, SettleRight};
 use crate::order::{
@@ -850,6 +852,24 @@ impl World {
                 }
                 Ok(())
             }
+            Event::ConfirmedInputsRecorded {
+                order,
+                revision,
+                base,
+                ..
+            } => {
+                let lane = self
+                    .lanes
+                    .get(order)
+                    .ok_or_else(|| format!("order {order} has no scope"))?;
+                let confirmed_base = lane.confirmation.as_ref().map(|found| &found.base_commit);
+                if *revision != lane.scope.rev || confirmed_base != Some(base) {
+                    return Err(format!(
+                        "order {order} records inputs its confirmation does not name"
+                    ));
+                }
+                Ok(())
+            }
             Event::ScopeRebound {
                 order,
                 scope,
@@ -1299,6 +1319,20 @@ impl World {
                             lane_run.receipt = None;
                         }
                     }
+                }
+            }
+            Event::ConfirmedInputsRecorded {
+                order,
+                revision,
+                base,
+                inputs,
+            } => {
+                if let Some(lane) = self.lanes.get_mut(order) {
+                    lane.confirmed_inputs = Some(ConfirmedInputs {
+                        revision: *revision,
+                        base: base.clone(),
+                        inputs: (**inputs).clone(),
+                    });
                 }
             }
             Event::ScopedReadbackPosted { readback } => {
@@ -1778,6 +1812,12 @@ fn decide_system(world: &World, ctx: &Ctx<'_>, cmd: SystemCmd) -> Result<Vec<Eve
             base,
             context,
         } => lane::decide_rebind(world, order, &base, &context),
+        SystemCmd::RecordConfirmedInputs {
+            order,
+            revision,
+            base,
+            inputs,
+        } => lane::decide_record_inputs(world, order, revision, &base, *inputs),
         SystemCmd::ScopeDrafted { order, rev, draft } => {
             lane::decide_drafted(world, order, rev, *draft)
         }

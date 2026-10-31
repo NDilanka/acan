@@ -7,6 +7,8 @@
 //!     selector and example hashes, one answer per open choice and one
 //!     acknowledgement per broad item--> confirmed                    [ScopeConfirmed]
 //! confirmed --ReviseScope: any newer revision--> unconfirmed         [ScopeRevised, LeaseEnded Superseded]
+//! confirmed --RecordConfirmedInputs: the confirmed revision at its base--> recorded
+//!                                                                    [ConfirmedInputsRecorded]
 //! PostScopedReadback at the confirmed revision and hash --> acknowledged [ScopedReadbackPosted]
 //! Claim --> needs the agent's acknowledged readback at the confirmed revision and hash
 //! ReportBuilt --> a run with no witnesses that waits for its receipt  [BuildReported]
@@ -24,10 +26,11 @@ use std::collections::BTreeMap;
 
 use acan_intent::{
     BroadGrantAck, CanonicalError, ChoiceAnswer, CommitSha, Contest, ContestId, ContestStatus,
-    EpisodeId, ExampleHash, GateContext, GateState, HumanRef, InvalidValue, ItemId, McpV1,
-    OrderRef, PostReadbackResponse, Prediction, PreparedCommit, RepairBudget, RepairRound,
-    RepairRounds, Scope, ScopeConfirmation, ScopeConfirmationV1, ScopeDraft, ScopeHash, ScopeRev,
-    ScopeRevision, SelectorHash, UnixMillis,
+    EnvHash, EpisodeId, EvaluatorVersion, ExampleHash, FixtureSetHash, GateContext, GateState,
+    HumanRef, InvalidValue, ItemId, LedgerHead, McpV1, OrderRef, PostReadbackResponse, Prediction,
+    PreparedCommit, ProbeSetHash, RepairBudget, RepairRound, RepairRounds, RunnerHash, RuntimeId,
+    SandboxPolicyHash, Scope, ScopeConfirmation, ScopeConfirmationV1, ScopeDraft, ScopeHash,
+    ScopeRev, ScopeRevision, SelectorHash, UnixMillis,
 };
 use serde::{Deserialize, Serialize};
 
@@ -129,6 +132,75 @@ impl ScopeBinding {
     }
 }
 
+/// The protected inputs a scope was confirmed under: the gate-context inputs that no candidate
+/// decides. The protected head, the merged commit, the scope hash, and the candidate's own overlay
+/// and artifacts are left out, because a re-bind changes them or derives them from the candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtectedInputs {
+    /// The ruling log revision in force.
+    pub ledger_head: LedgerHead,
+    /// The effective probes with their normalization plans.
+    pub probe_set_hash: ProbeSetHash,
+    /// The fixtures.
+    pub fixture_set_hash: FixtureSetHash,
+    /// The runner build and the app contract.
+    pub runner_hash: RunnerHash,
+    /// The evaluator that classifies the runs.
+    pub evaluator_version: EvaluatorVersion,
+    /// The app runtime.
+    pub runtime: RuntimeId,
+    /// The controlled environment.
+    pub controlled_env_hash: EnvHash,
+    /// The container policy the runs use.
+    pub sandbox_policy_hash: SandboxPolicyHash,
+}
+
+impl ProtectedInputs {
+    /// The protected inputs of `context`. Every context field is either taken or named as left
+    /// out, so a new field must be classified here to compile.
+    #[must_use]
+    pub fn of(context: &GateContext) -> Self {
+        let GateContext {
+            protected_head: _,
+            merged_commit: _,
+            overlay_hash: _,
+            effective_artifact_hashes: _,
+            scope_hash: _,
+            ledger_head,
+            probe_set_hash,
+            fixture_set_hash,
+            runner_hash,
+            evaluator_version,
+            runtime,
+            controlled_env_hash,
+            sandbox_policy_hash,
+        } = context;
+        Self {
+            ledger_head: *ledger_head,
+            probe_set_hash: *probe_set_hash,
+            fixture_set_hash: *fixture_set_hash,
+            runner_hash: *runner_hash,
+            evaluator_version: evaluator_version.clone(),
+            runtime: runtime.clone(),
+            controlled_env_hash: *controlled_env_hash,
+            sandbox_policy_hash: *sandbox_policy_hash,
+        }
+    }
+}
+
+/// The protected inputs recorded when a human confirmed one scope revision, at the base the
+/// confirmation names. A re-bind with no candidate prepared on that base checks the moved head
+/// against this record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedInputs {
+    /// The scope revision the confirmation covers.
+    pub revision: ScopeRev,
+    /// The base the confirmation names.
+    pub base: CommitSha,
+    /// The protected inputs at that base.
+    pub inputs: ProtectedInputs,
+}
+
 /// One gate run of a scope-first task. Its verdict comes only from its receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneRun {
@@ -155,6 +227,8 @@ pub struct ScopeLane {
     pub lineage: Vec<ScopeRevision>,
     /// The human confirmation of the current revision. A newer revision clears it.
     pub confirmation: Option<ScopeConfirmation>,
+    /// The protected inputs the origin recorded when the current revision was confirmed, if any.
+    pub confirmed_inputs: Option<ConfirmedInputs>,
     /// The repair budget, fixed by the first confirmation and never replenished.
     pub budget: Option<RepairBudget>,
     /// Every gate run of the order's tasks.
@@ -180,6 +254,7 @@ impl ScopeLane {
             scope,
             scope_hash,
             confirmation: None,
+            confirmed_inputs: None,
             budget: None,
             runs: BTreeMap::new(),
             episodes: BTreeMap::new(),
@@ -762,6 +837,47 @@ pub(crate) fn decide_prepared(
     Ok(vec![Event::CandidatePrepared {
         run,
         prepared: Box::new(prepared),
+    }])
+}
+
+/// `RecordConfirmedInputs`: the origin records the protected inputs a confirmed scope revision was
+/// confirmed under. Only the current revision's confirmation is recorded, and only at the base it
+/// names. A moved head or a newer revision is refused, so nothing is recorded for another base. A
+/// repeat for the recorded revision is a no-op.
+pub(crate) fn decide_record_inputs(
+    world: &World,
+    order: OrderId,
+    revision: ScopeRev,
+    base: &CommitSha,
+    inputs: ProtectedInputs,
+) -> Result<Vec<Event>, Rejection> {
+    let lane = world
+        .lane(order)
+        .ok_or_else(|| Rejection::unknown("order", order))?;
+    if lane.scope.rev != revision {
+        return Err(stale(lane));
+    }
+    let confirmation = confirmed(lane)?;
+    if confirmation.base_commit != *base {
+        return Err(Rejection::StaleEvidence {
+            detail: format!(
+                "the scope was confirmed on {}, not {base}: nothing is recorded",
+                confirmation.base_commit
+            ),
+        });
+    }
+    if lane
+        .confirmed_inputs
+        .as_ref()
+        .is_some_and(|record| record.revision == revision)
+    {
+        return Ok(Vec::new());
+    }
+    Ok(vec![Event::ConfirmedInputsRecorded {
+        order,
+        revision,
+        base: base.clone(),
+        inputs: Box::new(inputs),
     }])
 }
 
