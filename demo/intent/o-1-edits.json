@@ -2,11 +2,11 @@
   "schema": "acan-demo-intent-edits/2",
   "order": "o-1",
   "decided_by": "coordinator, delegated by the owner",
-  "note": "Written for the draft in run D:\\dev\\acan-takes\\d02t-fresh-o1-20261031-212852 (scope-draft-o-1.json, rev 1). Edits to the foreman's o-1 draft, logged separately from the model and labelled by who decided them. Each edit names the draft item it acts on by id; the draft_mapping block below maps each drafted id to the coordinator decision it follows. take.ps1 applies scope_edits to the draft in order, then choice_rules to the open choices, then sends the result as one revise_scope through the owner's member HTTP route, and logs each edit as a human step. An op whose id is not in the draft stops the take (fail closed). Nothing here is a verdict: the edits state the order's rules and the gate checks them.",
+  "note": "Written for the draft in run D:\\dev\\acan-takes\\d02t-fresh2-o1-20261031-230914 (scope-draft-o-1.json, rev 1). Each edit names the draft item it acts on by id; the draft_mapping block maps each drafted id to the coordinator decision it follows. take.ps1 applies scope_edits to the draft in order, then choice_rules to the open choices, then sends the result as one revise_scope through the owner's member HTTP route, and logs each edit as a human step. An op whose id is not in the draft stops the take (fail closed). INCOMPLETE: keep-login (drafted must-keep, POST /api/login, step login-check) is not covered by any coordinator decision; the take must not be resumed until it is decided. Nothing here is a verdict: the edits state the order's rules and the gate checks them.",
   "choice_rules": [
     {
       "id": "cr-bucket-scope",
-      "question_match": "(?i)shared across the link API",
+      "question_match": "(?i)shared across (the|all) link API",
       "option_label_match": "(?i)^Shared\\b",
       "when_no_option_matches": "fail",
       "decided_by": "coordinator, delegated by the owner",
@@ -15,7 +15,7 @@
     {
       "id": "cr-retry-header",
       "question_match": "(?i)Retry-After",
-      "option_label_match": "(?i)^Return 429 with no extra header",
+      "option_label_match": "(?i)^No extra header",
       "when_no_option_matches": "fail",
       "decided_by": "coordinator, delegated by the owner",
       "reason": "The order does not ask for a Retry-After header."
@@ -43,7 +43,7 @@
     {
       "op": "replace_must_keep",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "The drafted must-keep (keep-health) checks step health, which is not a probe step. The same rule, GET /health still returns 200 for an anonymous request, is anchored on probe step s1 of the health probe. The rule keeps the drafted id keep-health, because take.ps1 matches a replacement by id.",
+      "reason": "The drafted must-keep (keep-health) checks step health-check, which is not a probe step. The same rule, GET /health still returns 200 for an anonymous request, is anchored on probe step s1 of the health probe. The rule keeps the drafted id keep-health, because take.ps1 matches a replacement by id.",
       "rule": {
         "id": "keep-health",
         "selector": {
@@ -68,7 +68,7 @@
     {
       "op": "add_must_keep",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "The new draft (run d02t-fresh-o1-20261031-212852) has no redirect must-keep, so the earlier re-anchored redirect keep is added rather than replaced. The rule, the public redirect status stays as in base, is anchored on probe step s3 of link-redirect-and-clicks (anonymous GET /${link_code}, route /:code). The rule id keep-redirect is kept.",
+      "reason": "This draft (run d02t-fresh2-o1-20261031-230914) has no redirect must-keep, so the earlier re-anchored redirect keep is added rather than replaced. The rule, the public redirect status stays as in base, is anchored on probe step s3 of link-redirect-and-clicks (anonymous GET /${link_code}, route /:code). The rule id keep-redirect is kept.",
       "rule": {
         "id": "keep-redirect",
         "selector": {
@@ -147,6 +147,7 @@
     },
     {
       "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
       "reason": "A second session of the same user shares that user's quota: the relogin session's 11th request is answered 429. The actor label alice_relogin is a separate window group, so this is a status check, not a window.",
       "item": {
         "id": "i-quota-relogin",
@@ -179,6 +180,7 @@
     },
     {
       "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
       "reason": "The request sent at 59999 ms after the window opened is still inside the window and is answered 429. Covers the probe step s15 so its difference has an owner.",
       "item": {
         "id": "i-quota-inside-window",
@@ -283,32 +285,158 @@
         "text": "Each user keeps a separate link quota: bob's requests are not limited by alice's",
         "machine_ids": ["ratelimit"]
       }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body is an error instead of the link fields; the body may change only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-relogin",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s11" },
+          "principal": { "kind": "actor", "name": "alice_relogin" },
+          "channel": "body"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-429-relogin",
+            "predicate": { "predicate": "status_in", "step_id": "s11", "statuses": [429] },
+            "text": "The relogin session's over-limit POST /api/links is answered 429, so its body may differ from the 201 body"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s11",
+          "path": "body.code",
+          "after": { "state": "missing" }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body is an error instead of the link fields; the body may change only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s13" },
+          "principal": { "kind": "actor", "name": "alice" },
+          "channel": "body"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-429-window",
+            "predicate": { "predicate": "status_in", "step_id": "s13", "statuses": [429] },
+            "text": "alice's 11th POST /api/links is answered 429, so its body may differ from the 201 body"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s13",
+          "path": "body.code",
+          "after": { "state": "missing" }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body is an error instead of the link fields; the body may change only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-inside-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s15" },
+          "principal": { "kind": "actor", "name": "alice" },
+          "channel": "body"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-429-inside",
+            "predicate": { "predicate": "status_in", "step_id": "s15", "statuses": [429] },
+            "text": "A POST /api/links 59999 ms into the window is answered 429, so its body may differ from the 201 body"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s15",
+          "path": "body.code",
+          "after": { "state": "missing" }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body is an error instead of the link fields; the body may change only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-get-links",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s14" },
+          "principal": { "kind": "actor", "name": "alice_fresh" },
+          "channel": "body"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-429-get-links",
+            "predicate": { "predicate": "status_in", "step_id": "s14", "statuses": [429] },
+            "text": "The signed-in user's over-limit GET /api/links is answered 429, so its body may differ from the 200 body"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s14",
+          "path": "body.links",
+          "after": { "state": "missing" }
+        },
+        "machine_ids": ["ratelimit"]
+      }
     }
   ],
   "draft_mapping": {
-    "run": "D:\\dev\\acan-takes\\d02t-fresh-o1-20261031-212852",
-    "draft_file": "D:\\dev\\acan-takes\\d02t-fresh-o1-20261031-212852\\scope-draft-o-1.json",
+    "run": "D:\\dev\\acan-takes\\d02t-fresh2-o1-20261031-230914",
+    "draft_file": "D:\\dev\\acan-takes\\d02t-fresh2-o1-20261031-230914\\scope-draft-o-1.json",
     "draft_rev": 1,
     "decided_by": "coordinator, delegated by the owner",
     "items": [
-      { "draft_id": "limit-get-links", "kind": "may", "action": "remove_may", "decision": "replaced by the corpus-anchored GET item i-quota-get-links (s14, alice_fresh, 429)" },
-      { "draft_id": "limit-post-links", "kind": "may", "action": "remove_may", "decision": "replaced by the corpus-anchored POST items i-quota-window (s13), i-quota-relogin (s11), i-quota-inside-window (s15), and the must-keep mk-bob-quota (s12)" },
+      { "draft_id": "limit-get-links", "kind": "may", "action": "remove_may", "decision": "replaced by the corpus-anchored GET item i-quota-get-links (s14, alice_fresh, 429) and its body item i-quota-body-get-links" },
+      { "draft_id": "limit-post-links", "kind": "may", "action": "remove_may", "decision": "replaced by the corpus-anchored POST items i-quota-window (s13), i-quota-relogin (s11), i-quota-inside-window (s15), the must-keep mk-bob-quota (s12), and the body items i-quota-body-relogin, i-quota-body-window, i-quota-body-inside-window" },
       { "draft_id": "limit-delete-links", "kind": "may", "action": "remove_may", "decision": "removed; no probe sends more than ten DELETEs, so it is reported out of scope" },
-      { "draft_id": "keep-health", "kind": "must_keep", "action": "replace_must_keep", "decision": "re-anchored on probe s1 (GET /health, anonymous, status 200)" },
+      { "draft_id": "keep-health", "kind": "must_keep", "action": "replace_must_keep", "decision": "re-anchored on probe s1 (GET /health, anonymous, status 200); the draft step health-check is not a probe step" },
+      { "draft_id": "keep-login", "kind": "must_keep", "action": "NONE: blocked", "decision": "UNCOVERED. No coordinator decision covers POST /api/login equals_base at step login-check, which is not a probe step. The corpus has POST /api/login steps (core.json lines 28, 69, 98, 332, 344, 1209, 1230). Coordinator to decide: re-anchor on a named corpus step, drop, or keep as is." },
       { "draft_id": "keep-redirect", "kind": "not in draft", "action": "add_must_keep", "decision": "added at probe s3 (anonymous GET /:code, status equals base)" },
-      { "draft_id": "link-api-scope", "kind": "open", "action": "answer api-only (option label Only /api/links routes)", "decision": "Coordinator decision 1: link-api-scope = api-only. Reason copied verbatim into answers[0].reason." },
-      { "draft_id": "(no cr-bucket-scope match)", "kind": "open", "action": "none", "decision": "The draft has no question matching cr-bucket-scope; the shared-budget answer was not applied to any choice in this run." },
-      { "draft_id": "(no cr-retry-header match)", "kind": "open", "action": "none", "decision": "The draft has no Retry-After question; no header answer was applied." }
+      { "draft_id": "q-bucket-scope", "kind": "open", "action": "answered by choice rule cr-bucket-scope: Shared across GET POST DELETE link routes", "decision": "bucket-scope = shared (coordinator, earlier decision). Reason in cr-bucket-scope." },
+      { "draft_id": "q-retry-header", "kind": "open", "action": "answered by choice rule cr-retry-header: No extra header, status only", "decision": "Retry-After stays out of scope (coordinator decision 2: the answer to the header question is no header). Reason in cr-retry-header." }
     ],
+    "link_api_scope": "The draft has no route question, so link-api-scope is not applied in this run. The shared option lists GET, POST and DELETE link routes; under the earlier decision (the link API is the signed-in /api/links routes), that matches.",
     "code_format": "The draft has no code-format item, so D2 (drop i-code-format) holds with nothing to remove.",
-    "window_filter": "Coordinator decision 2 (ANY branch). crates/acan-intent: EventFilter.method is a required MethodSelector, and MethodSelector::Any exists (types.rs:838, predicate.rs:687 method_admits returns true). i-quota-window and mk-bob-quota now use event_filter.method ANY, so the window counts every method on /api/links for the principal. The item selector stays POST at s13 and s12. The link-quota-window probe has only POST /api/links steps, so the verdict does not change. No Rust was changed."
+    "window_filter": "Event filters use method ANY on route /api/links for i-quota-window and mk-bob-quota (ANY branch of decision 2; types.rs:838, predicate.rs:687). The filter does not cover route /api/links/:code, the DELETE route. No probe judges DELETE, so this is reported, not ruled.",
+    "flags_for_coordinator": [
+      "keep-login is uncovered: take must not be resumed until it is decided.",
+      "Shared option names DELETE link routes; the window filters count /api/links only."
+    ]
   },
-  "answers": [
-    {
-      "choice_id": "link-api-scope",
-      "option_label": "Only /api/links routes",
-      "decided_by": "coordinator, delegated by the owner",
-      "reason": "The link API is the signed-in /api/links routes. The public redirect GET /:code is not under /api and is not signed in, so it is outside this limit."
-    }
-  ]
+  "answers": []
 }
