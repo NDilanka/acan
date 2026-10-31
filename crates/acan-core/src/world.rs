@@ -58,6 +58,8 @@ pub enum Step {
     Explain,
     /// Comparing a screenshot witness.
     Screenshot,
+    /// Comparing a page's screenshots with a vision model.
+    Vision,
 }
 
 /// Token totals.

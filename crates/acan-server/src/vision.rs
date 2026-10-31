@@ -31,7 +31,8 @@ pub use browser::{CHROME, EDGE, default_browser};
 
 /// The record version the routes serve.
 pub(crate) const VERSION: &str = "vision_witness/1";
-/// The provider every vision call is routed to: the foreman's.
+/// The provider the record names. Vision calls reach it through the vision route, which
+/// defaults to the foreman's route.
 const PROVIDER: &str = "meta";
 /// The corpus probe whose page is captured, and the step whose response is that page: the
 /// dashboard as a signed-in user sees it.
@@ -606,7 +607,7 @@ async fn record_usage<C: ModelClient>(
 ) {
     let command = SystemCmd::ModelUsed {
         model: call.model.clone(),
-        step: Step::Screenshot,
+        step: Step::Vision,
         input_tokens: call.usage.prompt_tokens,
         output_tokens: call.usage.completion_tokens,
     };

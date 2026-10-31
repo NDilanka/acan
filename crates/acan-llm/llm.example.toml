@@ -42,3 +42,8 @@ provider = "baseten"
 
 [routing.fast]
 provider = "baseten"
+
+# Vision checks (the advisory page comparison) have their own row. Without this block they use
+# the foreman's route.
+[routing.vision]
+provider = "meta"

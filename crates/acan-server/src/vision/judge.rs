@@ -88,10 +88,10 @@ pub(crate) fn request(pair: &Pair<'_>) -> ChatRequest {
     }
 }
 
-/// Asks `client` to compare `pair` as the foreman. A failed call is `not_checked`, never a
+/// Asks `client` to compare `pair` as the vision role. A failed call is `not_checked`, never a
 /// verdict.
 pub(crate) async fn judge<C: ModelClient>(client: &C, pair: &Pair<'_>) -> Judgement {
-    match client.chat_traced(Role::Foreman, request(pair)).await {
+    match client.chat_traced(Role::Vision, request(pair)).await {
         Ok(traced) => {
             let response = traced.value;
             let (verdict, reason, raw_reply) = read_reply(response.content.as_deref());
@@ -205,7 +205,7 @@ mod tests {
     #[tokio::test]
     async fn a_consistent_reply_is_read() {
         let stub = Stub::default().when(
-            Role::Foreman,
+            Role::Vision,
             |_| true,
             Reply::text(r#"{"verdict":"consistent","reason":"The totals column is still shown."}"#),
         );
@@ -220,7 +220,7 @@ mod tests {
     #[tokio::test]
     async fn an_inconsistent_reply_in_a_fence_is_read() {
         let stub = Stub::default().when(
-            Role::Foreman,
+            Role::Vision,
             |_| true,
             Reply::text("```json\n{\"verdict\": \"inconsistent\", \"reason\": \"The summary line is gone.\"}\n```"),
         );
@@ -233,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn a_reply_that_does_not_parse_is_unclear_and_keeps_its_text() {
         let stub = Stub::default().when(
-            Role::Foreman,
+            Role::Vision,
             |_| true,
             Reply::text("Looks fine to me!"));
         let items = items();
