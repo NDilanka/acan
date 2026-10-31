@@ -369,7 +369,6 @@ async fn a_conflicting_land_reports_the_files_and_reopens_the_task() {
 }
 
 #[tokio::test]
-#[ignore = "product gap: a protected head that moves before any candidate is prepared has no recorded protected input to check the scope against, and the confirmation binds no corpus or app-contract hash (lane.rs decide_rebind)"]
 async fn a_land_onto_a_protected_branch_that_moved_merges_only_the_gated_commit() {
     let _docker = DOCKER.lock().await;
     let repo = demo_repo();
@@ -412,7 +411,6 @@ async fn a_land_onto_a_protected_branch_that_moved_merges_only_the_gated_commit(
 }
 
 #[tokio::test]
-#[ignore = "product gap: the reclaim starts on a protected head that moved before any candidate was prepared on the confirmed base, so no recorded protected input checks the scope (lane.rs decide_rebind)"]
 async fn a_reclaim_after_a_refused_land_starts_from_the_protected_head_the_user_moved_to() {
     let _docker = DOCKER.lock().await;
     let repo = demo_repo();
