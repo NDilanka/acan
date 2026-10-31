@@ -145,9 +145,10 @@ pub fn ruling_draft(json: &str) -> Result<RulingDraftView, serde_json::Error> {
 /// The latency the origin also sends is not read here.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct UsageRow {
-    /// The role the calls served, such as `split` or `explain`.
+    /// The role the calls served: `foreman`, `worker`, `fast`, or `vision` for the vision witness.
     pub role: String,
-    /// The provider that answered, such as `Meta Model API` or `Baseten`.
+    /// The provider's name in the config, such as `meta` or `baseten`. `offline` marks the
+    /// offline stand-in, which is not a model call.
     pub provider: String,
     /// The model that answered.
     pub model: String,

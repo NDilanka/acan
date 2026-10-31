@@ -30,11 +30,11 @@ pub const CHAR_CSS_PX: f32 = 6.5;
 /// From the plate's front edge down to the middle of the label, in CSS pixels. Matches the
 /// label's offset and line height in `index.html`.
 pub const LABEL_DROP_CSS_PX: f32 = 13.0;
-/// The size of the screen rectangle the fixed usage panel covers, in CSS pixels: width and
-/// height, measured against the shots (the panel spans about 270 by 75 pixels there) and padded
-/// right and up so a machine's name beside or above the panel stays clear of it. The panel's
-/// height grows with the usage rows, so the pad is generous.
-pub const USAGE_PANEL_CSS: [f32; 2] = [360.0, 120.0];
+/// The size of the screen rectangle the fixed usage panel covers at rest, in CSS pixels: width
+/// and height. The panel now holds the meta attribution table, its legend and its note, so these
+/// are estimates from that content, not measurements in a browser. The panel grows with the
+/// rows, so the pad is generous.
+pub const USAGE_PANEL_CSS: [f32; 2] = [480.0, 210.0];
 /// The label's bottom edge sits this many `LABEL_DROP_CSS_PX` below the plate's front edge.
 const LABEL_BOTTOM_DROPS: f32 = 1.6;
 /// Below the size to name, this many of the largest machines are still named, down to
@@ -513,7 +513,7 @@ mod tests {
             assert_eq!(avoid[3], height, "bottom is the viewport height");
             assert_eq!(
                 avoid[1],
-                height - 120.0 * dpr,
+                height - USAGE_PANEL_CSS[1] * dpr,
                 "top is the panel's height up from the bottom"
             );
         }
