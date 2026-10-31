@@ -34,6 +34,30 @@
       "rule": "present",
       "label": "the over-limit body carries an error or a generated value",
       "reason": "A rejected request creates no link, so later generated values (codes, paths, counts) can differ from the base. The field is accepted when the candidate has a value; the value itself is not compared."
+    },
+    {
+      "id": "rl-cookie-session-present",
+      "field": "^cookie\\.session$",
+      "candidate": "present",
+      "rule": "present",
+      "label": "the session cookie is a random token per login",
+      "reason": "The session cookie is issued per login and holds a random token, so its value differs between runs. The field is accepted when the candidate sets it; the value is not compared."
+    },
+    {
+      "id": "rl-stored-user-id-present",
+      "field": "^side_effect\\.store\\.users\\[\\d+\\]\\.id$",
+      "candidate": "present",
+      "rule": "present",
+      "label": "the stored user id is a generated identifier",
+      "reason": "The stored user's id is generated on signup, so its value differs between runs. The field is accepted when the candidate stores the user; the value is not compared."
+    },
+    {
+      "id": "rl-stored-password-hash-present",
+      "field": "^side_effect\\.store\\.users\\[\\d+\\]\\.passwordHash$",
+      "candidate": "present",
+      "rule": "present",
+      "label": "the stored password hash is salted per write",
+      "reason": "The stored password hash is salted when it is written, so its value differs between runs with the same password. The field is accepted when the candidate stores a hash; the value is not compared. This is a human relaxation of the comparison, recorded as such: the predicate checks presence, not that the value is a hash."
     }
   ]
 }
