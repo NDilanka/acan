@@ -1585,7 +1585,10 @@ async fn run_tool(
         }
     };
     let answer = match call.function.name.as_str() {
-        "read_file" => tools.read_file(&string_arg(&args, "path")).await,
+        "read_file" => match read_offset(&args) {
+            Ok(offset) => tools.read_file(&string_arg(&args, "path"), offset).await,
+            Err(reason) => Err(reason),
+        },
         "list_files" => tools.list_files(&string_arg(&args, "path")),
         "run_tests" => tools.run_tests().await,
         "write_file" => {
@@ -1975,6 +1978,18 @@ fn string_arg(args: &Value, key: &str) -> String {
     args[key].as_str().unwrap_or_default().to_owned()
 }
 
+/// The byte offset a `read_file` call starts from. Absent or null means the start of the file.
+/// Anything else that is not a whole number is refused, so a bad offset cannot quietly read the
+/// first page again.
+fn read_offset(args: &Value) -> Result<u64, String> {
+    match args.get("offset") {
+        None | Some(Value::Null) => Ok(0),
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| format!("offset must be a whole number of bytes, not {value}")),
+    }
+}
+
 fn log(steps: &mut Vec<String>, text: String) {
     tracing::info!("{text}");
     steps.push(text);
@@ -2226,6 +2241,27 @@ mod tests {
         let declared = vec!["src/a.ts".to_owned()];
         let tools = Worktree::new(root.path().to_path_buf(), &declared, None);
         (root, tools)
+    }
+
+    #[test]
+    fn a_read_offset_is_a_whole_number_of_bytes_or_absent() {
+        assert_eq!(read_offset(&json!({ "path": "a.ts" })), Ok(0));
+        assert_eq!(
+            read_offset(&json!({ "path": "a.ts", "offset": null })),
+            Ok(0)
+        );
+        assert_eq!(
+            read_offset(&json!({ "path": "a.ts", "offset": 32768 })),
+            Ok(32768)
+        );
+        for bad in [json!("32768"), json!(-1), json!(1.5)] {
+            let refused = read_offset(&json!({ "path": "a.ts", "offset": bad.clone() }))
+                .expect_err("a value that is not a whole number is refused");
+            assert!(
+                refused.contains("offset must be a whole number of bytes"),
+                "the refusal names the rule for {bad}: {refused}"
+            );
+        }
     }
 
     /// A worker config for edit-loop tests: no server, no test command, `max_steps` steps.

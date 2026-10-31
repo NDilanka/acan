@@ -54,8 +54,9 @@ param(
     # 0 keeps the offered value. The value is a human decision and is logged as one.
     [ValidateRange(0, 8)]
     [int]$RepairRounds = 0,
-    # The most model calls the worker's edit loop may make. Set by a human decision, logged in the summary.
-    [int]$WorkerMaxSteps = 80,
+    # The most model calls the worker's edit loop may make per build. Set by a human decision, logged in the summary.
+    # 200 since D02M: the D02T run used all 120 on its fourth build without a commit.
+    [int]$WorkerMaxSteps = 200,
     # A JSON file of the coordinator's decisions, written into summary.json as coordinator_decisions.
     [string]$DecisionsFile = '',
     [int]$HealthWaitSec = 90,
