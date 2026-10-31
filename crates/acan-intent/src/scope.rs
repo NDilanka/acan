@@ -573,8 +573,8 @@ pub struct BroadGrantAck {
 }
 
 bounded!(
-    /// Repair rounds one order may use: at most two in v1.
-    RepairRounds(u32), 0 ..= 2, "repair rounds per order"
+    /// Repair rounds one order may use: at most four in v1.
+    RepairRounds(u32), 0 ..= 4, "repair rounds per order"
 );
 
 /// The repair budget of one order, fixed before the first run.
@@ -677,15 +677,16 @@ mod tests {
     }
 
     #[test]
-    fn an_order_has_at_most_two_repair_rounds() {
+    fn an_order_has_at_most_four_repair_rounds() {
         let budget = |rounds: u32| {
             serde_json::from_value::<RepairBudget>(json!({
                 "repair_rounds": rounds, "wall_time_ms": 1, "model_cost_micros": 1,
                 "max_episodes": 1
             }))
         };
-        assert!(budget(2).is_ok());
-        assert!(budget(3).is_err());
+        assert!(budget(0).is_ok());
+        assert!(budget(4).is_ok());
+        assert!(budget(5).is_err());
     }
 
     #[test]

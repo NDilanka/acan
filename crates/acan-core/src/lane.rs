@@ -557,13 +557,16 @@ pub fn confirmation_body(
     })
 }
 
+/// The repair rounds a body offers before the order's first confirmation fixes its own. This is
+/// the default, not the v1 cap, which is [`RepairRounds::MAX`].
+const OFFERED_REPAIR_ROUNDS: u32 = 2;
+
 /// The repair budget a body offers before the order's first confirmation fixes one: two repair
-/// rounds, the most v1 allows, ten minutes of wall time, a two-dollar model cost cap, and four
-/// new episodes.
+/// rounds, ten minutes of wall time, a two-dollar model cost cap, and four new episodes.
 fn offered_budget() -> RepairBudget {
     RepairBudget {
-        repair_rounds: RepairRounds::try_from(RepairRounds::MAX)
-            .expect("the largest repair round count is in range"),
+        repair_rounds: RepairRounds::try_from(OFFERED_REPAIR_ROUNDS)
+            .expect("the offered repair round count is in range"),
         wall_time_ms: 600_000,
         model_cost_micros: 2_000_000,
         max_episodes: 4,

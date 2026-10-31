@@ -596,7 +596,7 @@ fn classify(
         }
     } else if let Ok(list) = NonEmpty::try_from(bounce.clone()) {
         let round = RoundNumber::try_from(rounds_used + 1)
-            .map_err(|_| Rejection::invalid("an order has at most two repair rounds"))?;
+            .map_err(|_| Rejection::invalid("an order has at most four repair rounds"))?;
         let key = RoundKey {
             order: lane::order_ref(lane.order)?,
             round,
