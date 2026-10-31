@@ -245,11 +245,13 @@ struct Sequence<'a> {
     input: &'a SequenceInput<'a>,
     identity: Identity,
     run_id: RunId,
-    started: Instant,
     started_at: UnixMillis,
     deadline: Instant,
     steps: Vec<&'a Step>,
     recipe_len: usize,
+    /// The controlled clock in milliseconds: the sum of the `advance_time` steps that succeeded.
+    /// The app reads the same clock, so a request's `sent_at_ms` is the app's time, not wall time.
+    clock_ms: u64,
     workspace: Option<Workspace>,
     /// The create of the container, until it has been awaited.
     pending_create: Option<JoinHandle<Result<String, CreateError>>>,
@@ -282,13 +284,13 @@ impl<'a> Sequence<'a> {
             input,
             identity,
             run_id,
-            started,
             started_at: unix_millis(),
             deadline: started
                 .checked_add(Duration::from_millis(cap_ms))
                 .unwrap_or(started),
             steps,
             recipe_len: input.fixture.recipe.len(),
+            clock_ms: 0,
             workspace: None,
             pending_create: None,
             created: None,
@@ -487,7 +489,7 @@ impl<'a> Sequence<'a> {
             route_template: route,
             actor: step.actor.clone(),
             client: step.client.clone(),
-            sent_at_ms: self.elapsed_ms(),
+            sent_at_ms: self.clock_ms,
         };
         self.spend()?;
         let limit = self.limit(Some(step.deadline_ms));
@@ -648,7 +650,10 @@ impl<'a> Sequence<'a> {
             return Err(reply_failure(&step.id, recipe, reply.crashed, reply.detail));
         }
         match reply.status {
-            Some(code) if (200..300).contains(&code) => Ok(()),
+            Some(code) if (200..300).contains(&code) => {
+                self.clock_ms = self.clock_ms.saturating_add(step.by_ms);
+                Ok(())
+            }
             code => Err(failed(
                 &step.id,
                 recipe,
@@ -903,10 +908,6 @@ impl<'a> Sequence<'a> {
             })?;
         self.observations.push((hash, observation));
         Ok(())
-    }
-
-    fn elapsed_ms(&self) -> u64 {
-        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
     /// Removes a container that never reached the attach step: one whose create is still in

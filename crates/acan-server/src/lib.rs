@@ -8,6 +8,7 @@
 mod auth;
 #[cfg(test)]
 mod e2e;
+mod examples;
 mod git;
 mod host;
 mod http;

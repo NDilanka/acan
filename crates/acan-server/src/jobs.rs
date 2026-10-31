@@ -62,6 +62,7 @@ use tokio::sync::Semaphore;
 use tokio::task::{self, JoinHandle, JoinSet};
 
 use crate::STATE_DIR;
+use crate::examples;
 use crate::git::{LandFailure, Workspace};
 use crate::host::{self, Host, SubmitError};
 use crate::land::{self, Delivery, LandError};
@@ -1147,6 +1148,15 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
             unnamed.join(", ")
         )));
     }
+    // The examples the receipt's episodes name are kept before the receipt is recorded, so a human
+    // can rule on each episode. Only the observed runs of this pass are kept. A store that fails
+    // fails the run, so no receipt names an example that is not kept.
+    examples::retain(
+        &host.repo().join(STATE_DIR).join(examples::DIR),
+        run,
+        &judged,
+    )
+    .map_err(|err| JobError::Unavailable(format!("run {run}'s examples do not keep: {err}")))?;
     host.submit(Command::System(SystemCmd::ReceiptReady {
         run,
         receipt: Box::new(judged.receipt),

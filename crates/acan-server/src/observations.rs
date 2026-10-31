@@ -155,7 +155,7 @@ fn io_error(path: &Path, source: io::Error) -> ObservationError {
 /// # Errors
 ///
 /// Returns the I/O error of the failing step.
-fn replace_file(target: &Path, temp: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn replace_file(target: &Path, temp: &Path, bytes: &[u8]) -> io::Result<()> {
     let written = write_synced(temp, bytes).and_then(|()| fs::rename(temp, target));
     if written.is_err() {
         let _ = fs::remove_file(temp);
