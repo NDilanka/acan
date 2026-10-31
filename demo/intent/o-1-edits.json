@@ -1,7 +1,8 @@
 {
   "schema": "acan-demo-intent-edits/2",
   "order": "o-1",
-  "note": "Human edits to the foreman's o-1 draft, logged separately from the model. Each edit names the draft item it acts on by id; a draft from a new run may use other ids, so this file is written for the draft in the run it resumes. take.ps1 applies scope_edits to the draft in order, then choice_rules to the open choices, then sends the result as one revise_scope through the owner's member HTTP route, and logs each edit as a human step. An op whose id is not in the draft stops the take (fail closed). Nothing here is a verdict: the edits state the order's rules and the gate checks them.",
+  "decided_by": "owner for the code-length answer (decision 2026-10-31 06:33); coordinator, delegated by the owner, for every other edit",
+  "note": "Edits to the foreman's o-1 draft, logged separately from the model and labelled by who decided them. Each edit names the draft item it acts on by id; a draft from a new run may use other ids, so this file is written for the draft in the run it resumes. take.ps1 applies scope_edits to the draft in order, then choice_rules to the open choices, then sends the result as one revise_scope through the owner's member HTTP route, and logs each edit as a human step. An op whose id is not in the draft stops the take (fail closed). Nothing here is a verdict: the edits state the order's rules and the gate checks them.",
   "choice_rules": [
     {
       "id": "cr-code-length",
@@ -15,14 +16,14 @@
       "question_match": "(?i)duplicate",
       "option_label_match": "(?i)allow|reuse",
       "when_no_option_matches": "fail",
-      "reason": "The demo generates each link code at random and does not check for an existing code (src/links.ts, randomInt loop), so its current behavior allows reuse. The order does not ask for a change, so the current behavior is kept (human answer, 'Allow reuse of code')."
+      "reason": "The demo generates each link code at random and does not check for an existing code (src/links.ts, randomInt loop), so its current behavior allows reuse. The order does not ask for a change, so the current behavior is kept (delegated answer, 'Allow reuse of code')."
     },
     {
       "id": "cr-health",
       "question_match": "(?i)health",
       "option_label_match": "(?i)keep",
       "when_no_option_matches": "fail",
-      "reason": "The order does not ask for a health-check change, so the current health status is kept (human answer, 'Keep 200 for healthy')."
+      "reason": "The order does not ask for a health-check change, so the current health status is kept (delegated answer, 'Keep 200 for healthy')."
     }
   ],
   "scope_edits": [
