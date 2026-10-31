@@ -980,6 +980,38 @@ fn a_record_for_an_older_revision_needs_the_scope_confirmed_again() {
 }
 
 #[test]
+fn a_ruling_recorded_after_the_confirmation_is_never_recorded_as_part_of_it() {
+    let mut fx = Fx::new();
+    let scope = fx.open_lane();
+    fx.record_ruling("owner", fx.decision_json(1, "r-1", None))
+        .expect("the ruling is recorded");
+    // The inputs the host computes now name the ruling log after the ruling. The scope was
+    // confirmed before it, so the record is refused rather than taking the ruling in.
+    let prepared = fx.prepared_json(&scope, &commit(9));
+    let refused = record_inputs(&mut fx, &scope, &prepared["context"]).unwrap_err();
+    assert!(
+        matches!(refused, Rejection::StaleEvidence { .. }),
+        "{refused:?}"
+    );
+
+    // Nothing was recorded, so a moved head cannot be checked and is refused.
+    let moved = commit(7);
+    let refused = fx
+        .system(SystemCmd::RebindBase {
+            order: fx.order,
+            base: moved.parse().expect("a commit sha"),
+            context: Box::new(from(context_on(&prepared, &moved))),
+        })
+        .unwrap_err();
+    assert!(
+        matches!(refused, Rejection::StaleEvidence { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(confirmed_base(&fx).as_deref(), Some(BASE));
+    fx.assert_replays();
+}
+
+#[test]
 fn a_conflicting_candidate_refuses_the_run_and_reopens_the_task() {
     let mut fx = Fx::new();
     let scope = fx.open_lane();

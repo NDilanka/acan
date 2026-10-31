@@ -188,14 +188,14 @@ impl ProtectedInputs {
     }
 }
 
-/// The protected inputs recorded when a human confirmed one scope revision, at the base the
-/// confirmation names. A re-bind with no candidate prepared on that base checks the moved head
-/// against this record.
+/// The protected inputs recorded when a human confirmed one scope revision. A re-bind with no
+/// candidate prepared on the confirmed base checks the moved head against this record. A re-bind
+/// keeps the record: it only moves the confirmation's base after the inputs match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmedInputs {
     /// The scope revision the confirmation covers.
     pub revision: ScopeRev,
-    /// The base the confirmation names.
+    /// The base the confirmation named when the inputs were recorded.
     pub base: CommitSha,
     /// The protected inputs at that base.
     pub inputs: ProtectedInputs,
@@ -229,6 +229,10 @@ pub struct ScopeLane {
     pub confirmation: Option<ScopeConfirmation>,
     /// The protected inputs the origin recorded when the current revision was confirmed, if any.
     pub confirmed_inputs: Option<ConfirmedInputs>,
+    /// The ruling log head when the current revision was confirmed. The inputs recorded for the
+    /// revision must name this head, so a ruling recorded after the confirmation is never taken
+    /// as part of it.
+    pub confirmed_ledger_head: Option<LedgerHead>,
     /// The repair budget, fixed by the first confirmation and never replenished.
     pub budget: Option<RepairBudget>,
     /// Every gate run of the order's tasks.
@@ -255,6 +259,7 @@ impl ScopeLane {
             scope_hash,
             confirmation: None,
             confirmed_inputs: None,
+            confirmed_ledger_head: None,
             budget: None,
             runs: BTreeMap::new(),
             episodes: BTreeMap::new(),
@@ -842,8 +847,9 @@ pub(crate) fn decide_prepared(
 
 /// `RecordConfirmedInputs`: the origin records the protected inputs a confirmed scope revision was
 /// confirmed under. Only the current revision's confirmation is recorded, and only at the base it
-/// names. A moved head or a newer revision is refused, so nothing is recorded for another base. A
-/// repeat for the recorded revision is a no-op.
+/// names. A moved head or a newer revision is refused, so nothing is recorded for another base.
+/// The ruling log head must be the one in force at the confirmation. A repeat for the recorded
+/// revision is a no-op.
 pub(crate) fn decide_record_inputs(
     world: &World,
     order: OrderId,
@@ -864,6 +870,14 @@ pub(crate) fn decide_record_inputs(
                 "the scope was confirmed on {}, not {base}: nothing is recorded",
                 confirmation.base_commit
             ),
+        });
+    }
+    // The inputs must be the ones in force at the confirmation. A ruling recorded after it is
+    // not part of the confirmation, so the record is refused rather than taking that ruling in.
+    if lane.confirmed_ledger_head != Some(inputs.ledger_head) {
+        return Err(Rejection::StaleEvidence {
+            detail: "a ruling was recorded after the scope was confirmed: nothing is recorded"
+                .to_owned(),
         });
     }
     if lane

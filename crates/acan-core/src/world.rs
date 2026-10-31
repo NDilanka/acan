@@ -1293,9 +1293,11 @@ impl World {
                 order,
                 confirmation,
             } => {
+                let ledger_head = self.ledger().head();
                 if let Some(lane) = self.lanes.get_mut(order) {
                     lane.budget.get_or_insert(confirmation.budget);
                     lane.confirmation = Some((**confirmation).clone());
+                    lane.confirmed_ledger_head = Some(ledger_head);
                 }
             }
             Event::ScopeRebound {
