@@ -5,10 +5,17 @@
   "choice_rules": [
     {
       "id": "cr-code-length",
-      "question_match": "(?i)code|length|character",
+      "question_match": "(?i)format|length|character",
       "option_label_match": "(?i)\\b7\\b|seven|keep|current",
       "when_no_option_matches": "remove",
-      "reason": "The draft's format question (q-1) offers letters-and-digits or a UUID; neither names the current length 7 (CODE_LENGTH = 7 in D:\\dev\\acan-demo\\src\\links.ts:6), so the open choice is removed. The current short-code form stays under the must-keep mk-code-length. If a draft offers an option that keeps 7, take.ps1 answers that option instead and the choice stays open until confirmed."
+      "reason": "The draft's format question offers options that do not name the current length 7 (CODE_LENGTH = 7 in D:\\dev\\acan-demo\\src\\links.ts:6), so the open choice is removed. The current short-code form is stated by the may item i-code-format. If a draft offers an option that keeps 7, take.ps1 answers that option instead and the choice stays open until confirmed."
+    },
+    {
+      "id": "cr-duplicate-codes",
+      "question_match": "(?i)duplicate",
+      "option_label_match": "(?i)allow|reuse",
+      "when_no_option_matches": "fail",
+      "reason": "The demo generates each link code at random and does not check for an existing code (src/links.ts, randomInt loop), so its current behavior allows reuse. The order does not ask for a change, so the current behavior is kept (human answer, 'Allow reuse of code')."
     },
     {
       "id": "cr-health",
@@ -22,13 +29,13 @@
     {
       "op": "remove_may",
       "id": "may-1",
-      "reason": "The drafted item (may-1) adds body.short_code to POST /api/links. The demo returns shortPath and code instead (src/server.ts:123), and its example writes a 6-character code, which contradicts the 7-character codes of src/links.ts:6. Dropped; the quota items and the code-length must-keep cover the link API."
+      "reason": "The drafted item (may-1) claims any status change of POST /api/links and checks step s-create, which is not a step of any probe, so it cannot be judged. Dropped: the status of that route is covered by the quota items, which name the step that answers 429."
     },
     {
       "op": "replace_must_keep",
-      "reason": "The drafted must-keep (mk-1) checks step s-health, which is not a step of any probe, so it cannot be judged. The same rule, that health stays available, is re-pointed at step s1 of the probe health (GET /health, anonymous): it still returns 200.",
+      "reason": "The drafted must-keep (keep-1) checks step s-health, which is not a step of any probe, so it cannot be judged. The same rule, that health stays available, is re-pointed at step s1 of the probe health (GET /health, anonymous): it still returns 200.",
       "rule": {
-        "id": "mk-1",
+        "id": "keep-1",
         "selector": {
           "surface": "http",
           "method": "GET",
@@ -49,10 +56,10 @@
       }
     },
     {
-      "op": "add_must_keep",
-      "reason": "The order keeps the current code length: new link codes stay 7 characters. Only the short-code format is checked by a predicate; no predicate in the current language checks the length, so the length itself is not machine-checked and is recorded here as a human rule.",
-      "rule": {
-        "id": "mk-code-length",
+      "op": "add_may",
+      "reason": "The order keeps the short-code form: a new link's code is a URL-safe short code of letters and digits, 7 characters long (src/links.ts:6). The code is new on each request, so its value may differ from the base; the acceptance predicate checks its format on each probe that has it. No predicate in the current language checks the length, so the length is not machine-checked and stays a human rule here.",
+      "item": {
+        "id": "i-code-format",
         "selector": {
           "surface": "http",
           "method": "POST",
@@ -62,7 +69,8 @@
           "channel": "body",
           "field_path": "code"
         },
-        "obligations": [
+        "change": "modify",
+        "acceptance": [
           {
             "obligation_id": "obl-code-short-code",
             "predicate": {
@@ -73,7 +81,14 @@
             "text": "The new link code is a URL-safe short code of letters and digits"
           }
         ],
-        "text": "New link codes stay 7 characters. The gate checks only the short-code characters; the 7-character length has no predicate and is not machine-checked.",
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s4",
+          "path": "body.code",
+          "before": { "state": "present", "value": "Ab3Cd9E" },
+          "after": { "state": "present", "value": "Xy7Qm2P" }
+        },
         "machine_ids": ["links"]
       }
     },
