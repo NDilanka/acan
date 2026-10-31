@@ -367,7 +367,9 @@ function Invoke-ReplayOrder {
         $editsPath = Join-Path $intentDir "$id-edits.json"
         $scope = Invoke-ScopeEdits -Order $id -Raw $raw -Oid $oid -View $view -EditsFile $editsPath -OrderDir $dir
         $confirmed = Invoke-ScopeConfirm -Order $id -Raw $raw -Oid $oid -Scope $scope -MaxEpisodes $MaxEpisodes -OrderDir $dir
-        $line['scope'] = if (@($scope.human_edits).Count -gt 0 -or @($scope.answers).Count -gt 0) { 'human_edits' } else { 'drafted' }
+        # human_edits: any logged edit, any choice answered by a rule, or any explicit answer in the edits file
+        $humanCount = @($scope.human_edits | Where-Object { $null -ne $_ }).Count + @($scope.answers | Where-Object { $null -ne $_ }).Count + @($scope.edits.answers | Where-Object { $null -ne $_ }).Count
+        $line['scope'] = if ($humanCount -gt 0) { 'human_edits' } else { 'drafted' }
         $line['scope_hash'] = [string]$confirmed.scope_hash
 
         # worker-r, a model worker, once
