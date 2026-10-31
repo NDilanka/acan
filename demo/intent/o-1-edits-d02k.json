@@ -329,7 +329,18 @@
         "acceptance": [
           {
             "obligation_id": "obl-body-add-429-relogin",
-            "predicate": { "predicate": "status_in", "step_id": "s11", "statuses": [429] },
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                { "predicate": "status_in", "step_id": "s11", "statuses": [429] },
+                { "predicate": "equals", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.error" }, "value": "too many requests" },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.clicks" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.code" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.createdAt" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.shortPath" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.target" } }
+              ]
+            },
             "text": "The relogin session's over-limit POST /api/links is answered 429, so its body may gain an error"
           }
         ],
@@ -362,7 +373,18 @@
         "acceptance": [
           {
             "obligation_id": "obl-body-modify-429-relogin",
-            "predicate": { "predicate": "status_in", "step_id": "s11", "statuses": [429] },
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                { "predicate": "status_in", "step_id": "s11", "statuses": [429] },
+                { "predicate": "equals", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.error" }, "value": "too many requests" },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.clicks" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.code" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.createdAt" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.shortPath" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.target" } }
+              ]
+            },
             "text": "The relogin session's over-limit POST /api/links is answered 429, so its body may change"
           }
         ],
@@ -395,7 +417,18 @@
         "acceptance": [
           {
             "obligation_id": "obl-body-remove-429-relogin",
-            "predicate": { "predicate": "status_in", "step_id": "s11", "statuses": [429] },
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                { "predicate": "status_in", "step_id": "s11", "statuses": [429] },
+                { "predicate": "equals", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.error" }, "value": "too many requests" },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.clicks" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.code" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.createdAt" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.shortPath" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s11", "path": "body.target" } }
+              ]
+            },
             "text": "The relogin session's over-limit POST /api/links is answered 429, so its body may lose the link fields"
           }
         ],
@@ -428,7 +461,18 @@
         "acceptance": [
           {
             "obligation_id": "obl-body-add-429-window",
-            "predicate": { "predicate": "status_in", "step_id": "s13", "statuses": [429] },
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                { "predicate": "status_in", "step_id": "s13", "statuses": [429] },
+                { "predicate": "equals", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.error" }, "value": "too many requests" },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.clicks" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.code" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.createdAt" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.shortPath" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.target" } }
+              ]
+            },
             "text": "alice's 11th POST /api/links is answered 429, so its body may gain an error"
           }
         ],
@@ -461,7 +505,18 @@
         "acceptance": [
           {
             "obligation_id": "obl-body-modify-429-window",
-            "predicate": { "predicate": "status_in", "step_id": "s13", "statuses": [429] },
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                { "predicate": "status_in", "step_id": "s13", "statuses": [429] },
+                { "predicate": "equals", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.error" }, "value": "too many requests" },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.clicks" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.code" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.createdAt" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.shortPath" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.target" } }
+              ]
+            },
             "text": "alice's 11th POST /api/links is answered 429, so its body may change"
           }
         ],
@@ -494,7 +549,18 @@
         "acceptance": [
           {
             "obligation_id": "obl-body-remove-429-window",
-            "predicate": { "predicate": "status_in", "step_id": "s13", "statuses": [429] },
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                { "predicate": "status_in", "step_id": "s13", "statuses": [429] },
+                { "predicate": "equals", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.error" }, "value": "too many requests" },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.clicks" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.code" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.createdAt" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.shortPath" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s13", "path": "body.target" } }
+              ]
+            },
             "text": "alice's 11th POST /api/links is answered 429, so its body may lose the link fields"
           }
         ],
@@ -527,7 +593,18 @@
         "acceptance": [
           {
             "obligation_id": "obl-body-add-429-inside",
-            "predicate": { "predicate": "status_in", "step_id": "s15", "statuses": [429] },
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                { "predicate": "status_in", "step_id": "s15", "statuses": [429] },
+                { "predicate": "equals", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.error" }, "value": "too many requests" },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.clicks" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.code" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.createdAt" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.shortPath" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.target" } }
+              ]
+            },
             "text": "A POST /api/links 59999 ms into the window is answered 429, so its body may gain an error"
           }
         ],
@@ -560,7 +637,18 @@
         "acceptance": [
           {
             "obligation_id": "obl-body-modify-429-inside",
-            "predicate": { "predicate": "status_in", "step_id": "s15", "statuses": [429] },
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                { "predicate": "status_in", "step_id": "s15", "statuses": [429] },
+                { "predicate": "equals", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.error" }, "value": "too many requests" },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.clicks" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.code" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.createdAt" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.shortPath" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.target" } }
+              ]
+            },
             "text": "A POST /api/links 59999 ms into the window is answered 429, so its body may change"
           }
         ],
@@ -593,7 +681,18 @@
         "acceptance": [
           {
             "obligation_id": "obl-body-remove-429-inside",
-            "predicate": { "predicate": "status_in", "step_id": "s15", "statuses": [429] },
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                { "predicate": "status_in", "step_id": "s15", "statuses": [429] },
+                { "predicate": "equals", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.error" }, "value": "too many requests" },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.clicks" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.code" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.createdAt" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.shortPath" } },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s15", "path": "body.target" } }
+              ]
+            },
             "text": "A POST /api/links 59999 ms into the window is answered 429, so its body may lose the link fields"
           }
         ],
@@ -626,7 +725,14 @@
         "acceptance": [
           {
             "obligation_id": "obl-body-add-429-get-links",
-            "predicate": { "predicate": "status_in", "step_id": "s14", "statuses": [429] },
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                { "predicate": "status_in", "step_id": "s14", "statuses": [429] },
+                { "predicate": "equals", "at": { "ref": "field", "run": "candidate", "step_id": "s14", "path": "body.error" }, "value": "too many requests" },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s14", "path": "body.links" } }
+              ]
+            },
             "text": "The signed-in user's over-limit GET /api/links is answered 429, so its body may gain an error"
           }
         ],
@@ -659,7 +765,14 @@
         "acceptance": [
           {
             "obligation_id": "obl-body-modify-429-get-links",
-            "predicate": { "predicate": "status_in", "step_id": "s14", "statuses": [429] },
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                { "predicate": "status_in", "step_id": "s14", "statuses": [429] },
+                { "predicate": "equals", "at": { "ref": "field", "run": "candidate", "step_id": "s14", "path": "body.error" }, "value": "too many requests" },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s14", "path": "body.links" } }
+              ]
+            },
             "text": "The signed-in user's over-limit GET /api/links is answered 429, so its body may change"
           }
         ],
@@ -692,7 +805,14 @@
         "acceptance": [
           {
             "obligation_id": "obl-body-remove-429-get-links",
-            "predicate": { "predicate": "status_in", "step_id": "s14", "statuses": [429] },
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                { "predicate": "status_in", "step_id": "s14", "statuses": [429] },
+                { "predicate": "equals", "at": { "ref": "field", "run": "candidate", "step_id": "s14", "path": "body.error" }, "value": "too many requests" },
+                { "predicate": "absent", "at": { "ref": "field", "run": "candidate", "step_id": "s14", "path": "body.links" } }
+              ]
+            },
             "text": "The signed-in user's over-limit GET /api/links is answered 429, so its body may lose the link fields"
           }
         ],
@@ -745,7 +865,7 @@
     ],
     "examples": "D18. Add items: body.error before missing, after 'too many requests' (observed at s11, s12, s13, s14, s15 in both runs). Remove items: body.code at s11 (QxMNooK), s13 (mPCJpY8), s15 (qWTcBuy); body.links at s14 (10 observed links, deterministic across runs). Modify items: no field present in base and candidate with a changed value at these steps in either run, so the status example is used (before 201 at POST steps, 200 at s14; after 429).",
     "window_filter": "Event filters use method ANY on route /api/links for i-quota-window and mk-bob-quota (ANY branch of decision 2). The DELETE route is named in both window texts (decision 4).",
-    "decisions_applied": "D14 whole-body items (12); D15 no Retry-After item (the draft has no Retry-After question); D17 window-boundary exclusive; D18 examples; D19 questions answered from recorded decisions and logged here."
+    "decisions_applied": "D14 whole-body items (12); D02L body read (coordinator, delegated by the owner): every 429 whole-body item reads the body with status_in, equals body.error 'too many requests', and absent on each field the seq 29 receipt lists as removed at that step (matches_schema cannot state required, properties or const: ValueSchema has only type and format); D15 no Retry-After item (the draft has no Retry-After question); D17 window-boundary exclusive; D18 examples; D19 questions answered from recorded decisions and logged here."
   },
   "answers": []
 }
