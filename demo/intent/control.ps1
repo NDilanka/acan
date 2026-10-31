@@ -250,7 +250,15 @@ try {
 } finally {
     if ($claimed) {
         $rel = Call-Tool -Name 'release_task' -Arguments @{ task = $Task; generation = $generation }
-        Add-Step -Name 'control releases the claim after its receipt' -Ok $rel.ok -Evidence @{ refused = $(if ($rel.ok) { $null } else { $rel.text }) }
+        # A blocked receipt makes the server release the claim itself. A later release of the same
+        # generation is then refused as stale with no current holder: that exact refusal means released.
+        $alreadyReleased = (-not $rel.ok) -and ($rel.text -eq 'stale generation; current is None')
+        if ($alreadyReleased) {
+            $result['release'] = 'already released by the server (stale generation; current is None)'
+            Add-Step -Name 'control releases the claim after its receipt' -Ok $true -Evidence @{ released = 'already released by the server'; refused = $rel.text }
+        } else {
+            Add-Step -Name 'control releases the claim after its receipt' -Ok $rel.ok -Evidence @{ refused = $(if ($rel.ok) { $null } else { $rel.text }) }
+        }
     }
     Write-Result
     Write-Output "result: $Out"
