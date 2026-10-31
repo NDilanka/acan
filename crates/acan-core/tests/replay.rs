@@ -2,8 +2,9 @@ mod common;
 
 use acan_core::{
     Actor, AgentCmd, Check, Command, CommitId, Ctx, Event, Explanation, Fence, HumanCmd, Judgement,
-    OrderPhase, OrderRev, Origin, ReplayError, Replica, Settlement, Stage, Stamped, Step,
-    SystemCmd, TaskId, TaskSpec, TaskState, WitnessOutcome, WitnessSpec,
+    OrderPhase, OrderRev, Origin, Rejection, ReplayError, Replica, Settlement, Stage, Stamped,
+    Step, SystemCmd, TaskId, TaskSpec, TaskState, VisionCounts, VisionStatus, WitnessOutcome,
+    WitnessSpec,
 };
 use common::{Fx, events, machine, stored, sym};
 
@@ -251,4 +252,47 @@ fn json_replay_then_further_commands_allocate_the_same_ids() {
     let actual = replayed.execute(&ctx, cmd).expect("order posted");
     assert_eq!(expected, actual);
     assert_eq!(fx.origin.world(), replayed.world());
+}
+
+#[test]
+fn a_vision_check_names_its_own_gate_run_and_changes_nothing_the_gate_reads() {
+    let mut fx = full_loop();
+    let (task, run) = fx
+        .log
+        .iter()
+        .find_map(|stamped| match &stamped.event {
+            Event::BuildReported { task, run, .. } => Some((*task, *run)),
+            _ => None,
+        })
+        .expect("the loop reported a build");
+    let other = if task == fx.task1 { fx.task2 } else { fx.task1 };
+    let check = |task| SystemCmd::VisionChecked {
+        task,
+        gate_run: run,
+        status: VisionStatus::Done,
+        counts: VisionCounts {
+            inconsistent: 1,
+            ..VisionCounts::default()
+        },
+        human_questions: 1,
+    };
+    assert!(
+        matches!(fx.system(check(other)), Err(Rejection::Unknown { .. })),
+        "a check naming another task's run is refused"
+    );
+    let gate = fx.origin.world().gate(run).cloned();
+    let phase_before = phase(&fx);
+    let batch = fx.system(check(task)).expect("the check is recorded");
+    assert!(matches!(
+        events(&batch).as_slice(),
+        [Event::VisionChecked { .. }]
+    ));
+    assert_eq!(fx.origin.world().gate(run).cloned(), gate);
+    assert_eq!(phase(&fx), phase_before);
+
+    let json = serde_json::to_string(&fx.log).expect("log serializes");
+    assert!(json.contains(r#""type":"vision.checked""#), "{json}");
+    let stored: Vec<Stamped> = serde_json::from_str(&json).expect("log parses");
+    let replica = Replica::from_log(stored).expect("log folds");
+    assert_eq!(replica.world(), fx.origin.world());
 }

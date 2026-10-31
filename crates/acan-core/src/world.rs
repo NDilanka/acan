@@ -682,6 +682,10 @@ impl World {
             | Event::AgentRegistered { .. }
             | Event::IndexUpdated { .. }
             | Event::ModelUsed { .. } => Ok(()),
+            Event::VisionChecked { task, gate_run, .. } => match self.gates.get(gate_run) {
+                Some(gate) if gate.task == *task => Ok(()),
+                _ => Err(format!("unknown gate run {gate_run} of task {task}")),
+            },
             Event::OrderPosted {
                 order, witnesses, ..
             } => {
@@ -1279,6 +1283,7 @@ impl World {
                 }
             }
             Event::RulingRecorded { event } => self.ledger.append((**event).clone()),
+            Event::VisionChecked { .. } => {}
         }
         self.next_seq = stamped.seq.next();
     }
@@ -1729,5 +1734,21 @@ fn decide_system(world: &World, ctx: &Ctx<'_>, cmd: SystemCmd) -> Result<Vec<Eve
             base,
             context,
         } => lane::decide_rebind(world, order, &base, &context),
+        SystemCmd::VisionChecked {
+            task,
+            gate_run,
+            status,
+            counts,
+            human_questions,
+        } => match world.gate(gate_run) {
+            Some(gate) if gate.task == task => Ok(vec![Event::VisionChecked {
+                task,
+                gate_run,
+                status,
+                counts,
+                human_questions,
+            }]),
+            _ => Err(Rejection::unknown("gate run", gate_run)),
+        },
     }
 }

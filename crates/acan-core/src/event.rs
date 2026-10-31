@@ -285,6 +285,42 @@ pub enum SystemCmd {
         /// The gate context computed on `base` with the current scope and rulings.
         context: Box<GateContext>,
     },
+    /// The advisory vision witness of a gate run finished. Nothing the gate decides reads it.
+    VisionChecked {
+        /// The task the run gates.
+        task: TaskId,
+        /// The run.
+        gate_run: GateRunId,
+        /// Whether the witness ran.
+        status: VisionStatus,
+        /// How many checks reached each verdict.
+        counts: VisionCounts,
+        /// How many verdicts ask a human to look.
+        human_questions: u32,
+    },
+}
+
+/// Whether an advisory vision witness ran to the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionStatus {
+    /// Every check has a verdict, `not_checked` included.
+    Done,
+    /// The witness could not run its checks.
+    Failed,
+}
+
+/// How many checks of a vision witness reached each verdict.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisionCounts {
+    /// Every must-keep item still holds.
+    pub consistent: u32,
+    /// At least one must-keep item does not hold.
+    pub inconsistent: u32,
+    /// The model could not decide, or its reply did not parse.
+    pub unclear: u32,
+    /// The call failed or a page could not be rendered.
+    pub not_checked: u32,
 }
 
 /// Who caused an event.
@@ -497,6 +533,16 @@ pub enum Event {
     /// A human ruling appended to the ruling log.
     RulingRecorded {
         event: Box<LedgerEvent>,
+    },
+    /// An advisory vision verdict summary. The contract names it `vision.checked`, so it keeps
+    /// that spelling instead of the snake case tag. Applying it changes nothing.
+    #[serde(rename = "vision.checked")]
+    VisionChecked {
+        task: TaskId,
+        gate_run: GateRunId,
+        status: VisionStatus,
+        counts: VisionCounts,
+        human_questions: u32,
     },
 }
 
