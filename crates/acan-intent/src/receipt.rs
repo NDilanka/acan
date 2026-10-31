@@ -17,9 +17,11 @@
 //!   channel, path or requests that an acceptance predicate reads, and `obligation_fulfilled`
 //!   otherwise.
 //! - A difference no rule or item claims is `out_of_scope`: one item per probe, step and path.
-//! - An active ruling whose predicate fails on a probe it reaches is `violates_ruling`: one item
-//!   per failing probe. A ruling whose normalization plan no longer matches the corpus, or an exact
-//!   approval whose evidence is not one it accepted, is `stale` and never held.
+//! - An active ruling whose predicate fails on a reached probe where a field it covers differs
+//!   is `violates_ruling`: one item per failing probe. A reached probe whose covered fields agree
+//!   with the base is not checked and holds the ruling. A ruling whose normalization plan no
+//!   longer matches the corpus, or an exact approval whose evidence is not one it accepted, is
+//!   `stale` and never held.
 //!
 //! A scope item that no probe reaches gets no receipt item, because a receipt item needs the
 //! probe that checked it. Its acceptance obligations are counted as unknown in
@@ -1275,6 +1277,10 @@ fn same_evidence(left: &Contrast<'_>, right: &Contrast<'_>) -> bool {
 /// The status of one ruling, and the receipt items of its failing probes. A failing probe becomes
 /// a `violates_ruling` item, so the violation has a row of its own. A ruling whose approval covers
 /// some reached evidence only, or none, is `stale` and never held.
+///
+/// A standing ruling rules on change: its predicate runs only on a probe where a field it covers
+/// differs between base and candidate. A reached probe whose covered fields agree with the base
+/// neither violates the ruling nor makes it stale; the ruling holds there without a check.
 fn ruling(
     inputs: &ReceiptInputs<'_>,
     expectation: &Expectation,
@@ -1298,7 +1304,20 @@ fn ruling(
         .filter(|&index| applies(inputs, expectation, index))
         .collect();
     let stale = current.len() < reaching.len();
-    let answers: Vec<(usize, CheckResult)> = current
+    let checked: Vec<usize> = match expectation.applicability {
+        Applicability::StandingPredicateApproval => current
+            .iter()
+            .copied()
+            .filter(|&index| {
+                claims
+                    .iter()
+                    .any(|claim| claim.probe == index && claim.covered_by(&expectation.selector))
+            })
+            .collect(),
+        // An exact approval runs on the evidence it accepted, changed or not.
+        Applicability::ExactObservationApproval => current.clone(),
+    };
+    let answers: Vec<(usize, CheckResult)> = checked
         .iter()
         .map(|&index| (index, answer(inputs, &expectation.predicate, index)))
         .collect();
@@ -1311,6 +1330,11 @@ fn ruling(
         if stale {
             behavior.record(Verdict::Unknown);
             return Ok((RulingStatus::Stale {}, Vec::new()));
+        }
+        if checked.is_empty() {
+            // Nothing the ruling covers differs on any reached probe: it holds.
+            behavior.record(Verdict::Pass);
+            return Ok((RulingStatus::Held {}, Vec::new()));
         }
         return Ok(match aggregate(answers).0 {
             CheckResult::Unknown { reason } => {

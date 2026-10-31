@@ -78,6 +78,7 @@ struct Hit {
     status: u16,
     body: Value,
     cookies: Vec<(&'static str, String)>,
+    headers: Vec<(&'static str, String)>,
 }
 
 impl Hit {
@@ -92,6 +93,7 @@ impl Hit {
             status,
             body: body_for(status),
             cookies: Vec::new(),
+            headers: Vec::new(),
         }
     }
 
@@ -110,13 +112,17 @@ impl Hit {
             sent_at_ms: self.sent_at_ms,
         });
         observation.completeness = Completeness::Complete {};
+        let mut headers: BTreeMap<String, String> = self
+            .headers
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), value.clone()))
+            .collect();
+        if self.status == 429 {
+            headers.insert("retry-after".to_owned(), "60".to_owned());
+        }
         observation.channels = Channels {
             status: Some(self.status),
-            headers: if self.status == 429 {
-                BTreeMap::from([("retry-after".to_owned(), "60".to_owned())])
-            } else {
-                BTreeMap::new()
-            },
+            headers,
             cookies: self
                 .cookies
                 .iter()
@@ -1071,6 +1077,111 @@ fn open_episode(scope: &Scope, selector: &Selector) -> DiscrepancyEpisode {
         .expect("the episode is an object")
         .remove("obligation_id");
     serde_json::from_value(value).expect("the episode decodes")
+}
+
+/// A standing ruling on the login route: the request id a login is answered with is an opaque
+/// uuid. Its field is a header the standard runs never send, so a test decides who sends it.
+fn request_id_ruling() -> LedgerEvent {
+    let mut value: Value = parse(LEDGER_DECISION);
+    value["ruling_id"] = json!("r-request-id");
+    value["selector"] = json!({
+        "surface": "http",
+        "method": "POST",
+        "route_template": "/api/login",
+        "step_context": { "kind": "any" },
+        "principal": { "kind": "anonymous" },
+        "channel": "header",
+        "field_path": "x-request-id"
+    });
+    value["predicate_ast"] = json!({
+        "predicate": "matches_schema",
+        "at": { "ref": "field", "run": "candidate", "step_id": "s1", "path": "header.x-request-id" },
+        "schema": { "type": "string", "format": "uuid" }
+    });
+    value["label"] = json!("The request id is an opaque uuid");
+    value["machine_ids"] = json!(["auth"]);
+    value["normalization_version"] = json!("norm/1");
+    value["normalization_hash"] = login_plan();
+    value["applicability"] = json!("standing_predicate_approval");
+    value["accepts"] = json!([]);
+    serde_json::from_value(value).expect("the ruling decodes")
+}
+
+#[test]
+fn a_standing_ruling_is_held_where_base_and_candidate_agree_on_its_field() {
+    let scope = scope();
+    let confirmation = confirmation_for(&scope);
+    let ledger = fold::fold(&[request_id_ruling()]).expect("the ruling folds");
+    let context = prepared_context(&confirmation, &ledger);
+    // No run sends x-request-id: the candidate agrees with the base on the ruling's field, so the
+    // ruling has nothing to check and holds.
+    let agreeing = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+    );
+    let receipt = build(
+        &scope,
+        &confirmation,
+        &context,
+        &ledger,
+        &[agreeing.result()],
+    )
+    .expect("the receipt builds");
+    assert!(
+        matches!(
+            ruling_status(&receipt, "r-request-id"),
+            RulingStatus::Held {}
+        ),
+        "a ruling whose field never differs was not held: {:?}",
+        ruling_status(&receipt, "r-request-id")
+    );
+    assert!(
+        receipt
+            .items
+            .iter()
+            .all(|item| item.class != ItemClass::ViolatesRuling),
+        "a field the candidate did not change violated the ruling"
+    );
+}
+
+#[test]
+fn a_standing_ruling_is_violated_where_its_field_differs_and_breaks_it() {
+    let scope = scope();
+    let confirmation = confirmation_for(&scope);
+    let ledger = fold::fold(&[request_id_ruling()]).expect("the ruling folds");
+    let context = prepared_context(&confirmation, &ledger);
+    // The candidate answers the first login with the username as its request id: the field
+    // differs from the base, and the value is no uuid.
+    let mut candidate = sequence(SIX_FAILURES);
+    hit_mut(&mut candidate, "s1")
+        .headers
+        .push(("x-request-id", "alice".to_owned()));
+    let broken = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        candidate,
+    );
+    let receipt = build(&scope, &confirmation, &context, &ledger, &[broken.result()])
+        .expect("the receipt builds");
+    assert!(
+        matches!(
+            ruling_status(&receipt, "r-request-id"),
+            RulingStatus::Violated { .. }
+        ),
+        "a wrong request id where the field differs did not violate: {:?}",
+        ruling_status(&receipt, "r-request-id")
+    );
+    assert!(
+        receipt
+            .items
+            .iter()
+            .any(|item| item.class == ItemClass::ViolatesRuling
+                && item.ruling_id.as_ref().map(|id| id.as_str()) == Some("r-request-id")),
+        "the violation does not name the ruling"
+    );
 }
 
 #[test]
