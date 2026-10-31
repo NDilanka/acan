@@ -99,6 +99,22 @@ impl RepoFiles {
         lines.join("\n")
     }
 
+    /// The module file of each machine: `src/ratelimit.ts` is machine `ratelimit`'s file. A
+    /// machine that names a directory has no one module file, so it contributes nothing. In
+    /// path order.
+    #[must_use]
+    pub fn routed(&self, machines: &[String]) -> Vec<&str> {
+        self.files
+            .iter()
+            .map(String::as_str)
+            .filter(|file| {
+                let name = file.rsplit('/').next().unwrap_or(file);
+                let stem = name.split('.').next().unwrap_or(name);
+                machines.iter().any(|machine| machine.as_str() == stem)
+            })
+            .collect()
+    }
+
     /// The tracked files that belong to the scope machines, in path order.
     #[must_use]
     pub fn in_scope(&self, scope: &[String]) -> Vec<&str> {
@@ -400,6 +416,15 @@ mod tests {
         assert_eq!(
             repo.in_scope(&paths(&["test"])),
             vec!["test/helpers.ts", "test/login.test.ts"]
+        );
+    }
+
+    #[test]
+    fn a_machine_routes_through_its_own_module_file_and_a_directory_machine_through_none() {
+        let repo = demo();
+        assert_eq!(
+            repo.routed(&paths(&["middleware", "server", "test"])),
+            vec!["src/middleware.ts", "src/server.ts"]
         );
     }
 }

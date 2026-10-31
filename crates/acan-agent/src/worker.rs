@@ -9,9 +9,10 @@ use std::time::{Duration, Instant};
 
 use acan_core::{ClashState, Locus, MAX_PREDICTIONS, Settlement};
 use acan_intent::{
-    CheckResult, ContestKind, ContestResponse, Enforcement, EpisodeId, GetReceiptResponse,
-    GetRulingsResponse, GetScopeResponse, ItemClass, ItemState, NotEnforcedReason, Predicted,
-    Prediction, ProbeHash, Receipt, ReceiptHash, ReceiptItem, RulingSummary, RulingTagState, Scope,
+    Change, CheckResult, ContestKind, ContestResponse, Enforcement, EpisodeId, GetReceiptResponse,
+    GetRulingsResponse, GetScopeResponse, ItemClass, ItemState, MachineId, MustKeep, NonEmpty,
+    NotEnforcedReason, Predicted, Prediction, ProbeHash, Receipt, ReceiptHash, ReceiptItem,
+    RulingSummary, RulingTagState, Scope, ScopeItem,
 };
 use acan_llm::{ChatRequest, Message, ModelClient, Role, ToolCall, ToolSpec};
 use anyhow::{Context, bail};
@@ -215,7 +216,8 @@ struct Planned {
 /// this claim, in the order taken. No later plan of the claim may declare one of them again.
 /// `repair_rounds` is the confirmed scope's budget: how many bounced builds may be repaired.
 /// `rulings` are the rulings the origin held for the task's machines when the claim was made. They
-/// are text for the build brief, never a verdict on a build.
+/// are text for the build brief, never a verdict on a build. `scope` is the confirmed scope the
+/// claim was planned against; a re-plan after a narrow settlement plans against the same scope.
 #[derive(Debug, Clone)]
 struct Claim {
     task: String,
@@ -224,11 +226,13 @@ struct Claim {
     gave_up: Vec<Given>,
     repair_rounds: u32,
     rulings: Vec<RulingSummary>,
+    scope: Scope,
 }
 
 /// What one attempt at a task produced.
 enum Attempt {
-    Claimed(Claim),
+    // Boxed: a claim carries the confirmed scope, which is far larger than the other variants.
+    Claimed(Box<Claim>),
     /// The task cannot be claimed yet, such as before the human confirms its scope. The next
     /// poll tries it again.
     Pending(String),
@@ -398,7 +402,7 @@ async fn claim_next<C: ModelClient>(
                 continue;
             }
             match try_claim(config, model, mcp, &row, steps).await? {
-                Attempt::Claimed(claim) => return Ok(Some(claim)),
+                Attempt::Claimed(claim) => return Ok(Some(*claim)),
                 Attempt::Pending(reason) => {
                     if waiting.insert(task) {
                         log(steps, format!("waiting on {reason}"));
@@ -456,7 +460,7 @@ async fn try_claim<C: ModelClient>(
         ),
     );
     let repo = RepoFiles::load(&config.repo).await?;
-    let planned = match plan_work(model, &repo, row, &[], steps).await {
+    let planned = match plan_work(model, &repo, row, &confirmed.scope, &[], steps).await {
         Ok(planned) => planned,
         Err(reasons) => {
             return Ok(Attempt::Skipped(format!(
@@ -511,14 +515,15 @@ async fn try_claim<C: ModelClient>(
             let generation = value["generation"]
                 .as_u64()
                 .context("claim_task named no generation")?;
-            Ok(Attempt::Claimed(Claim {
+            Ok(Attempt::Claimed(Box::new(Claim {
                 task,
                 generation,
                 files: planned.footprint,
                 gave_up: Vec::new(),
                 repair_rounds,
                 rulings: rulings.rulings,
-            }))
+                scope: confirmed.scope,
+            })))
         }
     }
 }
@@ -1407,7 +1412,7 @@ async fn redeclare<C: ModelClient>(
     let row = get_task(mcp, &claim.task).await?;
     let repo = RepoFiles::load(&config.repo).await?;
     let started = Instant::now();
-    let planned = match plan_work(model, &repo, &row, &claim.gave_up, steps).await {
+    let planned = match plan_work(model, &repo, &row, &claim.scope, &claim.gave_up, steps).await {
         Ok(planned) => planned,
         Err(reasons) => {
             return Ok(Err(format!(
@@ -1609,21 +1614,27 @@ async fn release(mcp: &McpClient, claim: &Claim, why: &str, steps: &mut Vec<Stri
 /// the task is skipped, so a plan that cannot be grounded never reaches the origin.
 const PLAN_ATTEMPTS: usize = 3;
 
-/// Plans one task and checks the plan against the repository. A refused plan is sent back with
-/// the reasons and the file list. The error is the reasons of the last refusal.
+/// Plans one task and checks the plan against the repository and the confirmed scope. A refused
+/// plan is sent back with the reasons and the file list. The error is the reasons of the last
+/// refusal.
 ///
 /// `given` holds the places a Narrow settlement took from the task. A plan may not name them. A
 /// narrowed task whose plan keeps no file at all gets that plan back with its summary, so the
 /// caller can release the claim with the reason.
+///
+/// The footprint must also keep every module file a may-change item's selector routes through:
+/// a change the item allows cannot be built without them. A file the claim gave up under a
+/// narrow settlement is not required, since it may not be declared again.
 async fn plan_work<C: ModelClient>(
     model: &C,
     repo: &RepoFiles,
     row: &Value,
+    scope: &Scope,
     given: &[Given],
     steps: &mut Vec<String>,
 ) -> Result<Planned, String> {
     let task = string_field(row, "task");
-    let brief = planning_brief(repo, row, given).await;
+    let brief = planning_brief(repo, row, scope, given).await;
     let lost: Vec<String> = given
         .iter()
         .filter_map(|taken| file_of(&taken.at))
@@ -1659,21 +1670,26 @@ async fn plan_work<C: ModelClient>(
                             .filter(|file| lost.contains(file))
                             .cloned()
                             .collect();
-                        if taken.is_empty() {
-                            return Ok(Planned {
-                                summary: plan.summary,
-                                footprint: checked.footprint,
-                                fixes: checked.fixes,
-                            });
+                        if !taken.is_empty() {
+                            taken
+                                .iter()
+                                .map(|file| {
+                                    format!(
+                                        "{file} was given up under a narrow settlement, so it may not be declared again"
+                                    )
+                                })
+                                .collect()
+                        } else {
+                            let missing = unrouted(repo, scope, &checked.footprint, &lost);
+                            if missing.is_empty() {
+                                return Ok(Planned {
+                                    summary: plan.summary,
+                                    footprint: checked.footprint,
+                                    fixes: checked.fixes,
+                                });
+                            }
+                            missing
                         }
-                        taken
-                            .iter()
-                            .map(|file| {
-                                format!(
-                                    "{file} was given up under a narrow settlement, so it may not be declared again"
-                                )
-                            })
-                            .collect()
                     }
                     Err(reasons) => reasons,
                 }
@@ -1693,23 +1709,44 @@ async fn plan_work<C: ModelClient>(
     Err(refusal.join("; "))
 }
 
-/// The planning message for one task: its title, brief and scope, the repository's tracked files,
-/// and the full text of the files its scope machines hold. A narrowed task also gets the places it
-/// gave up and why.
-async fn planning_brief(repo: &RepoFiles, row: &Value, given: &[Given]) -> String {
-    let scope: Vec<String> = row["scope"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|machine| machine.as_str().map(str::to_owned))
-        .collect();
+/// One refusal for each module file a may-change item routes through that the footprint leaves
+/// out. A place the claim gave up under a narrow settlement is not required: it may not be
+/// declared again.
+fn unrouted(repo: &RepoFiles, scope: &Scope, footprint: &[String], lost: &[String]) -> Vec<String> {
+    let mut reasons = Vec::new();
+    for item in &scope.body.may {
+        for machine in item.machine_ids.iter() {
+            let one = [machine.as_str().to_owned()];
+            for file in repo.routed(&one) {
+                let named = footprint.iter().any(|declared| declared == file);
+                let given_up = lost.iter().any(|place| place == file);
+                if !named && !given_up {
+                    reasons.push(format!(
+                        "`{file}` is the module file of machine `{machine}`, which scope item {} routes through; the plan must name it",
+                        item.id.as_str()
+                    ));
+                }
+            }
+        }
+    }
+    reasons.sort();
+    reasons.dedup();
+    reasons
+}
+
+/// The planning message for one task: its title and brief, the confirmed scope (its machines,
+/// selectors, and must-keep and may items), the repository's tracked files, and the full text of
+/// the files the scope machines hold. A narrowed task also gets the places it gave up and why.
+async fn planning_brief(repo: &RepoFiles, row: &Value, scope: &Scope, given: &[Given]) -> String {
+    let machines = scope_machines(scope);
     let brief = format!(
-        "Task: {}\nBrief: {}\nScope machines: {}\n\nRepository files (tracked; use these paths exactly):\n{}\n\nFull text of the files in the scope machines:\n{}",
+        "Task: {}\nBrief: {}\n\n{}\n\nScope machines: {}\n\nRepository files (tracked; use these paths exactly):\n{}\n\nFull text of the files in the scope machines:\n{}",
         string_field(row, "title"),
         string_field(row, "brief"),
-        scope.join(", "),
+        scope_section(scope),
+        machines.join(", "),
         repo.listing(),
-        repo.scope_text(&scope).await,
+        repo.scope_text(&machines).await,
     );
     if given.is_empty() {
         return brief;
@@ -1725,6 +1762,105 @@ async fn planning_brief(repo: &RepoFiles, row: &Value, given: &[Given]) -> Strin
         "{brief}\n\nYour declaration was narrowed, so you gave up these places, and you may not declare them again:\n{}\nPlan the change without them. List only the files the change still needs. If the change cannot be done without them, reply with an empty files list and say why in summary.",
         gave_up.join("\n")
     )
+}
+
+/// The machines the confirmed scope names, in id order with duplicates removed.
+fn scope_machines(scope: &Scope) -> Vec<String> {
+    let mut machines: Vec<String> = scope
+        .body
+        .may
+        .iter()
+        .flat_map(|item| item.machine_ids.iter())
+        .chain(
+            scope
+                .body
+                .must_keep
+                .iter()
+                .flat_map(|rule| rule.machine_ids.iter()),
+        )
+        .map(|id| id.as_str().to_owned())
+        .collect();
+    machines.sort();
+    machines.dedup();
+    machines
+}
+
+/// The confirmed scope as the planner sees it: what may change, with each item's selector and
+/// acceptance obligations, and what must keep. The gate, not the planner, decides what passes.
+fn scope_section(scope: &Scope) -> String {
+    let may = if scope.body.may.is_empty() {
+        "- (nothing may change)".to_owned()
+    } else {
+        scope
+            .body
+            .may
+            .iter()
+            .map(may_line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let keep = if scope.body.must_keep.is_empty() {
+        "- (nothing is pinned to keep)".to_owned()
+    } else {
+        scope
+            .body
+            .must_keep
+            .iter()
+            .map(keep_line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "Confirmed scope (rev {} of {}):\nMay change:\n{may}\nMust keep:\n{keep}",
+        scope.rev.0,
+        scope.order.as_str()
+    )
+}
+
+/// One may-change item as a brief line: its id and kind, its machines, its selector as the
+/// scope wrote it, and each acceptance obligation's id and text.
+fn may_line(item: &ScopeItem) -> String {
+    format!(
+        "- {} ({}), machines {}: selector {}; it must hold: {}",
+        item.id.as_str(),
+        change_name(item.change),
+        machine_list(&item.machine_ids),
+        serde_json::to_string(&item.selector)
+            .unwrap_or_else(|_| "(a selector that does not print)".to_owned()),
+        item.acceptance
+            .iter()
+            .map(|obligation| format!("{}: {}", obligation.obligation_id.as_str(), obligation.text))
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
+/// One must-keep rule as a brief line: its id, its machines, and the rule in the human's words.
+fn keep_line(rule: &MustKeep) -> String {
+    format!(
+        "- {}, machines {}: {}",
+        rule.id.as_str(),
+        machine_list(&rule.machine_ids),
+        rule.text
+    )
+}
+
+/// A machine list as the brief shows it.
+fn machine_list(machines: &NonEmpty<MachineId>) -> String {
+    machines
+        .iter()
+        .map(|id| id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The change kind as the scope draft words it.
+fn change_name(change: Change) -> &'static str {
+    match change {
+        Change::Add => "add",
+        Change::Modify => "modify",
+        Change::Remove => "remove",
+    }
 }
 
 async fn open_tasks(mcp: &McpClient) -> anyhow::Result<Vec<Value>> {
@@ -1784,6 +1920,14 @@ mod tests {
         RepoFiles::from_paths("unused", vec!["src/a.ts".to_owned()])
     }
 
+    /// The confirmed scope of the intent fixtures: may-change items on machines `ratelimit`,
+    /// `auth` and `errors`, and must-keep rules on `auth` and `links`.
+    fn scope() -> Scope {
+        serde_json::from_str::<GetScopeResponse>(SCOPE)
+            .expect("the scope fixture reads")
+            .scope
+    }
+
     /// The text of every message in a request, so a test can look for a reason in it.
     fn text_of(request: &ChatRequest) -> String {
         serde_json::to_string(&request.messages).unwrap_or_default()
@@ -1804,7 +1948,7 @@ mod tests {
                 Reply::text(r#"{"summary":"write the file","files":["src/a.ts"]}"#),
             );
         let row = json!({ "title": "t", "brief": "b", "scope": ["src"], "task": "t-1" });
-        let planned = plan_work(&model, &repo(), &row, &[], &mut Vec::new())
+        let planned = plan_work(&model, &repo(), &row, &scope(), &[], &mut Vec::new())
             .await
             .expect("the second reply is a plan");
         assert_eq!(planned.footprint, vec!["src/a.ts".to_owned()]);
@@ -1830,7 +1974,7 @@ mod tests {
             );
         let row = json!({ "title": "t", "brief": "b", "scope": ["src"], "task": "t-1" });
         let mut steps = Vec::new();
-        let planned = plan_work(&model, &repo(), &row, &[], &mut steps)
+        let planned = plan_work(&model, &repo(), &row, &scope(), &[], &mut steps)
             .await
             .expect("the corrected plan passes");
         assert_eq!(planned.footprint, vec!["src/a.ts".to_owned()]);
@@ -1851,7 +1995,7 @@ mod tests {
         );
         let row = json!({ "title": "t", "brief": "b", "scope": ["src"], "task": "t-1" });
         let mut steps = Vec::new();
-        let reasons = plan_work(&model, &repo(), &row, &[], &mut steps)
+        let reasons = plan_work(&model, &repo(), &row, &scope(), &[], &mut steps)
             .await
             .expect_err("no attempt names a tracked file");
         assert!(
@@ -1865,6 +2009,94 @@ mod tests {
         assert_eq!(refusals, PLAN_ATTEMPTS);
     }
 
+    /// A repository the fixture scope routes through: one module file per may machine, and one
+    /// file no item touches.
+    fn routed_repo() -> RepoFiles {
+        RepoFiles::from_paths(
+            "unused",
+            vec![
+                "src/auth.ts".to_owned(),
+                "src/errors.ts".to_owned(),
+                "src/ratelimit.ts".to_owned(),
+                "src/store.ts".to_owned(),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn a_plan_that_leaves_out_a_file_the_scope_routes_through_is_sent_back_with_it() {
+        // The first plan names the store and one routed module, leaving out the auth and errors
+        // modules the may items route through. The refusal names them, and the next call shows
+        // the planner the confirmed scope. The corrected plan passes.
+        let model = Stub::default()
+            .when(
+                Role::Worker,
+                |request| !text_of(request).contains("routes through"),
+                Reply::text(r#"{"summary":"s","files":["src/store.ts","src/ratelimit.ts"]}"#),
+            )
+            .when(
+                Role::Worker,
+                |request| {
+                    let text = text_of(request);
+                    text.contains("`src/auth.ts` is the module file of machine `auth`")
+                        && text.contains("`src/errors.ts` is the module file of machine `errors`")
+                        && text.contains("/api/login")
+                        && text.contains("mk-links-order")
+                },
+                Reply::text(
+                    r#"{"summary":"s","files":["src/store.ts","src/ratelimit.ts","src/auth.ts","src/errors.ts"]}"#,
+                ),
+            );
+        let row = json!({ "title": "t", "brief": "b", "scope": ["src"], "task": "t-1" });
+        let mut steps = Vec::new();
+        let planned = plan_work(&model, &routed_repo(), &row, &scope(), &[], &mut steps)
+            .await
+            .expect("the corrected plan passes");
+        assert_eq!(
+            planned.footprint,
+            vec![
+                "src/auth.ts".to_owned(),
+                "src/errors.ts".to_owned(),
+                "src/ratelimit.ts".to_owned(),
+                "src/store.ts".to_owned(),
+            ]
+        );
+        let refusal = steps
+            .iter()
+            .find(|step| step.starts_with("plan refused on t-1 (attempt 1 of 3)"))
+            .expect("the first plan was refused");
+        assert!(refusal.contains("src/auth.ts"), "{refusal}");
+        assert!(refusal.contains("src/errors.ts"), "{refusal}");
+        assert!(!refusal.contains("src/store.ts"), "{refusal}");
+    }
+
+    #[tokio::test]
+    async fn a_replan_is_not_asked_for_a_routed_file_the_narrowing_took() {
+        // The narrowing took the auth and errors modules, so the re-plan may not name them and
+        // is not asked for them, though the scope routes through them.
+        let model = Stub::default().when(
+            Role::Worker,
+            |_| true,
+            Reply::text(r#"{"summary":"s","files":["src/ratelimit.ts"]}"#),
+        );
+        let row = json!({ "title": "t", "brief": "b", "scope": ["src"], "task": "t-1" });
+        let given = vec![
+            taken("src/auth.ts", "clash c-1"),
+            taken("src/errors.ts", "clash c-1"),
+        ];
+        let planned = plan_work(
+            &model,
+            &routed_repo(),
+            &row,
+            &scope(),
+            &given,
+            &mut Vec::new(),
+        )
+        .await
+        .expect("the given-up files are not required");
+        assert_eq!(planned.footprint, vec!["src/ratelimit.ts".to_owned()]);
+    }
+
     fn claim() -> Claim {
         Claim {
             task: "t-1".to_owned(),
@@ -1873,6 +2105,7 @@ mod tests {
             gave_up: Vec::new(),
             repair_rounds: 2,
             rulings: Vec::new(),
+            scope: scope(),
         }
     }
 
@@ -2031,9 +2264,16 @@ mod tests {
             );
         let row = json!({ "title": "t", "brief": "b", "scope": ["src"], "task": "t-1" });
         let mut steps = Vec::new();
-        let planned = plan_work(&model, &two_file_repo(), &row, &gave_up_a(), &mut steps)
-            .await
-            .expect("the second plan passes");
+        let planned = plan_work(
+            &model,
+            &two_file_repo(),
+            &row,
+            &scope(),
+            &gave_up_a(),
+            &mut steps,
+        )
+        .await
+        .expect("the second plan passes");
         assert_eq!(planned.footprint, vec!["src/b.ts".to_owned()]);
         assert!(
             steps
@@ -2055,6 +2295,7 @@ mod tests {
             &model,
             &two_file_repo(),
             &row,
+            &scope(),
             &gave_up_a(),
             &mut Vec::new(),
         )
