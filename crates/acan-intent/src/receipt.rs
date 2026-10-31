@@ -260,6 +260,7 @@ pub fn build_receipt(inputs: &ReceiptInputs<'_>) -> Result<CoreDerived<Receipt>,
             inputs,
             expectation,
             &claims,
+            &mut owners,
             &hashes,
             &usable,
             &mut behavior,
@@ -582,12 +583,14 @@ fn probe_item(
 }
 
 /// Who owns a difference. A must-keep rule owns every difference it covers, then a may-change
-/// item owns the rest it covers, and whatever no rule owns is out of scope.
+/// item owns the rest it covers, then a ruling takes the rest its approval covers on the probes
+/// it holds or violates. Whatever no rule owns is out of scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Owner {
     Unclaimed,
     Must,
     May,
+    Ruling,
 }
 
 /// One difference, the probe it was found in, and the request that sent its step.
@@ -1274,17 +1277,22 @@ fn same_evidence(left: &Contrast<'_>, right: &Contrast<'_>) -> bool {
         && left.candidate == right.candidate
 }
 
-/// The status of one ruling, and the receipt items of its failing probes. A failing probe becomes
-/// a `violates_ruling` item, so the violation has a row of its own. A ruling whose approval covers
-/// some reached evidence only, or none, is `stale` and never held.
+/// The status of one ruling, and the receipt items it adds. A failing probe becomes a
+/// `violates_ruling` item, so the violation has a row of its own, and the differences it covers
+/// there are the ruling's, not out of scope. A ruling whose approval covers some reached evidence
+/// only, or none, is `stale` and never held.
 ///
 /// A standing ruling rules on change: its predicate runs only on a probe where a field it covers
 /// differs between base and candidate. A reached probe whose covered fields agree with the base
-/// neither violates the ruling nor makes it stale; the ruling holds there without a check.
+/// neither violates the ruling nor makes it stale; the ruling holds there without a check. A held
+/// standing ruling takes the differences it covers that no must-keep rule or may-change item
+/// owns, one fulfilled item per probe it takes them on. A ruling never takes over an item's
+/// difference.
 fn ruling(
     inputs: &ReceiptInputs<'_>,
     expectation: &Expectation,
     claims: &[Claim],
+    owners: &mut [Owner],
     hashes: &[ProbeHash],
     usable: &[bool],
     behavior: &mut Behavior,
@@ -1343,13 +1351,21 @@ fn ruling(
             }
             CheckResult::Pass {} | CheckResult::Fail { .. } => {
                 behavior.record(Verdict::Pass);
-                (RulingStatus::Held {}, Vec::new())
+                let items = match expectation.applicability {
+                    Applicability::StandingPredicateApproval => {
+                        held_items(inputs, expectation, claims, owners, hashes, &checked)?
+                    }
+                    Applicability::ExactObservationApproval => Vec::new(),
+                };
+                (RulingStatus::Held {}, items)
             }
         });
     }
     behavior.record(Verdict::Fail);
     let mut items = Vec::new();
     for &index in &failing {
+        // The violation's row is the ruling's: the same difference is not also out of scope.
+        take_for_ruling(owners, claims, index, &expectation.selector);
         let claimed: Vec<&Claim> = claims
             .iter()
             .filter(|claim| claim.probe == index && claim.covered_by(&expectation.selector))
@@ -1386,6 +1402,84 @@ fn ruling(
         .ok_or_else(|| inconsistent("a violated ruling has no failing probe"))?;
     let item_ids = NonEmpty::new(first, ids);
     Ok((RulingStatus::Violated { item_ids }, items))
+}
+
+/// Marks the differences on `probe` that `selector` covers and no item owns yet as the ruling's,
+/// and returns their indices.
+fn take_for_ruling(
+    owners: &mut [Owner],
+    claims: &[Claim],
+    probe: usize,
+    selector: &Selector,
+) -> Vec<usize> {
+    let taken: Vec<usize> = (0..claims.len())
+        .filter(|&index| {
+            owners[index] == Owner::Unclaimed
+                && claims[index].probe == probe
+                && claims[index].covered_by(selector)
+        })
+        .collect();
+    for &index in &taken {
+        owners[index] = Owner::Ruling;
+    }
+    taken
+}
+
+/// The fulfilled items of a held standing approval: on each checked probe, the differences it
+/// takes over, one item per probe that has any.
+fn held_items(
+    inputs: &ReceiptInputs<'_>,
+    expectation: &Expectation,
+    claims: &[Claim],
+    owners: &mut [Owner],
+    hashes: &[ProbeHash],
+    probes: &[usize],
+) -> Result<Vec<ReceiptItem>, ReceiptError> {
+    let mut items = Vec::new();
+    for &probe in probes {
+        let taken = take_for_ruling(owners, claims, probe, &expectation.selector);
+        if taken.is_empty() {
+            continue;
+        }
+        let claimed: Vec<&Claim> = taken.iter().map(|&index| &claims[index]).collect();
+        items.push(ruling_item(inputs, expectation, hashes, probe, &claimed)?);
+    }
+    Ok(items)
+}
+
+/// The fulfilled item of one probe a standing approval holds. It names the ruling, not an
+/// obligation: the ruling's own predicate is the check that held.
+fn ruling_item(
+    inputs: &ReceiptInputs<'_>,
+    expectation: &Expectation,
+    hashes: &[ProbeHash],
+    probe: usize,
+    claimed: &[&Claim],
+) -> Result<ReceiptItem, ReceiptError> {
+    let result = &inputs.results[probe];
+    let episode = episode_for(inputs.episodes, &expectation.selector, &[]);
+    Ok(ReceiptItem {
+        item_id: minted("ruling", &(&expectation.ruling_id, hashes[probe]))?,
+        class: ItemClass::ObligationFulfilled,
+        state: state_of(episode),
+        machine_id: expectation.machine_ids.first().clone(),
+        selector: Some(canonical_episode_selector(&expectation.selector)),
+        probe_hash: hashes[probe],
+        episode_id: episode.map(|episode| episode.id),
+        ruling_id: Some(expectation.ruling_id.clone()),
+        attempts: attempts_of(episode),
+        budget: budget(inputs),
+        route_path: result.contrast.probe.route_path.clone(),
+        sequence: sequence(result),
+        evidence: evidence(result, claimed),
+        evaluation: Evaluation {
+            authorization: Authorization::Ruling {
+                ruling_id: expectation.ruling_id.clone(),
+            },
+            outcome: item_outcome(inputs, &[probe], claimed),
+            obligations: Vec::new(),
+        },
+    })
 }
 
 fn out_of_scope(

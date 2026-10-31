@@ -10,12 +10,12 @@ use acan_intent::compare::{self, Contrast};
 use acan_intent::predicate::RetainedExample;
 use acan_intent::receipt::{self, ProbeResult, ReceiptError, ReceiptInputs};
 use acan_intent::{
-    CaptureOutcome, Channels, Comparison, Completeness, ContentHash, Contest, ContrastExample,
-    CoreDerived, CorpusProbe, DiscrepancyEpisode, EpisodeKey, Fixture, FixtureSetManifest,
-    FoldedLedger, GateState, HttpMethod, ItemClass, LedgerEvent, Mask, MaskablePath, Observation,
-    ObservationHash, ObservedRun, Outcome, PreparedCommit, ProbeCorpus, ProbeHash,
-    ProbeSetManifest, Receipt, ReceiptItem, RequestRecord, RulingStatus, Run, RunOutcome, RunRole,
-    Scope, ScopeConfirmation, Selector, canonical_episode_selector,
+    Authorization, CaptureOutcome, Channels, Comparison, Completeness, ContentHash, Contest,
+    ContrastExample, CoreDerived, CorpusProbe, DiscrepancyEpisode, EpisodeKey, Fixture,
+    FixtureSetManifest, FoldedLedger, GateState, HttpMethod, ItemClass, LedgerEvent, Mask,
+    MaskablePath, Observation, ObservationHash, ObservedRun, Outcome, PreparedCommit, ProbeCorpus,
+    ProbeHash, ProbeSetManifest, Receipt, ReceiptItem, RequestRecord, RulingStatus, Run,
+    RunOutcome, RunRole, Scope, ScopeConfirmation, Selector, canonical_episode_selector,
 };
 use acan_intent::{admit, fold};
 use serde::Serialize;
@@ -1181,6 +1181,192 @@ fn a_standing_ruling_is_violated_where_its_field_differs_and_breaks_it() {
             .any(|item| item.class == ItemClass::ViolatesRuling
                 && item.ruling_id.as_ref().map(|id| id.as_str()) == Some("r-request-id")),
         "the violation does not name the ruling"
+    );
+}
+
+/// An opaque request id of the form the request-id ruling accepts.
+const REQUEST_ID: &str = "3f2b9c1e-8a7d-4e2b-9c3d-1a2b3c4d5e6f";
+
+/// The candidate's sixth-login sequence with its first login answered with `request_id`. The
+/// base never sends the header, so the candidate's field is added and differs from the base.
+fn with_request_id(request_id: &str) -> Vec<Hit> {
+    let mut candidate = sequence(SIX_FAILURES);
+    hit_mut(&mut candidate, "s1")
+        .headers
+        .push(("x-request-id", request_id.to_owned()));
+    candidate
+}
+
+#[test]
+fn a_held_standing_ruling_takes_its_difference_as_one_fulfilled_item() {
+    let scope = scope();
+    let confirmation = confirmation_for(&scope);
+    let ledger = fold::fold(&[request_id_ruling()]).expect("the ruling folds");
+    let context = prepared_context(&confirmation, &ledger);
+    let held = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        with_request_id(REQUEST_ID),
+    );
+    let receipt = build(&scope, &confirmation, &context, &ledger, &[held.result()])
+        .expect("the receipt builds");
+    assert!(
+        matches!(
+            ruling_status(&receipt, "r-request-id"),
+            RulingStatus::Held {}
+        ),
+        "a uuid where the field differs was not held: {:?}",
+        ruling_status(&receipt, "r-request-id")
+    );
+    assert_eq!(
+        receipt.counts.get(ItemClass::OutOfScope),
+        0,
+        "a held ruling left its difference out of scope"
+    );
+    let rows: Vec<&ReceiptItem> = receipt
+        .items
+        .iter()
+        .filter(|item| item.ruling_id.as_ref().map(|id| id.as_str()) == Some("r-request-id"))
+        .collect();
+    let [row] = rows.as_slice() else {
+        panic!(
+            "one probe holds the ruling, so one ruling item: found {}",
+            rows.len()
+        );
+    };
+    assert_eq!(row.class, ItemClass::ObligationFulfilled);
+    assert!(row.class.counts_toward_pass());
+    assert!(
+        matches!(row.evaluation.authorization, Authorization::Ruling { .. }),
+        "the fulfilled row is not authorized by the ruling"
+    );
+    assert!(
+        row.evidence
+            .iter()
+            .any(|evidence| evidence.field.as_str() == "header.x-request-id"),
+        "the fulfilled row carries no evidence of the difference it takes"
+    );
+}
+
+#[test]
+fn a_held_standing_ruling_leaves_a_difference_a_may_item_owns_to_that_item() {
+    // A may-change item that names the request id owns the difference, so the ruling finds it
+    // already owned and takes nothing: the ruling still holds, but no ruling item is made.
+    let scope = edited_scope(|value| {
+        value["body"]["may"]
+            .as_array_mut()
+            .expect("the scope has may items")
+            .push(json!({
+                "id": "i-request-id",
+                "selector": {
+                    "surface": "http",
+                    "method": "POST",
+                    "route_template": "/api/login",
+                    "step_context": { "kind": "any" },
+                    "principal": { "kind": "anonymous" },
+                    "channel": "header",
+                    "field_path": "x-request-id"
+                },
+                "change": "add",
+                "acceptance": [{
+                    "obligation_id": "obl-request-id",
+                    "predicate": {
+                        "predicate": "present",
+                        "at": {
+                            "ref": "field",
+                            "run": "candidate",
+                            "step_id": "s1",
+                            "path": "header.x-request-id"
+                        }
+                    },
+                    "text": "A login carries a request id"
+                }],
+                "provenance": "model",
+                "example": {
+                    "kind": "target",
+                    "step_id": "s1",
+                    "path": "header.x-request-id",
+                    "after": { "state": "present", "value": REQUEST_ID }
+                },
+                "machine_ids": ["auth"]
+            }));
+    });
+    let confirmation = confirmation_for(&scope);
+    let ledger = fold::fold(&[request_id_ruling()]).expect("the ruling folds");
+    let context = prepared_context(&confirmation, &ledger);
+    let candidate = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        with_request_id(REQUEST_ID),
+    );
+    let receipt = build(
+        &scope,
+        &confirmation,
+        &context,
+        &ledger,
+        &[candidate.result()],
+    )
+    .expect("the receipt builds");
+    assert!(
+        matches!(
+            ruling_status(&receipt, "r-request-id"),
+            RulingStatus::Held {}
+        ),
+        "the ruling was not held: {:?}",
+        ruling_status(&receipt, "r-request-id")
+    );
+    assert!(
+        receipt
+            .items
+            .iter()
+            .all(|item| item.ruling_id.as_ref().map(|id| id.as_str()) != Some("r-request-id")),
+        "the ruling took a difference the may item owns"
+    );
+    let owned = item(&receipt, "i-request-id");
+    assert!(
+        matches!(
+            owned.evaluation.authorization,
+            Authorization::MayChange { .. }
+        ),
+        "the may item does not own its difference: {:?}",
+        owned.evaluation.authorization
+    );
+    assert_eq!(receipt.counts.get(ItemClass::OutOfScope), 0);
+}
+
+#[test]
+fn a_violated_standing_ruling_takes_its_difference_so_it_is_not_also_out_of_scope() {
+    let scope = scope();
+    let confirmation = confirmation_for(&scope);
+    let ledger = fold::fold(&[request_id_ruling()]).expect("the ruling folds");
+    let context = prepared_context(&confirmation, &ledger);
+    let broken = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        with_request_id("alice"),
+    );
+    let receipt = build(&scope, &confirmation, &context, &ledger, &[broken.result()])
+        .expect("the receipt builds");
+    assert!(
+        matches!(
+            ruling_status(&receipt, "r-request-id"),
+            RulingStatus::Violated { .. }
+        ),
+        "a name where the field differs did not violate: {:?}",
+        ruling_status(&receipt, "r-request-id")
+    );
+    assert_eq!(
+        receipt.counts.get(ItemClass::ViolatesRuling),
+        1,
+        "the violation has one row"
+    );
+    assert_eq!(
+        receipt.counts.get(ItemClass::OutOfScope),
+        0,
+        "the violated difference was also counted out of scope"
     );
 }
 
