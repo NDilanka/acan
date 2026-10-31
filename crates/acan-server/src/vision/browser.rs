@@ -436,7 +436,9 @@ mod tests {
         let page = |head: &str| inert(&format!("<!doctype html>{head}<p>x</p>"));
         assert_eq!(
             page("<meta charset=\"ISO-8859-1\">"),
-            format!("<!doctype html>{CHARSET}{POLICY}<x-inert-meta charset=\"ISO-8859-1\"><p>x</p>")
+            format!(
+                "<!doctype html>{CHARSET}{POLICY}<x-inert-meta charset=\"ISO-8859-1\"><p>x</p>"
+            )
         );
         assert_eq!(
             page("<meta http-equiv=Content-Type content=\"text/html; charset=shift_jis\">"),
@@ -463,7 +465,10 @@ mod tests {
             "<metadata charset=utf-8>",
         ] {
             let page = inert(tag);
-            assert!(page.starts_with(&format!("{CHARSET}{POLICY}")), "{tag}: {page}");
+            assert!(
+                page.starts_with(&format!("{CHARSET}{POLICY}")),
+                "{tag}: {page}"
+            );
             assert_eq!(
                 page.to_ascii_lowercase().matches("<meta").count(),
                 2,

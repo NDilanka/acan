@@ -577,8 +577,11 @@ async fn page(
     if kept.status != Some(200) || !html {
         return Err(format!(
             "the {what} page answered {} {}, not an HTML page",
-            kept.status.map_or_else(|| "no status".to_owned(), |s| s.to_string()),
-            kept.content_type.as_deref().unwrap_or("with no content type"),
+            kept.status
+                .map_or_else(|| "no status".to_owned(), |s| s.to_string()),
+            kept.content_type
+                .as_deref()
+                .unwrap_or("with no content type"),
         ));
     }
     browser::render(&vision.browser, &kept.body)
@@ -752,7 +755,11 @@ mod tests {
             data_dir: data.path().to_path_buf(),
         };
         let vision = Vision::open(&outside, repo.path()).expect("opens");
-        assert!(vision.root.starts_with(std::fs::canonicalize(data.path()).expect("resolves")));
+        assert!(
+            vision
+                .root
+                .starts_with(std::fs::canonicalize(data.path()).expect("resolves"))
+        );
     }
 
     #[tokio::test]
@@ -780,14 +787,24 @@ mod tests {
             .expect("saves the image");
         assert_eq!(vision.record(task, run).await.expect("reads"), Some(record));
         assert_eq!(
-            vision.image(task, run, 0, Side::Candidate).await.expect("reads"),
+            vision
+                .image(task, run, 0, Side::Candidate)
+                .await
+                .expect("reads"),
             Some(b"png".to_vec())
         );
         assert_eq!(
-            vision.image(task, run, 0, Side::Baseline).await.expect("reads"),
+            vision
+                .image(task, run, 0, Side::Baseline)
+                .await
+                .expect("reads"),
             None
         );
-        assert!(vision.run_dir(task, run).ends_with(Path::new("t-3").join("g-5")));
+        assert!(
+            vision
+                .run_dir(task, run)
+                .ends_with(Path::new("t-3").join("g-5"))
+        );
     }
 
     #[tokio::test]

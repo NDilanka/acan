@@ -53,7 +53,10 @@ pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<Public
         .route("/api/tasks/{task}/rulings", get(get_rulings::<C>))
         .route("/api/tasks/{task}/receipt", get(get_receipt::<C>))
         .route("/api/tasks/{task}/vision", get(get_vision::<C>))
-        .route("/api/tasks/{task}/vision/{file}", get(get_vision_image::<C>))
+        .route(
+            "/api/tasks/{task}/vision/{file}",
+            get(get_vision_image::<C>),
+        )
         .route(
             "/api/tasks/{task}/vision/{index}/baseline.png",
             get(get_vision_baseline::<C>),
@@ -415,10 +418,7 @@ async fn get_vision_baseline<C: ModelClient + 'static>(
 }
 
 /// The task and its latest gate run. A task with no gate run is 404.
-fn vision_run<C: ModelClient>(
-    host: &Host<C>,
-    raw: &str,
-) -> Result<(TaskId, GateRunId), ApiError> {
+fn vision_run<C: ModelClient>(host: &Host<C>, raw: &str) -> Result<(TaskId, GateRunId), ApiError> {
     let task: TaskId = raw.parse().map_err(|_| ApiError::NotFound("task"))?;
     host.read(|world| {
         if world.task(task).is_none() {

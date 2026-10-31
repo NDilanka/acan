@@ -250,8 +250,7 @@ async fn commit(
             &stamped.event,
             Event::ModelUsed { .. } | Event::VisionChecked { .. }
         )
-    })
-    {
+    }) {
         wake.notify_one();
     }
     Ok(batch)

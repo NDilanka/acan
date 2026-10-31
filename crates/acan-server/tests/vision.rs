@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use acan_core::{Event, Stamped};
-use acan_server::{DEFAULT_WITNESS_CONCURRENCY, Models, Running, ServerConfig, VisionConfig, start};
+use acan_server::{
+    DEFAULT_WITNESS_CONCURRENCY, Models, Running, ServerConfig, VisionConfig, start,
+};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
@@ -131,7 +133,11 @@ async fn the_vision_routes_need_a_token_a_task_and_a_gate_run() {
         let (status, _) = get(&running, route, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{route} without a token");
         let (status, _) = get(&running, route, Some("acan_unknown")).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "{route} with an unknown token");
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{route} with an unknown token"
+        );
         assert_not_found(&get(&running, route, Some(OWNER_TOKEN)).await, "gate run");
         let unknown = route.replace(&task, "t-99");
         assert_not_found(&get(&running, &unknown, Some(OWNER_TOKEN)).await, "task");

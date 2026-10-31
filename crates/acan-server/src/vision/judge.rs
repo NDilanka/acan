@@ -12,7 +12,10 @@ pub(crate) const VISION_PROMPT: &str = "You compare screenshots of one web page 
 /// Output budget for one check. Muse Spark spends hidden reasoning tokens from this cap, so it
 /// is well above the size of the reply itself.
 pub(crate) const MAX_TOKENS: u32 = 1_200;
-const _: () = assert!(MAX_TOKENS >= 800, "a vision check needs at least 800 output tokens");
+const _: () = assert!(
+    MAX_TOKENS >= 800,
+    "a vision check needs at least 800 output tokens"
+);
 
 /// The images and items of one check.
 pub(crate) struct Pair<'a> {
@@ -182,8 +185,13 @@ mod tests {
         let request = request(&pair(&items, Some(b"baseline-png")));
         assert_eq!(request.max_tokens, Some(MAX_TOKENS));
         let messages = wire(&request);
-        assert_eq!(messages[0], json!({ "role": "system", "content": VISION_PROMPT }));
-        let parts = messages[1]["content"].as_array().expect("an array of parts");
+        assert_eq!(
+            messages[0],
+            json!({ "role": "system", "content": VISION_PROMPT })
+        );
+        let parts = messages[1]["content"]
+            .as_array()
+            .expect("an array of parts");
         let kinds: Vec<&str> = parts
             .iter()
             .map(|part| part["text"].as_str().unwrap_or("image"))
@@ -197,7 +205,9 @@ mod tests {
     fn a_check_without_a_baseline_sends_the_candidate_alone() {
         let items = items();
         let messages = wire(&request(&pair(&items, None)));
-        let parts = messages[1]["content"].as_array().expect("an array of parts");
+        let parts = messages[1]["content"]
+            .as_array()
+            .expect("an array of parts");
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0]["text"], "CANDIDATE");
     }
@@ -212,7 +222,10 @@ mod tests {
         let items = items();
         let judged = judge(&stub, &pair(&items, Some(b"b"))).await;
         assert_eq!(judged.verdict, Verdict::Consistent);
-        assert_eq!(judged.reason.as_deref(), Some("The totals column is still shown."));
+        assert_eq!(
+            judged.reason.as_deref(),
+            Some("The totals column is still shown.")
+        );
         assert_eq!(judged.raw_reply, None);
         assert!(judged.call.is_some());
     }
@@ -232,10 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_reply_that_does_not_parse_is_unclear_and_keeps_its_text() {
-        let stub = Stub::default().when(
-            Role::Vision,
-            |_| true,
-            Reply::text("Looks fine to me!"));
+        let stub = Stub::default().when(Role::Vision, |_| true, Reply::text("Looks fine to me!"));
         let items = items();
         let judged = judge(&stub, &pair(&items, None)).await;
         assert_eq!(judged.verdict, Verdict::Unclear);
@@ -269,7 +279,10 @@ mod tests {
 
     #[test]
     fn an_empty_reply_is_unclear() {
-        assert_eq!(read_reply(None), (Verdict::Unclear, None, Some(String::new())));
+        assert_eq!(
+            read_reply(None),
+            (Verdict::Unclear, None, Some(String::new()))
+        );
         assert_eq!(
             read_reply(Some(r#"{"verdict":"maybe"}"#)).0,
             Verdict::Unclear
