@@ -1754,6 +1754,7 @@ fn decide_system(world: &World, ctx: &Ctx<'_>, cmd: SystemCmd) -> Result<Vec<Eve
         SystemCmd::LandResult { task, head, result } => {
             gate::decide_land_result(world, task, &head, result)
         }
+        SystemCmd::CandidateConflicted { run, files } => gate::decide_conflicted(world, run, files),
         SystemCmd::ModelUsed {
             model,
             step,

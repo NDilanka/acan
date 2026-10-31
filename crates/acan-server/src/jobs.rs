@@ -1037,7 +1037,20 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
     tracing::debug!(%run, prepared = contrast.prepared.is_some(), "a scope-first run starts");
     let repo = workspace.repo();
     let pass = Pass::new(host, repo, run).await?;
-    let candidate = prepare_candidate(repo, &pass, &contrast.head).await?;
+    let candidate = match prepare_candidate(repo, &pass, &contrast.head).await? {
+        Ok(candidate) => candidate,
+        Err(files) => {
+            // The candidate cannot be tested on the protected head. The origin refuses the run,
+            // names the files, and reopens the task. Nothing is installed.
+            tracing::info!(%run, files = files.len(), "the candidate conflicts with the protected head");
+            host.submit(Command::System(SystemCmd::CandidateConflicted {
+                run,
+                files,
+            }))
+            .await?;
+            return Ok(());
+        }
+    };
     tracing::debug!(%run, "the candidate is prepared on the protected head");
     let ledger = host.folded_rulings().map_err(JobError::Rulings)?;
     let episodes = judged_episodes(host, contrast.order, run)?;
@@ -1152,7 +1165,15 @@ async fn gated_land<C: ModelClient>(
         return Ok(Some(Ok(landed)));
     }
     let pass = Pass::new(host, repo, delivery.run).await?;
-    let candidate = prepare_candidate(repo, &pass, head).await?;
+    let candidate = match prepare_candidate(repo, &pass, head).await? {
+        Ok(candidate) => candidate,
+        // A conflict refuses the land, so the origin reopens the task with the files named.
+        Err(files) => {
+            drop(writes);
+            drop(fence);
+            return Ok(Some(Err(conflict_reason(head, &files))));
+        }
+    };
     let ledger = host.folded_rulings().map_err(JobError::Rulings)?;
     let episodes = judged_episodes(host, delivery.order, delivery.run)?;
     let order = Order {
@@ -1217,24 +1238,40 @@ async fn rebind<C: ModelClient>(
     }
 }
 
-/// Prepares `head` on the pass's protected head. A conflict is an error: the candidate has no
-/// merged commit to test.
+/// Prepares `head` on the pass's protected head. The inner `Err` is a conflict: the files that
+/// clash with the protected head. The candidate then has no merged commit to test, and the
+/// caller refuses it. The outer error is a git failure or a head that is not a commit, which the
+/// job retries.
 async fn prepare_candidate(
     repo: &Repo,
     pass: &Pass,
     head: &CommitId,
-) -> Result<Preparation, JobError> {
+) -> Result<Result<Preparation, Vec<String>>, JobError> {
     let commit = CommitSha::from_str(&head.to_string())
         .map_err(|err| JobError::Unavailable(format!("the candidate is not a commit: {err}")))?;
     match repo
         .prepare(&commit, &observe::protected_paths(&pass.policy))
         .await?
     {
-        PrepareOutcome::Prepared(candidate) => Ok(candidate),
+        PrepareOutcome::Prepared(candidate) => Ok(Ok(candidate)),
+        PrepareOutcome::Conflict { files, .. } => {
+            Ok(Err(files.iter().map(ToString::to_string).collect()))
+        }
+        // The outcome enum is non-exhaustive: an outcome this build does not know is not a
+        // candidate to test, so it fails closed and is retried.
         _ => Err(JobError::Unavailable(format!(
-            "candidate {head} conflicts with the protected head"
+            "candidate {head} has no prepared outcome on the protected head"
         ))),
     }
+}
+
+/// Why a candidate that conflicts with the protected head was refused, in the words the origin
+/// records. It names the commit and the conflicting files.
+fn conflict_reason(head: &CommitId, files: &[String]) -> String {
+    format!(
+        "candidate {head} conflicts with the protected head: {}",
+        files.join(", ")
+    )
 }
 
 /// The protected head as a commit sha.

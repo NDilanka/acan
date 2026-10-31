@@ -8,6 +8,7 @@
 //! Gating --ClashFound on the task--> Declared             (run abandoned; late results rejected)
 //! Queued --LandResult Ok--> Landed                        [Landed]
 //! Queued --LandResult Err--> Open                         [LandFailed]
+//! Gating --CandidateConflicted--> Open                    [LeaseEnded Refused, LandFailed]
 //! ```
 //!
 //! A scope-first run freezes no witnesses and stays gating until its receipt closes it; see
@@ -210,6 +211,54 @@ pub(crate) fn close(
         }
     };
     [Event::GateClosed { run, verdict }, follow]
+}
+
+/// `CandidateConflicted`: the host could not merge the gating run's candidate onto the protected
+/// head. Only the task's current gating run can be refused, and the refusal must name the files
+/// that conflict. It ends the lease and reopens the task with those files in the reason, the way
+/// `LandFailed` does. It installs nothing, and the run stays in the log, inert.
+pub(crate) fn decide_conflicted(
+    world: &World,
+    run: GateRunId,
+    files: Vec<String>,
+) -> Result<Vec<Event>, Rejection> {
+    let gate = world
+        .gate(run)
+        .ok_or_else(|| Rejection::unknown("gate run", run))?;
+    // Only a scope-first run is refused here: a legacy run has no candidate to prepare.
+    lane::lane_run(world, run)?;
+    if files.is_empty() {
+        return Err(Rejection::invalid("a conflict names at least one file"));
+    }
+    let task = world
+        .task(gate.task)
+        .ok_or_else(|| Rejection::unknown("task", gate.task))?;
+    let TaskState::Claimed {
+        claim,
+        stage: Stage::Gating { run: current, .. },
+    } = &task.state
+    else {
+        return Err(Rejection::wrong_state("gate run", "closed"));
+    };
+    if *current != run {
+        return Err(Rejection::wrong_state("gate run", "closed"));
+    }
+    let reason = format!(
+        "candidate {} conflicts with the protected head: {}",
+        gate.head,
+        files.join(", ")
+    );
+    Ok(vec![
+        Event::LeaseEnded {
+            task: task.id,
+            generation: claim.lease.generation,
+            why: LeaseEnd::Refused,
+        },
+        Event::LandFailed {
+            task: task.id,
+            reason,
+        },
+    ])
 }
 
 /// `LandResult`: rejected unless the task is `Queued` at `head` and at the front of the land queue.

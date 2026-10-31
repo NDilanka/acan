@@ -327,7 +327,6 @@ async fn a_failing_gate_sends_the_task_back_to_building_and_lands_nothing() {
 }
 
 #[tokio::test]
-#[ignore = "product gap: a candidate that conflicts with the protected head records no refusal (jobs.rs prepare_candidate)"]
 async fn a_conflicting_land_reports_the_files_and_reopens_the_task() {
     let _docker = DOCKER.lock().await;
     let repo = demo_repo();

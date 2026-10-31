@@ -658,6 +658,86 @@ fn a_moved_protected_input_or_ruling_needs_the_scope_confirmed_again() {
 }
 
 #[test]
+fn a_conflicting_candidate_refuses_the_run_and_reopens_the_task() {
+    let mut fx = Fx::new();
+    let scope = fx.open_lane();
+    fx.readback(fx.task1, &scope, vec![]);
+    let run = fx.gate_run(fx.task1);
+
+    let batch = fx
+        .system(SystemCmd::CandidateConflicted {
+            run,
+            files: vec!["landed.txt".to_owned()],
+        })
+        .expect("the conflict refuses the run");
+    let reason = batch
+        .iter()
+        .find_map(|stamped| match &stamped.event {
+            Event::LandFailed { task, reason } if *task == fx.task1 => Some(reason.clone()),
+            _ => None,
+        })
+        .expect("the refusal is recorded as a failed land");
+    assert!(
+        reason.contains("landed.txt"),
+        "the reason names the file: {reason}"
+    );
+    assert!(
+        batch.iter().any(|stamped| matches!(
+            &stamped.event,
+            Event::LeaseEnded { task, why: LeaseEnd::Refused, .. } if *task == fx.task1
+        )),
+        "the lease ends with the refusal"
+    );
+    assert!(
+        matches!(
+            fx.origin.world().task(fx.task1).map(|t| &t.state),
+            Some(TaskState::Open)
+        ),
+        "the task reopens"
+    );
+    assert!(
+        fx.origin
+            .world()
+            .pending_contrasts()
+            .iter()
+            .all(|pending| pending.run != run),
+        "the refused run is no longer pending"
+    );
+    // A refused run is closed: the same refusal again is rejected.
+    let again = fx
+        .system(SystemCmd::CandidateConflicted {
+            run,
+            files: vec!["landed.txt".to_owned()],
+        })
+        .unwrap_err();
+    assert!(matches!(again, Rejection::WrongState { .. }), "{again:?}");
+    fx.assert_replays();
+}
+
+#[test]
+fn a_conflict_refusal_names_at_least_one_file() {
+    let mut fx = Fx::new();
+    let scope = fx.open_lane();
+    fx.readback(fx.task1, &scope, vec![]);
+    let run = fx.gate_run(fx.task1);
+
+    let refused = fx
+        .system(SystemCmd::CandidateConflicted {
+            run,
+            files: Vec::new(),
+        })
+        .unwrap_err();
+    assert!(matches!(refused, Rejection::Invalid { .. }), "{refused:?}");
+    assert!(
+        matches!(
+            fx.origin.world().task(fx.task1).map(|t| &t.state),
+            Some(TaskState::Claimed { .. })
+        ),
+        "a refusal with no file changes nothing"
+    );
+}
+
+#[test]
 fn a_confirmation_is_bound_to_revision_base_rulings_and_hashes() {
     let mut fx = Fx::new();
     let scope: Scope = from(fx.scope_json(1, narrow_selector()));

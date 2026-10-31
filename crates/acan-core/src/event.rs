@@ -286,6 +286,14 @@ pub enum SystemCmd {
         /// The gate context computed on `base` with the current scope and rulings.
         context: Box<GateContext>,
     },
+    /// The host could not merge a gating run's candidate onto the protected head. The run is
+    /// refused: the task reopens with the conflicting files named, and nothing is installed.
+    CandidateConflicted {
+        /// The gating run.
+        run: GateRunId,
+        /// The conflicting paths, in the order git reported them. Never empty.
+        files: Vec<String>,
+    },
     /// The foreman drafted the scope of an order revision.
     ScopeDrafted {
         /// The order.
