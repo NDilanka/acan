@@ -14,8 +14,10 @@ use acan_core::{
     ScopeConfirmation, ScopeDraftOutcome, Seq, Stamped, TaskId, TaskState,
 };
 use acan_intent::{
-    GetReceiptRequest, GetReceiptResponse, GetRulingsRequest, GetRulingsResponse, GetScopeRequest,
-    GetScopeResponse, MachineId, McpError, McpErrorCode, McpV1, TaskRef,
+    ContrastExample, ContrastExampleHash, EpisodeId, GetReceiptRequest, GetReceiptResponse,
+    GetRulingsRequest, GetRulingsResponse, GetScopeRequest, GetScopeResponse, LedgerHead,
+    MachineId, McpError, McpErrorCode, McpV1, NormalizationHash, NormalizationVersion, ProbeHash,
+    ScopeHash, Selector, TaskRef,
 };
 use acan_llm::{ModelClient, UsageTotals};
 use acan_scan::Plant;
@@ -29,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::auth::Principal;
+use crate::examples;
 use crate::host::{Host, SubmitError};
 use crate::intent_api::{self, IntentError};
 use crate::jobs;
@@ -55,6 +58,10 @@ pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<Public
         .route(
             "/api/orders/{order}/scope/confirmation",
             get(get_scope_confirmation::<C>),
+        )
+        .route(
+            "/api/orders/{order}/episodes/{episode}/ruling-draft",
+            get(get_ruling_draft::<C>),
         );
     let router = match web {
         Some(root) => {
@@ -418,6 +425,104 @@ async fn get_scope_confirmation<C: ModelClient + 'static>(
             .map_err(ApiError::Rejected)
     })?;
     Ok(Json(body))
+}
+
+/// What a member needs to rule on one discrepancy episode: the contrast examples kept for it, the
+/// example the ruling is on, and the hashes and versions a decision names. Members only, since a
+/// human rules. The draft confirms nothing. `RecordRuling` checks the decision a member sends.
+#[derive(Serialize)]
+struct RulingDraftView {
+    order: String,
+    episode: EpisodeId,
+    scope_hash: ScopeHash,
+    ledger_head: LedgerHead,
+    selector: Selector,
+    probe_hash: ProbeHash,
+    /// The example the ruling is on: the episode's latest candidate run, for its probe.
+    ruled_on: ContrastExampleHash,
+    normalization_version: NormalizationVersion,
+    normalization_hash: NormalizationHash,
+    /// Every example kept for the episode, by run and then hash.
+    examples: Vec<DraftExample>,
+}
+
+/// One example kept for an episode, with the normalization it was compared under.
+#[derive(Serialize)]
+struct DraftExample {
+    run: String,
+    hash: ContrastExampleHash,
+    probe_hash: ProbeHash,
+    normalization_version: NormalizationVersion,
+    normalization_hash: NormalizationHash,
+    example: ContrastExample,
+}
+
+/// The ruling draft of an episode. The episode's latest evidence names the candidate run the
+/// ruling is on, so the example of that run and the episode's probe is `ruled_on`.
+async fn get_ruling_draft<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+    Path((order, episode)): Path<(String, String)>,
+) -> Result<Json<RulingDraftView>, ApiError> {
+    member(&host, &headers)?;
+    let order: OrderId = order.parse().map_err(|_| ApiError::NotFound("order"))?;
+    let episode: EpisodeId = episode.parse().map_err(|_| ApiError::NotFound("episode"))?;
+    let (scope_hash, ledger_head, selector, latest) = host.read(|world| {
+        let lane = world
+            .lane(order)
+            .ok_or(ApiError::NotFound("scope for this order"))?;
+        let found = lane
+            .episodes
+            .get(&episode)
+            .ok_or(ApiError::NotFound("episode"))?;
+        let latest = found
+            .evidence
+            .last()
+            .ok_or(ApiError::NotFound("evidence for this episode"))?;
+        Ok::<_, ApiError>((
+            lane.scope_hash,
+            world.ledger().head(),
+            found.selector.clone(),
+            (latest.run.to_string(), latest.probe_hash),
+        ))
+    })?;
+    let (run, probe_hash) = latest;
+    let dir = host.repo().join(STATE_DIR).join(examples::DIR);
+    let kept = examples::read(&dir, &episode).map_err(|err| ApiError::Internal(err.into()))?;
+    let examples = kept
+        .into_iter()
+        .map(|stored| {
+            let internal = |err| ApiError::Internal(anyhow::Error::from(err));
+            let probe = stored.example.probe.spec.probe_hash().map_err(internal)?;
+            let normalization = &stored.example.probe.normalization;
+            Ok(DraftExample {
+                run: stored.run,
+                hash: stored.hash,
+                probe_hash: probe,
+                normalization_version: normalization.version.clone(),
+                normalization_hash: normalization.normalization_hash().map_err(internal)?,
+                example: stored.example,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let ruled = examples
+        .iter()
+        .find(|kept| kept.run == run && kept.probe_hash == probe_hash)
+        .ok_or(ApiError::NotFound(
+            "retained example for the episode's latest run",
+        ))?;
+    Ok(Json(RulingDraftView {
+        order: order.to_string(),
+        episode,
+        scope_hash,
+        ledger_head,
+        selector,
+        probe_hash,
+        ruled_on: ruled.hash,
+        normalization_version: ruled.normalization_version.clone(),
+        normalization_hash: ruled.normalization_hash,
+        examples,
+    }))
 }
 
 /// The latest receipt of a task's gate runs.

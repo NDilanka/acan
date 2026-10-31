@@ -22,7 +22,7 @@ use acan_core::{
     HumanCmd, LEASE_TTL_MS, LaneVerdict, MachineKey, OrderId, Origin, ScopeBinding, Stage, Stamped,
     TaskId, TaskState, World,
 };
-use acan_intent::{ItemClass, Scope, ScopeConfirmation};
+use acan_intent::{ContrastExample, ItemClass, LedgerEvent, Scope, ScopeConfirmation};
 use acan_llm::{
     CallRecord, ChatRequest, ChatResponse, LlmError, ModelClient, Role, Usage, UsageLedger,
 };
@@ -1001,6 +1001,148 @@ async fn a_member_reads_the_confirmation_body_and_sending_it_confirms_the_scope(
     assert!(
         lane.confirmation.is_some(),
         "posting the body confirms the scope"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A failing gate opens an episode, and the observed runs it was judged on are kept for it. A
+/// member reads them through the ruling draft, and a ruling built from the draft is recorded. An
+/// agent token never reads the draft.
+#[tokio::test]
+async fn a_member_rules_on_a_kept_example_from_the_ruling_draft() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let running = start_plant(root).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+    post_order(&running).await;
+    scope_first(&running, root, task).await;
+    let fence = claim(&running, task).await;
+    wait_for_worktree(root, task, fence.generation).await;
+    build_with(
+        &running,
+        root,
+        task,
+        fence,
+        &["src/auth.ts"],
+        seed_regression,
+    )
+    .await;
+    settle(&running, "the gate to block the regression", |log, _| {
+        log.iter().find_map(|stamped| match &stamped.event {
+            Event::ReceiptRecorded { record, .. }
+                if matches!(record.verdict, LaneVerdict::Blocked { .. }) =>
+            {
+                Some(())
+            }
+            _ => None,
+        })
+    })
+    .await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let episode = settle(&running, "the episode the regression opened", |_, world| {
+        world
+            .lane(order)
+            .and_then(|lane| lane.episodes.keys().next().copied())
+    })
+    .await;
+
+    let path = format!("/api/orders/{order}/episodes/{episode}/ruling-draft");
+    let refused = client()
+        .get(url(&running, &path))
+        .bearer_auth(AGENT_TOKEN)
+        .send()
+        .await
+        .expect("the agent's draft request is sent");
+    assert_eq!(
+        refused.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "an agent token never reads a ruling draft"
+    );
+    let response = client()
+        .get(url(&running, &path))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .expect("the draft request is sent");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "the member reads the draft"
+    );
+    let draft: Value = response.json().await.expect("the draft is JSON");
+    let ruled_on = draft["ruled_on"]
+        .as_str()
+        .expect("the draft names the example it is on")
+        .to_owned();
+    let kept = draft["examples"]
+        .as_array()
+        .expect("the draft lists the kept examples");
+    assert!(
+        kept.iter()
+            .any(|example| example["hash"] == json!(ruled_on)),
+        "the ruled-on example is one of the kept examples: {draft}"
+    );
+    for kept_example in kept {
+        let example: ContrastExample = serde_json::from_value(kept_example["example"].clone())
+            .expect("a kept example decodes");
+        let hash = example.contrast_example_hash().expect("the example hashes");
+        assert_eq!(
+            kept_example["hash"],
+            json!(hash.to_string()),
+            "a kept example hashes to its name"
+        );
+    }
+
+    // The decision is built from the draft: the ledger head it chains to, the scope in force, the
+    // episode, and the example it is on. RecordRuling checks the chain and the actor.
+    let head = &draft["ledger_head"];
+    let mut decision = json!({
+        "event": "decision_confirmed",
+        "schema_version": "acan-ledger/1",
+        "event_seq": head["event_seq"].as_u64().expect("the head has a sequence") + 1,
+        "actor": "owner",
+        "at": 1_800_000_000_000u64,
+        "ruling_id": "r-signup-body",
+        "order": order.to_string(),
+        "scope_hash": draft["scope_hash"],
+        "episode_id": draft["episode"],
+        "evidence_hashes": [],
+        "selector": draft["selector"],
+        "predicate_ast": {
+            "predicate": "equals_base",
+            "step_id": "s1",
+            "path": "body",
+            "anchor": { "kind": "fresh" }
+        },
+        "accepts": [ruled_on],
+        "rejects": [],
+        "ruled_on": ruled_on,
+        "normalization_version": draft["normalization_version"],
+        "normalization_hash": draft["normalization_hash"],
+        "applicability": "exact_observation_approval",
+        "label": "the signup body",
+        "machine_ids": [MACHINE]
+    });
+    if !head["hash"].is_null() {
+        decision["prev_hash"] = head["hash"].clone();
+    }
+    let event: LedgerEvent = serde_json::from_value(decision).expect("the decision decodes");
+    member(
+        &running,
+        &HumanCmd::RecordRuling {
+            event: Box::new(event),
+        },
+    )
+    .await;
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        1,
+        "the ruling built from the draft is the ledger's first event"
     );
     running.stop().await.expect("the server stops");
 }
