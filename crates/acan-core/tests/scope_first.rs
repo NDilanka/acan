@@ -816,6 +816,34 @@ fn a_moved_ruling_before_preparation_needs_the_scope_confirmed_again() {
 }
 
 #[test]
+fn a_moved_head_after_a_scope_change_needs_the_scope_confirmed_again() {
+    let mut fx = Fx::new();
+    let scope = fx.open_lane();
+    let prepared = fx.prepared_json(&scope, &commit(9));
+    // The scope changed after it was confirmed, so the confirmation is void and nothing is
+    // re-bound against it.
+    let widened: Scope = from(fx.scope_json(2, broad_selector()));
+    let _ = fx.revise(&widened);
+    let moved = commit(7);
+    let refused = fx
+        .system(SystemCmd::RebindBase {
+            order: fx.order,
+            base: moved.parse().expect("a commit sha"),
+            context: Box::new(from(context_on(&prepared, &moved))),
+        })
+        .unwrap_err();
+    assert_eq!(refused, Rejection::ScopeNotConfirmed { order: fx.order });
+    assert!(
+        fx.origin
+            .world()
+            .lane(fx.order)
+            .is_some_and(|lane| lane.confirmation.is_none()),
+        "the confirmation is void"
+    );
+    fx.assert_replays();
+}
+
+#[test]
 fn a_moved_head_with_no_candidate_on_the_confirmed_base_needs_the_scope_confirmed_again() {
     let mut fx = Fx::new();
     let scope = fx.open_lane();
