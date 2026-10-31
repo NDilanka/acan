@@ -5,38 +5,47 @@
   "note": "Edits to the foreman's o-1 draft, logged separately from the model and labelled by who decided them. Each edit names the draft item it acts on by id; a draft from a new run may use other ids, so this file is written for the draft in the run it resumes. take.ps1 applies scope_edits to the draft in order, then choice_rules to the open choices, then sends the result as one revise_scope through the owner's member HTTP route, and logs each edit as a human step. An op whose id is not in the draft stops the take (fail closed). Nothing here is a verdict: the edits state the order's rules and the gate checks them.",
   "choice_rules": [
     {
-      "id": "cr-code-length",
-      "question_match": "(?i)format|length|character",
-      "option_label_match": "(?i)\\b7\\b|seven|keep|current",
-      "when_no_option_matches": "remove",
-      "reason": "The draft's format question offers options that do not name the current length 7 (CODE_LENGTH = 7 in D:\\dev\\acan-demo\\src\\links.ts:6), so the open choice is removed. The current short-code form is stated by the may item i-code-format. If a draft offers an option that keeps 7, take.ps1 answers that option instead and the choice stays open until confirmed."
+      "id": "cr-bucket-scope",
+      "question_match": "(?i)shared across the link API",
+      "option_label_match": "(?i)^Shared\\b",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The order says ten requests per 60 seconds on the link API, one budget for the API, not one per route."
     },
     {
-      "id": "cr-duplicate-codes",
-      "question_match": "(?i)duplicate",
-      "option_label_match": "(?i)allow|reuse",
+      "id": "cr-retry-header",
+      "question_match": "(?i)Retry-After",
+      "option_label_match": "(?i)^Return 429 with no extra header",
       "when_no_option_matches": "fail",
-      "reason": "The demo generates each link code at random and does not check for an existing code (src/links.ts, randomInt loop), so its current behavior allows reuse. The order does not ask for a change, so the current behavior is kept (delegated answer, 'Allow reuse of code')."
-    },
-    {
-      "id": "cr-health",
-      "question_match": "(?i)health",
-      "option_label_match": "(?i)keep",
-      "when_no_option_matches": "fail",
-      "reason": "The order does not ask for a health-check change, so the current health status is kept (delegated answer, 'Keep 200 for healthy')."
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The order does not ask for a Retry-After header."
     }
   ],
   "scope_edits": [
     {
       "op": "remove_may",
-      "id": "may-1",
-      "reason": "The drafted item (may-1) claims any status change of POST /api/links and checks step s-create, which is not a step of any probe, so it cannot be judged. Dropped: the status of that route is covered by the quota items, which name the step that answers 429."
+      "id": "limit-get-links",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The drafted item (limit-get-links) names no probe step. The over-limit GET /api/links is anchored on probe step s14 of login-over-quota by i-quota-get-links, which is kept."
+    },
+    {
+      "op": "remove_may",
+      "id": "limit-post-links",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The drafted item names a step that is not in the probe corpus; the same rule is anchored on the corpus steps that send the 11th request, a relogin, a request inside the window, and bob's own quota. Boundary is exclusive: a request at 60 s starts a new window."
+    },
+    {
+      "op": "remove_may",
+      "id": "limit-delete-links",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "No probe sends more than ten DELETE requests, so this item cannot be judged; a DELETE status change stays out of scope and is reported."
     },
     {
       "op": "replace_must_keep",
-      "reason": "The drafted must-keep (keep-1) checks step s-health, which is not a step of any probe, so it cannot be judged. The same rule, that health stays available, is re-pointed at step s1 of the probe health (GET /health, anonymous): it still returns 200.",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The drafted must-keep (keep-health) checks step health-check, which is not a probe step. The same rule, GET /health still returns 200 for an anonymous request, is anchored on probe step s1 of the health probe. The rule keeps the drafted id keep-health, because take.ps1 matches a replacement by id.",
       "rule": {
-        "id": "keep-1",
+        "id": "keep-health",
         "selector": {
           "surface": "http",
           "method": "GET",
@@ -54,6 +63,31 @@
         ],
         "text": "Health endpoint remains available",
         "machine_ids": ["server", "middleware", "ratelimit", "auth", "errors"]
+      }
+    },
+    {
+      "op": "replace_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The drafted must-keep (keep-redirect) checks step redirect-check, which is not a probe step. The same rule, the public redirect status stays as in base, is anchored on probe step s3 of link-redirect-and-clicks (anonymous GET /${link_code}, route /:code). The rule keeps the drafted id keep-redirect, because take.ps1 matches a replacement by id.",
+      "rule": {
+        "id": "keep-redirect",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/:code",
+          "step_context": { "kind": "step", "step_id": "s3" },
+          "principal": { "kind": "anonymous" },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "obl-redirect-same",
+            "predicate": { "predicate": "equals_base", "step_id": "s3", "path": "status", "anchor": { "kind": "fresh" } },
+            "text": "Public redirect status remains as in base."
+          }
+        ],
+        "text": "Public short-link redirect stays outside the signed-in link limit.",
+        "machine_ids": ["server", "links", "store"]
       }
     },
     {
