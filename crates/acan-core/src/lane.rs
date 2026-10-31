@@ -11,8 +11,9 @@
 //! Claim --> needs the agent's acknowledged readback at the confirmed revision and hash
 //! ReportBuilt --> a run with no witnesses that waits for its receipt  [BuildReported]
 //! CandidatePrepared: same base, scope and ruling head --> prepared    [CandidatePrepared]
-//! RebindBase: protected head moved, every bound input the same --> re-bound, prepared runs
-//!     cleared, so each is prepared and receipted again                 [ScopeRebound]
+//! RebindBase: protected head moved, every protected input the same as a candidate prepared on
+//!     the confirmed base --> re-bound, live prepared runs cleared, so each is prepared and
+//!     receipted again; a move with no such candidate is refused          [ScopeRebound]
 //! ```
 //!
 //! The legacy model review never authorizes anything here. The lane reads only its own
@@ -731,6 +732,8 @@ pub(crate) fn decide_prepared(
         return Err(Rejection::wrong_state("gate run", "closed"));
     }
     let confirmation = confirmed(lane)?;
+    // A moved protected head is re-bound first (`RebindBase`), and only then is the candidate
+    // prepared on it. A candidate is never prepared under a confirmation that names another base.
     if prepared.base_commit != confirmation.base_commit {
         return Err(Rejection::StaleEvidence {
             detail: format!(
@@ -764,9 +767,11 @@ pub(crate) fn decide_prepared(
 
 /// `RebindBase`: the protected head moved after the scope was confirmed. The confirmation moves
 /// to `base` only when the scope's executable content, the ruling log and every protected input
-/// that a prepared run was tested under are unchanged. Then each gating run that was prepared
-/// loses its prepared commit and receipt, so no old receipt is reused. Anything else needs the
-/// scope confirmed again by a human.
+/// are unchanged. The protected inputs are checked against each candidate prepared on the
+/// confirmed base: that candidate recorded what the scope was tested under, and a landed or
+/// dropped candidate is such a record too. Then each live gating run that was prepared loses its
+/// prepared commit and receipt, so no old receipt is reused. A move with no such record cannot be
+/// checked, and anything else changed, so the scope must be confirmed again by a human.
 pub(crate) fn decide_rebind(
     world: &World,
     order: OrderId,
@@ -791,12 +796,14 @@ pub(crate) fn decide_rebind(
         });
     }
     let mut runs = Vec::new();
+    let mut recorded = 0_usize;
     for (run, lane_run) in &lane.runs {
-        // A landed or dropped task keeps its record: only a live run is re-bound.
-        let live = world.task(lane_run.task).is_some_and(|task| {
-            !matches!(task.state, TaskState::Landed { .. } | TaskState::Dropped)
-        });
-        let Some(prepared) = lane_run.prepared.as_ref().filter(|_| live) else {
+        // Only a candidate prepared on the confirmed base records what the scope was tested under.
+        let Some(prepared) = lane_run
+            .prepared
+            .as_ref()
+            .filter(|prepared| prepared.base_commit == confirmation.base_commit)
+        else {
             continue;
         };
         if !same_inputs(&prepared.context, context) {
@@ -806,13 +813,23 @@ pub(crate) fn decide_rebind(
                 ),
             });
         }
-        runs.push(*run);
+        recorded += 1;
+        // A landed or dropped task keeps its record: only a live run is re-bound.
+        let live = world.task(lane_run.task).is_some_and(|task| {
+            !matches!(task.state, TaskState::Landed { .. } | TaskState::Dropped)
+        });
+        if live {
+            runs.push(*run);
+        }
     }
-    if runs.is_empty() {
-        return Err(Rejection::wrong_state(
-            "scope",
-            "has no prepared run to re-bind",
-        ));
+    // With no candidate prepared on the confirmed base, nothing records the protected inputs the
+    // scope was confirmed under. The move cannot be checked, so the scope must be confirmed again.
+    if recorded == 0 {
+        return Err(Rejection::StaleEvidence {
+            detail: "no candidate was prepared on the confirmed base, so its protected inputs are \
+                     unrecorded: the scope must be confirmed again"
+                .to_owned(),
+        });
     }
     let scope = Scope {
         base_commit: base.clone(),

@@ -1060,6 +1060,23 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
         ledger: &ledger,
         episodes: &episodes,
     };
+    // The protected head moved after the scope was confirmed. The run is not prepared on the new
+    // head under the old confirmation. The scope is re-bound to the new head first, and the next
+    // pass prepares the run under the re-bound confirmation. The core refuses the re-bind when
+    // a protected input moved, so a human must confirm again.
+    if pass.base.protected_head() != &contrast.confirmation.base_commit {
+        let scratch = pass.scratch.join("context");
+        let plan = pass.plan(repo, &candidate, &scratch);
+        let context = observe::current(&plan, &order).await?;
+        host.submit(Command::System(SystemCmd::RebindBase {
+            order: contrast.order,
+            base: pass.base.protected_head().clone(),
+            context: Box::new(context),
+        }))
+        .await?;
+        tracing::info!(%run, "the scope is re-bound to the moved protected head");
+        return Ok(());
+    }
     let recorded = match contrast.prepared {
         Some(prepared) => {
             if candidate.merged_commit() != &prepared.context.merged_commit

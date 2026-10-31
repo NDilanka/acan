@@ -657,6 +657,186 @@ fn a_moved_protected_input_or_ruling_needs_the_scope_confirmed_again() {
     fx.assert_replays();
 }
 
+/// Lands `fx.task1` on the confirmed base. Its candidate was prepared on `BASE` and its receipt
+/// passed, so the land installed `commit(7)` as the protected head. Returns the prepared context
+/// the candidate recorded, which is the record a later move of the head is checked against.
+fn land_task1(fx: &mut Fx, scope: &Scope) -> Value {
+    let (run, prepared) = fx.prepared_run(scope, fx.task1);
+    let receipt = fx.passing_receipt(scope, &prepared);
+    fx.send_receipt(run, receipt)
+        .expect("the receipt on the confirmed base is recorded");
+    fx.system(SystemCmd::LandResult {
+        task: fx.task1,
+        head: commit(9).parse().expect("a commit id"),
+        result: Ok(commit(7).parse().expect("a commit id")),
+    })
+    .expect("the land is recorded");
+    prepared
+}
+
+/// The lane's confirmed base, as the confirmation names it.
+fn confirmed_base(fx: &Fx) -> Option<String> {
+    fx.origin
+        .world()
+        .lane(fx.order)
+        .expect("lane")
+        .confirmation
+        .as_ref()
+        .map(|c| c.base_commit.to_string())
+}
+
+#[test]
+fn a_moved_head_before_preparation_rebinds_when_the_protected_inputs_are_unchanged() {
+    let mut fx = Fx::new();
+    let scope = fx.open_lane();
+    fx.readback(fx.task1, &scope, vec![]);
+    let landed = land_task1(&mut fx, &scope);
+
+    // The protected head moved to commit 7, where the first task landed. No protected input
+    // moved, and the candidate prepared on the confirmed base recorded them, so the scope re-binds
+    // before the second task has a candidate.
+    let moved = commit(7);
+    let events = fx
+        .system(SystemCmd::RebindBase {
+            order: fx.order,
+            base: moved.parse().expect("a commit sha"),
+            context: Box::new(from(context_on(&landed, &moved))),
+        })
+        .expect("the scope re-binds to the moved head before anything is prepared");
+    assert!(
+        events
+            .iter()
+            .any(|stamped| matches!(stamped.event, Event::ScopeRebound { .. })),
+        "the re-bind is recorded"
+    );
+    assert_eq!(confirmed_base(&fx).as_deref(), Some(moved.as_str()));
+    let rebound = fx
+        .origin
+        .world()
+        .lane(fx.order)
+        .expect("lane")
+        .scope
+        .clone();
+
+    // The second task is then prepared on the moved head. A candidate still on the old base is
+    // refused, and the candidate on the moved head is accepted under the re-bound confirmation.
+    fx.readback(fx.task2, &rebound, vec![]);
+    let run = fx.gate_run(fx.task2);
+    let stale = fx
+        .system(SystemCmd::CandidatePrepared {
+            run,
+            prepared: Box::new(from(fx.prepared_json(&scope, &commit(9)))),
+        })
+        .unwrap_err();
+    assert!(
+        matches!(stale, Rejection::StaleEvidence { .. }),
+        "{stale:?}"
+    );
+
+    let mut fresh = fx.prepared_json(&rebound, &commit(9));
+    fresh["base_commit"] = json!(moved);
+    fresh["context"] = context_on(&fresh, &moved);
+    fresh["context"]["scope_hash"] = json!(rebound.scope_hash().expect("hashing"));
+    fx.prepare(run, fresh);
+    assert!(
+        fx.origin
+            .world()
+            .pending_contrasts()
+            .iter()
+            .any(|pending| pending.run == run && pending.prepared.is_some()),
+        "the second task is prepared on the moved head"
+    );
+    fx.assert_replays();
+}
+
+#[test]
+fn a_moved_protected_input_before_preparation_needs_the_scope_confirmed_again() {
+    let mut fx = Fx::new();
+    let scope = fx.open_lane();
+    fx.readback(fx.task1, &scope, vec![]);
+    let landed = land_task1(&mut fx, &scope);
+    let moved = commit(7);
+    let order = fx.order;
+    let rebind = |context: Value| SystemCmd::RebindBase {
+        order,
+        base: moved.parse().expect("a commit sha"),
+        context: Box::new(from(context)),
+    };
+
+    // A probe's normalization plan changed with the head, so the recorded corpus no longer holds.
+    let mut probes = context_on(&landed, &moved);
+    probes["probe_set_hash"] = json!(sha(8));
+    let refused = fx.system(rebind(probes)).unwrap_err();
+    assert!(
+        matches!(refused, Rejection::StaleEvidence { .. }),
+        "{refused:?}"
+    );
+
+    // The app contract changed with the head, so the recorded runner no longer holds.
+    let mut app = context_on(&landed, &moved);
+    app["runner_hash"] = json!(sha(9));
+    let refused = fx.system(rebind(app)).unwrap_err();
+    assert!(
+        matches!(refused, Rejection::StaleEvidence { .. }),
+        "{refused:?}"
+    );
+
+    assert_eq!(
+        confirmed_base(&fx).as_deref(),
+        Some(BASE),
+        "nothing was re-bound"
+    );
+    fx.assert_replays();
+}
+
+#[test]
+fn a_moved_ruling_before_preparation_needs_the_scope_confirmed_again() {
+    let mut fx = Fx::new();
+    let scope = fx.open_lane();
+    fx.readback(fx.task1, &scope, vec![]);
+    let landed = land_task1(&mut fx, &scope);
+    let moved = commit(7);
+
+    // A ruling was recorded after the candidate was prepared, so the context names the old log.
+    fx.record_ruling("owner", fx.decision_json(1, "r-1", None))
+        .expect("the ruling is recorded");
+    let refused = fx
+        .system(SystemCmd::RebindBase {
+            order: fx.order,
+            base: moved.parse().expect("a commit sha"),
+            context: Box::new(from(context_on(&landed, &moved))),
+        })
+        .unwrap_err();
+    assert!(
+        matches!(refused, Rejection::StaleEvidence { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(confirmed_base(&fx).as_deref(), Some(BASE));
+    fx.assert_replays();
+}
+
+#[test]
+fn a_moved_head_with_no_candidate_on_the_confirmed_base_needs_the_scope_confirmed_again() {
+    let mut fx = Fx::new();
+    let scope = fx.open_lane();
+    // No candidate was prepared on the confirmed base, so nothing records its protected inputs.
+    let prepared = fx.prepared_json(&scope, &commit(9));
+    let moved = commit(7);
+    let refused = fx
+        .system(SystemCmd::RebindBase {
+            order: fx.order,
+            base: moved.parse().expect("a commit sha"),
+            context: Box::new(from(context_on(&prepared, &moved))),
+        })
+        .unwrap_err();
+    assert!(
+        matches!(refused, Rejection::StaleEvidence { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(confirmed_base(&fx).as_deref(), Some(BASE));
+    fx.assert_replays();
+}
+
 #[test]
 fn a_conflicting_candidate_refuses_the_run_and_reopens_the_task() {
     let mut fx = Fx::new();
