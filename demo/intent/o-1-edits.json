@@ -8,7 +8,7 @@
       "question_match": "(?i)code|length|character",
       "option_label_match": "(?i)\\b7\\b|seven|keep|current",
       "when_no_option_matches": "remove",
-      "reason": "Neither offered option keeps the current length 7 (CODE_LENGTH = 7 in D:\\dev\\acan-demo\\src\\links.ts:6), so the open choice is removed. If a draft offers an option that keeps 7, take.ps1 answers that option instead and the choice stays open until confirmed."
+      "reason": "The draft's format question (q-1) offers letters-and-digits or a UUID; neither names the current length 7 (CODE_LENGTH = 7 in D:\\dev\\acan-demo\\src\\links.ts:6), so the open choice is removed. The current short-code form stays under the must-keep mk-code-length. If a draft offers an option that keeps 7, take.ps1 answers that option instead and the choice stays open until confirmed."
     },
     {
       "id": "cr-health",
@@ -22,13 +22,13 @@
     {
       "op": "remove_may",
       "id": "may-1",
-      "reason": "The drafted item (may-1) changes the POST /api/links body, and its example writes a 6-character code, which contradicts the order's must-keep of 7-character codes. Its step s-create is not a step of any probe, so it cannot be judged. Dropped; the quota items and the code-length must-keep cover the link API."
+      "reason": "The drafted item (may-1) adds body.short_code to POST /api/links. The demo returns shortPath and code instead (src/server.ts:123), and its example writes a 6-character code, which contradicts the 7-character codes of src/links.ts:6. Dropped; the quota items and the code-length must-keep cover the link API."
     },
     {
       "op": "replace_must_keep",
-      "reason": "The drafted must-keep (keep-1) checks step s-health, which is not a step of any probe, so it cannot be judged. The same rule, that health stays available, is re-pointed at step s1 of the probe health (GET /health, anonymous): it still returns 200.",
+      "reason": "The drafted must-keep (mk-1) checks step s-health, which is not a step of any probe, so it cannot be judged. The same rule, that health stays available, is re-pointed at step s1 of the probe health (GET /health, anonymous): it still returns 200.",
       "rule": {
-        "id": "keep-1",
+        "id": "mk-1",
         "selector": {
           "surface": "http",
           "method": "GET",

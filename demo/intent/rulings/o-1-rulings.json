@@ -1,0 +1,39 @@
+{
+  "schema": "acan-demo-intent-rulings/1",
+  "order": "o-1",
+  "note": "Human rulings on out-of-scope differences in a candidate's receipt. Each rule names the field it covers and the candidate state it applies to, and says what the human accepts. ruling.ps1 turns each rule into a standing predicate and records it through the member HTTP API (record_ruling). Nothing here is a verdict: the gate evaluates each predicate on every retained example and refuses a ruling that does not hold on them.",
+  "rules": [
+    {
+      "id": "rl-request-id-opaque",
+      "field": "^header\\.x-request-id$",
+      "candidate": "present",
+      "rule": "uuid",
+      "label": "x-request-id is an opaque random id, not identity",
+      "reason": "The order does not mention a request id. A random UUID per response identifies the request and carries no user name, so it is accepted. A value that carries a user name is not accepted by this rule and would be reported as violating it."
+    },
+    {
+      "id": "rl-over-limit-status",
+      "field": "^status$",
+      "candidate": "any",
+      "rule": "status_429",
+      "label": "the over-limit answer is 429",
+      "reason": "The status differs only where the candidate answers 429 to a request over the limit. The order asks for 429 there, so the status step is accepted at that step."
+    },
+    {
+      "id": "rl-over-limit-body-absent",
+      "field": "^body\\.",
+      "candidate": "missing",
+      "rule": "status_429",
+      "label": "a 429 answer has no link body",
+      "reason": "The base answers the same request 201 with a link, and the over-limit answer has no link body. Accepted where the candidate answers 429."
+    },
+    {
+      "id": "rl-over-limit-body-present",
+      "field": "^body\\.",
+      "candidate": "present",
+      "rule": "present",
+      "label": "the over-limit body carries an error or a generated value",
+      "reason": "A rejected request creates no link, so later generated values (codes, paths, counts) can differ from the base. The field is accepted when the candidate has a value; the value itself is not compared."
+    }
+  ]
+}
