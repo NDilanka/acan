@@ -21,7 +21,7 @@ export function forgetToken() {
   setLink("sign in");
 }
 
-async function get(path) {
+export async function get(path) {
   const res = await fetch(path, { headers: { Authorization: `Bearer ${state.token}` } });
   if (res.status === 401 || res.status === 403) {
     forgetToken();

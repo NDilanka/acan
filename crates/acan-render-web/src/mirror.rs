@@ -14,7 +14,7 @@ use acan_core::{
 use serde::Serialize;
 
 use crate::feed::Entry;
-use crate::lanes::{LaneView, lane_views};
+use crate::lanes::{LaneView, ReceiptCount, lane_views, receipt_counts};
 use crate::plan::Plan;
 
 /// Where the first agent's body sits inside its machine, in world units from the corner.
@@ -245,6 +245,7 @@ impl Mirror {
             clashes,
             usage: usage_rows(world),
             lanes: lane_views(world),
+            receipts: receipt_counts(world),
         }
     }
 
@@ -372,6 +373,9 @@ pub struct View {
     pub usage: Vec<UsageRow>,
     /// One scope lane per order whose scope has been set, in order id order.
     pub lanes: Vec<LaneView>,
+    /// Orders with a recorded receipt, in order id order, and their receipt counts. The page
+    /// fetches an order's plant view again when its count moves.
+    pub receipts: Vec<ReceiptCount>,
 }
 
 /// One model's calls for one step of the loop.
@@ -859,6 +863,7 @@ mod tests {
         assert!(view.questions.is_empty());
         assert!(view.clashes.is_empty());
         assert!(view.lanes.is_empty());
+        assert!(view.receipts.is_empty());
         assert_eq!(view.next_seq, Seq::new(1));
     }
 
@@ -1457,6 +1462,7 @@ mod tests {
         };
         assert_eq!(choice.machine, "src/api");
         assert_eq!(choice.options.len(), 2);
+        assert!(view.receipts.is_empty());
     }
 
     #[test]

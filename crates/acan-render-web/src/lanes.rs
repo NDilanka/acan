@@ -82,10 +82,38 @@ pub struct ChoiceView {
     pub options: Vec<ChoiceOption>,
 }
 
+/// An order with at least one recorded receipt: its id as the origin names it (`o-N`), and how
+/// many of its gate runs have a receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReceiptCount {
+    /// The order, as `o-N`.
+    pub order: String,
+    /// How many of the order's gate runs have a recorded receipt.
+    pub recorded: u32,
+}
+
 /// Every scope lane of `world`, in order id order. An order without a scope has none.
 #[must_use]
 pub fn lane_views(world: &World) -> Vec<LaneView> {
     world.lanes().map(lane_view).collect()
+}
+
+/// The receipt count of each order with at least one recorded receipt, in order id order.
+#[must_use]
+pub fn receipt_counts(world: &World) -> Vec<ReceiptCount> {
+    world.lanes().filter_map(receipt_count).collect()
+}
+
+fn receipt_count(lane: &ScopeLane) -> Option<ReceiptCount> {
+    let recorded = lane
+        .runs
+        .values()
+        .filter(|run| run.receipt.is_some())
+        .count();
+    (recorded > 0).then(|| ReceiptCount {
+        order: lane.order.to_string(),
+        recorded: u32::try_from(recorded).unwrap_or(u32::MAX),
+    })
 }
 
 fn lane_view(lane: &ScopeLane) -> LaneView {

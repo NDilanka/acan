@@ -90,5 +90,8 @@ export const state = {
   hasOrder: false,
   labelGeneration: 0,
   labels: new Map(),
+  // The plant view summary of each order that has receipts, as the wasm side checked it. See
+  // `plant.js`.
+  plantViews: new Map(),
 };
 
