@@ -1172,8 +1172,26 @@ pub(crate) async fn confirmed_inputs_command<C: ModelClient>(
     };
     let repo = workspace.repo();
     let pass = Pass::new(host, repo, format!("confirm-{order}")).await?;
+    let command = confirmed_inputs(host, &pass, repo, order, confirmation);
+    // The pass is only read for its inputs, so its directory goes once the record is built.
+    discard_pass(&pass);
+    command
+}
+
+/// The record of the protected inputs `confirmation` was confirmed under, read from `pass` on the
+/// protected head as it is now.
+fn confirmed_inputs<C: ModelClient>(
+    host: &Host<C>,
+    pass: &Pass,
+    repo: &Repo,
+    order: OrderId,
+    confirmation: &ScopeConfirmation,
+) -> anyhow::Result<Option<SystemCmd>> {
     if pass.base.protected_head() != &confirmation.base_commit {
-        tracing::info!(%order, "the protected head moved after the scope was confirmed: nothing is recorded");
+        tracing::info!(
+            %order,
+            "the protected head moved after the scope was confirmed: nothing is recorded"
+        );
         return Ok(None);
     }
     let Some(scope) = host.read(|world| world.lane(order).map(|lane| lane.scope.clone())) else {
@@ -1194,6 +1212,17 @@ pub(crate) async fn confirmed_inputs_command<C: ModelClient>(
         base: confirmation.base_commit.clone(),
         inputs: Box::new(inputs),
     }))
+}
+
+/// Removes the directory of a pass that is finished with. The pass is only read, so nothing is
+/// lost. A failed removal is logged and not returned, as a partial snapshot's is.
+fn discard_pass(pass: &Pass) {
+    let Some(dir) = pass.snapshot.parent() else {
+        return;
+    };
+    if let Err(err) = fs::remove_dir_all(dir) {
+        tracing::warn!(path = %dir.display(), error = %err, "a finished pass directory stays behind");
+    }
 }
 
 /// Lands a scope-first task. The delivery is checked again under the landing fence before any
