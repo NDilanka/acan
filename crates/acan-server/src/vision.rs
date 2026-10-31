@@ -671,8 +671,8 @@ mod tests {
         assert_eq!(json["status"], "done");
         assert_eq!(json["provider"], "meta");
         let unanswered = VisionWitness::new(task, run, WitnessStatus::Pending);
-        let json = serde_json::to_value(&unanswered).expect("serializes");
-        assert_eq!(json["provider"], serde_json::Value::Null);
+        let unanswered_json = serde_json::to_value(&unanswered).expect("serializes");
+        assert_eq!(unanswered_json["provider"], serde_json::Value::Null);
         assert_eq!(json["failed_reason"], serde_json::Value::Null);
         let check = &json["checks"][0];
         assert_eq!(check["comparison"], "baseline_vs_candidate");
