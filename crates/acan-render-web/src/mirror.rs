@@ -14,6 +14,7 @@ use acan_core::{
 use serde::Serialize;
 
 use crate::feed::Entry;
+use crate::lanes::{LaneView, lane_views};
 use crate::plan::Plan;
 
 /// Where the first agent's body sits inside its machine, in world units from the corner.
@@ -243,6 +244,7 @@ impl Mirror {
             questions,
             clashes,
             usage: usage_rows(world),
+            lanes: lane_views(world),
         }
     }
 
@@ -368,6 +370,8 @@ pub struct View {
     pub clashes: Vec<ClashView>,
     /// Model calls so far, one row per model and step. Empty until the first call.
     pub usage: Vec<UsageRow>,
+    /// One scope lane per order whose scope has been set, in order id order.
+    pub lanes: Vec<LaneView>,
 }
 
 /// One model's calls for one step of the loop.
@@ -738,9 +742,9 @@ mod tests {
     use std::str::FromStr;
 
     use acan_core::{
-        AgentCmd, Belt, CodeIndex, CodeRev, Command, CommitId, Ctx, FilePath, HumanCmd,
-        IndexedFile, IndexedSymbol, MachineKey, MemberId, Origin, Seq, Step, SystemCmd, Timestamp,
-        WorldId, WorldRef,
+        AgentCmd, Belt, Check, CodeIndex, CodeRev, Command, CommitId, Ctx, FilePath, HumanCmd,
+        IndexedFile, IndexedSymbol, MachineKey, MemberId, Origin, Scope, ScopeBinding,
+        ScopeConfirmation, Seq, Step, SystemCmd, Timestamp, WitnessSpec, WorldId, WorldRef,
     };
     use serde_json::json;
 
@@ -854,6 +858,7 @@ mod tests {
         assert!(view.agents.is_empty());
         assert!(view.questions.is_empty());
         assert!(view.clashes.is_empty());
+        assert!(view.lanes.is_empty());
         assert_eq!(view.next_seq, Seq::new(1));
     }
 
@@ -1235,5 +1240,413 @@ mod tests {
         assert_eq!(row.role, "explain");
         assert_eq!(row.model, "test-model");
         assert_eq!((row.calls, row.input, row.output), (1, 30, 4));
+    }
+
+    /// The commit the lane fixtures' scopes sit on.
+    const BASE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// A selector on the status of `POST /api/login` for anonymous callers, at step `s1`, or at
+    /// every step when `every_step` is set, which makes it broad.
+    fn login_selector(every_step: bool) -> serde_json::Value {
+        let step = if every_step {
+            json!({"kind": "any"})
+        } else {
+            json!({"kind": "step", "step_id": "s1"})
+        };
+        json!({
+            "surface": "http", "method": "POST", "route_template": "/api/login",
+            "step_context": step, "principal": {"kind": "anonymous"}, "channel": "status"
+        })
+    }
+
+    fn obligation(id: &str, text: &str) -> serde_json::Value {
+        json!({
+            "obligation_id": id,
+            "predicate": {
+                "predicate": "present",
+                "at": {"ref": "field", "run": "candidate", "step_id": "s1", "path": "status"}
+            },
+            "text": text
+        })
+    }
+
+    /// A may-change item with two acceptance obligations, naming `machines` as given.
+    fn may_item(id: &str, selector: serde_json::Value, machines: &[&str]) -> serde_json::Value {
+        json!({
+            "id": id,
+            "selector": selector,
+            "change": "add",
+            "acceptance": [
+                obligation(&format!("{id}-limit"), "the sixth failed login gets a 429"),
+                obligation(&format!("{id}-retry"), "the 429 says when to retry")
+            ],
+            "provenance": "user",
+            "example": {
+                "kind": "target", "step_id": "s1", "path": "status",
+                "after": {"state": "present", "value": 429}
+            },
+            "machine_ids": machines
+        })
+    }
+
+    /// Revision 1 of a scope for `order`: `may`, one must-keep rule and one open choice.
+    fn scope_for(order: OrderId, may: Vec<serde_json::Value>) -> Scope {
+        serde_json::from_value(json!({
+            "version": "acan-scope/1",
+            "order": order.to_string(),
+            "rev": 1,
+            "base_commit": BASE_COMMIT,
+            "body": {
+                "may": may,
+                "must_keep": [{
+                    "id": "k-login",
+                    "selector": login_selector(false),
+                    "obligations": [obligation("k-login-ok", "a correct password still logs in")],
+                    "text": "login keeps working for a correct password",
+                    "machine_ids": ["src/api"]
+                }],
+                "open": [{
+                    "id": "c-count",
+                    "machine_id": "src/api",
+                    "question": "Count failed logins per account or per address?",
+                    "options": [
+                        {"key": "account", "label": "Per account"},
+                        {"key": "address", "label": "Per address"}
+                    ]
+                }]
+            }
+        }))
+        .expect("the scope fixture decodes")
+    }
+
+    /// Posts an order on `src/api` as the founder. Returns its id and the events.
+    fn post_order(
+        origin: &mut Origin,
+        index: &CodeIndex,
+        sentence: &str,
+    ) -> (OrderId, Vec<Stamped>) {
+        let events = accepted(
+            origin,
+            index,
+            Command::Human {
+                member: founder(),
+                cmd: HumanCmd::PostOrder {
+                    machine: MachineKey::from_str("src/api").expect("a machine key"),
+                    sentence: sentence.to_owned(),
+                    witnesses: vec![WitnessSpec {
+                        check: Check::Test {
+                            command: "npm test".to_owned(),
+                        },
+                        reason: "the existing tests keep passing".to_owned(),
+                    }],
+                },
+            },
+        );
+        let order = events
+            .iter()
+            .find_map(|stamped| match &stamped.event {
+                Event::OrderPosted { order, .. } => Some(*order),
+                _ => None,
+            })
+            .expect("the post mints an order");
+        (order, events)
+    }
+
+    /// A confirmation of `scope` by the founder, bound the way the origin checks it.
+    fn confirmation_for(origin: &Origin, scope: &Scope) -> ScopeConfirmation {
+        let binding = ScopeBinding::of(scope).expect("the scope hashes");
+        serde_json::from_value(json!({
+            "version": "acan-scope-confirmation/1",
+            "order": scope.order,
+            "scope_rev": scope.rev,
+            "scope_hash": binding.scope_hash,
+            "base_commit": scope.base_commit,
+            "ruling_versions": origin.world().ledger().ruling_versions(),
+            "selector_hashes": binding.selector_hashes,
+            "example_hashes": binding.example_hashes,
+            "answers": [{"choice_id": "c-count", "option": "account"}],
+            "broad_grants": [],
+            "budget": {
+                "repair_rounds": 2, "wall_time_ms": 1_800_000,
+                "model_cost_micros": 2_000_000, "max_episodes": 6
+            },
+            "by": founder().as_str(),
+            "at": 3_000
+        }))
+        .expect("the confirmation fixture decodes")
+    }
+
+    /// A world with one order on `src/api` whose scope is revision 1 with `may`, not yet
+    /// confirmed.
+    struct LaneFixture {
+        origin: Origin,
+        log: Vec<Stamped>,
+        index: CodeIndex,
+        order: OrderId,
+        scope: Scope,
+    }
+
+    fn lane_fixture(may: Vec<serde_json::Value>) -> LaneFixture {
+        let index = index();
+        let (mut origin, opened) = open_world();
+        let mut log = vec![opened];
+        let (order, posted) = post_order(&mut origin, &index, "Limit failed logins");
+        log.extend(posted);
+        let scope = scope_for(order, may);
+        log.extend(accepted(
+            &mut origin,
+            &index,
+            Command::Human {
+                member: founder(),
+                cmd: HumanCmd::ReviseScope {
+                    order,
+                    scope: Box::new(scope.clone()),
+                },
+            },
+        ));
+        LaneFixture {
+            origin,
+            log,
+            index,
+            order,
+            scope,
+        }
+    }
+
+    fn narrow_item() -> serde_json::Value {
+        may_item("i-limit", login_selector(false), &["src/api"])
+    }
+
+    #[test]
+    fn an_order_with_a_scope_folds_into_one_unconfirmed_lane() {
+        let fx = lane_fixture(vec![narrow_item()]);
+        let view = Mirror::from_log(fx.log)
+            .expect("the log replays")
+            .view(&plan());
+
+        let [lane] = view.lanes.as_slice() else {
+            panic!("the one order with a scope has one lane");
+        };
+        assert_eq!(lane.order, fx.order);
+        assert_eq!(lane.state, "unconfirmed");
+        assert!(lane.confirmation.is_none());
+        assert_eq!(lane.rev, fx.scope.rev);
+        assert_eq!(
+            lane.scope_hash,
+            fx.scope.scope_hash().expect("the scope hashes")
+        );
+        assert_eq!(lane.scope, fx.scope);
+
+        let [item] = lane.may.as_slice() else {
+            panic!("the scope has one may-change item");
+        };
+        assert_eq!(item.label, "the sixth failed login gets a 429");
+        assert_eq!(item.selector, "POST /api/login");
+        assert_eq!(item.machines, ["src/api"]);
+        assert!(!item.broad);
+
+        let [rule] = lane.must_keep.as_slice() else {
+            panic!("the scope has one must-keep rule");
+        };
+        assert_eq!(rule.text, "login keeps working for a correct password");
+        assert_eq!(rule.ruling_id, None);
+        assert_eq!(rule.machines, ["src/api"]);
+
+        let [choice] = lane.open.as_slice() else {
+            panic!("the scope has one open choice");
+        };
+        assert_eq!(choice.machine, "src/api");
+        assert_eq!(choice.options.len(), 2);
+    }
+
+    #[test]
+    fn a_confirmed_scope_carries_its_confirmation_and_the_member_who_gave_it() {
+        let mut fx = lane_fixture(vec![narrow_item()]);
+        let confirmation = confirmation_for(&fx.origin, &fx.scope);
+        let events = accepted(
+            &mut fx.origin,
+            &fx.index,
+            Command::Human {
+                member: founder(),
+                cmd: HumanCmd::ConfirmScope {
+                    order: fx.order,
+                    confirmation: Box::new(confirmation.clone()),
+                },
+            },
+        );
+        let recorded = events
+            .iter()
+            .any(|stamped| matches!(stamped.event, Event::ScopeConfirmed { .. }));
+        assert!(recorded, "the confirmation is recorded");
+        fx.log.extend(events);
+        let view = Mirror::from_log(fx.log)
+            .expect("the log replays")
+            .view(&plan());
+
+        let [lane] = view.lanes.as_slice() else {
+            panic!("the one order with a scope has one lane");
+        };
+        assert_eq!(lane.state, "confirmed");
+        let shown = lane
+            .confirmation
+            .as_ref()
+            .expect("the lane carries its confirmation");
+        assert_eq!(shown, &confirmation);
+        assert_eq!(shown.by.as_str(), founder().as_str());
+        let json = serde_json::to_value(lane).expect("a lane serializes");
+        assert_eq!(json["confirmation"]["by"], founder().as_str());
+    }
+
+    #[test]
+    fn an_order_without_a_scope_has_no_lane() {
+        let mut fx = lane_fixture(vec![narrow_item()]);
+        let (other, posted) = post_order(&mut fx.origin, &fx.index, "Show the session");
+        fx.log.extend(posted);
+        let view = Mirror::from_log(fx.log)
+            .expect("the log replays")
+            .view(&plan());
+
+        assert_eq!(view.orders.len(), 2);
+        let [lane] = view.lanes.as_slice() else {
+            panic!("only the order with a scope has a lane");
+        };
+        assert_eq!(lane.order, fx.order);
+        assert_ne!(lane.order, other);
+    }
+
+    #[test]
+    fn a_broad_selector_marks_its_item_broad() {
+        let fx = lane_fixture(vec![
+            narrow_item(),
+            may_item("i-every-step", login_selector(true), &["src/api"]),
+        ]);
+        let view = Mirror::from_log(fx.log)
+            .expect("the log replays")
+            .view(&plan());
+
+        let broad: Vec<(&str, bool)> = view.lanes[0]
+            .may
+            .iter()
+            .map(|item| (item.id.as_str(), item.broad))
+            .collect();
+        assert_eq!(broad, [("i-limit", false), ("i-every-step", true)]);
+        for (shown, item) in view.lanes[0].may.iter().zip(&fx.scope.body.may) {
+            assert_eq!(shown.broad, item.selector.is_broad());
+        }
+    }
+
+    #[test]
+    fn a_machine_name_the_plan_lacks_comes_through_unchanged() {
+        let plan = plan();
+        assert_eq!(plan.index_of("billing"), None);
+        let item = may_item("i-limit", login_selector(false), &["src/api", "billing"]);
+        let fx = lane_fixture(vec![item]);
+        let view = Mirror::from_log(fx.log)
+            .expect("the log replays")
+            .view(&plan);
+
+        assert_eq!(view.lanes[0].may[0].machines, ["src/api", "billing"]);
+    }
+
+    fn keys(value: &serde_json::Value) -> BTreeSet<&str> {
+        value
+            .as_object()
+            .expect("a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect()
+    }
+
+    #[test]
+    fn a_lane_serializes_with_exactly_its_keys() {
+        let fx = lane_fixture(vec![narrow_item()]);
+        let view = Mirror::from_log(fx.log)
+            .expect("the log replays")
+            .view(&plan());
+        let lane = serde_json::to_value(&view.lanes[0]).expect("a lane serializes");
+
+        assert_eq!(
+            keys(&lane),
+            BTreeSet::from([
+                "order",
+                "rev",
+                "scope_hash",
+                "scope",
+                "state",
+                "may",
+                "must_keep",
+                "open",
+                "confirmation",
+            ])
+        );
+        assert_eq!(
+            keys(&lane["may"][0]),
+            BTreeSet::from([
+                "id",
+                "label",
+                "selector",
+                "change",
+                "provenance",
+                "broad",
+                "machines",
+            ])
+        );
+        assert_eq!(
+            keys(&lane["must_keep"][0]),
+            BTreeSet::from(["id", "text", "ruling_id", "machines"])
+        );
+        assert_eq!(
+            keys(&lane["open"][0]),
+            BTreeSet::from(["id", "machine", "question", "options"])
+        );
+        assert_eq!(
+            keys(&lane["open"][0]["options"][0]),
+            BTreeSet::from(["key", "label"])
+        );
+
+        assert_eq!(
+            lane["order"],
+            serde_json::to_value(fx.order).expect("an order id serializes")
+        );
+        assert_eq!(lane["rev"], 1);
+        assert_eq!(lane["state"], "unconfirmed");
+        assert!(lane["confirmation"].is_null());
+        assert_eq!(
+            lane["scope"],
+            serde_json::to_value(&fx.scope).expect("a scope serializes")
+        );
+        assert_eq!(
+            lane["may"][0],
+            json!({
+                "id": "i-limit",
+                "label": "the sixth failed login gets a 429",
+                "selector": "POST /api/login",
+                "change": "add",
+                "provenance": "user",
+                "broad": false,
+                "machines": ["src/api"]
+            })
+        );
+        assert_eq!(
+            lane["must_keep"][0],
+            json!({
+                "id": "k-login",
+                "text": "login keeps working for a correct password",
+                "ruling_id": null,
+                "machines": ["src/api"]
+            })
+        );
+        assert_eq!(
+            lane["open"][0],
+            json!({
+                "id": "c-count",
+                "machine": "src/api",
+                "question": "Count failed logins per account or per address?",
+                "options": [
+                    {"key": "account", "label": "Per account"},
+                    {"key": "address", "label": "Per address"}
+                ]
+            })
+        );
     }
 }
