@@ -26,5 +26,7 @@ async function fetchPlantView(state, fetchText, order, recorded) {
     state.plantViews.set(order, { recorded, summary: null, error });
   } finally {
     inFlight.delete(order);
+    // A count that moved while this fetch was in flight is fetched now, not at the next event.
+    syncPlantViews(state, fetchText);
   }
 }
