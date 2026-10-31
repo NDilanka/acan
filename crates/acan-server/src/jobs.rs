@@ -1069,13 +1069,28 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
         let scratch = pass.scratch.join("context");
         let plan = pass.plan(repo, &candidate, &scratch);
         let context = observe::current(&plan, &order).await?;
-        host.submit(Command::System(SystemCmd::RebindBase {
+        let rebind = SystemCmd::RebindBase {
             order: contrast.order,
             base: pass.base.protected_head().clone(),
             context: Box::new(context),
-        }))
-        .await?;
-        tracing::info!(%run, "the scope is re-bound to the moved protected head");
+        };
+        match host.submit(Command::System(rebind)).await {
+            Ok(_) => tracing::info!(%run, "the scope is re-bound to the moved protected head"),
+            Err(SubmitError::Rejected(rejection)) => {
+                // The origin will not re-bind the scope, so the run cannot be tested on the moved
+                // head. It is refused now: the lease ends and the task reopens with the reason.
+                // Waiting for the lease to expire would hold the task for nothing.
+                tracing::info!(%run, "the origin refused the re-bind to the moved protected head");
+                host.submit(Command::System(SystemCmd::RefuseRun {
+                    run,
+                    reason: format!(
+                        "the protected head moved and the scope could not be re-bound to it: {rejection}"
+                    ),
+                }))
+                .await?;
+            }
+            Err(err) => return Err(err.into()),
+        }
         return Ok(());
     }
     let recorded = match contrast.prepared {

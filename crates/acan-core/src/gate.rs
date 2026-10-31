@@ -9,6 +9,7 @@
 //! Queued --LandResult Ok--> Landed                        [Landed]
 //! Queued --LandResult Err--> Open                         [LandFailed]
 //! Gating --CandidateConflicted--> Open                    [LeaseEnded Refused, LandFailed]
+//! Gating --RefuseRun--> Open                              [LeaseEnded Refused, LandFailed]
 //! ```
 //!
 //! A scope-first run freezes no witnesses and stays gating until its receipt closes it; see
@@ -231,6 +232,32 @@ pub(crate) fn decide_conflicted(
     if files.is_empty() {
         return Err(Rejection::invalid("a conflict names at least one file"));
     }
+    let names: Vec<String> = files.iter().map(ToString::to_string).collect();
+    let reason = format!(
+        "candidate {} conflicts with the protected head: {}",
+        gate.head,
+        names.join(", ")
+    );
+    decide_refused(world, run, reason)
+}
+
+/// `RefuseRun`: the host could not carry a gating run forward, and the origin refuses it with
+/// `reason`. The rules are those of `CandidateConflicted`: only the task's current gating
+/// scope-first run can be refused. The lease ends and the task reopens with `reason`, and nothing
+/// is installed. The run stays in the log, inert.
+pub(crate) fn decide_refused(
+    world: &World,
+    run: GateRunId,
+    reason: String,
+) -> Result<Vec<Event>, Rejection> {
+    let gate = world
+        .gate(run)
+        .ok_or_else(|| Rejection::unknown("gate run", run))?;
+    // Only a scope-first run is refused here: a legacy run has no candidate to prepare.
+    lane::lane_run(world, run)?;
+    if reason.trim().is_empty() {
+        return Err(Rejection::invalid("a refusal names a reason"));
+    }
     let task = world
         .task(gate.task)
         .ok_or_else(|| Rejection::unknown("task", gate.task))?;
@@ -244,12 +271,6 @@ pub(crate) fn decide_conflicted(
     if *current != run {
         return Err(Rejection::wrong_state("gate run", "closed"));
     }
-    let names: Vec<String> = files.iter().map(ToString::to_string).collect();
-    let reason = format!(
-        "candidate {} conflicts with the protected head: {}",
-        gate.head,
-        names.join(", ")
-    );
     Ok(vec![
         Event::LeaseEnded {
             task: task.id,

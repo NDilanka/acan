@@ -307,6 +307,16 @@ pub enum SystemCmd {
         /// The conflicting repo-relative paths, in the order git reported them. Never empty.
         files: Vec<RepoPath>,
     },
+    /// The host could not carry a gating run forward, and the origin refused the run with
+    /// `reason`. The lease ends and the task reopens with the reason, the way a conflict does.
+    /// Nothing is installed. Used when the origin refuses a re-bind of the scope to a moved
+    /// protected head, so the task does not wait for its lease to expire.
+    RefuseRun {
+        /// The gating run.
+        run: GateRunId,
+        /// Why the run is refused, in the words the task records. Never empty.
+        reason: String,
+    },
     /// The foreman drafted the scope of an order revision.
     ScopeDrafted {
         /// The order.
