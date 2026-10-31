@@ -847,7 +847,7 @@ fn a_conflicting_candidate_refuses_the_run_and_reopens_the_task() {
     let batch = fx
         .system(SystemCmd::CandidateConflicted {
             run,
-            files: vec!["landed.txt".to_owned()],
+            files: vec!["landed.txt".parse().expect("a repo path")],
         })
         .expect("the conflict refuses the run");
     let reason = batch
@@ -887,7 +887,7 @@ fn a_conflicting_candidate_refuses_the_run_and_reopens_the_task() {
     let again = fx
         .system(SystemCmd::CandidateConflicted {
             run,
-            files: vec!["landed.txt".to_owned()],
+            files: vec!["landed.txt".parse().expect("a repo path")],
         })
         .unwrap_err();
     assert!(matches!(again, Rejection::WrongState { .. }), "{again:?}");

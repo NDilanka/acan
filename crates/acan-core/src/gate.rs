@@ -19,6 +19,7 @@
 
 use std::collections::BTreeMap;
 
+use acan_intent::RepoPath;
 use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, Rejection};
@@ -220,7 +221,7 @@ pub(crate) fn close(
 pub(crate) fn decide_conflicted(
     world: &World,
     run: GateRunId,
-    files: Vec<String>,
+    files: Vec<RepoPath>,
 ) -> Result<Vec<Event>, Rejection> {
     let gate = world
         .gate(run)
@@ -243,10 +244,11 @@ pub(crate) fn decide_conflicted(
     if *current != run {
         return Err(Rejection::wrong_state("gate run", "closed"));
     }
+    let names: Vec<String> = files.iter().map(ToString::to_string).collect();
     let reason = format!(
         "candidate {} conflicts with the protected head: {}",
         gate.head,
-        files.join(", ")
+        names.join(", ")
     );
     Ok(vec![
         Event::LeaseEnded {

@@ -8,7 +8,7 @@ use std::fmt;
 
 use acan_intent::{
     CommitSha, Contest, ContestId, ContestKind, ContestStatus, EpisodeId, GateContext, LedgerEvent,
-    Prediction, PreparedCommit, ProbeHash, Receipt, Scope, ScopeConfirmation, ScopeDraft,
+    Prediction, PreparedCommit, ProbeHash, Receipt, RepoPath, Scope, ScopeConfirmation, ScopeDraft,
     ScopeHash, ScopeRev,
 };
 use serde::{Deserialize, Serialize};
@@ -291,8 +291,8 @@ pub enum SystemCmd {
     CandidateConflicted {
         /// The gating run.
         run: GateRunId,
-        /// The conflicting paths, in the order git reported them. Never empty.
-        files: Vec<String>,
+        /// The conflicting repo-relative paths, in the order git reported them. Never empty.
+        files: Vec<RepoPath>,
     },
     /// The foreman drafted the scope of an order revision.
     ScopeDrafted {

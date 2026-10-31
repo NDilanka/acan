@@ -53,8 +53,8 @@ use acan_core::{
 use acan_git::{Preparation, PrepareOutcome, Repo};
 use acan_intent::{
     AppContract, CommitSha, ContainerPolicy, DiscrepancyEpisode, GateContext, MachineId, ModelRef,
-    OrderRef, PreparedCommit, ProbeCorpus, Scope, ScopeConfirmation, ScopeDraft, ScopeDraftV1,
-    ScopeRev, UnixMillis,
+    OrderRef, PreparedCommit, ProbeCorpus, RepoPath, Scope, ScopeConfirmation, ScopeDraft,
+    ScopeDraftV1, ScopeRev, UnixMillis,
 };
 use acan_llm::{CallRecord, LlmError, ModelClient, Role};
 use acan_witness::RunnerConfig;
@@ -1263,7 +1263,7 @@ async fn prepare_candidate(
     repo: &Repo,
     pass: &Pass,
     head: &CommitId,
-) -> Result<Result<Preparation, Vec<String>>, JobError> {
+) -> Result<Result<Preparation, Vec<RepoPath>>, JobError> {
     let commit = CommitSha::from_str(&head.to_string())
         .map_err(|err| JobError::Unavailable(format!("the candidate is not a commit: {err}")))?;
     match repo
@@ -1271,9 +1271,7 @@ async fn prepare_candidate(
         .await?
     {
         PrepareOutcome::Prepared(candidate) => Ok(Ok(candidate)),
-        PrepareOutcome::Conflict { files, .. } => {
-            Ok(Err(files.iter().map(ToString::to_string).collect()))
-        }
+        PrepareOutcome::Conflict { files, .. } => Ok(Err(files)),
         // The outcome enum is non-exhaustive: an outcome this build does not know is not a
         // candidate to test, so it fails closed and is retried.
         _ => Err(JobError::Unavailable(format!(
@@ -1284,10 +1282,11 @@ async fn prepare_candidate(
 
 /// Why a candidate that conflicts with the protected head was refused, in the words the origin
 /// records. It names the commit and the conflicting files.
-fn conflict_reason(head: &CommitId, files: &[String]) -> String {
+fn conflict_reason(head: &CommitId, files: &[RepoPath]) -> String {
+    let names: Vec<String> = files.iter().map(ToString::to_string).collect();
     format!(
         "candidate {head} conflicts with the protected head: {}",
-        files.join(", ")
+        names.join(", ")
     )
 }
 
