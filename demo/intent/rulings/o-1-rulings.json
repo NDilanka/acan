@@ -1,7 +1,7 @@
 {
   "schema": "acan-demo-intent-rulings/1",
   "order": "o-1",
-  "note": "Human rulings on out-of-scope differences in a candidate's receipt. Each rule names the field it covers and the candidate state it applies to, and says what the human accepts. ruling.ps1 turns each rule into a standing predicate and records it through the member HTTP API (record_ruling). Nothing here is a verdict: the gate evaluates each predicate on every retained example and refuses a ruling that does not hold on them.",
+  "note": "Human rulings on out-of-scope differences in a candidate's receipt. Each rule names the field it covers and the candidate state it applies to, and says what the human accepts. ruling.ps1 turns each rule into a standing predicate on one step of the candidate, and records one ruling per episode and step through the member HTTP API (record_ruling). Nothing here is a verdict: the gate evaluates each ruling on every probe its selector reaches, and a probe that fails it becomes violates_ruling.",
   "rules": [
     {
       "id": "rl-request-id-opaque",

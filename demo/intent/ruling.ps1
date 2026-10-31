@@ -1,18 +1,24 @@
 <#
 .SYNOPSIS
-Records a human ruling on each out-of-scope episode of one receipt, through the member HTTP API.
+Records a human ruling on each out-of-scope step of one receipt, through the member HTTP API.
 
 .DESCRIPTION
 The human's rules are in a rules file (demo/intent/rulings/<order>-rulings.json). For each
 out-of-scope item of the receipt, the first rule whose field pattern and candidate state match
-gives the predicate the ruling states. The predicate is built from the candidate run only. For each
-episode the script reads the ruling draft (GET .../ruling-draft), takes the ledger head from it,
-and posts one decision_confirmed event through POST /api/commands with cmd record_ruling. The
-origin checks the predicate on every retained example and refuses a ruling that does not hold on
-them; a refusal stops the script and is written to the output.
+gives the predicate the ruling states. The predicate reads one step of the candidate run, so the
+ruling is per (episode, step): its selector is the episode's selector with step_context set to that
+step, so the gate judges it only on the probes that have that step. For each (episode, step) the
+script reads the ruling draft (GET .../ruling-draft) fresh, keeps the draft examples of the probes
+where that step differs as the accepted examples, and posts one decision_confirmed event through
+POST /api/commands with cmd record_ruling.
+
+The origin checks the decision's chain and actor, and records it. It does not run the predicate on
+the examples at record time (acan-core ruling.rs decide_record; acan-intent predicate.rs check_examples
+is not on that path). The gate evaluates each ruling on every probe its selector reaches: a failing
+probe becomes violates_ruling, and a probe the predicate cannot judge leaves the ruling unheld.
 
 The script never decides a verdict itself: it turns the rules into predicates and sends them. The
-gate evaluates the predicates. The owner token is read from the argument and never printed.
+owner token is read from the argument and never printed.
 #>
 [CmdletBinding()]
 param(
@@ -37,6 +43,7 @@ if ($rules.order -ne $Order) { throw "the rules file is for $($rules.order), not
 if (-not $OrderId) { $OrderId = $Order }
 $receipt = (Get-Content -LiteralPath $ReceiptFile -Raw | ConvertFrom-Json).receipt
 $log = [System.Collections.Generic.List[object]]::new()
+$sha = [System.Security.Cryptography.SHA256]::Create()
 
 function Select-Rule {
     param([string]$Field, [string]$State)
@@ -59,61 +66,76 @@ function New-Predicate {
     }
 }
 
-# Group the out-of-scope items by episode, in the order the receipt lists them.
-$episodes = [ordered]@{}
+# Group the out-of-scope items by episode and step, in the order the receipt lists them. A ruling
+# names one step, because a predicate reads a field of one step.
+$groups = [ordered]@{}
 foreach ($item in @($receipt.items)) {
     if ([string]$item.class -ne 'out_of_scope') { continue }
     $episode = [string]$item.episode_id
     if (-not $episode) { throw "an out-of-scope item has no episode: $($item.item_id)" }
-    if (-not $episodes.Contains($episode)) { $episodes[$episode] = [System.Collections.Generic.List[object]]::new() }
-    $episodes[$episode].Add($item)
+    $ev = @($item.evidence | Where-Object { $_.slot -eq 'candidate' })
+    if ($ev.Count -ne 1) { throw "episode ${episode}: an item has $($ev.Count) candidate evidence rows, expected one" }
+    $ev = $ev[0]
+    $step = [string]$ev.step
+    $key = "$episode|$step"
+    if (-not $groups.Contains($key)) {
+        $groups[$key] = [pscustomobject]@{ episode = $episode; step = $step; probes = [System.Collections.Generic.List[string]]::new(); items = [System.Collections.Generic.List[object]]::new() }
+    }
+    $groups[$key].items.Add($item)
+    $probe = [string]$item.probe_hash
+    if (-not $groups[$key].probes.Contains($probe)) { $groups[$key].probes.Add($probe) }
 }
-Write-Output "out-of-scope episodes to rule: $($episodes.Count)"
+Write-Output "out-of-scope episode steps to rule: $($groups.Count)"
 
-foreach ($episode in $episodes.Keys) {
-    $items = $episodes[$episode]
+foreach ($key in $groups.Keys) {
+    $group = $groups[$key]
+    $episode = $group.episode
+    $step = $group.step
     $predicates = [System.Collections.Generic.List[object]]::new()
     $seen = @{}
     $label = $null
     $machine = $null
-    $candidateRun = $null
     $fields = @()
-    foreach ($item in $items) {
-        $ev = @($item.evidence | Where-Object { $_.slot -eq 'candidate' })
-        if ($ev.Count -ne 1) { throw "episode ${episode}: an item has $($ev.Count) candidate evidence rows, expected one" }
-        $ev = $ev[0]
+    foreach ($item in $group.items) {
+        $ev = @($item.evidence | Where-Object { $_.slot -eq 'candidate' })[0]
         $state = [string]$ev.value.state
         $rule = Select-Rule -Field ([string]$ev.field) -State $state
         if ($null -eq $rule) {
-            throw "episode ${episode}: no rule in $RulesFile covers field $($ev.field) with candidate state $state; the item stays open"
+            throw "episode ${episode} step ${step}: no rule in $RulesFile covers field $($ev.field) with candidate state $state; the item stays open"
         }
-        $predicate = New-Predicate -Rule $rule -Step ([string]$ev.step) -Field ([string]$ev.field)
-        $key = ($predicate | ConvertTo-Json -Depth 20 -Compress)
-        if (-not $seen.ContainsKey($key)) { $seen[$key] = $true; $predicates.Add($predicate) }
-        if ($null -eq $label) { $label = [string]$rule.label; $machine = [string]$item.machine_id; $candidateRun = [string]$ev.run_id }
-        if ([string]$ev.run_id -ne $candidateRun) { throw "episode ${episode}: items name more than one candidate run" }
-        $fields += "$($ev.step) $($ev.field) ($($rule.id))"
+        $predicate = New-Predicate -Rule $rule -Step $step -Field ([string]$ev.field)
+        $pkey = ($predicate | ConvertTo-Json -Depth 20 -Compress)
+        if (-not $seen.ContainsKey($pkey)) { $seen[$pkey] = $true; $predicates.Add($predicate) }
+        if ($null -eq $label) { $label = [string]$rule.label; $machine = [string]$item.machine_id }
+        $fields += "$($ev.field) ($($rule.id))"
     }
     $predicate = if ($predicates.Count -eq 1) { $predicates[0] } else { [ordered]@{ predicate = 'all'; of = @($predicates) } }
+    $hex = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($key)) | ForEach-Object { $_.ToString('x2') })
+    $ruling = "r-$OrderId-" + $hex.Substring(0, 12)
 
-    # The draft is read again for every episode: each ruling moves the ledger head.
+    # The draft is read again for every ruling: each ruling moves the ledger head.
     $draft = Invoke-RestMethod -Uri "$base/api/orders/$OrderId/episodes/$([uri]::EscapeDataString($episode))/ruling-draft" -Headers $headers -TimeoutSec 60
-    $accepts = @()
-    $rejects = @()
+    $accepts = [System.Collections.Generic.List[string]]::new()
+    $examplesByProbe = @{}
     foreach ($example in @($draft.examples)) {
-        if ([string]$example.run -eq $candidateRun -and [string]$example.probe_hash -eq [string]$draft.probe_hash) {
-            $accepts += [string]$example.hash
-        } else {
-            $rejects += [string]$example.hash
-        }
+        $probe = [string]$example.probe_hash
+        $examplesByProbe[$probe] = $true
+        if ($group.probes -contains $probe -and -not $accepts.Contains([string]$example.hash)) { $accepts.Add([string]$example.hash) }
     }
-    if ($accepts.Count -eq 0) { throw "episode ${episode}: the draft keeps no example of candidate run $candidateRun for its probe" }
+    foreach ($probe in $group.probes) {
+        if (-not $examplesByProbe.ContainsKey($probe)) { throw "episode ${episode} step ${step}: the draft keeps no example for probe $probe" }
+    }
+    if ($accepts.Count -eq 0) { throw "episode ${episode} step ${step}: the draft keeps no example for the step's probes" }
+    $ruledOn = if ($accepts -contains [string]$draft.ruled_on) { [string]$draft.ruled_on } else { $accepts[0] }
+    $selector = [ordered]@{}
+    foreach ($prop in $draft.selector.PSObject.Properties) { $selector[$prop.Name] = $prop.Value }
+    $selector['step_context'] = [ordered]@{ kind = 'step'; step_id = $step }
+
     $head = $draft.ledger_head
-    $ruling = "r-$OrderId-" + (($episode -replace '^sha256:', '').Substring(0, 12))
     $decision = [ordered]@{
-        event                 = 'decision_confirmed'
-        schema_version        = 'acan-ledger/1'
-        event_seq             = [uint64]$head.event_seq + 1
+        event          = 'decision_confirmed'
+        schema_version = 'acan-ledger/1'
+        event_seq      = [uint64]$head.event_seq + 1
     }
     if ($null -ne $head.hash) { $decision['prev_hash'] = [string]$head.hash }
     $decision['actor'] = $Actor
@@ -123,11 +145,11 @@ foreach ($episode in $episodes.Keys) {
     $decision['scope_hash'] = [string]$draft.scope_hash
     $decision['episode_id'] = $episode
     $decision['evidence_hashes'] = @()
-    $decision['selector'] = $draft.selector
+    $decision['selector'] = $selector
     $decision['predicate_ast'] = $predicate
     $decision['accepts'] = @($accepts)
-    $decision['rejects'] = @($rejects)
-    $decision['ruled_on'] = [string]$draft.ruled_on
+    $decision['rejects'] = @()
+    $decision['ruled_on'] = $ruledOn
     $decision['normalization_version'] = [string]$draft.normalization_version
     $decision['normalization_hash'] = [string]$draft.normalization_hash
     $decision['applicability'] = 'standing_predicate_approval'
@@ -138,31 +160,33 @@ foreach ($episode in $episodes.Keys) {
     $entry = [ordered]@{
         ruling_id  = $ruling
         episode_id = $episode
+        step_id    = $step
         fields     = $fields
         label      = $label
         predicate  = $predicate
+        probes     = @($group.probes)
         accepts    = @($accepts)
-        rejects    = @($rejects)
+        ruled_on   = $ruledOn
         ledger_seq = $decision['event_seq']
     }
     try {
         $resp = Invoke-RestMethod -Method Post -Uri "$base/api/commands" -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 120
         $entry['result'] = 'recorded'
         $entry['events'] = @($resp | ForEach-Object { [string]$_.event.type })
-        Write-Output "[recorded] $ruling $($fields -join '; ')"
+        Write-Output "[recorded] $ruling $episode $step ($($fields -join '; '))"
     } catch {
         $detail = if ($_.ErrorDetails) { $_.ErrorDetails.Message } else { $_.Exception.Message }
         $entry['result'] = 'refused'
         $entry['refusal'] = $detail
         $log.Add($entry)
         $entry | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $Out -Encoding utf8
-        throw "the origin refused ruling $ruling for $episode`: $detail"
+        throw "the origin refused ruling $ruling for $episode step ${step}: $detail"
     }
     $log.Add($entry)
 }
 
 $result = [ordered]@{
-    schema     = 'acan-ruling-run/1'
+    schema     = 'acan-ruling-run/2'
     order      = $Order
     order_id   = $OrderId
     receipt    = $ReceiptFile
