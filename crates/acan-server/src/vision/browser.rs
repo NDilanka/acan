@@ -33,8 +33,8 @@ const REMOVE_PAUSE: Duration = Duration::from_millis(250);
 
 /// The policy that leads every rendered page. It runs no script and blocks every load except
 /// inline styles and `data:` images, so the page cannot pull a `file://` resource into the
-/// screenshot. [`inert`] renames every `<meta` tag of the page itself, so a candidate's refresh
-/// or policy tag does nothing.
+/// screenshot. [`inert`] renames every `<meta` tag of the page itself except its charset
+/// declarations, so a candidate's refresh or policy tag does nothing.
 const POLICY: &str = r#"<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:">"#;
 
 /// Characters percent-encoded in a `file://` path.
@@ -90,22 +90,31 @@ pub(crate) struct Screenshot {
 /// # Errors
 ///
 /// Returns [`RenderError`] when the browser is missing, fails, times out or writes no PNG.
-pub(crate) async fn render(browser: &Path, html: &str) -> Result<Screenshot, RenderError> {
+pub(crate) async fn render(
+    browser: &Path,
+    html: &str,
+    content_type: Option<&str>,
+) -> Result<Screenshot, RenderError> {
     if !browser.is_file() {
         return Err(RenderError::NoBrowser(browser.to_path_buf()));
     }
     let dir = RenderDir::create().await?;
-    let rendered = render_in(browser, html, dir.path()).await;
+    let rendered = render_in(browser, html, content_type, dir.path()).await;
     dir.remove().await;
     rendered
 }
 
-async fn render_in(browser: &Path, html: &str, dir: &Path) -> Result<Screenshot, RenderError> {
+async fn render_in(
+    browser: &Path,
+    html: &str,
+    content_type: Option<&str>,
+    dir: &Path,
+) -> Result<Screenshot, RenderError> {
     let page = dir.join("page.html");
     let shot = dir.join("shot.png");
     let profile = dir.join("profile");
     // The candidate's HTML is untrusted: it is only ever opened inert, never as a live page.
-    tokio::fs::write(&page, inert(html)).await?;
+    tokio::fs::write(&page, inert(html, content_type)).await?;
     let mut command = tokio::process::Command::new(browser);
     command
         .args(arguments(&page, &shot, &profile))
@@ -149,19 +158,33 @@ pub(crate) fn arguments(page: &Path, shot: &Path, profile: &Path) -> Vec<OsStrin
     ]
 }
 
-/// `html` with every `<meta` tag renamed to an unknown element and [`POLICY`] first in the head.
-/// Tag names are matched without regard to case, as the HTML parser does.
-pub(crate) fn inert(html: &str) -> String {
+/// `html` with every `<meta` tag renamed to an unknown element except the page's own charset
+/// declarations, and [`POLICY`] first in the head. A page that declares no charset gets the one
+/// `content_type` names, before the policy. Tag names are matched without regard to case, as the
+/// HTML parser does.
+pub(crate) fn inert(html: &str, content_type: Option<&str>) -> String {
     const META: &str = "<meta";
     let lower = html.to_ascii_lowercase();
     let mut neutral = String::with_capacity(html.len() + POLICY.len());
+    let mut declares_charset = false;
     let mut from = 0;
     for (at, _) in lower.match_indices(META) {
         neutral.push_str(&html[from..at]);
-        neutral.push_str("<x-inert-meta");
+        if is_charset_declaration(&lower[at..]) {
+            declares_charset = true;
+            neutral.push_str(&html[at..at + META.len()]);
+        } else {
+            neutral.push_str("<x-inert-meta");
+        }
         from = at + META.len();
     }
     neutral.push_str(&html[from..]);
+    // A page opened from `file://` with no charset is read as the platform's legacy encoding.
+    let head = if declares_charset {
+        POLICY.to_owned()
+    } else {
+        format!(r#"<meta charset="{}">{POLICY}"#, charset_of(content_type))
+    };
     // A doctype must stay first, or the page renders in quirks mode.
     let lead = neutral.len() - neutral.trim_start().len();
     let doctype = neutral[lead..]
@@ -170,10 +193,86 @@ pub(crate) fn inert(html: &str) -> String {
     match neutral[lead..].find('>').filter(|_| doctype) {
         Some(end) => {
             let split = lead + end + 1;
-            format!("{}{POLICY}{}", &neutral[..split], &neutral[split..])
+            format!("{}{head}{}", &neutral[..split], &neutral[split..])
         }
-        None => format!("{POLICY}{neutral}"),
+        None => format!("{head}{neutral}"),
     }
+}
+
+/// Whether the lowercased `<meta` tag that starts `tag` only declares the charset. A tag that
+/// also names a refresh or a policy is not one, nor is one with a character reference, which
+/// could spell either, nor one that never closes.
+fn is_charset_declaration(tag: &str) -> bool {
+    meta_tag_len(tag).is_some_and(|len| {
+        let tag = &tag[..len];
+        tag.contains("charset")
+            && !tag.contains("refresh")
+            && !tag.contains("content-security-policy")
+            && !tag.contains('&')
+    })
+}
+
+/// The length of the `<meta` start tag that begins `tag`, through the `>` the HTML tokenizer
+/// closes it at. A `>` inside a quoted attribute value does not close it, so a checked tag is
+/// never shorter than the one the browser reads. `None` when the tag name goes on past `meta`
+/// or the tag never closes.
+fn meta_tag_len(tag: &str) -> Option<usize> {
+    #[derive(Clone, Copy)]
+    enum State {
+        BeforeName,
+        Name,
+        BeforeValue,
+        Quoted(u8),
+        Unquoted,
+    }
+    const NAME_END: usize = "<meta".len();
+    let space = |byte: u8| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c');
+    let bytes = tag.as_bytes();
+    let after = *bytes.get(NAME_END)?;
+    if !(space(after) || after == b'/' || after == b'>') {
+        return None;
+    }
+    let mut state = State::BeforeName;
+    for (at, &byte) in bytes.iter().enumerate().skip(NAME_END) {
+        state = match state {
+            // After a quoted value the tokenizer reads the next attribute, as before a name.
+            State::Quoted(quote) if byte == quote => State::BeforeName,
+            State::Quoted(_) => state,
+            _ if byte == b'>' => return Some(at + 1),
+            State::BeforeName if space(byte) || byte == b'/' => State::BeforeName,
+            State::BeforeName => State::Name,
+            State::Name if byte == b'=' => State::BeforeValue,
+            State::Name if byte == b'/' => State::BeforeName,
+            // Whitespace after a name keeps it open for an `=`, so it stays `Name`.
+            State::Name => State::Name,
+            State::BeforeValue if space(byte) => State::BeforeValue,
+            State::BeforeValue if byte == b'"' || byte == b'\'' => State::Quoted(byte),
+            State::BeforeValue => State::Unquoted,
+            State::Unquoted if space(byte) => State::BeforeName,
+            State::Unquoted => State::Unquoted,
+        };
+    }
+    None
+}
+
+/// The charset parameter of a `Content-Type`, kept to ASCII letters, digits, `-` and `_` so it
+/// cannot leave the attribute it is written into. UTF-8 when there is none.
+fn charset_of(content_type: Option<&str>) -> String {
+    content_type
+        .into_iter()
+        .flat_map(|kind| kind.split(';').skip(1))
+        .find_map(|param| {
+            let (name, value) = param.split_once('=')?;
+            name.trim().eq_ignore_ascii_case("charset").then_some(value)
+        })
+        .map(|value| {
+            value
+                .chars()
+                .filter(|&c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                .collect::<String>()
+        })
+        .filter(|charset| !charset.is_empty())
+        .unwrap_or_else(|| "utf-8".to_owned())
 }
 
 /// The `file://` URL of `path`.
@@ -275,10 +374,16 @@ mod tests {
             "--no-first-run",
             "--disable-extensions",
         ] {
-            assert!(args.iter().any(|arg| arg == required), "{required} in {args:?}");
+            assert!(
+                args.iter().any(|arg| arg == required),
+                "{required} in {args:?}"
+            );
         }
         assert!(args.contains(&format!("--screenshot={}", dir.join("shot.png").display())));
-        assert!(args.contains(&format!("--user-data-dir={}", dir.join("profile").display())));
+        assert!(args.contains(&format!(
+            "--user-data-dir={}",
+            dir.join("profile").display()
+        )));
         assert_eq!(
             args.last().map(String::as_str),
             Some(file_url(&dir.join("page.html")).as_str())
@@ -295,25 +400,94 @@ mod tests {
             file_url(Path::new(r"C:\Users\A S U S\page.html")),
             "file:///C:/Users/A%20S%20U%20S/page.html"
         );
-        assert_eq!(file_url(Path::new("/tmp/a#b.html")), "file:///tmp/a%23b.html");
+        assert_eq!(
+            file_url(Path::new("/tmp/a#b.html")),
+            "file:///tmp/a%23b.html"
+        );
     }
+
+    const UTF8: &str = r#"<meta charset="utf-8">"#;
 
     #[test]
     fn a_page_cannot_refresh_or_relax_the_policy() {
         let page = inert(
             "<!DOCTYPE html><html><head><META http-equiv=\"refresh\" content=\"0;url=file:///C:/secret\">\
              <meta http-equiv=Content-Security-Policy content=\"default-src *\"></head><body>hi</body></html>",
+            None,
         );
-        assert!(page.starts_with(&format!("<!DOCTYPE html>{POLICY}")), "{page}");
-        assert_eq!(page.to_ascii_lowercase().matches("<meta").count(), 1, "{page}");
-        assert!(page.contains("<x-inert-meta http-equiv=\"refresh\""), "{page}");
+        assert!(
+            page.starts_with(&format!("<!DOCTYPE html>{UTF8}{POLICY}")),
+            "{page}"
+        );
+        assert_eq!(
+            page.to_ascii_lowercase().matches("<meta").count(),
+            2,
+            "{page}"
+        );
+        assert!(
+            page.contains("<x-inert-meta http-equiv=\"refresh\""),
+            "{page}"
+        );
         assert!(page.ends_with("<body>hi</body></html>"));
     }
 
     #[test]
-    fn a_page_without_a_doctype_starts_with_the_policy() {
-        assert_eq!(inert("<p>x</p>"), format!("{POLICY}<p>x</p>"));
-        assert_eq!(inert(""), POLICY);
+    fn a_page_without_a_doctype_starts_with_the_charset_and_the_policy() {
+        assert_eq!(inert("<p>x</p>", None), format!("{UTF8}{POLICY}<p>x</p>"));
+        assert_eq!(inert("", None), format!("{UTF8}{POLICY}"));
+    }
+
+    #[test]
+    fn the_page_keeps_its_own_charset_declarations() {
+        let head = "<head><META Charset=\"Shift_JIS\">\
+                    <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"></head>";
+        assert_eq!(
+            inert(
+                &format!("<!doctype html>{head}"),
+                Some("text/html; charset=iso-8859-1")
+            ),
+            format!("<!doctype html>{POLICY}{head}")
+        );
+    }
+
+    #[test]
+    fn a_page_without_a_charset_gets_the_response_charset() {
+        fn lead(charset: &str) -> String {
+            format!("<!doctype html><meta charset=\"{charset}\">{POLICY}<p>x</p>")
+        }
+        let page = |content_type| inert("<!doctype html><p>x</p>", content_type);
+        assert_eq!(
+            page(Some("text/html; Charset=\"ISO-8859-1\"")),
+            lead("ISO-8859-1")
+        );
+        assert_eq!(
+            page(Some("text/html; charset=utf-8\"><script>")),
+            lead("utf-8script")
+        );
+        assert_eq!(page(Some("text/html")), lead("utf-8"));
+        assert_eq!(page(Some("text/html; charset=\"\"")), lead("utf-8"));
+        assert_eq!(page(None), lead("utf-8"));
+    }
+
+    #[test]
+    fn a_charset_tag_that_does_anything_else_is_renamed() {
+        for tag in [
+            "<meta charset=\"utf-8\" http-equiv=\"refresh\" content=\"0;url=file:///C:/secret\">",
+            "<meta charset=utf-8 content=\"a>b\" http-equiv=refresh>",
+            "<meta charset=utf-8 x='>' http-equiv=refresh>",
+            "<meta charset=utf-8 http-equiv=\"&#114;efresh\" content=0>",
+            "<meta charset=\"x\" http-equiv=\"Content-Security-Policy\" content=\"default-src *\">",
+            "<meta charset=utf-8",
+            "<metadata charset=utf-8>",
+        ] {
+            let page = inert(tag, None);
+            assert!(page.starts_with(&format!("{UTF8}{POLICY}")), "{tag}: {page}");
+            assert_eq!(
+                page.to_ascii_lowercase().matches("<meta").count(),
+                2,
+                "{tag}: {page}"
+            );
+        }
     }
 
     #[test]
@@ -330,10 +504,14 @@ mod tests {
     async fn a_missing_browser_is_reported_before_anything_is_written() {
         let missing = Path::new(r"C:\no\such\browser.exe");
         assert!(matches!(
-            render(missing, "<p>x</p>").await,
+            render(missing, "<p>x</p>", None).await,
             Err(RenderError::NoBrowser(_))
         ));
     }
+
+    /// Held by every test that runs the installed browser, so one test's render directory is
+    /// never counted in another's cleanup check.
+    static BROWSER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Runs the installed browser. Skipped when neither Edge nor Chrome is installed.
     #[tokio::test]
@@ -344,8 +522,9 @@ mod tests {
             eprintln!("skipped: no Edge or Chrome at {}", browser.display());
             return;
         }
+        let _browser = BROWSER.lock().await;
         let before = render_dirs();
-        let plain = render(&browser, &format!("{PAGE}</body></html>"))
+        let plain = render(&browser, &format!("{PAGE}</body></html>"), None)
             .await
             .expect("the page renders");
         assert_eq!((plain.width, plain.height), (WIDTH, HEIGHT));
@@ -356,6 +535,7 @@ mod tests {
                 "{PAGE}<script>document.body.style.background='#0c0';\
                  document.querySelector('h1').textContent='SCRIPT RAN'</script></body></html>"
             ),
+            None,
         )
         .await
         .expect("the scripted page renders");
@@ -363,6 +543,38 @@ mod tests {
         assert!(
             hostile.png == plain.png,
             "the script ran: the scripted page renders differently"
+        );
+        assert_eq!(render_dirs(), before, "the render directories were removed");
+    }
+
+    /// Runs the installed browser. Skipped when neither Edge nor Chrome is installed.
+    #[tokio::test]
+    async fn a_script_does_not_change_the_screenshot() {
+        const HEAD: &str = "<!doctype html><html><body><p id=\"said\">Before the script</p>";
+        const SCRIPT: &str =
+            "<script>document.getElementById('said').textContent='After the script'</script>";
+        let browser = default_browser();
+        if !browser.is_file() {
+            eprintln!("skipped: no Edge or Chrome at {}", browser.display());
+            return;
+        }
+        let _browser = BROWSER.lock().await;
+        let before = render_dirs();
+        let content_type = Some("text/html; charset=utf-8");
+        let a = render(
+            &browser,
+            &format!("{HEAD}{SCRIPT}</body></html>"),
+            content_type,
+        )
+        .await
+        .expect("the page with the script renders");
+        let b = render(&browser, &format!("{HEAD}</body></html>"), content_type)
+            .await
+            .expect("the page without the script renders");
+        // Compared whole, not with assert_eq, so a failure does not print two PNGs.
+        assert!(
+            a.png == b.png,
+            "the script ran: the page with it renders differently"
         );
         assert_eq!(render_dirs(), before, "the render directories were removed");
     }

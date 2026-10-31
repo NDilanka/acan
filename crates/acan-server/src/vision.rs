@@ -579,7 +579,7 @@ async fn page(
             kept.content_type.as_deref().unwrap_or("with no content type"),
         ));
     }
-    browser::render(&vision.browser, &kept.body)
+    browser::render(&vision.browser, &kept.body, kept.content_type.as_deref())
         .await
         .map_err(|err| format!("the {what} page was not rendered: {err}"))
 }
