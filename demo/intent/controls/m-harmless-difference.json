@@ -1,0 +1,47 @@
+{
+  "schema": "acan-demo-control/1",
+  "id": "m-harmless-difference",
+  "kind": "implementation",
+  "applies_to": "o-1",
+  "base": "f91962156841332d5753d869554839f7c4cdea79",
+  "control_of": "mutants.json m-harmless-difference (out-of-scope difference, applied by the take's control identity)",
+  "description": "The o-1 limiter (one counter per signed-in user, shared across that user's sessions) plus an x-request-id response header with a random UUID on every /api/ response. No status or body byte changes.",
+  "declared_files": ["src/middleware.ts", "src/ratelimit.ts", "src/server.ts"],
+  "files": [
+    {
+      "path": "src/middleware.ts",
+      "edits": [
+        {
+          "old": "import type { IncomingMessage, ServerResponse } from 'node:http';",
+          "new": "import { randomUUID } from 'node:crypto';\nimport type { IncomingMessage, ServerResponse } from 'node:http';"
+        },
+        {
+          "old": "  try {\n    const decision = deps.limiter.check(clientKey(req));\n    if (!decision.allowed) {\n      res.setHeader('retry-after', String(decision.retryAfterSeconds));\n      throw new HttpError(429, 'too many requests');\n    }\n\n    const token = readToken(req);\n    const userId = resolveSession(deps.store, token);\n    if (route.requiresUser && userId === null) {\n      throw new HttpError(401, 'login required');\n    }\n",
+          "new": "  try {\n    const token = readToken(req);\n    const userId = resolveSession(deps.store, token);\n    if (url.pathname.startsWith('/api/')) res.setHeader('x-request-id', randomUUID());\n    if (route.requiresUser && userId === null) {\n      throw new HttpError(401, 'login required');\n    }\n    if (userId !== null && route.path.startsWith('/api/links')) {\n      const decision = deps.limiter.check(userId);\n      if (!decision.allowed) {\n        throw new HttpError(429, 'too many requests');\n      }\n    }\n"
+        }
+      ]
+    },
+    {
+      "path": "src/ratelimit.ts",
+      "edits": [
+        {
+          "old": "/** Stub: allows every request. Replace with a window or token bucket later. */",
+          "new": "/**\n * A fixed window per key: the first `limit` calls in a window are allowed and the rest are denied\n * until the window ends. Every call counts, whether or not its request then succeeds. A key's\n * window opens at its first call, and the clock is read on every call.\n */\nexport function createWindowLimiter(limit: number, windowMs: number, now: () => number = () => Date.now()): RateLimiter {\n  const windows = new Map<string, { start: number; count: number }>();\n  return {\n    check(key) {\n      const at = now();\n      let window = windows.get(key);\n      if (window === undefined || at - window.start >= windowMs) {\n        window = { start: at, count: 0 };\n        windows.set(key, window);\n      }\n      window.count += 1;\n      if (window.count <= limit) return { allowed: true, retryAfterSeconds: 0 };\n      return { allowed: false, retryAfterSeconds: (window.start + windowMs - at) / 1000 };\n    },\n  };\n}\n\n/** Allows every request. Kept for callers that want no limit. */"
+        }
+      ]
+    },
+    {
+      "path": "src/server.ts",
+      "edits": [
+        {
+          "old": "import { createNoopLimiter, type RateLimiter } from './ratelimit.ts';",
+          "new": "import { createWindowLimiter, type RateLimiter } from './ratelimit.ts';"
+        },
+        {
+          "old": "    limiter: options.limiter ?? createNoopLimiter(),",
+          "new": "    limiter: options.limiter ?? createWindowLimiter(10, 60_000),"
+        }
+      ]
+    }
+  ]
+}
