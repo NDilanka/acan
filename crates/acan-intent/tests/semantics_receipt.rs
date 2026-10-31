@@ -1395,6 +1395,75 @@ fn a_grant_on_one_field_does_not_own_the_replacement_of_its_ancestor() {
     );
 }
 
+#[test]
+fn a_whole_body_item_covers_every_body_field_at_its_step_and_nothing_at_another() {
+    let scope = edited_scope(|value| {
+        let mut whole = value["body"]["may"][2].clone();
+        whole["id"] = json!("i-login-whole-body");
+        whole["selector"]["step_context"] = json!({ "kind": "step", "step_id": "s6" });
+        whole["selector"]
+            .as_object_mut()
+            .expect("a selector is an object")
+            .remove("field_path");
+        whole["acceptance"] = body_error_item_accepting_status();
+        value["body"]["may"] = json!([whole]);
+    });
+    let confirmation = confirmation_for(&scope);
+    let ledger = empty_ledger();
+    let context = prepared_context(&confirmation, &ledger);
+    let mut base = sequence(SIX_FAILURES);
+    let mut candidate = sequence(SIX_FAILURES);
+    for step in ["s5", "s6"] {
+        hit_mut(&mut base, step).body = json!({ "error": "invalid credentials", "links": ["a"] });
+        hit_mut(&mut candidate, step).body =
+            json!({ "error": "too many attempts", "links": ["b"] });
+    }
+    let measured = login(STANDARD, base.clone(), base, candidate);
+    let receipt = build(
+        &scope,
+        &confirmation,
+        &context,
+        &ledger,
+        &[measured.result()],
+    )
+    .expect("the receipt builds");
+    let Outcome::Changed { differences } = &item(&receipt, "i-login-whole-body").evaluation.outcome
+    else {
+        panic!("the whole-body item claims no difference");
+    };
+    let at_s6: Vec<&str> = differences
+        .iter()
+        .filter(|difference| difference.step_id.as_str() == "s6")
+        .map(|difference| difference.path.as_str())
+        .collect();
+    assert!(
+        at_s6.iter().any(|path| path.starts_with("body.error")),
+        "the whole-body item misses body.error at s6: {at_s6:?}"
+    );
+    assert!(
+        at_s6.iter().any(|path| path.starts_with("body.links")),
+        "the whole-body item misses body.links at s6: {at_s6:?}"
+    );
+    assert!(
+        differences
+            .iter()
+            .all(|difference| difference.step_id.as_str() == "s6"),
+        "the whole-body item claims a difference at another step: {differences:?}"
+    );
+    assert!(
+        receipt
+            .items
+            .iter()
+            .any(|entry| entry.class == ItemClass::OutOfScope
+                && matches!(
+                    &entry.evaluation.outcome,
+                    Outcome::Changed { differences }
+                        if differences.iter().any(|difference| difference.step_id.as_str() == "s5")
+                )),
+        "the body difference at s5 is not out of scope"
+    );
+}
+
 // Unreached items and contests.
 
 #[test]
