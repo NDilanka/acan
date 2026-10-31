@@ -65,6 +65,7 @@ version = "0.1.0"
 name = "acan-llm"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "dotenvy",
  "reqwest",
  "schemars",

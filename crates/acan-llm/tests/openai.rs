@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use acan_llm::{
-    ApiKey, ApiKeys, ChatRequest, FunctionCall, JsonSchemaFormat, LlmConfig, LlmError, Message,
-    ModelClient, OpenAiCompatible, RequestId, RequestIdSource, RetryPolicy, Role, ToolCall,
-    ToolKind, ToolSpec,
+    ApiKey, ApiKeys, ChatRequest, ContentPart, FunctionCall, JsonSchemaFormat, LlmConfig, LlmError,
+    Message, ModelClient, OpenAiCompatible, RequestId, RequestIdSource, RetryPolicy, Role,
+    ToolCall, ToolKind, ToolSpec,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -1091,4 +1091,50 @@ async fn route_to_moves_a_role_to_another_provider() {
         0
     );
     assert_eq!(body_of(&meta, 0).await["model"], "muse-spark-1.3");
+}
+
+#[tokio::test]
+async fn a_turn_with_images_reaches_the_wire_as_an_array_of_parts() {
+    let meta = MockServer::start().await;
+    let baseten = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(traced_reply("{}"))
+        .expect(1)
+        .mount(&meta)
+        .await;
+
+    let request = ChatRequest {
+        messages: vec![
+            Message::system("Compare the pages."),
+            Message::user_parts(vec![
+                ContentPart::text("Does the summary line still hold?"),
+                ContentPart::text("BASELINE"),
+                ContentPart::png(b"base"),
+                ContentPart::text("CANDIDATE"),
+                ContentPart::png(b"cand"),
+            ]),
+        ],
+        max_tokens: Some(800),
+        ..Default::default()
+    };
+    let traced =
+        ModelClient::chat_traced(&client(&meta, &baseten, "baseten"), Role::Foreman, request)
+            .await
+            .expect("chat succeeds");
+
+    assert_eq!(traced.reply_model.as_deref(), Some("muse-spark-1.3-served"));
+    assert_eq!(
+        body_of(&meta, 0).await["messages"],
+        json!([
+            {"role": "system", "content": "Compare the pages."},
+            {"role": "user", "content": [
+                {"type": "text", "text": "Does the summary line still hold?"},
+                {"type": "text", "text": "BASELINE"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,YmFzZQ=="}},
+                {"type": "text", "text": "CANDIDATE"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,Y2FuZA=="}}
+            ]}
+        ])
+    );
 }

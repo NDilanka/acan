@@ -6,6 +6,7 @@ use serde::de::DeserializeOwned;
 use crate::chat::{ChatRequest, ChatResponse, JsonSchemaFormat};
 use crate::error::LlmError;
 use crate::role::Role;
+use crate::trace::Traced;
 use crate::usage::CallRecord;
 
 /// The one interface the rest of Acan uses for model calls.
@@ -43,6 +44,27 @@ pub trait ModelClient: Send + Sync {
         async move {
             let response = self.chat(role, with_schema::<T>(request)).await?;
             parse_structured(response, str::to_owned)
+        }
+    }
+
+    /// Runs [`ModelClient::chat`] and also returns the provider's trace fields. A client that
+    /// reads none, such as [`crate::Stub`], returns them empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`ModelClient::chat`].
+    fn chat_traced(
+        &self,
+        role: Role,
+        request: ChatRequest,
+    ) -> impl Future<Output = Result<Traced<ChatResponse>, LlmError>> + Send {
+        async move {
+            let value = self.chat(role, request).await?;
+            Ok(Traced {
+                value,
+                request_id: None,
+                reply_model: None,
+            })
         }
     }
 }
