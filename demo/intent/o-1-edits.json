@@ -212,6 +212,39 @@
       }
     },
     {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The order limits the whole link API, so a signed-in user's over-limit GET /api/links is answered 429.",
+      "item": {
+        "id": "i-quota-get-links",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s14" },
+          "principal": { "kind": "actor", "name": "alice_fresh" },
+          "channel": "status"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-quota-get-links-429",
+            "predicate": { "predicate": "status_in", "step_id": "s14", "statuses": [429] },
+            "text": "A signed-in user's over-limit GET /api/links is answered 429"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s14",
+          "path": "status",
+          "before": { "state": "present", "value": 200 },
+          "after": { "state": "present", "value": 429 }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
       "op": "add_must_keep",
       "reason": "bob keeps his own quota: his first 10 link requests are allowed though alice has used hers. Window evaluated on bob's request at s12 only.",
       "rule": {

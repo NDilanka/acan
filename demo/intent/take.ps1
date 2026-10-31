@@ -266,7 +266,7 @@ function Get-OrderTasks {
 
 function Start-Worker {
     param([string]$Name, [string]$Token, [string]$Tag)
-    $argLine = "--server $script:Base --token $Token --repo `"$script:Repo`" --llm `"$script:LlmPath`" --env `"$script:EnvPath`" --test-command `"bun test`" --wait-secs 600 --max-steps 30 --heartbeat-secs 20"
+    $argLine = "--server $script:Base --token $Token --repo `"$script:Repo`" --llm `"$script:LlmPath`" --env `"$script:EnvPath`" --test-command `"bun test`" --wait-secs 600 --max-steps 45 --heartbeat-secs 20"
     $p = Start-Process -FilePath $WorkerExe -ArgumentList $argLine `
         -RedirectStandardOutput (Join-Path $run "logs\$Name.$Tag.out.log") `
         -RedirectStandardError (Join-Path $run "logs\$Name.$Tag.err.log") -PassThru -WindowStyle Hidden
