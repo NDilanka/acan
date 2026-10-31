@@ -1345,7 +1345,10 @@ async fn edit<C: ModelClient>(
         }
         for call in response.tool_calls {
             let name = call.function.name.clone();
-            match run_tool(config, mcp, claim, tools, &call, steps).await? {
+            let target = trace_target(config, &call);
+            let step = run_tool(config, mcp, claim, tools, &call, steps).await?;
+            trace_call(steps, &name, &target, &step);
+            match step {
                 ToolStep::Answer(text) => {
                     // A failing test run is an answer too, so it counts as a failed call.
                     let failed = text.starts_with("error:") || text.starts_with("fail:");
@@ -1378,6 +1381,58 @@ async fn edit<C: ModelClient>(
         config.max_steps,
         tally.summary()
     )))
+}
+
+/// The most characters of an error a trace line carries.
+const TRACE_ERROR_CHARS: usize = 200;
+
+/// What a call worked on, for the trace: the path it named, or the test command it runs. A
+/// commit's message is the model's own text and is not traced.
+fn trace_target(config: &WorkerConfig, call: &ToolCall) -> String {
+    match call.function.name.as_str() {
+        "run_tests" => config.test_command.clone().unwrap_or_default(),
+        _ => serde_json::from_str::<Value>(&call.function.arguments)
+            .ok()
+            .and_then(|args| args["path"].as_str().map(str::to_owned))
+            .unwrap_or_default(),
+    }
+}
+
+/// Logs one line for a tool call: the tool, its path or command, and how the call ended. The
+/// line never carries a file body or written content, and an error is cut to its first line and
+/// [`TRACE_ERROR_CHARS`].
+fn trace_call(steps: &mut Vec<String>, name: &str, target: &str, step: &ToolStep) {
+    let outcome = match step {
+        ToolStep::Answer(text) if text.starts_with("error:") || text.starts_with("fail:") => {
+            let first = text.lines().next().unwrap_or_default();
+            let cut: String = first.chars().take(TRACE_ERROR_CHARS).collect();
+            if first.chars().count() > TRACE_ERROR_CHARS {
+                format!("{cut}...")
+            } else {
+                cut
+            }
+        }
+        ToolStep::Answer(_) => "ok".to_owned(),
+        ToolStep::Committed(head) => format!("ok; committed {head}"),
+        ToolStep::NotCleared(stage) => {
+            format!("stopped; the task is {stage}, not cleared to build")
+        }
+        ToolStep::Lost(reason) => format!("stopped; the claim is lost: {reason}"),
+        ToolStep::Narrowed(given) => {
+            let places = given
+                .iter()
+                .map(|taken| file_of(&taken.at).unwrap_or_else(|| format!("{:?}", taken.at)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("stopped; the declaration narrowed: {places}")
+        }
+    };
+    let line = if target.is_empty() {
+        format!("trace {name}: {outcome}")
+    } else {
+        format!("trace {name} {target}: {outcome}")
+    };
+    log(steps, line);
 }
 
 /// Gives up the files a narrowing took while the task was building or waiting to build. Restores
@@ -2246,6 +2301,80 @@ mod tests {
             !seen[3].contains("3 of 4") && !seen[3].contains("2 of 4"),
             "{}",
             seen[3]
+        );
+    }
+
+    #[tokio::test]
+    async fn every_tool_call_is_traced_with_its_target_and_outcome_but_no_file_body() {
+        let (_root, mut tools) = edit_rig();
+        let script = Stub::default()
+            .when(
+                Role::Worker,
+                |request| replies(request) == 0,
+                Reply {
+                    tool_calls: vec![tool_call("read_file", json!({ "path": "src/a.ts" }))],
+                    ..Reply::default()
+                },
+            )
+            .when(
+                Role::Worker,
+                |request| replies(request) == 1,
+                Reply {
+                    tool_calls: vec![tool_call("read_file", json!({ "path": "src/missing.ts" }))],
+                    ..Reply::default()
+                },
+            )
+            .when(
+                Role::Worker,
+                |request| replies(request) == 2,
+                Reply {
+                    tool_calls: vec![tool_call("run_tests", json!({}))],
+                    ..Reply::default()
+                },
+            )
+            .when(Role::Worker, |_| true, Reply::text("done for the day"));
+        let model = Turns::of(script);
+        let mcp = McpClient::new("http://127.0.0.1:9", String::new());
+        let mut steps = Vec::new();
+        let end = edit(
+            &edit_config(5),
+            &model,
+            &mcp,
+            &mut claim(),
+            &mut tools,
+            "Task t-1.".to_owned(),
+            &mut steps,
+        )
+        .await
+        .expect("the edit runs");
+        assert!(matches!(end, Edit::Stopped(_)));
+        let traces: Vec<&str> = steps
+            .iter()
+            .map(String::as_str)
+            .filter(|step| step.starts_with("trace "))
+            .collect();
+        assert!(
+            traces.contains(&"trace read_file src/a.ts: ok"),
+            "{traces:?}"
+        );
+        let failed_read = traces
+            .iter()
+            .find(|line| line.starts_with("trace read_file src/missing.ts: "))
+            .expect("the missing read is traced");
+        assert!(
+            failed_read
+                .starts_with("trace read_file src/missing.ts: error: cannot read src/missing.ts"),
+            "{failed_read}"
+        );
+        assert!(
+            traces
+                .contains(&"trace run_tests: error: no test command is configured for this worker"),
+            "{traces:?}"
+        );
+        // A read file's body is never traced.
+        assert!(
+            !traces.iter().any(|line| line.contains("let a = 1")),
+            "{traces:?}"
         );
     }
 
