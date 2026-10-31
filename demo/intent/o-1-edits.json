@@ -2,7 +2,7 @@
   "schema": "acan-demo-intent-edits/2",
   "order": "o-1",
   "decided_by": "coordinator, delegated by the owner",
-  "note": "Edits to the foreman's o-1 draft, logged separately from the model and labelled by who decided them. Each edit names the draft item it acts on by id; a draft from a new run may use other ids, so this file is written for the draft in the run it resumes. take.ps1 applies scope_edits to the draft in order, then choice_rules to the open choices, then sends the result as one revise_scope through the owner's member HTTP route, and logs each edit as a human step. An op whose id is not in the draft stops the take (fail closed). Nothing here is a verdict: the edits state the order's rules and the gate checks them.",
+  "note": "Written for the draft in run D:\\dev\\acan-takes\\d02t-fresh-o1-20261031-212852 (scope-draft-o-1.json, rev 1). Edits to the foreman's o-1 draft, logged separately from the model and labelled by who decided them. Each edit names the draft item it acts on by id; the draft_mapping block below maps each drafted id to the coordinator decision it follows. take.ps1 applies scope_edits to the draft in order, then choice_rules to the open choices, then sends the result as one revise_scope through the owner's member HTTP route, and logs each edit as a human step. An op whose id is not in the draft stops the take (fail closed). Nothing here is a verdict: the edits state the order's rules and the gate checks them.",
   "choice_rules": [
     {
       "id": "cr-bucket-scope",
@@ -43,7 +43,7 @@
     {
       "op": "replace_must_keep",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "The drafted must-keep (keep-health) checks step health-check, which is not a probe step. The same rule, GET /health still returns 200 for an anonymous request, is anchored on probe step s1 of the health probe. The rule keeps the drafted id keep-health, because take.ps1 matches a replacement by id.",
+      "reason": "The drafted must-keep (keep-health) checks step health, which is not a probe step. The same rule, GET /health still returns 200 for an anonymous request, is anchored on probe step s1 of the health probe. The rule keeps the drafted id keep-health, because take.ps1 matches a replacement by id.",
       "rule": {
         "id": "keep-health",
         "selector": {
@@ -66,9 +66,9 @@
       }
     },
     {
-      "op": "replace_must_keep",
+      "op": "add_must_keep",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "The drafted must-keep (keep-redirect) checks step redirect-check, which is not a probe step. The same rule, the public redirect status stays as in base, is anchored on probe step s3 of link-redirect-and-clicks (anonymous GET /${link_code}, route /:code). The rule keeps the drafted id keep-redirect, because take.ps1 matches a replacement by id.",
+      "reason": "The new draft (run d02t-fresh-o1-20261031-212852) has no redirect must-keep, so the earlier re-anchored redirect keep is added rather than replaced. The rule, the public redirect status stays as in base, is anchored on probe step s3 of link-redirect-and-clicks (anonymous GET /${link_code}, route /:code). The rule id keep-redirect is kept.",
       "rule": {
         "id": "keep-redirect",
         "selector": {
@@ -283,5 +283,25 @@
       }
     }
   ],
+  "draft_mapping": {
+    "run": "D:\\dev\\acan-takes\\d02t-fresh-o1-20261031-212852",
+    "draft_file": "D:\\dev\\acan-takes\\d02t-fresh-o1-20261031-212852\\scope-draft-o-1.json",
+    "draft_rev": 1,
+    "decided_by": "coordinator, delegated by the owner",
+    "items": [
+      { "draft_id": "limit-get-links", "kind": "may", "action": "remove_may", "decision": "replaced by the corpus-anchored GET item i-quota-get-links (s14, alice_fresh, 429)" },
+      { "draft_id": "limit-post-links", "kind": "may", "action": "remove_may", "decision": "replaced by the corpus-anchored POST items i-quota-window (s13), i-quota-relogin (s11), i-quota-inside-window (s15), and the must-keep mk-bob-quota (s12)" },
+      { "draft_id": "limit-delete-links", "kind": "may", "action": "remove_may", "decision": "removed; no probe sends more than ten DELETEs, so it is reported out of scope" },
+      { "draft_id": "keep-health", "kind": "must_keep", "action": "replace_must_keep", "decision": "re-anchored on probe s1 (GET /health, anonymous, status 200)" },
+      { "draft_id": "keep-redirect", "kind": "not in draft", "action": "add_must_keep", "decision": "added at probe s3 (anonymous GET /:code, status equals base)" },
+      { "draft_id": "link-api-scope", "kind": "open", "action": "NONE: no answer written", "decision": "UNCOVERED. No coordinator decision answers which routes count as the link API. Options: api-only (Only /api/links routes), api-plus-redirect (/api/links routes plus GET /:code). The corpus has no signed-in GET /:code step (the only /:code probe, s3, is anonymous)." },
+      { "draft_id": "(no cr-bucket-scope match)", "kind": "open", "action": "none", "decision": "The draft has no question matching cr-bucket-scope; the shared-budget answer was not applied to any choice in this run." },
+      { "draft_id": "(no cr-retry-header match)", "kind": "open", "action": "none", "decision": "The draft has no Retry-After question; no header answer was applied." }
+    ],
+    "code_format": "The draft has no code-format item, so D2 (drop i-code-format) holds with nothing to remove.",
+    "flags_for_coordinator": [
+      "bucket-scope=shared reads as one budget across GET and POST on /api/links, but i-quota-window and mk-bob-quota filter event_filter.method to POST, so they count POST only. The verdict on the probe sequence does not change, but the acceptance text and the window policy would not match a shared budget. Confirm before resume."
+    ]
+  },
   "answers": []
 }
