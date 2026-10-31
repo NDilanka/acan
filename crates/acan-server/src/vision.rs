@@ -31,9 +31,6 @@ pub use browser::{CHROME, EDGE, default_browser};
 
 /// The record version the routes serve.
 pub(crate) const VERSION: &str = "vision_witness/1";
-/// The provider the record names. Vision calls reach it through the vision route, which
-/// defaults to the foreman's route.
-const PROVIDER: &str = "meta";
 /// The corpus probe whose page is captured, and the step whose response is that page: the
 /// dashboard as a signed-in user sees it.
 const PROBE: &str = "dashboard-session";
@@ -234,7 +231,8 @@ pub struct VisionWitness {
     pub status: WitnessStatus,
     /// The model that answered, once a call returned.
     pub model: Option<String>,
-    pub provider: String,
+    /// The provider of that same call; null when no call returned.
+    pub provider: Option<String>,
     pub failed_reason: Option<String>,
     pub checks: Vec<VisionCheck>,
 }
@@ -304,7 +302,7 @@ impl VisionWitness {
             gate_run: run.to_string(),
             status,
             model: None,
-            provider: PROVIDER.to_owned(),
+            provider: None,
             failed_reason: None,
             checks: Vec::new(),
         }
@@ -384,8 +382,9 @@ pub(crate) async fn witness<C: ModelClient>(
         tracing::warn!(%task, %run, error = %err, "the vision record could not be written");
     }
     let record = match checks(host, vision, plan, task, run, scope).await {
-        Ok((checks, model)) => VisionWitness {
+        Ok((checks, model, provider)) => VisionWitness {
             model,
+            provider,
             checks,
             ..VisionWitness::new(task, run, WitnessStatus::Done)
         },
@@ -415,7 +414,8 @@ pub(crate) async fn witness<C: ModelClient>(
     }
 }
 
-/// The checks of `run` and the model that answered. `Err` is why the witness could not run.
+/// The checks of `run`, and the model and provider of the call that answered them, when one
+/// returned. `Err` is why the witness could not run.
 async fn checks<C: ModelClient>(
     host: &Host<C>,
     vision: &Vision,
@@ -423,7 +423,7 @@ async fn checks<C: ModelClient>(
     task: TaskId,
     run: GateRunId,
     scope: &Scope,
-) -> Result<(Vec<VisionCheck>, Option<String>), String> {
+) -> Result<(Vec<VisionCheck>, Option<String>, Option<String>), String> {
     let (probe, route) = dashboard(plan.corpus)?;
     let step = StepId::from_str(STEP).map_err(|err| err.to_string())?;
     let must_keep: Vec<MustKeepItem> = scope
@@ -477,7 +477,7 @@ async fn checks<C: ModelClient>(
         Ok(shot) => shot,
         Err(reason) => {
             check.not_checked_reason = Some(clip(&reason));
-            return Ok((vec![check], None));
+            return Ok((vec![check], None, None));
         }
     };
     check.candidate_image_sha256 = Some(sha256_hex(&shot.png));
@@ -492,6 +492,7 @@ async fn checks<C: ModelClient>(
         candidate: &shot.png,
     };
     let judged = judge::judge(host.client(), &pair).await;
+    let provider = judged.call.as_ref().map(|call| call.provider.clone());
     check.verdict = judged.verdict;
     check.reason = judged.reason;
     check.raw_reply = judged.raw_reply;
@@ -503,7 +504,7 @@ async fn checks<C: ModelClient>(
         check.latency_ms = u64::try_from(call.latency.as_millis()).unwrap_or(u64::MAX);
         record_usage(host, task, run, call).await;
     }
-    Ok((vec![check], judged.model))
+    Ok((vec![check], judged.model, provider))
 }
 
 /// The dashboard probe of `corpus` and the route of its captured step.
@@ -580,7 +581,7 @@ async fn page(
             kept.content_type.as_deref().unwrap_or("with no content type"),
         ));
     }
-    browser::render(&vision.browser, &kept.body, kept.content_type.as_deref())
+    browser::render(&vision.browser, &kept.body)
         .await
         .map_err(|err| format!("the {what} page was not rendered: {err}"))
 }
@@ -656,6 +657,7 @@ mod tests {
         let (task, run) = ids();
         let record = VisionWitness {
             model: Some("muse-spark-1.3".to_owned()),
+            provider: Some("meta".to_owned()),
             checks: vec![check(Verdict::NotChecked)],
             ..VisionWitness::new(task, run, WitnessStatus::Done)
         };
@@ -665,6 +667,9 @@ mod tests {
         assert_eq!(json["gate_run"], "g-5");
         assert_eq!(json["status"], "done");
         assert_eq!(json["provider"], "meta");
+        let unanswered = VisionWitness::new(task, run, WitnessStatus::Pending);
+        let json = serde_json::to_value(&unanswered).expect("serializes");
+        assert_eq!(json["provider"], serde_json::Value::Null);
         assert_eq!(json["failed_reason"], serde_json::Value::Null);
         let check = &json["checks"][0];
         assert_eq!(check["comparison"], "baseline_vs_candidate");
