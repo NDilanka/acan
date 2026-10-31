@@ -1,16 +1,16 @@
 # Acan
 
-**[PLACEHOLDER: UI hero section and screenshot. Wording and image to be supplied by the orchestrator once the UI concept is set. No screenshot is committed.]**
+Acan replaces the chat window between a developer and their coding agents with a live map of the codebase. Every agent, every scope it may work in, every conflict and every piece of evidence sits in one shared place, so you can direct several agents at once and see trouble before code is written.
 
 Acan is a scope-first contract gate for coding agents. An order becomes a scope contract that names the files a worker may change and what must stay the same, and the gate checks it before any code is written.
 
-**[PLACEHOLDER: clash-lane sentence. Held until the orchestrator sets the wording after the clash re-run on main.]**
+When two workers declare overlapping files, Acan pins the clash on the map and holds both before either one writes.
 
 Work in progress for the Meta Global AI Developer Hackathon.
 
 ## Why Meta models matter here
 
-**[PLACEHOLDER: three lines of wording, to be set by the orchestrator. Factual material to choose from:]**
+Muse Spark is the foreman: it splits each order into tasks and drafts the scope contract a human then confirms. Muse Spark Open is every worker: it reads back the task, claims it and writes the code. Acan checks the result itself, so no model's word decides whether a change lands.
 
 - The routing in `crates/acan-llm/llm.example.toml` sends the foreman to Muse Spark and the workers to Muse Spark Open.
 - Foreman: Muse Spark drafted a scope from a real order, and Acan's decoder accepted it. See `receipts/m01-scope-draft.md`.
@@ -19,8 +19,8 @@ Work in progress for the Meta Global AI Developer Hackathon.
 ## Status
 
 - Live with receipts: a Muse Spark scope draft (`receipts/m01-scope-draft.md`) and six provider calls on three hosts (`receipts/p00-provider-smoke.md`).
-- **[PLACEHOLDER: clash-lane status line, pending the clash re-run on main.]**
-- **[PLACEHOLDER: status of the D02 live two-order take, pending its land.]**
+- Clash lane: proven live on Oct 28 (two tasks clashed on `src/middleware.ts`, were settled with one key before either wrote, then both landed). Since the scope-first gate landed, a take must confirm a scope before workers can claim, and the demo script is being updated for that.
+- In progress: a live two-order take (foreman draft, human confirmation, gate, a recorded ruling, and a second order blocked by that ruling).
 
 ## Meta models
 
@@ -29,9 +29,7 @@ Work in progress for the Meta Global AI Developer Hackathon.
 | Foreman | Muse Spark, `muse-spark-1.3` | Meta Model API (`api.meta.ai`) | p00 rows 1-2; m01 row 1 | Live, pass |
 | Worker | Muse Spark Open, `meta-models/muse-spark-open-1026` | Baseten (`inference.baseten.co`) | p00 rows 3-4 | Live, pass |
 | Worker, second host | Muse Spark Open, `accounts/fireworks/models/muse-spark-open` | Fireworks (`api.fireworks.ai`) | p00 rows 5-6 | Live, pass. Fireworks serves Muse Spark Open, and the API echoed that model id. |
-| **[PLACEHOLDER]** | Meta feature: vision witness | **[PLACEHOLDER]** | **[PLACEHOLDER]** | Pending the Meta features agent |
-| **[PLACEHOLDER]** | Meta feature: voice | **[PLACEHOLDER]** | **[PLACEHOLDER]** | Pending the Meta features agent |
-| **[PLACEHOLDER]** | Meta feature: long context | **[PLACEHOLDER]** | **[PLACEHOLDER]** | Pending the Meta features agent |
+| Vision witness (in progress) | Muse Spark, `muse-spark-1.3`, image input | Meta Model API | pending | Being built. Not yet proven live inside Acan. |
 
 ## Architecture
 
@@ -83,14 +81,15 @@ The UI and API use port 7311, and the demo app uses port 7312. Both are set with
 
 ## X01: 12-order replay
 
-**[PLACEHOLDER: X01 numbers for the 12 pre-registered orders and the 4 controls. Filled only after D02 lands and the X01 replay runs. No numbers are published before then.]**
+Pending. This runs after the two-order take lands. No numbers are published before then.
 
 ## Honest limits
 
 - The live take runs on Windows only. Its scripts use PowerShell 7 with Windows APIs.
 - Live takes need your own provider keys. `llm.toml` and `.env` are git-ignored and are not in the repository.
 - The take passes each worker a per-take local acan agent token on the command line. These tokens are created by the take for its own server. They are not provider keys.
-- **[VERIFY before publishing: the probe driver shares a container with candidate code; `model_cost_micros` is stored but not enforced.]**
+- The probe driver runs in the same container as the candidate code. The container has a read-only root and all Linux capabilities dropped.
+- `model_cost_micros` is stored in each order's repair budget, but no check reads it. The model cost cap is not enforced.
 - There is no hosted replay yet. The recorded receipts replay the provider calls, not the full UI.
 
 ## Rulings disclosure
