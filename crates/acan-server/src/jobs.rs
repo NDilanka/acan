@@ -61,6 +61,7 @@ use crate::host::{self, Host, SubmitError};
 use crate::land::{self, Delivery, LandError};
 use crate::model::{self, ReplyError};
 use crate::observe::{self, ObserveError, Order, Plan};
+use crate::vision;
 
 /// Total attempts one job key gets before the loop stops retrying it. Chosen so a broken model
 /// shows up in seconds during a demo while a live provider is called at most this many times
@@ -849,6 +850,7 @@ fn not_yet_building(world: &World) -> HashMap<TaskId, Generation> {
 /// One scope-first run, copied out of the world so no lock is held while it runs.
 struct Contrast {
     order: OrderId,
+    task: TaskId,
     head: CommitId,
     prepared: Option<PreparedCommit>,
     scope: Scope,
@@ -864,6 +866,7 @@ fn contrast_of(world: &World, run: GateRunId) -> Option<Contrast> {
     let lane = world.lane(pending.order)?;
     Some(Contrast {
         order: pending.order,
+        task: pending.task,
         head: pending.head.clone(),
         prepared: pending.prepared.cloned(),
         scope: lane.scope.clone(),
@@ -1069,6 +1072,21 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
         receipt: Box::new(judged.receipt),
     }))
     .await?;
+    // The receipt is recorded, so the gate's outcome is fixed before the advisory witness runs,
+    // and the witness reports its own failures instead of returning them.
+    if let Some(vision) = host.vision() {
+        let scratch = pass.scratch.join("vision");
+        let plan = pass.plan(repo, &candidate, &scratch);
+        Box::pin(vision::witness(
+            host,
+            vision,
+            &plan,
+            contrast.task,
+            run,
+            &contrast.scope,
+        ))
+        .await;
+    }
     Ok(())
 }
 

@@ -243,10 +243,14 @@ async fn commit(
         let _ = broadcast_tx.send(event.clone());
     }
     // Accounting-only batches must not wake the job loop: a job whose reply was unusable would
-    // otherwise requeue itself and every other failed job without any user activity.
-    if batch
-        .iter()
-        .any(|stamped| !matches!(&stamped.event, Event::ModelUsed { .. }))
+    // otherwise requeue itself and every other failed job without any user activity. An advisory
+    // vision summary is no job's input either.
+    if batch.iter().any(|stamped| {
+        !matches!(
+            &stamped.event,
+            Event::ModelUsed { .. } | Event::VisionChecked { .. }
+        )
+    })
     {
         wake.notify_one();
     }

@@ -17,6 +17,7 @@ use crate::auth::Tokens;
 use crate::git::Workspace;
 use crate::index::Scan;
 use crate::store::EventStore;
+use crate::vision::Vision;
 use crate::writer::{Snapshot, Writer};
 
 /// How many events a live subscriber may fall behind before the server disconnects it.
@@ -65,6 +66,8 @@ pub struct HostParts<C> {
     /// after another. Their container runs still take permits from the witness pool, so this does
     /// not raise how many containers run at once.
     pub probe_concurrency: usize,
+    /// The advisory vision witness. `None` runs no vision checks.
+    pub vision: Option<Vision>,
 }
 
 /// One world's host. Cloning shares the same writer, log and broadcast.
@@ -88,6 +91,7 @@ struct Inner<C> {
     witness_http_base_url: Option<String>,
     witness_slots: Arc<Semaphore>,
     probe_concurrency: usize,
+    vision: Option<Vision>,
     /// Held by a land from its final check through its install, and by every command that
     /// [`invalidates_landing`]. A command cannot change what a land is checking while the land
     /// checks and installs.
@@ -148,6 +152,7 @@ impl<C: ModelClient> Host<C> {
                 witness_http_base_url: parts.witness_http_base_url,
                 witness_slots: Arc::new(Semaphore::new(parts.witness_concurrency)),
                 probe_concurrency: parts.probe_concurrency,
+                vision: parts.vision,
                 landing: tokio::sync::Mutex::new(()),
             }),
         }
@@ -194,6 +199,11 @@ impl<C: ModelClient> Host<C> {
     /// How many probes of one contrast run at once.
     pub(crate) fn probe_concurrency(&self) -> usize {
         self.inner.probe_concurrency
+    }
+
+    /// The advisory vision witness, when this server runs one.
+    pub(crate) fn vision(&self) -> Option<&Vision> {
+        self.inner.vision.as_ref()
     }
 
     /// The bearer tokens.

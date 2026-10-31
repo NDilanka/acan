@@ -11,7 +11,7 @@ use std::path::Path;
 
 use acan_llm::{
     ApiKeys, ChatRequest, ChatResponse, ConfigError, LlmConfig, LlmError, ModelClient,
-    OpenAiCompatible, Role, Structured, UsageLedger,
+    OpenAiCompatible, Role, Structured, Traced, UsageLedger,
 };
 use anyhow::Context;
 use schemars::JsonSchema;
@@ -164,6 +164,31 @@ impl ModelClient for Models {
                 offline.chat_json::<T>(role, request).await
             }
             Self::Offline(offline) => offline.chat_json::<T>(role, request).await,
+        }
+    }
+
+    async fn chat_traced(
+        &self,
+        role: Role,
+        request: ChatRequest,
+    ) -> Result<Traced<ChatResponse>, LlmError> {
+        if is_retired(&request) {
+            return Err(refuse_review(role));
+        }
+        match self {
+            Self::Live { client, offline } => {
+                let err = match client.chat_traced(role, request.clone()).await {
+                    Ok(traced) => return Ok(traced),
+                    Err(err) => err,
+                };
+                if !answers_offline(role) {
+                    warn_failed(role, &err, "the job fails with this error");
+                    return Err(err);
+                }
+                warn_failed(role, &err, "answering with the offline reply");
+                offline.chat_traced(role, request).await
+            }
+            Self::Offline(offline) => offline.chat_traced(role, request).await,
         }
     }
 }

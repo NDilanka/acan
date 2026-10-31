@@ -408,6 +408,7 @@ async fn start_origin(root: &Path, tasks: usize) -> Running {
         protected_branch: Some("main".to_owned()),
         witness_http_base_url: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
+        vision: None,
     };
     start(config, Foreman { tasks }, UsageLedger::default())
         .await
