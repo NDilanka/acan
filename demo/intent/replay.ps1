@@ -130,8 +130,10 @@ function Show-Plan {
     Write-Output '  4. Each order once: post, split, draft, scope edits and confirm, worker-r (model), receipts,'
     Write-Output '     rulings, and the seeded control when the draw picked the order. Paused orders resume with'
     Write-Output '     -ResumeRun <run folder>; an order that finished in an earlier invocation is not run again.'
-    Write-Output '  5. Controls after o-1: m-overfit and m-harmless-difference. m-broad-scope and m-missing-fixture'
-    Write-Output '     are not_run until a driver and bundle exist for them.'
+    Write-Output '  5. Controls after o-1: m-overfit and m-harmless-difference. m-broad-scope: a separate order with the'
+    Write-Output '     o-1 sentence, revised with one broad item (ANY on /api/*), confirmation tried with no broad'
+    Write-Output '     acknowledgement. m-missing-fixture: the f-accounts copy without f5 and its static prediction;'
+    Write-Output '     the gate is not run on the copy, so that control stays not_run.'
     Write-Output '  6. summary.json (complete, incomplete with reasons, or paused), results.jsonl, secret scan.'
     Write-Output ''
     Write-Output 'Not shown: which orders the seeded draw picks. It is decided at live start.'
@@ -716,6 +718,167 @@ function Get-ControlExpectation {
     [string](@($controlList | Where-Object { $_.id -eq $Id })[0].expected_outcome)
 }
 
+function Invoke-BroadScopeControl {
+    # m-broad-scope: a scope draft whose may-change item is method ANY on route /api/*. The control is
+    # posted as its own order with o-1's sentence, so o-1's run is not touched. Its draft is revised with
+    # the broad item, then confirmation is tried with no broad acknowledgement. The expected outcome is a
+    # refusal that names the item, no scope_confirmed event, and no claim or build on the control's tasks.
+    # The control uses no agent token and starts no worker. Its revision and confirm use the owner's
+    # member token, as the take's own scope steps do.
+    $dir = Join-Path $script:CtrlDir 'm-broad-scope'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $line = New-ControlLine -Id 'm-broad-scope' -AppliesTo 'o-1' -Expected (Get-ControlExpectation -Id 'm-broad-scope') -Outcome 'error' -Result $null -Reason 'a separate order with the o-1 sentence; o-1 itself is not changed'
+    $line['actor'] = 'control identity (m-broad-scope), sent with the owner member token; not a model and not a human decision'
+    $line['worker_started'] = $false
+    $controlOrder = 'control-m-broad-scope'
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $o1 = @($orderList | Where-Object { [string]$_.id -eq 'o-1' })[0]
+        $posted = Send-Command @{ cmd = 'post_order'; machine = $o1.machine; sentence = $o1.sentence; witnesses = @() }
+        $postedEvent = $posted | Where-Object { $_.event.type -eq 'order_posted' } | Select-Object -First 1
+        if (-not $postedEvent) { throw 'setup_failed: post_order returned no order_posted event' }
+        $raw = "$($postedEvent.event.order)"
+        $oid = if ($raw -like 'o-*') { $raw } else { "o-$raw" }
+        $line['control_order'] = $raw
+        $line['control_oid'] = $oid
+        $null = Wait-Until -What 'the split of the control order' -Probe {
+            Invoke-Api -Path '/api/events' | Where-Object { $_.event.type -eq 'order_split' -and "$($_.event.order)" -eq $raw } | Select-Object -First 1
+        } -Terminal { $null }
+        $tasks = @(Get-OrderTasks -Events (Invoke-Api -Path '/api/events') -Raw $raw)
+        if ($tasks.Count -eq 0) { throw 'setup_failed: the split of the control order made no task' }
+        $line['tasks'] = $tasks
+        $view = Wait-Until -What 'the foreman draft of the control order' -Probe { Invoke-Api404Tolerant -Path "/api/orders/$oid/scope-draft" } -Terminal { $null }
+        if ($view.state -ne 'drafted') { throw "draft_not_ready: the draft state is $($view.state)" }
+
+        # the o-1 choice rules answer the same open choices; the broad item is the only scope edit
+        $o1Edits = Read-JsonFile -Path (Join-Path $intentDir 'o-1-edits.json')
+        $editsFile = Join-Path $dir 'edits.json'
+        $controlEdits = [ordered]@{
+            schema      = 'acan-demo-intent-edits/2'
+            order       = $controlOrder
+            decided_by  = 'control (m-broad-scope), not a decision'
+            note        = 'Control edits for m-broad-scope: the o-1 choice rules and one broad may-change item. Nothing here is a human decision.'
+            choice_rules = @($o1Edits.choice_rules)
+            scope_edits = @([ordered]@{
+                    op     = 'add_may'
+                    reason = 'The broad selector of m-broad-scope: every method on every route under /api/.'
+                    item   = [ordered]@{
+                        id        = 'i-broad-control'
+                        selector  = [ordered]@{ surface = 'http'; method = 'ANY'; route_template = '/api/*'; step_context = [ordered]@{ kind = 'any' }; principal = [ordered]@{ kind = 'any' }; channel = 'any' }
+                        change    = 'modify'
+                    }
+                })
+            answers     = @()
+        }
+        Write-JsonFile -Path $editsFile -Object $controlEdits
+
+        $scope = $null
+        try {
+            $scope = Invoke-ScopeEdits -Order $controlOrder -Raw $raw -Oid $oid -View $view -EditsFile $editsFile -OrderDir $dir -DecidedBy 'control (m-broad-scope), not a decision'
+        } catch {
+            $line['errors'] = @($line['errors']) + "the revision with the broad item was refused: $($_.Exception.Message)"
+            $line['outcome'] = 'not_as_expected'
+            $line['reason'] = 'the origin refused the revision, so the confirmation step was not reached'
+        }
+        if ($null -ne $scope) {
+            $refusal = $null
+            try {
+                $null = Invoke-ScopeConfirm -Order $controlOrder -Raw $raw -Oid $oid -Scope $scope -MaxEpisodes $MaxEpisodes -OrderDir $dir
+            } catch {
+                $refusal = $_.Exception.Message
+            }
+            $events = @(Invoke-Api -Path '/api/events')
+            $confirmedEvents = @($events | Where-Object { $_.event.type -eq 'scope_confirmed' -and "$($_.event.order)" -eq $raw }).Count
+            $buildEvents = @($events | Where-Object { $tasks -contains "$($_.event.task)" -and "$($_.event.type)" -match 'claim|build|land' }).Count
+            $confirmation = Invoke-Api404Tolerant -Path "/api/orders/$oid/scope/confirmation"
+            $line['confirmation_names_broad_item'] = ((ConvertTo-Json -Depth 30 -Compress $confirmation) -match 'i-broad-control')
+            $line['refusal'] = $refusal
+            $line['scope_confirmed_events'] = $confirmedEvents
+            $line['build_events'] = $buildEvents
+            $named = [bool]$refusal -and ($refusal -match 'needs its own acknowledgement')
+            if ($named -and $confirmedEvents -eq 0 -and $buildEvents -eq 0) {
+                $line['outcome'] = 'as_expected'
+                $line['reason'] = 'confirmation refused: the broad item needs its own acknowledgement; no scope_confirmed and no claim or build'
+            } else {
+                $line['outcome'] = 'not_as_expected'
+                $line['reason'] = 'the refusal, the scope events or the build events differ from the expected outcome; see refusal, scope_confirmed_events and build_events'
+            }
+        }
+    } catch {
+        $line['errors'] = @($line['errors']) + $_.Exception.Message
+        $line['outcome'] = 'error'
+        $line['reason'] = 'the control stopped before the confirmation step'
+    }
+    $watch.Stop()
+    $line['wall_seconds'] = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+    $line['finished'] = (Get-Date).ToString('o')
+    Add-ResultLine -Record $line
+}
+
+function Get-MissingFixturePrediction {
+    # What the gate should find on the copied recipe, read from the recipe alone. A login as bob has no
+    # account when no step signs bob up, and a capture whose source step is absent or failed has no value.
+    param($Recipe)
+    $steps = @($Recipe)
+    $ids = @($steps | ForEach-Object { [string]$_.id })
+    $bobSignups = @($steps | Where-Object { $_.step -eq 'http' -and "$($_.request.path)" -eq '/api/signup' -and "$($_.request.body.username)" -eq 'bob' })
+    $failed = [System.Collections.Generic.HashSet[string]]::new()
+    if ($bobSignups.Count -eq 0) {
+        foreach ($s in $steps) {
+            if ($s.step -eq 'http' -and "$($s.request.path)" -eq '/api/login' -and "$($s.request.body.username)" -eq 'bob') { $null = $failed.Add([string]$s.id) }
+        }
+    }
+    $changed = $true
+    while ($changed) {
+        $changed = $false
+        foreach ($s in $steps) {
+            if ($s.step -ne 'capture' -or $failed.Contains([string]$s.id)) { continue }
+            $source = [string]$s.from
+            if (($ids -notcontains $source) -or $failed.Contains($source)) {
+                $null = $failed.Add([string]$s.id)
+                $changed = $true
+            }
+        }
+    }
+    [ordered]@{
+        bob_signups_left            = $bobSignups.Count
+        steps_left                  = $ids.Count
+        predicted_failed_or_missing = @($failed | Sort-Object)
+        basis                       = 'the recipe alone: a login as bob has no account when no step signs bob up; a capture whose source step is absent or failed has no value'
+    }
+}
+
+function Invoke-MissingFixtureControl {
+    # m-missing-fixture: the f-accounts recipe at the pin with step f5 (bob's signup) removed, written as a
+    # copy into the run with its static prediction. The gate is not run on the copy: the probe corpus is
+    # read from the protected snapshot of a run repository, and take.ps1 starts no run whose protected
+    # head carries the copy. The control is reported not_run with that reason. It is never a pass.
+    $dir = Join-Path $script:CtrlDir 'm-missing-fixture'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $line = New-ControlLine -Id 'm-missing-fixture' -AppliesTo 'f-accounts' -Expected (Get-ControlExpectation -Id 'm-missing-fixture') -Outcome 'not_run' -Result $null -Reason 'the copy and its static prediction are written; no gate run exists for the copy'
+    try {
+        $pinnedLines = & git -C $DemoRepo show "${Pin}:.acan/probes/core.json"
+        if ($LASTEXITCODE -ne 0) { throw "git show ${Pin}:.acan/probes/core.json failed" }
+        $corpus = ($pinnedLines -join "`n") | ConvertFrom-Json -Depth 60
+        $fixtures = @($corpus.fixtures | Where-Object { $_.id -eq 'f-accounts' })
+        if ($fixtures.Count -ne 1) { throw 'the pinned probe corpus has no single f-accounts fixture' }
+        $recipe = @($fixtures[0].recipe)
+        if (@($recipe | Where-Object { $_.id -eq 'f5' }).Count -ne 1) { throw 'the f-accounts recipe has no step f5 to omit' }
+        $fixtures[0].recipe = @($recipe | Where-Object { $_.id -ne 'f5' })
+        $copy = Join-Path $dir 'core.json'
+        Set-Content -LiteralPath $copy -Value (ConvertTo-Json -Depth 60 $corpus) -Encoding utf8
+        $line['copy'] = $copy
+        $line['copy_sha256'] = Get-FileSha256 -Path $copy
+        $line['omitted_steps'] = @('f5')
+        $line['static_prediction'] = Get-MissingFixturePrediction -Recipe $fixtures[0].recipe
+        $line['reason'] = 'the copy and its static prediction are written; the gate was not run on the copy, so no receipt exists and nothing here is a pass'
+    } catch {
+        $line['errors'] = @($_.Exception.Message)
+        $line['reason'] = 'the copy could not be written, so there is no static prediction either'
+    }
+    Add-ResultLine -Record $line
+}
+
 if (-not $DryRun) {
     # ---- take.ps1, as a library ---------------------------------------------------------------
     if (-not (Test-Path -LiteralPath $TakeScript)) { throw "missing input: $TakeScript" }
@@ -906,13 +1069,8 @@ if (-not $DryRun) {
                     Add-ResultLine -Record (New-ControlLine -Id $c -AppliesTo 'o-1' -Expected (Get-ControlExpectation -Id $c) -Outcome 'not_run' -Result $null -Reason 'o-1 is not in this run')
                 }
             }
-            # Two controls have no driver or bundle in demo/intent, so they are reported not_run, never passed.
-            if (-not (Test-ControlLine -Id 'm-broad-scope')) {
-                Add-ResultLine -Record (New-ControlLine -Id 'm-broad-scope' -AppliesTo 'o-1' -Expected (Get-ControlExpectation -Id 'm-broad-scope') -Outcome 'not_run' -Result $null -Reason 'no scope-draft driver or bundle for m-broad-scope exists in demo/intent')
-            }
-            if (-not (Test-ControlLine -Id 'm-missing-fixture')) {
-                Add-ResultLine -Record (New-ControlLine -Id 'm-missing-fixture' -AppliesTo 'f-accounts' -Expected (Get-ControlExpectation -Id 'm-missing-fixture') -Outcome 'not_run' -Result $null -Reason 'no fixture-copy driver or bundle for m-missing-fixture exists in demo/intent')
-            }
+            if (-not (Test-ControlLine -Id 'm-broad-scope')) { Invoke-BroadScopeControl }
+            if (-not (Test-ControlLine -Id 'm-missing-fixture')) { Invoke-MissingFixtureControl }
         }
     } catch {
         $script:Summary['failure'] = $_.Exception.Message
