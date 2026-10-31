@@ -2,7 +2,7 @@
   "schema": "acan-demo-intent-edits/2",
   "order": "o-1",
   "decided_by": "coordinator, delegated by the owner",
-  "note": "Written for the draft in run D:\\dev\\acan-takes\\d02t-fresh2-o1-20261031-230914 (scope-draft-o-1.json, rev 1). Each edit names the draft item it acts on by id; the draft_mapping block maps each drafted id to the coordinator decision it follows. take.ps1 applies scope_edits to the draft in order, then choice_rules to the open choices, then sends the result as one revise_scope through the owner's member HTTP route, and logs each edit as a human step. An op whose id is not in the draft stops the take (fail closed). INCOMPLETE: keep-login (drafted must-keep, POST /api/login, step login-check) is not covered by any coordinator decision; the take must not be resumed until it is decided. Nothing here is a verdict: the edits state the order's rules and the gate checks them.",
+  "note": "Written for the draft in run D:\\dev\\acan-takes\\d02t-fresh2-o1-20261031-230914 (scope-draft-o-1.json, rev 1). Each edit names the draft item it acts on by id; the draft_mapping block maps each drafted id to the coordinator decision it follows. take.ps1 applies scope_edits to the draft in order, then choice_rules to the open choices, then sends the result as one revise_scope through the owner's member HTTP route, and logs each edit as a human step. An op whose id is not in the draft stops the take (fail closed). keep-login (drafted must-keep, POST /api/login, step login-check, which is not a probe step) is re-anchored on login-over-quota s11 by coordinator decision 1. Nothing here is a verdict: the edits state the order's rules and the gate checks them.",
   "choice_rules": [
     {
       "id": "cr-bucket-scope",
@@ -66,6 +66,31 @@
       }
     },
     {
+      "op": "replace_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "Login is not part of the link API, so it is not limited, even after a user's link quota is used up.",
+      "rule": {
+        "id": "keep-login",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/login",
+          "step_context": { "kind": "step", "step_id": "s11" },
+          "principal": { "kind": "any" },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "ob-login-same",
+            "predicate": { "predicate": "equals_base", "step_id": "s11", "path": "status", "anchor": { "kind": "fresh" } },
+            "text": "Login status unchanged from base."
+          }
+        ],
+        "text": "Login behavior must keep working.",
+        "machine_ids": ["server", "middleware", "ratelimit", "auth", "store", "errors"]
+      }
+    },
+    {
       "op": "add_must_keep",
       "decided_by": "coordinator, delegated by the owner",
       "reason": "This draft (run d02t-fresh2-o1-20261031-230914) has no redirect must-keep, so the earlier re-anchored redirect keep is added rather than replaced. The rule, the public redirect status stays as in base, is anchored on probe step s3 of link-redirect-and-clicks (anonymous GET /${link_code}, route /:code). The rule id keep-redirect is kept.",
@@ -126,7 +151,7 @@
                 "obligations": [{ "kind": "first_allowed" }, { "kind": "recovers" }]
               }
             },
-            "text": "Each user's first 10 requests to /api/links in 60 s, any method, are allowed; the 11th and later get 429; rejected attempts count; the first request at or after 60 s is allowed again"
+            "text": "Each user's first 10 requests to /api/links in 60 s, any method, are allowed; the 11th and later get 429; rejected attempts count; the first request at or after 60 s is allowed again. DELETE /api/links/:code shares the budget in the order but is not machine-checked; no probe sends more than ten deletes."
           },
           {
             "obligation_id": "obl-quota-alice-429",
@@ -279,7 +304,7 @@
                 "obligations": [{ "kind": "first_allowed" }]
               }
             },
-            "text": "bob's first 10 requests to /api/links in 60 s, any method, are allowed, even after alice has used up her quota"
+            "text": "bob's first 10 requests to /api/links in 60 s, any method, are allowed, even after alice has used up her quota. DELETE /api/links/:code shares the budget in the order but is not machine-checked; no probe sends more than ten deletes."
           }
         ],
         "text": "Each user keeps a separate link quota: bob's requests are not limited by alice's",
@@ -425,18 +450,19 @@
       { "draft_id": "limit-post-links", "kind": "may", "action": "remove_may", "decision": "replaced by the corpus-anchored POST items i-quota-window (s13), i-quota-relogin (s11), i-quota-inside-window (s15), the must-keep mk-bob-quota (s12), and the body items i-quota-body-relogin, i-quota-body-window, i-quota-body-inside-window" },
       { "draft_id": "limit-delete-links", "kind": "may", "action": "remove_may", "decision": "removed; no probe sends more than ten DELETEs, so it is reported out of scope" },
       { "draft_id": "keep-health", "kind": "must_keep", "action": "replace_must_keep", "decision": "re-anchored on probe s1 (GET /health, anonymous, status 200); the draft step health-check is not a probe step" },
-      { "draft_id": "keep-login", "kind": "must_keep", "action": "NONE: blocked", "decision": "UNCOVERED. No coordinator decision covers POST /api/login equals_base at step login-check, which is not a probe step. The corpus has POST /api/login steps (core.json lines 28, 69, 98, 332, 344, 1209, 1230). Coordinator to decide: re-anchor on a named corpus step, drop, or keep as is." },
+      { "draft_id": "keep-login", "kind": "must_keep", "action": "replace_must_keep (rule id keep-login)", "decision": "re-anchored on login-over-quota s11 (POST /api/login, anonymous, status equals base), by coordinator decision 1. Login-check is not a probe step. Standing rule 2 would have picked login-failures s1; decision 1 is more specific and is used." },
       { "draft_id": "keep-redirect", "kind": "not in draft", "action": "add_must_keep", "decision": "added at probe s3 (anonymous GET /:code, status equals base)" },
       { "draft_id": "q-bucket-scope", "kind": "open", "action": "answered by choice rule cr-bucket-scope: Shared across GET POST DELETE link routes", "decision": "bucket-scope = shared (coordinator, earlier decision). Reason in cr-bucket-scope." },
       { "draft_id": "q-retry-header", "kind": "open", "action": "answered by choice rule cr-retry-header: No extra header, status only", "decision": "Retry-After stays out of scope (coordinator decision 2: the answer to the header question is no header). Reason in cr-retry-header." }
     ],
     "link_api_scope": "The draft has no route question, so link-api-scope is not applied in this run. The shared option lists GET, POST and DELETE link routes; under the earlier decision (the link API is the signed-in /api/links routes), that matches.",
     "code_format": "The draft has no code-format item, so D2 (drop i-code-format) holds with nothing to remove.",
-    "window_filter": "Event filters use method ANY on route /api/links for i-quota-window and mk-bob-quota (ANY branch of decision 2; types.rs:838, predicate.rs:687). The filter does not cover route /api/links/:code, the DELETE route. No probe judges DELETE, so this is reported, not ruled.",
-    "flags_for_coordinator": [
-      "keep-login is uncovered: take must not be resumed until it is decided.",
-      "Shared option names DELETE link routes; the window filters count /api/links only."
-    ]
+    "window_filter": "Event filters use method ANY on route /api/links for i-quota-window and mk-bob-quota (ANY branch of decision 2; types.rs:838, predicate.rs:687). The filter does not cover route /api/links/:code, the DELETE route. Coordinator decision 4: DELETE /api/links/:code is accepted as is; the sentence 'DELETE /api/links/:code shares the budget in the order but is not machine-checked; no probe sends more than ten deletes.' is added to the text of both window items. limit-delete-links stays removed (no DELETE may item).",
+    "standing_rule_log": [
+      "keep-login: drafted must-keep names step login-check, which is not in the corpus. Mapped to login-over-quota s11 (POST /api/login, first corpus step with a POST /api/login and principal kind any, status equals base) by coordinator decision 1."
+    ],
+    "decisions_applied": "1 keep-login re-anchor; 2 standing rule logged above, no other unmatched steps; 3 repair_rounds stays 2 (no edit here); 4 DELETE sentence in both window items; 5 paraphrased reasons accepted, o-0 is the internal id.",
+    "flags_for_coordinator": []
   },
   "answers": []
 }
