@@ -669,7 +669,7 @@ try {
             $script:Evidence.workers['o-8-worker-b'] = @{ process = $wb; events = $wbEvents }
             Save-State
             $wbTypes = @($wbEvents | ForEach-Object { $_.type } | Select-Object -Unique)
-            Add-Step -Name 'o-8 step 4: worker B builds Retry-After (model)' -Actor 'worker-b (model worker)' -Provider "$($script:Routes.worker.provider) / $($script:Routes.worker.model)" -Result $(if ($wbTypes -contains 'build_reported' -or $wbTypes -contains 'landed') { 'pass' } else { 'fail' }) -Evidence @{ process = $wb; event_types = $wbTypes; events = $wbEvents.Count }
+            Add-Step -Name 'o-8 step 4: worker B builds Retry-After (model)' -Actor 'worker-b (model worker)' -Provider "$($script:Routes.worker.provider) / $($script:Routes.worker.model)" -Result $(if ($wb.exited -and ($wbTypes -contains 'build_reported' -or $wbTypes -contains 'landed')) { 'pass' } else { 'fail' }) -Evidence @{ process = $wb; event_types = $wbTypes; events = $wbEvents.Count; note = 'pass only when the worker process exited and a build was reported; a worker still running at the wait is recorded as fail' }
         } else {
             Add-Step -Name 'o-8 step 4: worker B (skipped by -SkipWorkers)' -Actor 'worker-b (model worker)' -Provider 'none' -Result 'not_run' -Evidence @{ reason = '-SkipWorkers' }
         }
