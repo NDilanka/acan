@@ -5,7 +5,7 @@
   "applies_to": "o-1",
   "base": "f91962156841332d5753d869554839f7c4cdea79",
   "control_of": "mutants.json m-harmless-difference (out-of-scope difference, applied by the take's control identity)",
-  "description": "The o-1 limiter (one counter per signed-in user, shared across that user's sessions) plus an x-request-id response header with a random UUID on every /api/ response. No status or body byte changes.",
+  "description": "The o-1 limiter (one counter per signed-in user, shared across that user's sessions) plus an x-request-id response header with a UUID-formatted value on every /api/ response, drawn from a per-process sha256 counter so the demo's seeded random stream is not shifted. No status or body byte changes.",
   "declared_files": ["src/middleware.ts", "src/ratelimit.ts", "src/server.ts"],
   "files": [
     {
@@ -13,11 +13,11 @@
       "edits": [
         {
           "old": "import type { IncomingMessage, ServerResponse } from 'node:http';",
-          "new": "import { randomUUID } from 'node:crypto';\nimport type { IncomingMessage, ServerResponse } from 'node:http';"
+          "new": "import { createHash } from 'node:crypto';\nimport type { IncomingMessage, ServerResponse } from 'node:http';\n\n// The demo's boot fixture seeds every random source, so a random draw here would shift the values\n// the app generates after it. This id comes from a per-process counter run through sha256, so it\n// draws nothing from the seeded stream and carries no user data.\nlet requestCount = 0;\n\nfunction requestId(): string {\n  const digest = createHash('sha256').update('x-request-id').update(String(requestCount++)).digest();\n  const bytes = Buffer.from(digest.subarray(0, 16));\n  bytes[6] = (bytes[6] & 0x0f) | 0x40;\n  bytes[8] = (bytes[8] & 0x3f) | 0x80;\n  const hex = bytes.toString('hex');\n  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;\n}"
         },
         {
           "old": "  try {\n    const decision = deps.limiter.check(clientKey(req));\n    if (!decision.allowed) {\n      res.setHeader('retry-after', String(decision.retryAfterSeconds));\n      throw new HttpError(429, 'too many requests');\n    }\n\n    const token = readToken(req);\n    const userId = resolveSession(deps.store, token);\n    if (route.requiresUser && userId === null) {\n      throw new HttpError(401, 'login required');\n    }\n",
-          "new": "  try {\n    const token = readToken(req);\n    const userId = resolveSession(deps.store, token);\n    if (url.pathname.startsWith('/api/')) res.setHeader('x-request-id', randomUUID());\n    if (route.requiresUser && userId === null) {\n      throw new HttpError(401, 'login required');\n    }\n    if (userId !== null && route.path.startsWith('/api/links')) {\n      const decision = deps.limiter.check(userId);\n      if (!decision.allowed) {\n        throw new HttpError(429, 'too many requests');\n      }\n    }\n"
+          "new": "  try {\n    const token = readToken(req);\n    const userId = resolveSession(deps.store, token);\n    if (url.pathname.startsWith('/api/')) res.setHeader('x-request-id', requestId());\n    if (route.requiresUser && userId === null) {\n      throw new HttpError(401, 'login required');\n    }\n    if (userId !== null && route.path.startsWith('/api/links')) {\n      const decision = deps.limiter.check(userId);\n      if (!decision.allowed) {\n        throw new HttpError(429, 'too many requests');\n      }\n    }\n"
         }
       ]
     },
