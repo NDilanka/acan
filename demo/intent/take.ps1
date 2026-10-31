@@ -32,16 +32,24 @@ param(
     [string]$EnvSource = 'D:\dev\acan\crates\acan-llm\.env',
     [string]$EditsFile = '',
     [int]$HealthWaitSec = 90,
-    [int]$StepWaitSec = 900
+    [int]$StepWaitSec = 900,
+    # Phase one: stop right after the foreman's draft, so a person can read it and write the edits
+    # for that draft. The draft is kept in the run folder and nothing is applied.
+    [switch]$DraftOnly,
+    # Phase two: resume a run folder from phase one. Its clone, database and draft are reused; the
+    # draft is read back from the server, not drafted again.
+    [string]$ResumeRun = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 if (-not $EditsFile) { $EditsFile = Join-Path $AcanRepo 'demo\intent\o-1-edits.json' }
+if ($DraftOnly -and $ResumeRun) { throw 'use either -DraftOnly or -ResumeRun, not both' }
 
 $script:Steps = [System.Collections.Generic.List[object]]::new()
 $script:Secrets = [System.Collections.Generic.List[string]]::new()
 $script:Proc = $null
+$script:DraftReady = $false
 $script:Base = ''
 $script:Repo = ''
 $script:Summary = $null
@@ -199,6 +207,15 @@ try {
 
     # ---- run folder and clone -----------------------------------------------------------
     # Nothing is created inside the clone before git clone succeeds. The clone is the only repo.
+    if ($ResumeRun) {
+        $run = (Resolve-Path -LiteralPath $ResumeRun).Path
+        $script:Repo = Join-Path $run 'repo'
+        if (-not (Test-Path -LiteralPath (Join-Path $script:Repo '.git'))) { throw "resume: no clone in $run" }
+        Assert-OwnRepo
+        $head = (Invoke-Git rev-parse HEAD | Out-String).Trim()
+        if ($head -ne $Pin) { throw "the resumed clone's HEAD is $head, not the pin $Pin" }
+        Add-Step -Name 'resume the run on its clone at the pin' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ repo = $script:Repo; head = $head; resumed_from = $run }
+    } else {
     New-Item -ItemType Directory -Path $run | Out-Null
     $script:Repo = Join-Path $run 'repo'
     & git clone --no-hardlinks -q $DemoRepo $script:Repo
@@ -240,23 +257,44 @@ try {
     Add-Step -Name 'write the run configuration' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{
         keys_loaded = @($keys.Keys); routing = $routes; tokens = 'written to .acan/tokens.json (ignored), not printed'
     }
+    }
+    if ($ResumeRun) {
+        # The resumed run keeps its own keys, routing and tokens; nothing is copied or rewritten.
+        $keysDir = Join-Path $run 'keys'
+        $configDir = Join-Path $run 'config'
+        $keys = Read-KeyFile -Path (Join-Path $keysDir '.env')
+        foreach ($value in $keys.Values) {
+            if ($value.Length -ge 8) { $script:Secrets.Add($value) }
+        }
+        $routes = Read-Routing -Text (Get-Content -LiteralPath (Join-Path $configDir 'llm.toml') -Raw)
+        $existingTokens = Get-Content -LiteralPath (Join-Path $script:Repo '.acan\tokens.json') -Raw | ConvertFrom-Json
+        $script:OwnerToken = [string](@($existingTokens | Where-Object { $_.principal.kind -eq 'member' })[0].token)
+        $agentA = [string](@($existingTokens | Where-Object { $_.principal.id -eq 'worker-a' })[0].token)
+        $control = [string](@($existingTokens | Where-Object { $_.principal.id -eq 'control-seeded' })[0].token)
+        $agentB = [string](@($existingTokens | Where-Object { $_.principal.id -eq 'worker-b' })[0].token)
+        foreach ($tok in @($script:OwnerToken, $agentA, $control, $agentB)) { $script:Secrets.Add($tok) }
+        Add-Step -Name 'reuse the run configuration (resume)' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{
+            keys_loaded = @($keys.Keys); routing = $routes; tokens = 'read from the clone, not printed'
+        }
+    }
 
     # ---- server ----------------------------------------------------------------------------
     $script:Base = "http://127.0.0.1:$Port"
     $serverArgs = @('serve', '--repo', $script:Repo, '--port', "$Port", '--bind', '127.0.0.1',
         '--protected-branch', 'main', '--llm', (Join-Path $configDir 'llm.toml'))
     foreach ($name in $keys.Keys) { Set-Item -Path "Env:$name" -Value $keys[$name] }
+    $logTag = if ($ResumeRun) { 'resume' } else { 'first' }
     try {
         $script:Proc = Start-Process -FilePath $AcanExe -ArgumentList $serverArgs `
-            -RedirectStandardOutput (Join-Path $run 'logs\server.out.log') `
-            -RedirectStandardError (Join-Path $run 'logs\server.err.log') -PassThru -WindowStyle Hidden
+            -RedirectStandardOutput (Join-Path $run "logs\server.$logTag.out.log") `
+            -RedirectStandardError (Join-Path $run "logs\server.$logTag.err.log") -PassThru -WindowStyle Hidden
     } finally {
         foreach ($name in $keys.Keys) { Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue }
     }
     $up = $false
     $healthEnd = (Get-Date).AddSeconds($HealthWaitSec)
     while (-not $up) {
-        if ($script:Proc.HasExited) { throw "the server exited with code $($script:Proc.ExitCode); see logs\server.err.log" }
+        if ($script:Proc.HasExited) { throw "the server exited with code $($script:Proc.ExitCode); see the server logs in logs\" }
         if ((Get-Date) -gt $healthEnd) { throw 'the server did not answer /health in time' }
         try { $null = Invoke-RestMethod -Uri "$script:Base/health" -TimeoutSec 5; $up = $true } catch { Start-Sleep -Milliseconds 500 }
     }
@@ -265,23 +303,33 @@ try {
     # ---- order o-1: post, split, draft, adopt, answer, confirm -------------------------------
     $orders = Get-Content -LiteralPath (Join-Path $AcanRepo 'demo\intent\orders.json') -Raw | ConvertFrom-Json
     $o1 = $orders.orders | Where-Object { $_.id -eq 'o-1' }
-    $posted = Send-Command @{ cmd = 'post_order'; machine = $o1.machine; sentence = $o1.sentence; witnesses = @() }
-    $postedEvent = $posted | Where-Object { $_.event.type -eq 'order_posted' } | Select-Object -First 1
-    if (-not $postedEvent) { throw 'post_order returned no order_posted event' }
-    $raw = "$($postedEvent.event.order)"
-    $oid = if ($raw -like 'o-*') { $raw } else { "o-$raw" }
-    Add-Step -Name 'post order o-1' -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{ order = $oid; machine = $o1.machine }
+    if ($ResumeRun) {
+        $state = Get-Content -LiteralPath (Join-Path $run 'run-state.json') -Raw | ConvertFrom-Json
+        $raw = [string]$state.raw
+        $oid = [string]$state.oid
+        Add-Step -Name 'resume: the order posted in phase one is read back' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ order = $oid; machine = $state.machine }
+    } else {
+        $posted = Send-Command @{ cmd = 'post_order'; machine = $o1.machine; sentence = $o1.sentence; witnesses = @() }
+        $postedEvent = $posted | Where-Object { $_.event.type -eq 'order_posted' } | Select-Object -First 1
+        if (-not $postedEvent) { throw 'post_order returned no order_posted event' }
+        $raw = "$($postedEvent.event.order)"
+        $oid = if ($raw -like 'o-*') { $raw } else { "o-$raw" }
+        Set-Content -LiteralPath (Join-Path $run 'run-state.json') -Value (ConvertTo-Json @{ raw = $raw; oid = $oid; machine = $o1.machine }) -Encoding utf8
+        Add-Step -Name 'post order o-1' -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{ order = $oid; machine = $o1.machine }
 
-    $null = Wait-Until -What 'the order split' -Probe {
-        $events = Invoke-Api -Path '/api/events'
-        $events | Where-Object { $_.event.type -eq 'order_split' -and "$($_.event.order)" -eq $raw } | Select-Object -First 1
-    } -Terminal { $null }
-    Add-Step -Name 'split the order into tasks' -Actor 'foreman' -Provider "$($routes.foreman.provider) / $($routes.foreman.model)" -Result 'pass'
+        $null = Wait-Until -What 'the order split' -Probe {
+            $events = Invoke-Api -Path '/api/events'
+            $events | Where-Object { $_.event.type -eq 'order_split' -and "$($_.event.order)" -eq $raw } | Select-Object -First 1
+        } -Terminal { $null }
+        Add-Step -Name 'split the order into tasks' -Actor 'foreman' -Provider "$($routes.foreman.provider) / $($routes.foreman.model)" -Result 'pass'
+    }
 
     $view = Wait-Until -What 'the foreman draft' -Probe { Invoke-Api404Tolerant -Path "/api/orders/$oid/scope-draft" } -Terminal { $null }
     if ($view.state -ne 'drafted') { throw "the foreman draft did not check: $($view.reason | ConvertTo-Json -Compress)" }
     $d = $view.draft
     $proposal = $d.draft.proposal
+    # The model's draft as the foreman returned it, kept in the run folder for review. It holds no key.
+    Set-Content -LiteralPath (Join-Path $run 'scope-draft.json') -Value ($d | ConvertTo-Json -Depth 60) -Encoding utf8
     Add-Step -Name 'foreman drafts the scope' -Actor 'foreman' -Provider "$($routes.foreman.provider) / $($d.draft.model)" -Result 'pass' -Evidence @{
         provenance = $d.draft.provenance
         rev = $d.rev
@@ -289,20 +337,84 @@ try {
         must_keep = @($proposal.must_keep).Count
         open = $proposal.open
     }
+    if ($DraftOnly) {
+        $script:DraftReady = $true
+        throw "draft recorded for human review; write the edits for this draft in $EditsFile, then resume with -ResumeRun $run"
+    }
+
+    # Human edits apply to the draft before the one revise_scope, so the scope the owner confirms is
+    # the draft plus the logged edits. Each edit is logged as a human step; an unknown op stops the take.
+    $edits = Get-Content -LiteralPath $EditsFile -Raw | ConvertFrom-Json
+    if ($edits.schema -ne 'acan-demo-intent-edits/2') {
+        throw "the edits file must have schema acan-demo-intent-edits/2, found '$($edits.schema)'"
+    }
+    $humanEdits = [System.Collections.Generic.List[object]]::new()
+    $humanAnswers = [System.Collections.Generic.List[object]]::new()
+    foreach ($edit in @($edits.scope_edits)) {
+        if ($edit.op -eq 'remove_may') {
+            if (@($proposal.may | Where-Object { $_.id -eq $edit.id }).Count -ne 1) {
+                throw "remove_may: may item $($edit.id) is not in the draft; the edits file must match the draft"
+            }
+            $proposal.may = @($proposal.may | Where-Object { $_.id -ne $edit.id })
+            $humanEdits.Add(@{ op = $edit.op; id = $edit.id; result = 'removed'; reason = $edit.reason })
+        } elseif ($edit.op -eq 'replace_must_keep') {
+            if (@($proposal.must_keep | Where-Object { $_.id -eq $edit.rule.id }).Count -ne 1) {
+                throw "replace_must_keep: must-keep $($edit.rule.id) is not in the draft; the edits file must match the draft"
+            }
+            $proposal.must_keep = @($proposal.must_keep | ForEach-Object { if ($_.id -eq $edit.rule.id) { $edit.rule } else { $_ } })
+            $humanEdits.Add(@{ op = $edit.op; id = $edit.rule.id; result = 'replaced'; reason = $edit.reason })
+        } elseif ($edit.op -eq 'add_must_keep') {
+            if (@($proposal.must_keep | Where-Object { $_.id -eq $edit.rule.id }).Count -gt 0) {
+                throw "must-keep $($edit.rule.id) is already in the draft"
+            }
+            $proposal.must_keep = @($proposal.must_keep) + @($edit.rule)
+            $humanEdits.Add(@{ op = $edit.op; id = $edit.rule.id; result = 'added'; reason = $edit.reason })
+        } elseif ($edit.op -eq 'add_may') {
+            if (@($proposal.may | Where-Object { $_.id -eq $edit.item.id }).Count -gt 0) {
+                throw "may item $($edit.item.id) is already in the draft"
+            }
+            $proposal.may = @($proposal.may) + @($edit.item)
+            $humanEdits.Add(@{ op = $edit.op; id = $edit.item.id; result = 'added'; reason = $edit.reason })
+        } else {
+            throw "unknown scope edit op '$($edit.op)' in $EditsFile"
+        }
+    }
+
+    # Choice rules match an open choice by its question text, because the foreman's question ids and
+    # wording change between drafts. A choice matched by no rule is left for an explicit answer below.
+    foreach ($choice in @($proposal.open)) {
+        $matched = @($edits.choice_rules | Where-Object { $choice.question -match $_.question_match })
+        if ($matched.Count -eq 0) { continue }
+        if ($matched.Count -gt 1) { throw "more than one choice rule matches $($choice.id): $((@($matched) | ForEach-Object { $_.id }) -join ', ')" }
+        $rule = $matched[0]
+        $keep = @($choice.options | Where-Object { $_.label -match $rule.option_label_match })
+        if ($keep.Count -gt 1) { throw "choice rule $($rule.id) matches more than one option of $($choice.id)" }
+        if ($keep.Count -eq 1) {
+            $humanAnswers.Add(@{ choice_id = $choice.id; option = $keep[0].key })
+            $humanEdits.Add(@{ op = 'answer_choice'; id = $choice.id; rule = $rule.id; option_label = $keep[0].label; result = 'answered; choice stays open until the answer is confirmed'; reason = $rule.reason })
+        } elseif ($rule.when_no_option_matches -eq 'remove') {
+            $proposal.open = @($proposal.open | Where-Object { $_.id -ne $choice.id })
+            $humanEdits.Add(@{ op = 'remove_open'; id = $choice.id; rule = $rule.id; question = $choice.question; result = 'removed'; reason = $rule.reason })
+        } else {
+            throw "choice $($choice.id) matches rule $($rule.id) but no option matches '$($rule.option_label_match)': $((@($choice.options) | ForEach-Object { $_.label }) -join ' | ')"
+        }
+    }
 
     $scope = @{ version = 'acan-scope/1'; order = $d.order; rev = $d.rev; base_commit = $d.base_commit; body = $proposal }
-    $null = Send-Command @{ cmd = 'revise_scope'; order = [int]$postedEvent.event.order; scope = $scope }
-    Add-Step -Name 'owner adopts the draft (revise_scope)' -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{ rev = $d.rev }
-
-    # Human edits: this take does not apply scope edits yet. Refuse rather than skip them.
-    $edits = Get-Content -LiteralPath $EditsFile -Raw | ConvertFrom-Json
-    if (@($edits.scope_edits).Count -gt 0) {
-        throw "the edits file lists $(@($edits.scope_edits).Count) scope edit(s); this take does not apply them yet"
+    $null = Send-Command @{ cmd = 'revise_scope'; order = [int]$raw; scope = $scope }
+    Add-Step -Name 'owner revises the draft with the logged human edits (revise_scope)' -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{ rev = $d.rev; human_edits = $humanEdits.Count; open_after = @($proposal.open).Count; may_after = @($proposal.may).Count; must_keep_after = @($proposal.must_keep).Count }
+    foreach ($entry in $humanEdits) {
+        Add-Step -Name "human scope edit: $($entry.op) $($entry.id)" -Actor 'human (o-1-edits.json, applied by the owner through revise_scope)' -Provider 'none' -Result 'pass' -Evidence $entry
     }
 
     $body = Invoke-Api -Path "/api/orders/$oid/scope/confirmation"
     $answers = @()
     foreach ($choice in @($proposal.open)) {
+        $fromKeep = @($humanAnswers | Where-Object { $_.choice_id -eq $choice.id })
+        if ($fromKeep.Count -eq 1) {
+            $answers += @{ choice_id = $choice.id; option = $fromKeep[0].option }
+            continue
+        }
         $given = @($edits.answers | Where-Object { $_.choice_id -eq $choice.id })
         if ($given.Count -ne 1) {
             throw "open choice $($choice.id) needs exactly one human answer in $EditsFile; options: $((@($choice.options) | ForEach-Object { $_.label }) -join ' | ')"
@@ -314,7 +426,7 @@ try {
         $answers += @{ choice_id = $choice.id; option = $option[0].key }
     }
     $body.answers = $answers
-    $confirmed = Send-Command @{ cmd = 'confirm_scope'; order = [int]$postedEvent.event.order; confirmation = $body }
+    $confirmed = Send-Command @{ cmd = 'confirm_scope'; order = [int]$raw; confirmation = $body }
     $scopeConfirmed = @($confirmed | Where-Object { $_.event.type -eq 'scope_confirmed' }).Count
     if ($scopeConfirmed -lt 1) { throw 'confirm_scope returned no scope_confirmed event' }
     Add-Step -Name 'owner confirms the scope (member HTTP)' -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{
@@ -338,8 +450,14 @@ try {
 }
 catch {
     $failure = $_.Exception.Message
-    $outcome = 'failed'
-    Write-Output "FAILED: $failure"
+    if ($script:DraftReady) {
+        # Phase one ends here on purpose: the draft is recorded and nothing was applied.
+        $outcome = 'draft_ready'
+        Write-Output "DRAFT READY: $failure"
+    } else {
+        $outcome = 'failed'
+        Write-Output "FAILED: $failure"
+    }
 }
 finally {
     if ($script:Proc -and -not $script:Proc.HasExited) {
@@ -390,6 +508,10 @@ finally {
         secret_scan     = $(if ($scanHits.Count -eq 0) { 'clean' } else { "hits: $($scanHits -join ', ')" })
     }
     $summaryPath = Join-Path $run 'summary.json'
+    # A resumed run keeps the summary of the run it resumes, so no earlier step is lost.
+    if (Test-Path -LiteralPath $summaryPath) {
+        Move-Item -LiteralPath $summaryPath -Destination (Join-Path $run ("summary.prev-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json'))
+    }
     $summaryText = $script:Summary | ConvertTo-Json -Depth 30
     foreach ($secret in $script:Secrets) {
         if ($summaryText.Contains($secret)) { $scanHits += 'summary.json' }

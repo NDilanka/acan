@@ -1,8 +1,241 @@
 {
-  "schema": "acan-demo-intent-edits/1",
+  "schema": "acan-demo-intent-edits/2",
   "order": "o-1",
-  "note": "Human edits to the foreman's o-1 draft, logged separately from the model. Each answer names an open choice by id and gives the option by its label. take.ps1 resolves the label to the option key and refuses an answer that matches no label. scope_edits must stay empty until the edits are written; take.ps1 refuses a non-empty list, so an edit is never skipped silently.",
-  "blocked": "The human answer for q-1 ('keep the current code length') is not recorded. In the live drafts the q-1 options differed between runs: 'Short code string | UUID string' in one run and 'Six characters | Eight characters' in another. Neither run offered an option that keeps the current length (CODE_LENGTH = 7 in demo links.ts). The answer stays empty until the parent decides how the human answer is recorded.",
-  "answers": [],
-  "scope_edits": []
+  "note": "Human edits to the foreman's o-1 draft, logged separately from the model. Each edit names the draft item it acts on by id; a draft from a new run may use other ids, so this file is written for the draft in the run it resumes. take.ps1 applies scope_edits to the draft in order, then choice_rules to the open choices, then sends the result as one revise_scope through the owner's member HTTP route, and logs each edit as a human step. An op whose id is not in the draft stops the take (fail closed). Nothing here is a verdict: the edits state the order's rules and the gate checks them.",
+  "choice_rules": [
+    {
+      "id": "cr-code-length",
+      "question_match": "(?i)code|length|character",
+      "option_label_match": "(?i)\\b7\\b|seven|keep|current",
+      "when_no_option_matches": "remove",
+      "reason": "Neither offered option keeps the current length 7 (CODE_LENGTH = 7 in D:\\dev\\acan-demo\\src\\links.ts:6), so the open choice is removed. If a draft offers an option that keeps 7, take.ps1 answers that option instead and the choice stays open until confirmed."
+    },
+    {
+      "id": "cr-health",
+      "question_match": "(?i)health",
+      "option_label_match": "(?i)keep",
+      "when_no_option_matches": "fail",
+      "reason": "The order does not ask for a health-check change, so the current health status is kept (human answer, 'Keep 200 for healthy')."
+    }
+  ],
+  "scope_edits": [
+    {
+      "op": "remove_may",
+      "id": "may-1",
+      "reason": "The drafted item (may-1) changes the POST /api/links body, and its example writes a 6-character code, which contradicts the order's must-keep of 7-character codes. Its step s-create is not a step of any probe, so it cannot be judged. Dropped; the quota items and the code-length must-keep cover the link API."
+    },
+    {
+      "op": "replace_must_keep",
+      "reason": "The drafted must-keep (keep-1) checks step s-health, which is not a step of any probe, so it cannot be judged. The same rule, that health stays available, is re-pointed at step s1 of the probe health (GET /health, anonymous): it still returns 200.",
+      "rule": {
+        "id": "keep-1",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/health",
+          "step_context": { "kind": "step", "step_id": "s1" },
+          "principal": { "kind": "anonymous" },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "obl-keep-1",
+            "predicate": { "predicate": "status_in", "step_id": "s1", "statuses": [200] },
+            "text": "GET /health still returns 200"
+          }
+        ],
+        "text": "Health endpoint remains available",
+        "machine_ids": ["server", "middleware", "ratelimit", "auth", "errors"]
+      }
+    },
+    {
+      "op": "add_must_keep",
+      "reason": "The order keeps the current code length: new link codes stay 7 characters. Only the short-code format is checked by a predicate; no predicate in the current language checks the length, so the length itself is not machine-checked and is recorded here as a human rule.",
+      "rule": {
+        "id": "mk-code-length",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s4" },
+          "principal": { "kind": "authenticated" },
+          "channel": "body",
+          "field_path": "code"
+        },
+        "obligations": [
+          {
+            "obligation_id": "obl-code-short-code",
+            "predicate": {
+              "predicate": "matches_schema",
+              "at": { "ref": "field", "run": "candidate", "step_id": "s4", "path": "body.code" },
+              "schema": { "type": "string", "format": "short_code" }
+            },
+            "text": "The new link code is a URL-safe short code of letters and digits"
+          }
+        ],
+        "text": "New link codes stay 7 characters. The gate checks only the short-code characters; the 7-character length has no predicate and is not machine-checked.",
+        "machine_ids": ["links"]
+      }
+    },
+    {
+      "op": "add_may",
+      "reason": "The order states ten requests per 60 seconds per user, answered 429 beyond that. The window counts each user's POST /api/links on the controlled clock, failed requests count, and a request at or after the window end is allowed again (Recovers). The item's selector is the step that is the user's 11th request, so the window is evaluated on the probe that has that sequence and no other.",
+      "item": {
+        "id": "i-quota-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s13" },
+          "principal": { "kind": "actor", "name": "alice" },
+          "channel": "status"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-quota-alice-window",
+            "predicate": {
+              "predicate": "window",
+              "policy": {
+                "event_filter": {
+                  "run": "candidate",
+                  "method": "POST",
+                  "route_template": "/api/links",
+                  "principal": { "kind": "actor", "name": "alice" }
+                },
+                "group_by": "principal",
+                "anchor": { "kind": "first_match" },
+                "duration_ms": 60000,
+                "allowed_count": 10,
+                "boundary": "exclusive",
+                "rejected_attempts": { "status_in": [429], "counted": "counted" },
+                "obligations": [{ "kind": "first_allowed" }, { "kind": "recovers" }]
+              }
+            },
+            "text": "Each user's first 10 POST /api/links in 60 s are allowed; the 11th and later get 429; rejected attempts count; the first request at or after 60 s is allowed again"
+          },
+          {
+            "obligation_id": "obl-quota-alice-429",
+            "predicate": { "predicate": "status_in", "step_id": "s13", "statuses": [429] },
+            "text": "alice's 11th link request, sent from client-b, is answered 429"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s13",
+          "path": "status",
+          "before": { "state": "present", "value": 201 },
+          "after": { "state": "present", "value": 429 }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "reason": "A second session of the same user shares that user's quota: the relogin session's 11th request is answered 429. The actor label alice_relogin is a separate window group, so this is a status check, not a window.",
+      "item": {
+        "id": "i-quota-relogin",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s11" },
+          "principal": { "kind": "actor", "name": "alice_relogin" },
+          "channel": "status"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-quota-relogin-429",
+            "predicate": { "predicate": "status_in", "step_id": "s11", "statuses": [429] },
+            "text": "alice's relogin session shares her quota: its request is answered 429"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s11",
+          "path": "status",
+          "before": { "state": "present", "value": 201 },
+          "after": { "state": "present", "value": 429 }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_may",
+      "reason": "The request sent at 59999 ms after the window opened is still inside the window and is answered 429. Covers the probe step s15 so its difference has an owner.",
+      "item": {
+        "id": "i-quota-inside-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s15" },
+          "principal": { "kind": "actor", "name": "alice" },
+          "channel": "status"
+        },
+        "change": "modify",
+        "acceptance": [
+          {
+            "obligation_id": "obl-quota-inside-429",
+            "predicate": { "predicate": "status_in", "step_id": "s15", "statuses": [429] },
+            "text": "A request 59999 ms into the window is still answered 429"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s15",
+          "path": "status",
+          "before": { "state": "present", "value": 201 },
+          "after": { "state": "present", "value": 429 }
+        },
+        "machine_ids": ["ratelimit"]
+      }
+    },
+    {
+      "op": "add_must_keep",
+      "reason": "bob keeps his own quota: his first 10 link requests are allowed though alice has used hers. Window evaluated on bob's request at s12 only.",
+      "rule": {
+        "id": "mk-bob-quota",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": { "kind": "step", "step_id": "s12" },
+          "principal": { "kind": "actor", "name": "bob" },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "obl-bob-quota-window",
+            "predicate": {
+              "predicate": "window",
+              "policy": {
+                "event_filter": {
+                  "run": "candidate",
+                  "method": "POST",
+                  "route_template": "/api/links",
+                  "principal": { "kind": "actor", "name": "bob" }
+                },
+                "group_by": "principal",
+                "anchor": { "kind": "first_match" },
+                "duration_ms": 60000,
+                "allowed_count": 10,
+                "boundary": "exclusive",
+                "rejected_attempts": { "status_in": [429], "counted": "counted" },
+                "obligations": [{ "kind": "first_allowed" }]
+              }
+            },
+            "text": "bob's first 10 POST /api/links in 60 s are allowed, even after alice has used up her quota"
+          }
+        ],
+        "text": "Each user keeps a separate link quota: bob's requests are not limited by alice's",
+        "machine_ids": ["ratelimit"]
+      }
+    }
+  ],
+  "answers": []
 }
