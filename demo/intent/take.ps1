@@ -50,9 +50,9 @@ param(
     # cap is four, and every differing field of a route is one episode, so the seeded differences
     # need more room. The value is a human decision and is logged as one.
     [int]$MaxEpisodes = 40,
-    # The repair budget's rounds for the order, set at its first confirmation: 0 to 4 (the type's bound).
+    # The repair budget's rounds for the order, set at its first confirmation: 0 to 8 (the type's bound).
     # 0 keeps the offered value. The value is a human decision and is logged as one.
-    [ValidateRange(0, 4)]
+    [ValidateRange(0, 8)]
     [int]$RepairRounds = 0,
     # The most model calls the worker's edit loop may make. Set by a human decision, logged in the summary.
     [int]$WorkerMaxSteps = 80,
