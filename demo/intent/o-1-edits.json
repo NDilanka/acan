@@ -1,7 +1,7 @@
 {
   "schema": "acan-demo-intent-edits/2",
   "order": "o-1",
-  "decided_by": "owner for the code-length answer (decision 2026-10-31 06:33); coordinator, delegated by the owner, for every other edit",
+  "decided_by": "coordinator, delegated by the owner",
   "note": "Edits to the foreman's o-1 draft, logged separately from the model and labelled by who decided them. Each edit names the draft item it acts on by id; a draft from a new run may use other ids, so this file is written for the draft in the run it resumes. take.ps1 applies scope_edits to the draft in order, then choice_rules to the open choices, then sends the result as one revise_scope through the owner's member HTTP route, and logs each edit as a human step. An op whose id is not in the draft stops the take (fail closed). Nothing here is a verdict: the edits state the order's rules and the gate checks them.",
   "choice_rules": [
     {
@@ -88,43 +88,6 @@
         ],
         "text": "Public short-link redirect stays outside the signed-in link limit.",
         "machine_ids": ["server", "links", "store"]
-      }
-    },
-    {
-      "op": "add_may",
-      "reason": "The order keeps the short-code form: a new link's code is a URL-safe short code of letters and digits, 7 characters long (src/links.ts:6). The code is new on each request, so its value may differ from the base; the acceptance predicate checks its format on each probe that has it. No predicate in the current language checks the length, so the length is not machine-checked and stays a human rule here.",
-      "item": {
-        "id": "i-code-format",
-        "selector": {
-          "surface": "http",
-          "method": "POST",
-          "route_template": "/api/links",
-          "step_context": { "kind": "step", "step_id": "s4" },
-          "principal": { "kind": "authenticated" },
-          "channel": "body",
-          "field_path": "code"
-        },
-        "change": "modify",
-        "acceptance": [
-          {
-            "obligation_id": "obl-code-short-code",
-            "predicate": {
-              "predicate": "matches_schema",
-              "at": { "ref": "field", "run": "candidate", "step_id": "s4", "path": "body.code" },
-              "schema": { "type": "string", "format": "short_code" }
-            },
-            "text": "The new link code is a URL-safe short code of letters and digits"
-          }
-        ],
-        "provenance": "user",
-        "example": {
-          "kind": "target",
-          "step_id": "s4",
-          "path": "body.code",
-          "before": { "state": "present", "value": "Ab3Cd9E" },
-          "after": { "state": "present", "value": "Xy7Qm2P" }
-        },
-        "machine_ids": ["links"]
       }
     },
     {

@@ -50,6 +50,10 @@ param(
     # cap is four, and every differing field of a route is one episode, so the seeded differences
     # need more room. The value is a human decision and is logged as one.
     [int]$MaxEpisodes = 40,
+    # The most model calls the worker's edit loop may make. Set by a human decision, logged in the summary.
+    [int]$WorkerMaxSteps = 80,
+    # A JSON file of the coordinator's decisions, written into summary.json as coordinator_decisions.
+    [string]$DecisionsFile = '',
     [int]$HealthWaitSec = 90,
     [int]$StepWaitSec = 900,
     [int]$WorkerWaitSec = 2700,
@@ -65,6 +69,7 @@ $PSNativeCommandUseErrorActionPreference = $false
 if (-not $EditsFile) { $EditsFile = Join-Path $AcanRepo "demo\intent\$Order-edits.json" }
 if (-not $RulesFile) { $RulesFile = Join-Path $AcanRepo 'demo\intent\rulings\o-1-rulings.json' }
 $intentDir = Join-Path $AcanRepo 'demo\intent'
+$coordinatorDecisions = if ($DecisionsFile -and (Test-Path -LiteralPath $DecisionsFile)) { Get-Content -LiteralPath $DecisionsFile -Raw | ConvertFrom-Json } else { $null }
 
 $script:Steps = [System.Collections.Generic.List[object]]::new()
 $script:Secrets = [System.Collections.Generic.List[string]]::new()
@@ -266,7 +271,7 @@ function Get-OrderTasks {
 
 function Start-Worker {
     param([string]$Name, [string]$Token, [string]$Tag)
-    $argLine = "--server $script:Base --token $Token --repo `"$script:Repo`" --llm `"$script:LlmPath`" --env `"$script:EnvPath`" --test-command `"bun test`" --wait-secs 600 --max-steps 45 --heartbeat-secs 20"
+    $argLine = "--server $script:Base --token $Token --repo `"$script:Repo`" --llm `"$script:LlmPath`" --env `"$script:EnvPath`" --test-command `"bun test`" --wait-secs 600 --max-steps $WorkerMaxSteps --heartbeat-secs 20"
     $p = Start-Process -FilePath $WorkerExe -ArgumentList $argLine `
         -RedirectStandardOutput (Join-Path $run "logs\$Name.$Tag.out.log") `
         -RedirectStandardError (Join-Path $run "logs\$Name.$Tag.err.log") -PassThru -WindowStyle Hidden
@@ -762,6 +767,8 @@ finally {
         server          = [ordered]@{ binary = $AcanExe; worker_binary = $WorkerExe; port = $Port; protected_branch = 'main'; logs = (Join-Path $run 'logs') }
         inputs          = [ordered]@{ edits_file = $EditsFile; edits_sha256 = $(if (Test-Path -LiteralPath $EditsFile) { (Get-FileHash -LiteralPath $EditsFile -Algorithm SHA256).Hash } else { 'none' }); rules_file = $RulesFile; rules_sha256 = (Get-FileHash -LiteralPath $RulesFile -Algorithm SHA256).Hash; max_episodes = $MaxEpisodes }
         steps           = @($script:Steps)
+        worker_max_steps = $WorkerMaxSteps
+        coordinator_decisions = $coordinatorDecisions
         checks          = $checks
         secret_scan     = $(if ($scanHits.Count -eq 0) { 'clean' } else { "hits: $($scanHits -join ', ')" })
     }
