@@ -232,6 +232,20 @@ pub fn derive_masks(contrast: &Contrast<'_>) -> Result<Vec<CoreDerived<Mask>>, C
     };
     let mut masks = Vec::new();
     for (a, b) in base_a.observations.iter().zip(&base_b.observations) {
+        let mut mask = |path: &str| -> Result<(), CompareError> {
+            masks.push(CoreDerived::derived(Mask {
+                probe_hash,
+                selector: MaskSelector {
+                    step_id: a.step_id.clone(),
+                    path: parse_path(path)?,
+                },
+                base_a_observation_hash: a.observation_hash,
+                base_b_observation_hash: b.observation_hash,
+                normalization_version: plan.version.clone(),
+                normalization_hash: plan_hash,
+            }));
+            Ok(())
+        };
         // A field the bases disagree on masks from them alone; the candidate pass leaves it alone.
         let mut base_masked = Vec::new();
         for found in step_differences(&a.channels, &b.channels) {
@@ -239,17 +253,7 @@ pub fn derive_masks(contrast: &Contrast<'_>) -> Result<Vec<CoreDerived<Mask>>, C
                 continue;
             }
             base_masked.push(found.path.clone());
-            masks.push(CoreDerived::derived(Mask {
-                probe_hash,
-                selector: MaskSelector {
-                    step_id: a.step_id.clone(),
-                    path: parse_path(&found.path)?,
-                },
-                base_a_observation_hash: a.observation_hash,
-                base_b_observation_hash: b.observation_hash,
-                normalization_version: plan.version.clone(),
-                normalization_hash: plan_hash,
-            }));
+            mask(&found.path)?;
         }
         let Some(candidate_step) = candidate.as_ref().and_then(|candidate| {
             candidate
@@ -273,17 +277,7 @@ pub fn derive_masks(contrast: &Contrast<'_>) -> Result<Vec<CoreDerived<Mask>>, C
             if format_of(base) != format_of(changed) {
                 continue;
             }
-            masks.push(CoreDerived::derived(Mask {
-                probe_hash,
-                selector: MaskSelector {
-                    step_id: a.step_id.clone(),
-                    path: parse_path(&found.path)?,
-                },
-                base_a_observation_hash: a.observation_hash,
-                base_b_observation_hash: b.observation_hash,
-                normalization_version: plan.version.clone(),
-                normalization_hash: plan_hash,
-            }));
+            mask(&found.path)?;
         }
     }
     Ok(masks)

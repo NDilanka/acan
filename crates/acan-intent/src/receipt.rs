@@ -1315,7 +1315,7 @@ fn ruling(
             })
             .collect(),
         // An exact approval runs on the evidence it accepted, changed or not.
-        Applicability::ExactObservationApproval => current.clone(),
+        Applicability::ExactObservationApproval => current,
     };
     let answers: Vec<(usize, CheckResult)> = checked
         .iter()
