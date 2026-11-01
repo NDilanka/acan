@@ -344,6 +344,56 @@ fn login_on(
     Measured::new(probe, fixture, run_a, run_b, run_c)
 }
 
+/// The login probe's twin: the same fixture, steps and route, with one step's deadline changed so
+/// its spec hashes apart, and a normalization plan of its own. Both reach the login route.
+fn login_twin() -> CorpusProbe {
+    let (login, _) = load("login-rate-limit");
+    let mut spec = to_value(&login.spec);
+    spec["steps"][0]["deadline_ms"] = json!(2001);
+    let mut plan = to_value(&login.normalization);
+    plan["maskable_paths"]
+        .as_array_mut()
+        .expect("the plan lists its maskable paths")
+        .push(json!("body.error"));
+    CorpusProbe {
+        label: "login-rate-limit-twin".to_owned(),
+        spec: serde_json::from_value(spec).expect("the twin's spec decodes"),
+        normalization: serde_json::from_value(plan).expect("the twin's plan decodes"),
+        ..login
+    }
+}
+
+/// The probe corpus with the login twin added.
+fn corpus_with_login_twin() -> ProbeCorpus {
+    let mut corpus: ProbeCorpus = parse(PROBE_CORPUS);
+    corpus.probes.push(login_twin());
+    corpus
+}
+
+/// As [`build`], for the probe corpus `corpus`, with no exact-approval anchors or contests.
+fn build_on(
+    corpus: &ProbeCorpus,
+    scope: &Scope,
+    confirmation: &ScopeConfirmation,
+    prepared: &PreparedCommit,
+    ledger: &CoreDerived<FoldedLedger>,
+    results: &[ProbeResult<'_>],
+) -> Result<Receipt, ReceiptError> {
+    let inputs = ReceiptInputs {
+        scope,
+        confirmation,
+        prepared,
+        ledger,
+        corpus,
+        results,
+        anchors: &[],
+        episodes: &[],
+        contests: &[],
+        gate_state: GateState::Blocked,
+    };
+    receipt::build_receipt(&inputs).map(|receipt| receipt.value().clone())
+}
+
 /// One health step: GET /health from client-a, answered `status` with `body`.
 fn health_hit(status: u16, body: Value) -> Hit {
     Hit {
@@ -394,12 +444,20 @@ fn prepared_context(
     confirmation: &ScopeConfirmation,
     ledger: &CoreDerived<FoldedLedger>,
 ) -> PreparedCommit {
-    let corpus: ProbeCorpus = parse(PROBE_CORPUS);
+    prepared_context_on(&parse(PROBE_CORPUS), confirmation, ledger)
+}
+
+/// As [`prepared_context`], for the probe corpus `corpus`.
+fn prepared_context_on(
+    corpus: &ProbeCorpus,
+    confirmation: &ScopeConfirmation,
+    ledger: &CoreDerived<FoldedLedger>,
+) -> PreparedCommit {
     let folded = ledger.value();
-    let probe_set = ProbeSetManifest::of(&corpus, &folded.retired_probes)
+    let probe_set = ProbeSetManifest::of(corpus, &folded.retired_probes)
         .and_then(|manifest| manifest.probe_set_hash())
         .expect("the probe set hashes");
-    let fixture_set = FixtureSetManifest::of(&corpus)
+    let fixture_set = FixtureSetManifest::of(corpus)
         .and_then(|manifest| manifest.fixture_set_hash())
         .expect("the fixture set hashes");
     let run: Value = parse(RUN);
@@ -1400,6 +1458,120 @@ fn a_ruling_with_the_same_version_and_another_plan_hash_is_stale_never_held() {
     assert!(
         matches!(ruling_status(&receipt, "r-login"), RulingStatus::Stale {}),
         "a ruling with another plan hash was not stale: {:?}",
+        ruling_status(&receipt, "r-login")
+    );
+}
+
+#[test]
+fn a_ruling_holds_on_its_own_plan_and_leaves_another_plans_probe_outside_it() {
+    let scope = scope();
+    let confirmation = confirmation_for(&scope);
+    let corpus = corpus_with_login_twin();
+    let ledger = fold::fold(&[login_ruling(
+        login_plan(),
+        "standing_predicate_approval",
+        json!([]),
+    )])
+    .expect("the ruling folds");
+    let prepared = prepared_context_on(&corpus, &confirmation, &ledger);
+    let on_its_plan = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+    );
+    // The twin's sixth login is answered 429, which the ruling's predicate does not allow. A
+    // header that no scope item names appears on the candidate only.
+    let mut limited = sequence(FIVE_THEN_LIMITED);
+    hit_mut(&mut limited, "s6")
+        .headers
+        .push(("x-trace", "one".to_owned()));
+    let (_, fixture) = load("login-rate-limit");
+    let other_plan = login_on(
+        login_twin(),
+        fixture,
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        limited,
+    );
+    let twin_hash = login_twin().spec.probe_hash().expect("the twin hashes");
+    let receipt = build_on(
+        &corpus,
+        &scope,
+        &confirmation,
+        &prepared,
+        &ledger,
+        &[on_its_plan.result(), other_plan.result()],
+    )
+    .expect("the receipt builds");
+    assert!(
+        matches!(ruling_status(&receipt, "r-login"), RulingStatus::Held {}),
+        "a ruling on its own plan did not hold: {:?}",
+        ruling_status(&receipt, "r-login")
+    );
+    assert_eq!(
+        receipt.counts.get(ItemClass::ViolatesRuling),
+        0,
+        "the probe on another plan was checked against the ruling"
+    );
+    assert!(
+        !receipt
+            .items
+            .iter()
+            .any(|item| item.ruling_id.is_some() && item.probe_hash == twin_hash),
+        "the ruling took rows from the probe on another plan"
+    );
+    assert!(
+        receipt
+            .items
+            .iter()
+            .any(|item| item.class == ItemClass::OutOfScope && item.probe_hash == twin_hash),
+        "the other plan's header row is not out of scope"
+    );
+}
+
+#[test]
+fn a_ruling_is_stale_only_when_no_reached_probe_has_its_plan() {
+    let scope = scope();
+    let confirmation = confirmation_for(&scope);
+    let corpus = corpus_with_login_twin();
+    // The links probe's plan hash: neither login probe has it.
+    let other_plan = parse::<Value>(LEDGER_DECISION)["normalization_hash"].clone();
+    let ledger = fold::fold(&[login_ruling(
+        other_plan,
+        "standing_predicate_approval",
+        json!([]),
+    )])
+    .expect("the ruling folds");
+    let prepared = prepared_context_on(&corpus, &confirmation, &ledger);
+    let on_login = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+    );
+    let (_, fixture) = load("login-rate-limit");
+    let twin = login_on(
+        login_twin(),
+        fixture,
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+    );
+    let receipt = build_on(
+        &corpus,
+        &scope,
+        &confirmation,
+        &prepared,
+        &ledger,
+        &[on_login.result(), twin.result()],
+    )
+    .expect("the receipt builds");
+    assert!(
+        matches!(ruling_status(&receipt, "r-login"), RulingStatus::Stale {}),
+        "a ruling with no reached probe on its plan was not stale: {:?}",
         ruling_status(&receipt, "r-login")
     );
 }

@@ -19,9 +19,11 @@
 //! - A difference no rule or item claims is `out_of_scope`: one item per probe, step and path.
 //! - An active ruling whose predicate fails on a reached probe where a field it covers differs
 //!   is `violates_ruling`: one item per failing probe. A reached probe whose covered fields agree
-//!   with the base is not checked and holds the ruling. A ruling whose normalization plan no
-//!   longer matches the corpus, or an exact approval whose evidence is not one it accepted, is
-//!   `stale` and never held.
+//!   with the base is not checked and holds the ruling. A ruling covers only the reached probes
+//!   whose normalization plan is the one it was confirmed under (and, for an exact approval, whose
+//!   evidence it accepted). A reached probe it does not cover keeps its own rows, which need a
+//!   ruling of their own. A ruling is `stale` and never held only when it reaches probes and
+//!   covers none of them.
 //!
 //! A scope item that no probe reaches gets no receipt item, because a receipt item needs the
 //! probe that checked it. Its acceptance obligations are counted as unknown in
@@ -1279,15 +1281,16 @@ fn same_evidence(left: &Contrast<'_>, right: &Contrast<'_>) -> bool {
 
 /// The status of one ruling, and the receipt items it adds. A failing probe becomes a
 /// `violates_ruling` item, so the violation has a row of its own, and the differences it covers
-/// there are the ruling's, not out of scope. A ruling whose approval covers some reached evidence
-/// only, or none, is `stale` and never held.
+/// there are the ruling's, not out of scope. A reached probe the ruling does not cover (see
+/// [`applies`]) is outside it: its rows stay unclaimed. A ruling is `stale` and never held only
+/// when it reaches probes and covers none of them.
 ///
-/// A standing ruling rules on change: its predicate runs only on a probe where a field it covers
-/// differs between base and candidate. A reached probe whose covered fields agree with the base
-/// neither violates the ruling nor makes it stale; the ruling holds there without a check. A held
-/// standing ruling takes the differences it covers that no must-keep rule or may-change item
-/// owns, one fulfilled item per probe it takes them on. A ruling never takes over an item's
-/// difference.
+/// A standing ruling rules on change: its predicate runs only on a covered probe where a field it
+/// covers differs between base and candidate. A covered probe whose covered fields agree with the
+/// base neither violates the ruling nor makes it stale; the ruling holds there without a check. A
+/// held standing ruling takes the differences it covers that no must-keep rule or may-change item
+/// owns, one fulfilled item per covered probe it takes them on. A ruling never takes over an
+/// item's difference.
 fn ruling(
     inputs: &ReceiptInputs<'_>,
     expectation: &Expectation,
@@ -1306,12 +1309,17 @@ fn ruling(
         behavior.record(Verdict::Unknown);
         return Ok((RulingStatus::NotReached {}, Vec::new()));
     }
+    // The probes the ruling covers. A reached probe it does not cover is outside it, so it is not
+    // a reason for staleness; only a ruling that covers none of its reached probes is stale.
     let current: Vec<usize> = reaching
         .iter()
         .copied()
         .filter(|&index| applies(inputs, expectation, index))
         .collect();
-    let stale = current.len() < reaching.len();
+    if current.is_empty() {
+        behavior.record(Verdict::Unknown);
+        return Ok((RulingStatus::Stale {}, Vec::new()));
+    }
     let checked: Vec<usize> = match expectation.applicability {
         Applicability::StandingPredicateApproval => current
             .iter()
@@ -1335,12 +1343,8 @@ fn ruling(
         .map(|(index, _)| *index)
         .collect();
     if failing.is_empty() {
-        if stale {
-            behavior.record(Verdict::Unknown);
-            return Ok((RulingStatus::Stale {}, Vec::new()));
-        }
         if checked.is_empty() {
-            // Nothing the ruling covers differs on any reached probe: it holds.
+            // Nothing the ruling covers differs on any probe it covers: it holds.
             behavior.record(Verdict::Pass);
             return Ok((RulingStatus::Held {}, Vec::new()));
         }
