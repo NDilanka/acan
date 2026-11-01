@@ -206,8 +206,9 @@ try {
     # ---- report and wait for the receipt -----------------------------------------------------
     # Without -AwaitRuling the control stops at its first new receipt. With it, the control keeps
     # its claim while a human rules: each new receipt is saved, and the control waits while the
-    # receipt is blocked. A receipt that is not blocked, a refused report, a claim that ends, or
-    # -RulingWaitSec with no new receipt ends the wait; the claim is then released without a land.
+    # receipt is blocked. A receipt that is not blocked, the receipt that answers the re-report, a
+    # refused report, a claim that ends, or -RulingWaitSec with no new receipt ends the wait; the
+    # claim is then released without a land.
     $before = Call-Tool -Name 'get_receipt' -Arguments @{ version = 'acan-mcp/1'; task = $Task }
     $lastHash = if ($before.ok) { [string]$before.value.receipt_hash } else { '' }
     $rep = Call-Tool -Name 'report_built' -Arguments @{ task = $Task; generation = $generation; head = $head }
@@ -217,6 +218,7 @@ try {
     $latest = $null
     $receiptsSaved = 0
     $reReported = $false
+    $regateReceived = $false
     while ($true) {
         $gr = Call-Tool -Name 'get_receipt' -Arguments @{ version = 'acan-mcp/1'; task = $Task }
         if ($gr.ok -and [string]$gr.value.receipt_hash -ne $lastHash) {
@@ -227,8 +229,11 @@ try {
             $gate = [string]$gr.value.receipt.gate_state
             Write-Output "receipt $lastHash gate_state $gate"
             # A blocked receipt waits for the rulings. Any other receipt is the answer to them (a
-            # passing gate records prepared, a land records landed): the control stops and releases.
-            if ($gate -ne 'blocked' -or -not $AwaitRuling) { break }
+            # passing gate records prepared, a land records landed). The first receipt after the
+            # re-report is the re-gate's answer: the control stops and releases even if it is blocked,
+            # so the wait never outlives the take's wait for this control.
+            if ($reReported) { $regateReceived = $true }
+            if ($reReported -or $gate -ne 'blocked' -or -not $AwaitRuling) { break }
             $deadline = (Get-Date).AddSeconds($RulingWaitSec)
         }
         if ($null -ne $latest -and $AwaitRuling) {
@@ -247,6 +252,9 @@ try {
         }
         if ((Get-Date) -gt $deadline) { break }
         Start-Sleep -Seconds 3
+    }
+    if ($reReported -and -not $regateReceived) {
+        Add-Step -Name 'the re-gate after the rulings answers with a receipt' -Ok $false -Evidence @{ waited_sec = $ReceiptWaitSec }
     }
     if ($null -eq $latest) {
         Add-Step -Name 'the gate answers the build with a receipt' -Ok $false -Evidence @{ waited_sec = $ReceiptWaitSec }

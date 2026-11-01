@@ -698,6 +698,13 @@ try {
         $done = Join-Path $ctrlRoot 'rulings-done.flag'
         $rulingsOut = Join-Path $ctrlRoot 'rulings-o-1.json'
         if (Test-Path -LiteralPath $done) { Remove-Item -LiteralPath $done }
+        # An earlier attempt's receipt, result or rulings are not this control's. They move aside, so the
+        # ruling step waits for this control's own receipt; an old receipt would be ruled on as if new.
+        $mhFinalPath = Join-Path $ctrlRoot 'm-harmless-final-receipt.json'
+        $staleStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        foreach ($stale in @($mh, "$mh.receipt.json", $mhFinalPath, $rulingsOut)) {
+            if (Test-Path -LiteralPath $stale) { Move-Item -LiteralPath $stale -Destination "$stale.prev-$staleStamp" }
+        }
         $ctlArgs = "-NoProfile -File `"$(Join-Path $intentDir 'control.ps1')`" -Server $script:Base -Token $controlToken -Repo `"$script:Repo`" -Task $t0 -Bundle `"$(Join-Path $intentDir 'controls\m-harmless-difference.json')`" -Out `"$mh`" -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -AwaitRuling -RulingWaitSec $RulingWaitSec -RulingsDone `"$done`""
         $ctl = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList $ctlArgs -RedirectStandardOutput "$mh.log" -RedirectStandardError "$mh.err.log" -PassThru -WindowStyle Hidden
         $recEnd = (Get-Date).AddSeconds(300 + $ControlWaitSec)
@@ -726,7 +733,9 @@ try {
         }
         Set-Content -LiteralPath $done -Value 'rulings finished' -Encoding utf8
         $ctlKilled = $false
-        if (-not $ctl.WaitForExit(($RulingWaitSec + 300) * 1000)) {
+        # After the flag the control waits for its re-gate's receipt for up to ControlWaitSec (the
+        # receipt wait after the re-report), so the take waits that long plus a margin before a kill.
+        if (-not $ctl.WaitForExit(($ControlWaitSec + 300) * 1000)) {
             # The control saves its result after every step, so its evidence survives the kill. A
             # killed control runs no release, so its claim is not released by this run.
             $ctlKilled = $true
