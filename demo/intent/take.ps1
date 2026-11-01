@@ -18,11 +18,12 @@ Phases, one order at a time:
      stop. A person writes the edits for that draft into the order's edits file.
   2. -ResumeRun <run> -Order o-1 -EditsFile <edits>: apply the edits as one revise_scope, confirm
      the scope (the owner raises the repair budget's max_episodes, logged), register the agents,
-     then: the seeded regression m-overfit (control), the seeded harmless difference
-     m-harmless-difference (control) with its human rulings and re-gate, then worker A (model),
-     which builds and lands the order once the control has released the task, and the land check.
-  3. -ResumeRun <run> -Order o-8 -DraftOnly, then the same with -EditsFile: worker B (model), then
-     the seeded ruling violation m-ruling-violation (control).
+     then: the seeded regression m-overfit (control, blocked), then the seeded harmless difference
+     m-harmless-difference (control): its out-of-scope episodes are ruled through member HTTP, it
+     re-gates, and the passing gate lands o-1 on its own. Then the land check. No model worker
+     runs in this phase.
+  3. -ResumeRun <run> -Order o-8 -DraftOnly, then the same with -EditsFile: worker B (model) builds
+     and lands the order, then the seeded ruling violation m-ruling-violation (control).
 
 Each human step is a member HTTP call and is logged in summary.json. Each control is a seeded
 bundle run through the MCP tools with its own agent token, never a model. A model call that fails
@@ -40,11 +41,14 @@ param(
     [string]$RunsRoot = 'D:\dev\acan-takes',
     [string]$DemoRepo = 'D:\dev\acan-demo',
     [string]$Pin = 'f91962156841332d5753d869554839f7c4cdea79',
-    [string]$AcanRepo = 'D:\dev\acan-wt\d02',
-    [string]$AcanExe = 'C:\cargo-targets\acan-d02\debug\acan.exe',
-    [string]$WorkerExe = 'C:\cargo-targets\acan-d02\debug\acan-worker.exe',
-    [string]$LlmSource = 'D:\dev\acan\crates\acan-llm\llm.toml',
-    [string]$EnvSource = 'D:\dev\acan\crates\acan-llm\.env',
+    # The Acan checkout the take runs from. Empty means the repository that holds this script.
+    [string]$AcanRepo = '',
+    # Required: the server and worker binaries built for this checkout, e.g. <CARGO_TARGET_DIR>\debug\acan.exe.
+    [Parameter(Mandatory)][string]$AcanExe,
+    [Parameter(Mandatory)][string]$WorkerExe,
+    # Required: the local LLM config and its .env with the keys. Neither is in git, so neither has a default.
+    [Parameter(Mandatory)][string]$LlmSource,
+    [Parameter(Mandatory)][string]$EnvSource,
     [string]$EditsFile = '',
     [string]$RulesFile = '',
     # The repair budget's cap on new episodes, set at the order's first confirmation. The offered
@@ -65,7 +69,8 @@ param(
     [int]$WorkerWaitSec = 2700,
     [int]$ControlWaitSec = 1500,
     [int]$RulingWaitSec = 1200,
-    # How long the land check waits for worker A's final receipt to show landed.
+    # How long the take waits for a passing gate's land to show in the latest receipt (the gate lands
+    # a passing candidate on its own), for m-harmless-difference in o-1 and for worker B in o-8.
     [int]$LandWaitSec = 900,
     [switch]$DraftOnly,
     [string]$ResumeRun = '',
@@ -74,6 +79,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+if (-not $AcanRepo) { $AcanRepo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
 if (-not $EditsFile) { $EditsFile = Join-Path $AcanRepo "demo\intent\$Order-edits.json" }
 if (-not $RulesFile) { $RulesFile = Join-Path $AcanRepo 'demo\intent\rulings\o-1-rulings.json' }
 $intentDir = Join-Path $AcanRepo 'demo\intent'
@@ -311,6 +317,22 @@ function Save-TaskReceipt {
     if ($resp.result.isError) { throw "get_receipt refused: $text" }
     Set-Content -LiteralPath $Path -Value $text -Encoding utf8
     [string](($text | ConvertFrom-Json).receipt.gate_state)
+}
+
+function Wait-TaskLanded {
+    # Polls the task's latest receipt, saving each read to Path, until it is landed, blocked or
+    # stopped, or Seconds pass. A passing gate lands its candidate on its own, a moment after the
+    # receipt. Returns the last gate_state read. Errors from the read are left to the caller.
+    param([string]$Task, [string]$Token, [string]$Path, [int]$Seconds)
+    $state = ''
+    $end = (Get-Date).AddSeconds($Seconds)
+    while ($true) {
+        $state = Save-TaskReceipt -Task $Task -Token $Token -Path $Path
+        if (@('landed', 'blocked', 'stopped') -contains $state) { break }
+        if ((Get-Date) -gt $end) { break }
+        Start-Sleep -Seconds 5
+    }
+    $state
 }
 
 function Get-AgentEvents {
@@ -672,44 +694,24 @@ try {
         # The re-gate passes when the receipt after the rulings is not blocked: prepared when every
         # item passes. A control that was killed at its wait does not pass.
         $regatePassed = ($null -ne $r3) -and (-not $ctlKilled) -and $rulingsOk -and (@('prepared', 'landed') -contains [string]$r3.gate_state)
-        $script:Evidence.controls['m-harmless-difference'] = @{ task = $t0; result = $mh; receipt_hash = $r3.receipt_hash; gate_state = $r3.gate_state; counts = $r3.counts; head = $r3.head; ruling_error = $rulingErr; rulings_ok = $rulingsOk; receipts_saved = $r3.receipts_saved; killed_at_wait = $ctlKilled; regate_passed = $regatePassed; last_reply = $r3.last_reply; control_error = $r3.error }
-        Save-State
-        Add-Step -Name 'o-1 step 2: seeded harmless difference m-harmless-difference (control): rulings recorded and the re-gate passes (not a land)' -Actor 'control-seeded (control identity, not a model)' -Provider 'none' -Result $(if ($regatePassed) { 'pass' } else { 'fail' }) -Evidence @{ task = $t0; receipt_hash = $r3.receipt_hash; gate_state = $r3.gate_state; counts = $r3.counts; rulings_ok = $rulingsOk; killed_at_wait = $ctlKilled; result_file = $mh }
-
-        # ---- step 3: worker A, model, builds and lands the order once the control released the task ----
-        if (-not $SkipWorkers) {
-            $wa = Start-Worker -Name 'worker-a' -Token $script:Tokens['worker-a'] -Tag 'o1'
-            $events = Invoke-Api -Path '/api/events'
-            $waEvents = Get-AgentEvents -Events $events -Agent 'worker-a'
-            $script:Evidence.workers['o-1-worker-a'] = @{ process = $wa; events = $waEvents }
-            Save-State
-            $waTypes = @($waEvents | ForEach-Object { $_.type } | Select-Object -Unique)
-            $waBuilt = [bool]($wa.exited -and $wa.exit_code -eq 0 -and ($waTypes -contains 'build_reported' -or $waTypes -contains 'landed'))
-            # The gate lands a passing candidate on its own; the latest receipt says whether it did.
-            $finalFile = Join-Path $ctrlRoot 'o-1-final-receipt.json'
-            $finalState = ''
-            $landEnd = (Get-Date).AddSeconds($LandWaitSec)
-            while ($waBuilt) {
-                try {
-                    $finalState = Save-TaskReceipt -Task $t0 -Token $controlToken -Path $finalFile
-                } catch {
-                    Write-Output "get_receipt: $($_.Exception.Message)"
-                    break
-                }
-                if (@('landed', 'blocked', 'stopped') -contains $finalState) { break }
-                if ((Get-Date) -gt $landEnd) { break }
-                Start-Sleep -Seconds 10
-            }
-            $landedNow = [bool]($waBuilt -and $finalState -eq 'landed' -and (Test-Path -LiteralPath $finalFile))
-            if ($landedNow) {
-                $script:Evidence.lands['o-1'] = Get-LandCheck -ReceiptFile $finalFile -What 'o-1'
-            }
-            Save-State
-            Add-Step -Name 'o-1 step 3: worker A builds and lands the order (honest attempt, model)' -Actor 'worker-a (model worker)' -Provider "$($script:Routes.worker.provider) / $($script:Routes.worker.model)" -Result $(if ($landedNow) { 'pass' } else { 'fail' }) -Evidence @{ process = $wa; worker_finished = (Get-WorkerFinish -Name 'worker-a' -Tag 'o1'); event_types = $waTypes; events = $waEvents.Count; final_gate_state = $finalState; final_receipt = $finalFile; land = $script:Evidence.lands['o-1']; note = 'pass only when the worker exited with code 0 after a build was reported, and the latest receipt is landed with its merged commit equal to the protected head; a worker still running at the wait, or one that ended without a commit, is recorded as fail' }
-        } else {
-            Add-Step -Name 'o-1 step 3: worker A (skipped by -SkipWorkers)' -Actor 'worker-a (model worker)' -Provider 'none' -Result 'not_run' -Evidence @{ reason = '-SkipWorkers' }
-            $landedNow = $false
+        # A passing gate lands its candidate on its own, a moment after the receipt. The take waits
+        # for the latest receipt to show landed (or blocked or stopped), then checks the merged commit.
+        $mhFinal = Join-Path $ctrlRoot 'm-harmless-final-receipt.json'
+        $landState = ''
+        if ($regatePassed) {
+            try { $landState = Wait-TaskLanded -Task $t0 -Token $controlToken -Path $mhFinal -Seconds $LandWaitSec }
+            catch { Write-Output "get_receipt: $($_.Exception.Message)" }
         }
+        $landedNow = [bool]($regatePassed -and $landState -eq 'landed' -and (Test-Path -LiteralPath $mhFinal))
+        if ($landedNow) {
+            $script:Evidence.lands['o-1'] = Get-LandCheck -ReceiptFile $mhFinal -What 'o-1'
+        }
+        $script:Evidence.controls['m-harmless-difference'] = @{ task = $t0; result = $mh; receipt_hash = $r3.receipt_hash; gate_state = $r3.gate_state; counts = $r3.counts; head = $r3.head; ruling_error = $rulingErr; rulings_ok = $rulingsOk; receipts_saved = $r3.receipts_saved; killed_at_wait = $ctlKilled; regate_passed = $regatePassed; final_receipt = $mhFinal; final_gate_state = $landState; landed = $landedNow; last_reply = $r3.last_reply; control_error = $r3.error }
+        Save-State
+        Add-Step -Name 'o-1 step 2: seeded harmless difference m-harmless-difference (control): rulings recorded through member HTTP, the re-gate passes and the gate lands o-1' -Actor 'control-seeded (control identity, not a model)' -Provider 'none' -Result $(if ($landedNow) { 'pass' } else { 'fail' }) -Evidence @{ task = $t0; receipt_hash = $r3.receipt_hash; gate_state = $r3.gate_state; final_gate_state = $landState; counts = $r3.counts; rulings_ok = $rulingsOk; killed_at_wait = $ctlKilled; land = $script:Evidence.lands['o-1']; result_file = $mh; final_receipt = $mhFinal }
+
+        # Worker A is not in this take: the o-1 land is m-harmless-difference's, and worker B builds
+        # and lands in o-8.
         $outcome = $(if ($landedNow) { 'o1_landed' } else { 'o1_not_landed' })
     }
 
@@ -729,7 +731,18 @@ try {
             $script:Evidence.workers['o-8-worker-b'] = @{ process = $wb; events = $wbEvents }
             Save-State
             $wbTypes = @($wbEvents | ForEach-Object { $_.type } | Select-Object -Unique)
-            Add-Step -Name 'o-8 step 4: worker B builds Retry-After (model)' -Actor 'worker-b (model worker)' -Provider "$($script:Routes.worker.provider) / $($script:Routes.worker.model)" -Result $(if ($wb.exited -and $wb.exit_code -eq 0 -and ($wbTypes -contains 'build_reported' -or $wbTypes -contains 'landed')) { 'pass' } else { 'fail' }) -Evidence @{ process = $wb; worker_finished = (Get-WorkerFinish -Name 'worker-b' -Tag 'o8'); event_types = $wbTypes; events = $wbEvents.Count; note = 'pass only when the worker exited with code 0 (its build was committed and reported) and a build was reported; a worker still running at the wait, or one that ended without a commit, is recorded as fail' }
+            $wbBuilt = [bool]($wb.exited -and $wb.exit_code -eq 0 -and ($wbTypes -contains 'build_reported' -or $wbTypes -contains 'landed'))
+            # A passing gate lands the candidate on its own; the take waits for the latest receipt.
+            $wbFinal = Join-Path $ctrlRoot 'o-8-final-receipt.json'
+            $wbState = ''
+            if ($wbBuilt) {
+                try { $wbState = Wait-TaskLanded -Task $lastTask -Token $controlToken -Path $wbFinal -Seconds $LandWaitSec }
+                catch { Write-Output "get_receipt: $($_.Exception.Message)" }
+            }
+            $wbLanded = [bool]($wbBuilt -and $wbState -eq 'landed' -and (Test-Path -LiteralPath $wbFinal))
+            if ($wbLanded) { $script:Evidence.lands['o-8'] = Get-LandCheck -ReceiptFile $wbFinal -What 'o-8' }
+            Save-State
+            Add-Step -Name 'o-8 step 4: worker B builds and lands Retry-After (model)' -Actor 'worker-b (model worker)' -Provider "$($script:Routes.worker.provider) / $($script:Routes.worker.model)" -Result $(if ($wbLanded) { 'pass' } else { 'fail' }) -Evidence @{ process = $wb; worker_finished = (Get-WorkerFinish -Name 'worker-b' -Tag 'o8'); event_types = $wbTypes; events = $wbEvents.Count; final_gate_state = $wbState; final_receipt = $wbFinal; land = $script:Evidence.lands['o-8']; note = 'pass only when the worker exited with code 0 (its build was committed and reported) and the latest receipt is landed with its merged commit equal to the protected head; a worker still running at the wait, or one that ended without a commit, is recorded as fail' }
         } else {
             Add-Step -Name 'o-8 step 4: worker B (skipped by -SkipWorkers)' -Actor 'worker-b (model worker)' -Provider 'none' -Result 'not_run' -Evidence @{ reason = '-SkipWorkers' }
         }
@@ -779,27 +792,19 @@ finally {
     }
 
     # Checks. Each one is computed from the evidence of this run, and is not_run until its evidence exists.
-    $wA = $script:Evidence.workers['o-1-worker-a']
     $wB = $script:Evidence.workers['o-8-worker-b']
-    $agentsClaimed = @()
-    foreach ($ev in @($wA, $wB)) {
-        if ($null -eq $ev) { continue }
-        foreach ($e in @($ev.events)) { if ($e.type -eq 'lease_granted') { $agentsClaimed += $e } }
-    }
-    $claimantIds = @($agentsClaimed | ForEach-Object { $_.task } | Select-Object -Unique)
-    # Part A is worker A landing o-1; the status below is the lease check for workers A and B.
-    $partA = if ($script:Evidence.lands.ContainsKey('o-1')) { [bool]$script:Evidence.lands['o-1'].equal } else { 'not_run' }
-    $c1 = if ($null -ne $wA -and $null -ne $wB) {
-        $aClaim = @($wA.events | Where-Object { $_.type -eq 'lease_granted' }).Count
-        $bClaim = @($wB.events | Where-Object { $_.type -eq 'lease_granted' }).Count
-        [ordered]@{ status = $(if ($aClaim -ge 1 -and $bClaim -ge 1) { 'pass' } else { 'fail' }); part_a_worker_a_lands_o1 = $partA; worker_a_lease_granted = $aClaim; worker_b_lease_granted = $bClaim; ids = @('worker-a', 'worker-b') }
-    } else { [ordered]@{ status = 'not_run'; part_a_worker_a_lands_o1 = $partA; reason = 'worker A and worker B have not both run in this take' } }
+    $landO1 = if ($script:Evidence.lands.ContainsKey('o-1')) { [bool]$script:Evidence.lands['o-1'].equal } else { 'not_run' }
+    $landO8 = if ($script:Evidence.lands.ContainsKey('o-8')) { [bool]$script:Evidence.lands['o-8'].equal } else { 'not_run' }
+    # Check 1: a model worker builds and lands an order. Worker B on o-8 is that worker in this take.
+    $c1 = if ($null -ne $wB) {
+        [ordered]@{ status = $(if ($landO8 -eq $true) { 'pass' } else { 'fail' }); worker_b_lands_o8 = $landO8; worker_b_lease_granted = @($wB.events | Where-Object { $_.type -eq 'lease_granted' }).Count }
+    } else { [ordered]@{ status = 'not_run'; worker_b_lands_o8 = $landO8; reason = 'worker B (o-8) has not run in this take; the o-8 draft-only stop does not run it' } }
     $m2 = $script:Evidence.controls['m-overfit']
     $c2 = if ($null -ne $m2) { [ordered]@{ status = $(if ($m2.ok) { 'pass' } else { 'fail' }); receipt_hash = $m2.receipt_hash; gate_state = $m2.gate_state; counts = $m2.counts; result_file = $m2.result } } else { [ordered]@{ status = 'not_run'; reason = 'm-overfit has not run' } }
     $rl = $script:Evidence.rulings['o-1']
     $mhEv = $script:Evidence.controls['m-harmless-difference']
-    # Check 3 is the rulings and the re-gate, not a land: the land is worker A's, in check 1 part A.
-    $c3 = if ($null -ne $rl -and $null -ne $mhEv) { [ordered]@{ status = $(if ($rl.count -ge 1 -and $mhEv.regate_passed) { 'pass' } else { 'fail' }); rulings = $rl.ids; regate_gate_state = $mhEv.gate_state; regate_passed = $mhEv.regate_passed } } else { [ordered]@{ status = 'not_run'; reason = 'no rulings recorded, or m-harmless-difference has not run' } }
+    # Check 3: the rulings recorded through member HTTP, and m-harmless-difference lands o-1 after them.
+    $c3 = if ($null -ne $rl -and $null -ne $mhEv) { [ordered]@{ status = $(if ($rl.count -ge 1 -and $mhEv.rulings_ok -and $mhEv.landed) { 'pass' } else { 'fail' }); rulings_recorded = $rl.count; rulings = $rl.ids; rulings_ok = $mhEv.rulings_ok; m_harmless_lands_o1 = $landO1; regate_gate_state = $mhEv.final_gate_state } } else { [ordered]@{ status = 'not_run'; reason = 'no rulings recorded, or m-harmless-difference has not run' } }
     $m8 = $script:Evidence.controls['m-ruling-violation']
     $c4 = if ($null -ne $m8) { [ordered]@{ status = $(if ($m8.ok) { 'pass' } else { 'fail' }); receipt_hash = $m8.receipt_hash; violates_ruling = $m8.violates_ruling; ruling_ids = $m8.ruling_ids } } else { [ordered]@{ status = 'not_run'; reason = 'm-ruling-violation has not run' } }
     $lands = @($script:Evidence.lands.Values)
@@ -807,9 +812,9 @@ finally {
     $c6 = [ordered]@{ status = 'not_run'; reason = 'a clean rerun is a second take folder; compare its summary classes with this one' }
     $c7 = [ordered]@{ status = $(if ($script:HumanSteps -gt 0 -and $script:MemberCalls -ge $script:HumanSteps) { 'partial' } else { 'not_run' }); human_steps = $script:HumanSteps; member_http_calls = $script:MemberCalls; note = 'every human step is a member HTTP call logged in steps; the take does not claim the rerun check' }
     $checks = [ordered]@{
-        '1_two_worker_identities'           = $c1
+        '1_model_worker_builds_and_lands'   = $c1
         '2_seeded_regression_bounced'       = $c2
-        '3_real_ruling_through_member_http' = $c3
+        '3_rulings_then_harmless_lands_o1'  = $c3
         '4_second_order_blocked_by_ruling'  = $c4
         '5_protected_head_equals_receipt'   = $c5
         '6_clean_rerun_same_classes'        = $c6
