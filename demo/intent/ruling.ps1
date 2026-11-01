@@ -75,6 +75,11 @@ function New-Predicate {
         'uuid'       { return [ordered]@{ predicate = 'matches_schema'; at = $at; schema = [ordered]@{ type = 'string'; format = 'uuid' } } }
         'status_429' { return [ordered]@{ predicate = 'status_in'; step_id = $Step; statuses = @(429) } }
         'present'    { return [ordered]@{ predicate = 'present'; at = $at } }
+        'absent'     { return [ordered]@{ predicate = 'absent'; at = $at } }
+        'equals'     {
+            if ($null -eq $Rule.PSObject.Properties['value']) { throw "rule $($Rule.id) is 'equals' but names no value" }
+            return [ordered]@{ predicate = 'equals'; at = $at; value = $Rule.value }
+        }
         default      { throw "rule $($Rule.id) names an unknown kind '$($Rule.rule)'" }
     }
 }

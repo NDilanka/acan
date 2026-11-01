@@ -11,6 +11,23 @@
       "rule": "uuid",
       "label": "x-request-id is an opaque random id, not identity",
       "reason": "The order does not mention a request id. A random UUID per response identifies the request and carries no user name, so it is accepted. A value that carries a user name is not accepted by this rule and is reported as violating it."
+    },
+    {
+      "id": "rl-429-body-error",
+      "field": "^body\\.error$",
+      "candidate": "present",
+      "rule": "equals",
+      "value": "too many requests",
+      "label": "an over-limit answer's body carries only the error",
+      "reason": "The o-1 scope already allows the 429 body change through its may items; the bounced m-overfit candidate's difference is the same allowed change. (D02Q)"
+    },
+    {
+      "id": "rl-429-body-fields-absent",
+      "field": "^body\\.(clicks|shortPath|createdAt|code|target)$",
+      "candidate": "missing",
+      "rule": "absent",
+      "label": "an over-limit answer's body carries only the error",
+      "reason": "The o-1 scope already allows the 429 body change through its may items; the bounced m-overfit candidate's difference is the same allowed change, and its 429 body drops the link fields. (D02Q)"
     }
   ]
 }

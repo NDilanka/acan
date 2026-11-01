@@ -326,13 +326,20 @@ function Save-TaskReceipt {
 function Wait-TaskLanded {
     # Polls the task's latest receipt, saving each read to Path, until it is landed, blocked or
     # stopped, or Seconds pass. A passing gate lands its candidate on its own, a moment after the
-    # receipt. Returns the last gate_state read. Errors from the read are left to the caller.
+    # receipt. The gate closes with the receipt's record, so a receipt that still reads prepared
+    # while the task is neither gating nor queued means the gate failed: the wait stops there
+    # instead of polling a prepared receipt until Seconds pass. Returns the last gate_state read.
+    # Errors from the reads are left to the caller.
     param([string]$Task, [string]$Token, [string]$Path, [int]$Seconds)
     $state = ''
     $end = (Get-Date).AddSeconds($Seconds)
     while ($true) {
         $state = Save-TaskReceipt -Task $Task -Token $Token -Path $Path
         if (@('landed', 'blocked', 'stopped') -contains $state) { break }
+        $view = Get-TaskView -Task $Task -Token $Token
+        if ([string]$view.state -eq 'landed') { $state = 'landed'; break }
+        $gateOpen = ([string]$view.state -eq 'queued') -or ([string]$view.stage -eq 'gating')
+        if (-not $gateOpen) { break }
         if ((Get-Date) -gt $end) { break }
         Start-Sleep -Seconds 5
     }
@@ -702,12 +709,13 @@ try {
         $mh = Join-Path $ctrlRoot 'm-harmless-difference.json'
         $done = Join-Path $ctrlRoot 'rulings-done.flag'
         $rulingsOut = Join-Path $ctrlRoot 'rulings-o-1.json'
+        $moRulingsOut = Join-Path $ctrlRoot 'rulings-o-1-moverfit.json'
         if (Test-Path -LiteralPath $done) { Remove-Item -LiteralPath $done }
         # An earlier attempt's receipt, result or rulings are not this control's. They move aside, so the
         # ruling step waits for this control's own receipt; an old receipt would be ruled on as if new.
         $mhFinalPath = Join-Path $ctrlRoot 'm-harmless-final-receipt.json'
         $staleStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-        foreach ($stale in @($mh, "$mh.receipt.json", $mhFinalPath, $rulingsOut)) {
+        foreach ($stale in @($mh, "$mh.receipt.json", $mhFinalPath, $rulingsOut, $moRulingsOut)) {
             if (Test-Path -LiteralPath $stale) { Move-Item -LiteralPath $stale -Destination "$stale.prev-$staleStamp" }
         }
         $ctlArgs = "-NoProfile -File `"$(Join-Path $intentDir 'control.ps1')`" -Server $script:Base -Token $controlToken -Repo `"$script:Repo`" -Task $t0 -Bundle `"$(Join-Path $intentDir 'controls\m-harmless-difference.json')`" -Out `"$mh`" -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -AwaitRuling -RulingWaitSec $RulingWaitSec -RulingsDone `"$done`""
@@ -725,9 +733,17 @@ try {
             try {
                 & (Join-Path $intentDir 'ruling.ps1') -Server $script:Base -OwnerToken $script:OwnerToken -Order $Order -OrderId $oid `
                     -ReceiptFile "$mh.receipt.json" -RulesFile $RulesFile -Out $rulingsOut
+                # The seeded regression's receipt has out-of-scope episodes of its own (its 429
+                # body carries only the error). They are ruled in the same take, before the flag
+                # lets the harmless control re-report, so the re-gate is not blocked by the
+                # earlier candidate's episodes (D02Q).
+                & (Join-Path $intentDir 'ruling.ps1') -Server $script:Base -OwnerToken $script:OwnerToken -Order $Order -OrderId $oid `
+                    -ReceiptFile "$mo.receipt.json" -RulesFile $RulesFile -Out $moRulingsOut
                 $rl = Get-Content -LiteralPath $rulingsOut -Raw | ConvertFrom-Json
-                $script:Evidence.rulings[$Order] = @{ log = $rulingsOut; count = @($rl.rulings).Count; ids = @($rl.rulings | ForEach-Object { $_.ruling_id }) }
-                Add-Step -Name 'o-1 rulings: the owner rules on the out-of-scope episodes (record_ruling, member HTTP)' -Actor 'owner (member HTTP; rules file applied by ruling.ps1)' -Provider 'none' -Result 'pass' -Evidence @{ rulings = @($rl.rulings | ForEach-Object { [ordered]@{ ruling_id = $_.ruling_id; episode_id = $_.episode_id; fields = $_.fields; result = $_.result; ledger_seq = $_.ledger_seq } }); log = $rulingsOut } -Human
+                $rlMo = Get-Content -LiteralPath $moRulingsOut -Raw | ConvertFrom-Json
+                $allRulings = @($rl.rulings) + @($rlMo.rulings)
+                $script:Evidence.rulings[$Order] = @{ log = $rulingsOut; log_moverfit = $moRulingsOut; count = $allRulings.Count; ids = @($allRulings | ForEach-Object { $_.ruling_id }) }
+                Add-Step -Name 'o-1 rulings: the owner rules on the out-of-scope episodes of both control receipts (record_ruling, member HTTP)' -Actor 'owner (member HTTP; rules file applied by ruling.ps1)' -Provider 'none' -Result 'pass' -Evidence @{ rulings = @($allRulings | ForEach-Object { [ordered]@{ ruling_id = $_.ruling_id; episode_id = $_.episode_id; fields = $_.fields; result = $_.result; ledger_seq = $_.ledger_seq } }); log = $rulingsOut; log_moverfit = $moRulingsOut } -Human
                 Save-State
             } catch {
                 $rulingErr = $_.Exception.Message
@@ -748,7 +764,7 @@ try {
             Write-Output "control m-harmless-difference was killed at its wait; its result so far is $mh"
         }
         $r3 = Read-ControlResult -Path $mh
-        $rulingsOk = ($null -eq $rulingErr) -and (Test-Path -LiteralPath $rulingsOut)
+        $rulingsOk = ($null -eq $rulingErr) -and (Test-Path -LiteralPath $rulingsOut) -and (Test-Path -LiteralPath $moRulingsOut)
         # The re-gate passes when the receipt after the rulings is not blocked: prepared when every
         # item passes. A control that was killed at its wait does not pass.
         $regatePassed = ($null -ne $r3) -and (-not $ctlKilled) -and $rulingsOk -and (@('prepared', 'landed') -contains [string]$r3.gate_state)
