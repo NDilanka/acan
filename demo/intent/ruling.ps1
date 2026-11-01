@@ -20,6 +20,10 @@ the examples at record time (acan-core ruling.rs decide_record; acan-intent pred
 is not on that path). The gate evaluates each ruling on every probe its selector reaches: a failing
 probe becomes violates_ruling, and a probe the predicate cannot judge leaves the ruling unheld.
 
+One ruling per (episode, step), not per probe: the origin takes the probes from the selector, and the
+predicate names one step. A ruling already in the ledger with the same content is skipped, so the
+script can run again after a resume; a ruling in the ledger with other content stops the script.
+
 The script never decides a verdict itself: it turns the rules into predicates and sends them. The
 owner token is read from the argument and never printed. With -PlanOnly the script only reads the
 receipt and the rules and prints the rulings it would send; it sends nothing.
@@ -134,11 +138,37 @@ if ($PlanOnly) {
     return
 }
 
+# The ledger's rulings, read once. A ruling id is derived from its episode and step, so a resumed
+# run plans the same id again. A ruling already in the ledger with the same content is skipped and
+# logged as already_recorded; the same id with other content stops the script, because a changed
+# ruling must supersede its head and this script does not do that.
+$ledgerRulings = @{}
+foreach ($row in @(Invoke-RestMethod -Uri "$base/api/events" -Headers $headers -TimeoutSec 60)) {
+    $ev = $row.event
+    if ($null -ne $ev -and [string]$ev.type -eq 'ruling_recorded') {
+        $ledgerRulings[[string]$ev.event.ruling_id] = [pscustomobject]@{ seq = [uint64]$row.seq; decision = $ev.event }
+    }
+}
+
 $failure = $null
 try {
     foreach ($plan in $plans) {
         $episode = $plan.episode
         $step = $plan.step
+        if ($ledgerRulings.ContainsKey($plan.ruling)) {
+            $old = $ledgerRulings[$plan.ruling]
+            $oldDecision = $old.decision
+            $sameContent = ([string]$oldDecision.episode_id -eq $episode) `
+                -and ([string]$oldDecision.selector.step_context.step_id -eq $step) `
+                -and ((ConvertTo-Json -Depth 60 -Compress $oldDecision.predicate_ast) -eq (ConvertTo-Json -Depth 60 -Compress $plan.predicate)) `
+                -and ([string]$oldDecision.label -eq [string]$plan.label)
+            if (-not $sameContent) {
+                throw "ruling $($plan.ruling) for $episode step $step is in the ledger (seq $($old.seq)) with other content; a changed ruling must supersede its head, which this script does not do"
+            }
+            $log.Add([ordered]@{ ruling_id = $plan.ruling; episode_id = $episode; step_id = $step; fields = $plan.fields; label = $plan.label; result = 'already_recorded'; ledger_seq = $old.seq })
+            Write-Output "[already recorded] $($plan.ruling) $episode $step (ledger seq $($old.seq))"
+            continue
+        }
         # The draft is read again for every ruling: each ruling moves the ledger head.
         $draft = Invoke-RestMethod -Uri "$base/api/orders/$OrderId/episodes/$([uri]::EscapeDataString($episode))/ruling-draft" -Headers $headers -TimeoutSec 60
         $accepts = [System.Collections.Generic.List[string]]::new()

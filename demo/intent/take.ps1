@@ -72,6 +72,10 @@ param(
     # How long the take waits for a passing gate's land to show in the latest receipt (the gate lands
     # a passing candidate on its own), for m-harmless-difference in o-1 and for worker B in o-8.
     [int]$LandWaitSec = 900,
+    # How long a control waits for its task to be open (unclaimed, not gating) before it claims. A
+    # gating run holds its task until it closes or is released, so the take fails after this wait
+    # and names the state; it does not release another run's claim.
+    [int]$ClaimWaitSec = 600,
     [switch]$DraftOnly,
     [string]$ResumeRun = '',
     [switch]$SkipWorkers
@@ -333,6 +337,32 @@ function Wait-TaskLanded {
         Start-Sleep -Seconds 5
     }
     $state
+}
+
+function Get-TaskView {
+    # The task's view as the origin answers get_task over MCP, for the control identity.
+    param([string]$Task, [string]$Token)
+    $body = ConvertTo-Json -Depth 20 -Compress @{ jsonrpc = '2.0'; id = 1; method = 'tools/call'; params = @{ name = 'get_task'; arguments = @{ task = $Task } } }
+    $resp = Invoke-RestMethod -Method Post -Uri "$($script:Base.TrimEnd('/'))/mcp" -Headers @{ Authorization = "Bearer $Token" } -ContentType 'application/json' -Body $body -TimeoutSec 120
+    if ($resp.error) { throw "get_task refused: $($resp.error.message)" }
+    $text = [string]$resp.result.content[0].text
+    if ($resp.result.isError) { throw "get_task refused: $text" }
+    $text | ConvertFrom-Json
+}
+
+function Wait-TaskClaimable {
+    # Returns the task's view once its state is open, so the next control can claim it. Polls
+    # until Seconds pass; then throws, naming the state the task is still in.
+    param([string]$Task, [string]$Token, [int]$Seconds)
+    $end = (Get-Date).AddSeconds($Seconds)
+    while ($true) {
+        $view = Get-TaskView -Task $Task -Token $Token
+        if ([string]$view.state -eq 'open') { return $view }
+        if ((Get-Date) -gt $end) {
+            throw "task $Task is $($view.state) (stage $($view.stage), generation $($view.generation)) after $Seconds s; a control cannot claim it. The take does not release another claim"
+        }
+        Start-Sleep -Seconds 5
+    }
 }
 
 function Get-AgentEvents {
@@ -639,6 +669,13 @@ try {
     if ($Order -eq 'o-1') {
         $t0 = $tasks[0]
         # ---- step 1: seeded regression m-overfit, control ----------------------------------------
+        try {
+            $view0 = Wait-TaskClaimable -Task $t0 -Token $controlToken -Seconds $ClaimWaitSec
+            Add-Step -Name 'o-1: task t-0 is open for the m-overfit claim' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ task = $t0; state = [string]$view0.state; generation = $view0.generation }
+        } catch {
+            Add-Step -Name 'o-1: task t-0 is open for the m-overfit claim' -Actor 'script' -Provider 'none' -Result 'fail' -Evidence @{ task = $t0; error = $_.Exception.Message }
+            throw
+        }
         $mo = Join-Path $ctrlRoot 'm-overfit.json'
         & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $controlToken -Repo $script:Repo -Task $t0 `
             -Bundle (Join-Path $intentDir 'controls\m-overfit.json') -Out $mo -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec
@@ -650,6 +687,13 @@ try {
         Add-Step -Name 'o-1 step 1: seeded regression m-overfit (control, not a model)' -Actor 'control-seeded (control identity, not a model)' -Provider 'none' -Result $(if ($r2Ok) { 'pass' } else { 'fail' }) -Evidence @{ task = $t0; receipt_hash = $r2.receipt_hash; gate_state = $r2.gate_state; counts = $r2.counts; result_file = $mo }
 
         # ---- step 2: seeded harmless difference m-harmless-difference, rulings, re-gate ----------
+        try {
+            $view1 = Wait-TaskClaimable -Task $t0 -Token $controlToken -Seconds $ClaimWaitSec
+            Add-Step -Name 'o-1: task t-0 is open for the m-harmless claim' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ task = $t0; state = [string]$view1.state; generation = $view1.generation }
+        } catch {
+            Add-Step -Name 'o-1: task t-0 is open for the m-harmless claim' -Actor 'script' -Provider 'none' -Result 'fail' -Evidence @{ task = $t0; error = $_.Exception.Message }
+            throw
+        }
         $mh = Join-Path $ctrlRoot 'm-harmless-difference.json'
         $done = Join-Path $ctrlRoot 'rulings-done.flag'
         $rulingsOut = Join-Path $ctrlRoot 'rulings-o-1.json'
@@ -698,7 +742,9 @@ try {
         # for the latest receipt to show landed (or blocked or stopped), then checks the merged commit.
         $mhFinal = Join-Path $ctrlRoot 'm-harmless-final-receipt.json'
         $landState = ''
-        if ($regatePassed) {
+        # Saved whenever the control was not killed, so a blocked re-gate leaves its receipt too.
+        # A blocked receipt returns at once; a passing one waits for the land.
+        if (-not $ctlKilled) {
             try { $landState = Wait-TaskLanded -Task $t0 -Token $controlToken -Path $mhFinal -Seconds $LandWaitSec }
             catch { Write-Output "get_receipt: $($_.Exception.Message)" }
         }
