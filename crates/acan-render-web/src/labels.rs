@@ -31,10 +31,10 @@ pub const CHAR_CSS_PX: f32 = 6.5;
 /// label's offset and line height in `index.html`.
 pub const LABEL_DROP_CSS_PX: f32 = 13.0;
 /// The size of the screen rectangle the fixed usage panel covers at rest, in CSS pixels: width
-/// and height. The panel now holds the meta attribution table, its legend and its note, so these
-/// are estimates from that content, not measurements in a browser. The panel grows with the
-/// rows, so the pad is generous.
-pub const USAGE_PANEL_CSS: [f32; 2] = [480.0, 210.0];
+/// and height. Measured in headless Chrome at 1440 by 900 on the usage fixture: the panel spans
+/// 577 by 191 pixels, padded right and up. Holding Alt grows the panel to about 630 by 292, which
+/// this room does not cover.
+pub const USAGE_PANEL_CSS: [f32; 2] = [600.0, 220.0];
 /// The label's bottom edge sits this many `LABEL_DROP_CSS_PX` below the plate's front edge.
 const LABEL_BOTTOM_DROPS: f32 = 1.6;
 /// Below the size to name, this many of the largest machines are still named, down to
