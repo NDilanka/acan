@@ -172,8 +172,9 @@ pub(crate) fn inert(html: &str) -> String {
     neutral.push_str(&html[from..]);
     // The body is already decoded to a UTF-8 String, so every page is declared UTF-8.
     let head = format!("{CHARSET}{POLICY}");
-    // A doctype must stay first, or the page renders in quirks mode.
-    let lead = neutral.len() - neutral.trim_start().len();
+    // A doctype must stay first, or the page renders in quirks mode. Only HTML's own spaces may
+    // precede it: any other character starts the body, so the policy must come before it.
+    let lead = neutral.len() - neutral.trim_start_matches(is_html_space).len();
     let doctype = neutral[lead..]
         .get(..9)
         .is_some_and(|start| start.eq_ignore_ascii_case("<!doctype"));
@@ -199,14 +200,19 @@ fn is_utf8_declaration(tag: &str) -> bool {
     })
 }
 
+/// The spaces HTML's tokenizer skips. Unicode spaces such as U+00A0 are not among them.
+fn is_html_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c')
+}
+
 /// Whether `tag` names a charset, and every charset it names is utf-8.
 fn names_only_utf8(tag: &str) -> bool {
     let mut named = false;
     for (at, _) in tag.match_indices("charset") {
         let value = tag[at + "charset".len()..]
-            .trim_start()
+            .trim_start_matches(is_html_space)
             .strip_prefix('=')
-            .map(str::trim_start)
+            .map(|value| value.trim_start_matches(is_html_space))
             .map(|value| value.strip_prefix(['"', '\'']).unwrap_or(value));
         let Some(rest) = value.and_then(|value| value.strip_prefix("utf-8")) else {
             return false;
@@ -475,6 +481,26 @@ mod tests {
                 "{tag}: {page}"
             );
         }
+    }
+
+    #[test]
+    fn a_unicode_space_before_the_doctype_keeps_the_policy_in_the_head() {
+        assert_eq!(
+            inert("\u{a0}<!doctype html><p>x</p>"),
+            format!("{CHARSET}{POLICY}\u{a0}<!doctype html><p>x</p>")
+        );
+        assert_eq!(
+            inert("<!doctype html><meta charset=\u{a0}utf-8><p>x</p>"),
+            format!("<!doctype html>{CHARSET}{POLICY}<x-inert-meta charset=\u{a0}utf-8><p>x</p>")
+        );
+    }
+
+    #[test]
+    fn html_spaces_before_the_doctype_keep_it_first() {
+        assert_eq!(
+            inert("\n\t<!doctype html><p>x</p>"),
+            format!("\n\t<!doctype html>{CHARSET}{POLICY}<p>x</p>")
+        );
     }
 
     #[test]
