@@ -28,6 +28,9 @@ param(
     [int]$RulingWaitSec = 1200,
     # A file the take writes once the rulings are recorded; the control then asks for a fresh receipt.
     [string]$RulingsDone = '',
+    # The first control on an order. When its claim ends before the build is cleared, it claims and
+    # declares again once (see the wait for build clearance below).
+    [switch]$RedeclareOnce,
     [string]$Pin = 'f91962156841332d5753d869554839f7c4cdea79'
 )
 
@@ -121,6 +124,32 @@ function Write-Result {
     Save-Result
 }
 
+# One control pass: read back at the confirmed scope, claim the task, declare the bundle's files.
+# It sets the claim and its generation for the rest of the run, and every step is a step of the
+# result file. $sc, $preds and $readSummary are set before the first call.
+function Invoke-ReadbackClaimDeclare {
+    param([string]$Suffix = '')
+    $rb = Call-Tool -Name 'post_scoped_readback' -Arguments @{
+        version     = 'acan-mcp/1'
+        task        = $Task
+        scope_rev   = $sc.value.scope.rev
+        scope_hash  = $sc.value.scope_hash
+        summary     = $readSummary
+        predictions = @($preds)
+    }
+    Add-Step -Name "control reads back the task at the confirmed scope$Suffix" -Ok $rb.ok -Evidence @{ refused = $(if ($rb.ok) { $null } else { $rb.text }) }
+    if (-not $rb.ok) { throw "readback refused$Suffix" }
+    $cl = Call-Tool -Name 'claim_task' -Arguments @{ task = $Task }
+    Add-Step -Name "control claims the task$Suffix" -Ok $cl.ok -Evidence @{ refused = $(if ($cl.ok) { $null } else { $cl.text }); generation = $cl.value.generation }
+    if (-not $cl.ok) { throw "claim refused$Suffix" }
+    $script:claimed = $true
+    $script:generation = [uint64]$cl.value.generation
+    $result['generation'] = $script:generation
+    $dc = Call-Tool -Name 'declare_changes' -Arguments @{ task = $Task; generation = $script:generation; files = @($bundleObj.declared_files) }
+    Add-Step -Name "control declares the files of its bundle$Suffix" -Ok $dc.ok -Evidence @{ files = @($bundleObj.declared_files); refused = $(if ($dc.ok) { $null } else { $dc.text }) }
+    if (-not $dc.ok) { throw "declare refused$Suffix" }
+}
+
 $bundleObj = Get-Content -LiteralPath $Bundle -Raw | ConvertFrom-Json
 $result['control'] = [string]$bundleObj.id
 $result['applies_to'] = [string]$bundleObj.applies_to
@@ -142,30 +171,18 @@ try {
     foreach ($rule in @($body.must_keep)) { $preds += @{ selector = $rule.selector; predicted = @{ kind = 'unchanged' } } }
     Add-Step -Name 'get the confirmed scope' -Ok $true -Evidence @{ scope_rev = $sc.value.scope.rev; scope_hash = [string]$sc.value.scope_hash; predictions = $preds.Count }
     $readSummary = if ($Summary) { $Summary } else { "control $($bundleObj.id): seeded bundle, not a model plan" }
-    $rb = Call-Tool -Name 'post_scoped_readback' -Arguments @{
-        version    = 'acan-mcp/1'
-        task       = $Task
-        scope_rev  = $sc.value.scope.rev
-        scope_hash = $sc.value.scope_hash
-        summary    = $readSummary
-        predictions = @($preds)
-    }
-    Add-Step -Name 'control reads back the task at the confirmed scope' -Ok $rb.ok -Evidence @{ refused = $(if ($rb.ok) { $null } else { $rb.text }) }
-    if (-not $rb.ok) { throw 'readback refused' }
 
-    # ---- claim and declare ----------------------------------------------------------------------
-    $cl = Call-Tool -Name 'claim_task' -Arguments @{ task = $Task }
-    Add-Step -Name 'control claims the task' -Ok $cl.ok -Evidence @{ refused = $(if ($cl.ok) { $null } else { $cl.text }); generation = $cl.value.generation }
-    if (-not $cl.ok) { throw 'claim refused' }
-    $claimed = $true
-    $generation = [uint64]$cl.value.generation
-    $result['generation'] = $generation
-    $dc = Call-Tool -Name 'declare_changes' -Arguments @{ task = $Task; generation = $generation; files = @($bundleObj.declared_files) }
-    Add-Step -Name 'control declares the files of its bundle' -Ok $dc.ok -Evidence @{ files = @($bundleObj.declared_files); refused = $(if ($dc.ok) { $null } else { $dc.text }) }
-    if (-not $dc.ok) { throw 'declare refused' }
+    # ---- read back, claim and declare -----------------------------------------------------------
+    Invoke-ReadbackClaimDeclare
 
     # ---- wait for build clearance ----------------------------------------------------------------
+    # A declared task waits for its order's declare barrier. The barrier holds while the order's
+    # siblings have not declared, and the task's lease runs out meanwhile; the barrier then lapses
+    # for the whole order. With -RedeclareOnce, a claim that ends before the build is cleared is
+    # claimed and declared again, once: the lapsed barrier clears it at its next declaration. A
+    # second loss, or a loss without the switch, ends the run.
     $cleared = $false
+    $redeclared = $false
     $stageEnd = (Get-Date).AddSeconds($StageWaitSec)
     $lastStage = ''
     while ($true) {
@@ -175,12 +192,22 @@ try {
         $state = [string]$tk.value.state
         $holds = ($tk.value.you_hold -eq $true) -and ([uint64]$tk.value.generation -eq $generation)
         if ($stage -ne $lastStage) { $lastStage = $stage; Write-Output "task stage: $stage" }
-        if ($state -ne 'claimed' -or -not $holds) { throw "task is $state at generation $($tk.value.generation); the control holds $generation" }
+        if ($state -ne 'claimed' -or -not $holds) {
+            if ($RedeclareOnce -and -not $redeclared -and $state -eq 'open') {
+                $redeclared = $true
+                Write-Output "the claim ended before the build was cleared; claiming and declaring again, once"
+                Invoke-ReadbackClaimDeclare -Suffix ' (again: the first claim ended before the build was cleared)'
+                $stageEnd = (Get-Date).AddSeconds($StageWaitSec)
+                $lastStage = ''
+                continue
+            }
+            throw "task is $state at generation $($tk.value.generation); the control holds $generation"
+        }
         if ($stage -eq 'building') { $cleared = $true; break }
         if ((Get-Date) -gt $stageEnd) { break }
         Start-Sleep -Seconds 2
     }
-    Add-Step -Name 'origin clears the task to build' -Ok $cleared -Evidence @{ stage = $lastStage }
+    Add-Step -Name 'origin clears the task to build' -Ok $cleared -Evidence @{ stage = $lastStage; redeclared = $redeclared }
     if (-not $cleared) { throw "build clearance did not arrive within $StageWaitSec s" }
 
     # ---- write the bundle into the worktree and commit ---------------------------------------

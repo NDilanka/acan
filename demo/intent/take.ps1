@@ -677,14 +677,19 @@ try {
             throw
         }
         $mo = Join-Path $ctrlRoot 'm-overfit.json'
+        # The first control on the order: if its claim ends before the build is cleared (its lease ran
+        # out while the order's declare barrier held), it claims and declares again once.
         & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $controlToken -Repo $script:Repo -Task $t0 `
-            -Bundle (Join-Path $intentDir 'controls\m-overfit.json') -Out $mo -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec
+            -Bundle (Join-Path $intentDir 'controls\m-overfit.json') -Out $mo -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -RedeclareOnce
         $r2 = Read-ControlResult -Path $mo
         $r2Obl = @($r2.items | Where-Object { $_.class -eq 'obligation_failed' }).Count
         $r2Ok = ($r2.gate_state -eq 'blocked' -and $r2Obl -ge 1)
         $script:Evidence.controls['m-overfit'] = @{ task = $t0; result = $mo; receipt_hash = $r2.receipt_hash; gate_state = $r2.gate_state; counts = $r2.counts; head = $r2.head; ok = $r2Ok }
         Save-State
         Add-Step -Name 'o-1 step 1: seeded regression m-overfit (control, not a model)' -Actor 'control-seeded (control identity, not a model)' -Provider 'none' -Result $(if ($r2Ok) { 'pass' } else { 'fail' }) -Evidence @{ task = $t0; receipt_hash = $r2.receipt_hash; gate_state = $r2.gate_state; counts = $r2.counts; result_file = $mo }
+        # The seeded regression must be blocked with an obligation_failed item. If it is not, the gate
+        # has not caught the regression, so the take stops before the harmless difference and its land.
+        if (-not $r2Ok) { throw "m-overfit was not blocked with an obligation_failed item (gate_state '$($r2.gate_state)', obligation_failed $r2Obl, control error '$($r2.error)'); o-1 stops before m-harmless-difference" }
 
         # ---- step 2: seeded harmless difference m-harmless-difference, rulings, re-gate ----------
         try {
