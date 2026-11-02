@@ -387,7 +387,12 @@ async fn a_routed_director_answers_on_its_own_provider() {
         .expect("the director answers on its own route");
 
     assert_eq!(out.call.provider, "baseten");
-    assert!(meta.received_requests().await.unwrap_or_default().is_empty());
+    assert!(
+        meta.received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

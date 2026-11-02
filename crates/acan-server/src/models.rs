@@ -193,3 +193,18 @@ impl ModelClient for Models {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use acan_llm::Role;
+
+    use super::answers_offline;
+
+    #[test]
+    fn a_director_or_foreman_call_is_never_answered_offline() {
+        assert!(!answers_offline(Role::Director));
+        assert!(!answers_offline(Role::Foreman));
+        assert!(answers_offline(Role::Fast));
+        assert!(answers_offline(Role::Worker));
+    }
+}
