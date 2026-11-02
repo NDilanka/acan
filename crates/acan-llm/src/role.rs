@@ -22,6 +22,26 @@ pub enum Role {
 }
 
 impl Role {
+    /// Every role, in the order the setup page lists them.
+    pub const ALL: [Self; 5] = [
+        Self::Foreman,
+        Self::Worker,
+        Self::Fast,
+        Self::Vision,
+        Self::Director,
+    ];
+
+    /// Whether the role needs a Meta model. Such a role is off without a Meta key, and no other
+    /// provider stands in for it. Vision and the director need Meta. The other roles run on any
+    /// provider.
+    #[must_use]
+    pub fn needs_meta(self) -> bool {
+        match self {
+            Self::Foreman | Self::Worker | Self::Fast => false,
+            Self::Vision | Self::Director => true,
+        }
+    }
+
     /// The name used in config files, CLI flags, and reports.
     pub fn as_str(self) -> &'static str {
         match self {

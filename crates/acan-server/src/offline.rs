@@ -32,7 +32,9 @@ impl Offline {
         Self { ledger }
     }
 
-    /// The ledger every answered call is recorded in.
+    /// The ledger every answered call is recorded in. Only the tests read it, since the server
+    /// reads the ledger it shares with the live client.
+    #[cfg(test)]
     #[must_use]
     pub fn ledger(&self) -> &UsageLedger {
         &self.ledger

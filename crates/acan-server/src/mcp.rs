@@ -643,6 +643,8 @@ fn api_message(err: ApiError) -> String {
         ApiError::Unauthorized => "unauthorized".to_owned(),
         ApiError::Forbidden(why) => why.to_owned(),
         ApiError::NotFound(what) => format!("no such {what}"),
+        ApiError::BadRequest(what) => format!("bad request: {what}"),
+        ApiError::Conflict(why) => format!("conflict: {why}"),
         ApiError::Rejected(rejection) => rejection.to_string(),
         ApiError::Refused(err) => serde_json::to_string(&err)
             .unwrap_or_else(|_| "the refusal did not serialize".to_owned()),

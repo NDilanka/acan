@@ -43,6 +43,9 @@ mod receipt;
 )]
 mod receipt_cli;
 mod redact;
+pub mod release;
+pub mod replay;
+mod setup;
 mod store;
 mod stream;
 mod tour;

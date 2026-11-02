@@ -25,7 +25,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -38,19 +38,28 @@ use crate::jobs;
 use crate::mcp;
 use crate::plant_view;
 use crate::public::{self, PublicRoot};
+use crate::release::{self, BugReport, UpdateStatus, VersionInfo};
 use crate::vision::{self, Side, VisionWitness};
-use crate::{STATE_DIR, redact, stream};
+use crate::{STATE_DIR, redact, setup, stream};
 
 /// Builds the router. The public files are served for every path the API does not claim.
 pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<PublicRoot>) -> Router {
     let router = Router::new()
         .route("/health", get(health))
+        .route("/version", get(version))
         .route("/mcp", post(mcp::post::<C>))
         .route("/api/commands", post(post_command::<C>))
         .route("/api/events", get(get_events::<C>))
         .route("/api/plant", get(get_plant::<C>))
         .route("/api/scan", post(post_scan::<C>))
         .route("/api/usage", get(get_usage::<C>))
+        .route("/api/update", get(get_update::<C>))
+        .route("/api/bug-report", get(get_bug_report::<C>))
+        .route("/setup", get(setup::page))
+        .route("/api/setup", get(setup::get_status::<C>))
+        .route("/api/setup/keys", post(setup::post_key::<C>))
+        .route("/api/setup/keys/{provider}", delete(setup::delete_key::<C>))
+        .route("/api/setup/roles/{role}", put(setup::put_role::<C>))
         .route("/api/stream", get(stream::upgrade::<C>))
         .route("/api/tasks/{task}/worktree", get(get_worktree::<C>))
         .route("/api/tasks/{task}/scope", get(get_scope::<C>))
@@ -94,6 +103,10 @@ pub enum ApiError {
     Forbidden(&'static str),
     /// The route names something the world does not have.
     NotFound(&'static str),
+    /// The request is malformed. The name says what it lacks, never what it sent.
+    BadRequest(&'static str),
+    /// The request is valid, but the server's state does not allow it. The name says why.
+    Conflict(&'static str),
     /// The origin refused the command. The body is the [`Rejection`].
     Rejected(Rejection),
     /// The scope-first lane refused the call with a closed code. The body is the [`McpError`].
@@ -118,6 +131,16 @@ impl IntoResponse for ApiError {
             Self::NotFound(what) => (
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "not_found", "what": what })),
+            )
+                .into_response(),
+            Self::BadRequest(what) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "bad_request", "what": what })),
+            )
+                .into_response(),
+            Self::Conflict(why) => (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "conflict", "what": why })),
             )
                 .into_response(),
             Self::Rejected(rejection) => (StatusCode::CONFLICT, Json(rejection)).into_response(),
@@ -194,7 +217,10 @@ pub(crate) fn authenticate<C: ModelClient>(
         .ok_or(ApiError::Unauthorized)
 }
 
-fn member<C: ModelClient>(host: &Host<C>, headers: &HeaderMap) -> Result<MemberId, ApiError> {
+pub(crate) fn member<C: ModelClient>(
+    host: &Host<C>,
+    headers: &HeaderMap,
+) -> Result<MemberId, ApiError> {
     match authenticate(host, bearer(headers))? {
         Principal::Member(member) => Ok(member),
         Principal::Agent(_) => Err(ApiError::Forbidden("only members may do this over HTTP")),
@@ -203,6 +229,12 @@ fn member<C: ModelClient>(host: &Host<C>, headers: &HeaderMap) -> Result<MemberI
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// The build's identity. Public, since it holds nothing private and the app shows it before anyone
+/// has signed in.
+async fn version() -> Json<VersionInfo> {
+    Json(release::version_info())
 }
 
 /// Every human command. The scope-first human commands arrive here too, as bodies: ReviseScope,
@@ -264,6 +296,25 @@ async fn get_usage<C: ModelClient + 'static>(
 ) -> Result<Json<Vec<UsageTotals>>, ApiError> {
     authenticate(&host, bearer(&headers))?;
     Ok(Json(host.ledger().snapshot()))
+}
+
+/// The update check's status. Any principal may read it.
+async fn get_update<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+) -> Result<Json<UpdateStatus>, ApiError> {
+    authenticate(&host, bearer(&headers))?;
+    Ok(Json(release::update_status()))
+}
+
+/// The bug report: a pre-filled issue link, and its full text. Members only, since the person
+/// using the app is the one who files it.
+async fn get_bug_report<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+) -> Result<Json<BugReport>, ApiError> {
+    member(&host, &headers)?;
+    Ok(Json(release::bug_report()))
 }
 
 /// Where a claimed task's worktree is, the branch it is on, and the protected-head snapshot its

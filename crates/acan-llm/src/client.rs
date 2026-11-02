@@ -6,6 +6,7 @@ use serde::de::DeserializeOwned;
 use crate::chat::{ChatRequest, ChatResponse, JsonSchemaFormat};
 use crate::error::LlmError;
 use crate::role::Role;
+use crate::setup::{KeyOutcome, KeyStatus, SetupError};
 use crate::trace::Traced;
 use crate::usage::CallRecord;
 
@@ -78,6 +79,47 @@ pub trait ModelClient: Send + Sync {
             let response = self.chat(role, with_schema::<T>(request)).await?;
             parse_structured(response, cap, str::to_owned)
         }
+    }
+
+    /// The providers, keys and role picks in use for model calls. A client with no setup of its
+    /// own reports none. It never reports a key itself.
+    fn key_status(&self) -> KeyStatus {
+        KeyStatus::default()
+    }
+
+    /// Checks `key` with `provider` and saves it, so calls use it from then on. Only a client
+    /// that keeps its keys in a keys file takes one; this default refuses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`save_checked`](crate::save_checked), or
+    /// [`SetupError::Unavailable`] when this client does not take saved keys.
+    fn save_key(
+        &self,
+        _provider: &str,
+        _key: &str,
+    ) -> impl Future<Output = Result<KeyOutcome, SetupError>> + Send {
+        async { Err(SetupError::Unavailable) }
+    }
+
+    /// Removes the saved key for `provider`, and any role pick that named it. Returns whether a
+    /// key was removed. This default refuses, as [`ModelClient::save_key`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetupError::Unavailable`] when this client does not take saved keys.
+    fn remove_key(&self, _provider: &str) -> Result<bool, SetupError> {
+        Err(SetupError::Unavailable)
+    }
+
+    /// Picks `provider` for `role`, or clears the pick when `provider` is `None`. This default
+    /// refuses, as [`ModelClient::save_key`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetupError::Unavailable`] when this client does not take saved keys.
+    fn set_role(&self, _role: Role, _provider: Option<&str>) -> Result<(), SetupError> {
+        Err(SetupError::Unavailable)
     }
 
     /// Runs [`ModelClient::chat`] and also returns the provider's trace fields. A client that
