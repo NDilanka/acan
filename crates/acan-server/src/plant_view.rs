@@ -43,7 +43,7 @@ pub(crate) async fn order_view<C: ModelClient + 'static>(
         ))
     })?;
     let state = host.repo().join(STATE_DIR);
-    let snapshot = jobs::receipt_snapshot(workspace.repo(), &state, receipt.base_commit())
+    let snapshot = jobs::receipt_snapshot(workspace.repo(), &state, &receipt.prepared)
         .await
         .map_err(ApiError::Internal)?;
     let (_app, corpus) =

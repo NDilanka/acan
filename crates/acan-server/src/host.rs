@@ -435,6 +435,15 @@ pub(crate) mod testing {
     /// A host over the repository at `repo`, which holds only the world's opening event, with
     /// `client` as its model client and no git workspace.
     pub(crate) async fn host_with<C: ModelClient + 'static>(repo: &Path, client: C) -> Host<C> {
+        host_signalled(repo, client).await.0
+    }
+
+    /// [`host_with`], and the sender that signals the host's shutdown. Dropping the sender leaves
+    /// the host unsignalled for good.
+    pub(crate) async fn host_signalled<C: ModelClient + 'static>(
+        repo: &Path,
+        client: C,
+    ) -> (Host<C>, watch::Sender<bool>) {
         let state = repo.join(".acan");
         std::fs::create_dir_all(&state).expect("the state dir");
         let store = EventStore::open(&state.join("world.db"))
@@ -454,8 +463,8 @@ pub(crate) mod testing {
             .await
             .expect("the open event stores");
         let (tokens, _) = Tokens::load_or_create(&state, &owner).expect("the tokens");
-        let (_shutdown, shutdown) = watch::channel(false);
-        Host::new(HostParts {
+        let (shutdown_tx, shutdown) = watch::channel(false);
+        let host = Host::new(HostParts {
             origin,
             store,
             tokens,
@@ -469,6 +478,7 @@ pub(crate) mod testing {
             witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
             probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
             vision: None,
-        })
+        });
+        (host, shutdown_tx)
     }
 }

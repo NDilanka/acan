@@ -23,7 +23,8 @@ const ALL_STATES: [ItemState; 5] = [
 ];
 
 /// Phrases a caption must not use: each claims more than the recorded classification shows.
-const OVERCLAIMS: [&str; 17] = [
+const OVERCLAIMS: [&str; 18] = [
+    "another item",
     "no obligation checks",
     "which the ruling forbids",
     "missed the target",
@@ -228,23 +229,21 @@ fn an_optional_item_that_cannot_be_bound_is_left_out() {
 }
 
 #[test]
-fn the_one_class_and_state_without_a_caption_fails_the_deterministic_tour() {
-    // A bounced obligation failure that is later marked fixed has no caption, so the view has no
-    // deterministic tour. Every other mandatory class and state has one.
+fn a_fixed_obligation_failure_is_captioned_as_a_failure() {
+    // A failed check can be fixed, and then regress: the receipt keeps the fixed state on the
+    // same item. The caption still names the failed class, and quotes only what it binds.
     let mut value = raw_view();
     item_mut(&mut value, "i-retry-after")["state"] = json!("fixed");
     let view: PlantView = serde_json::from_value(value).expect("decoding the view");
 
-    let err = deterministic(&view).expect_err("a mandatory item has no caption");
+    let tour = deterministic_tour(&view);
 
-    assert!(
-        matches!(
-            &err,
-            DeterministicError::Unbindable { item_id, .. }
-                if item_id.as_str() == "i-retry-after"
-        ),
-        "{err}"
-    );
+    assert!(tour.reaches(&"i-retry-after".parse().expect("an id")));
+    assert!(matches!(
+        template_of(&tour, "i-retry-after"),
+        "failed.obligation" | "failed.obligation.bare"
+    ));
+    assert!(admit::tour(&view, &trusted(), &tour).is_ok());
 }
 
 #[test]
@@ -368,47 +367,37 @@ fn held_check_in(state: ItemState) -> (PlantView, Tour) {
 }
 
 #[test]
-fn a_held_must_keep_check_in_bounced_says_another_item_on_its_route_is_bounced() {
+fn a_held_must_keep_check_in_bounced_records_the_bounced_state() {
     let (view, tour) = held_check_in(ItemState::Bounced);
 
-    assert_eq!(
-        template_of(&tour, "chk-health"),
-        "preserved.held_nearby.bounced"
-    );
+    assert_eq!(template_of(&tour, "chk-health"), "preserved.bounced");
     assert!(step_of(&tour, "chk-health").caption.slots.is_empty());
     assert!(admit::tour(&view, &trusted(), &tour).is_ok());
-    assert!(text_of("preserved.held_nearby.bounced").ends_with("is bounced."));
+    assert!(text_of("preserved.bounced").ends_with("Recorded state: bounced."));
 }
 
 #[test]
-fn a_held_must_keep_check_in_residue_says_another_item_on_its_route_is_in_residue() {
+fn a_held_must_keep_check_in_residue_records_the_residue_state() {
     let (view, tour) = held_check_in(ItemState::Residue);
 
-    assert_eq!(
-        template_of(&tour, "chk-health"),
-        "preserved.held_nearby.residue"
-    );
+    assert_eq!(template_of(&tour, "chk-health"), "preserved.residue");
     assert!(admit::tour(&view, &trusted(), &tour).is_ok());
-    assert!(text_of("preserved.held_nearby.residue").ends_with("is in residue."));
+    assert!(text_of("preserved.residue").ends_with("Recorded state: residue."));
 }
 
 #[test]
-fn a_held_must_keep_check_when_stopped_says_another_item_on_its_route_is_stopped() {
+fn a_held_must_keep_check_when_stopped_records_the_stopped_state() {
     let (view, tour) = held_check_in(ItemState::Stopped);
 
-    assert_eq!(
-        template_of(&tour, "chk-health"),
-        "preserved.held_nearby.stopped"
-    );
+    assert_eq!(template_of(&tour, "chk-health"), "preserved.stopped");
     assert!(admit::tour(&view, &trusted(), &tour).is_ok());
-    assert!(text_of("preserved.held_nearby.stopped").ends_with("is stopped."));
+    assert!(text_of("preserved.stopped").ends_with("Recorded state: stopped."));
 }
 
 #[test]
-fn the_only_mandatory_class_and_state_without_a_caption_is_a_fixed_obligation_failure() {
+fn every_mandatory_class_and_state_has_a_caption() {
     // A mandatory item the catalog cannot caption makes the deterministic tour fail, so every
-    // gap is listed here. A fixed obligation failure is a contradiction in the classes, not a
-    // missing template, so it stays a gap on purpose.
+    // gap is listed here. A fixed obligation failure is captioned by the bare failure template.
     let catalog = trusted();
     let mut uncaptioned = Vec::new();
     for class in ItemClass::ALL {
@@ -426,10 +415,7 @@ fn the_only_mandatory_class_and_state_without_a_caption_is_a_fixed_obligation_fa
             }
         }
     }
-    assert_eq!(
-        uncaptioned,
-        [(ItemClass::ObligationFailed, ItemState::Fixed)]
-    );
+    assert!(uncaptioned.is_empty(), "uncaptioned: {uncaptioned:?}");
 }
 
 #[test]

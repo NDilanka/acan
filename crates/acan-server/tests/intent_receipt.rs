@@ -443,10 +443,10 @@ fn caption_of(tour: &TourView, item_id: &str) -> (String, Vec<String>) {
 }
 
 #[test]
-fn every_item_in_every_state_has_a_deterministic_tour_but_a_fixed_obligation_failure() {
+fn every_item_in_every_state_has_a_deterministic_tour() {
     // The receipt builder can hold any state on any item, so each item is set to each state. A
-    // failed obligation that is fixed has no caption, because a fixed check passed. The catalog
-    // keeps that one gap on purpose, so its view has no deterministic tour.
+    // failed obligation in the fixed state is the state a regressed check takes: the receipt is
+    // built from the episode as it stood before the run, so a run that fails again keeps `fixed`.
     let plain = plain_view();
     let (plate, machines) = plate_and_machines(&plain);
     let scope = fixture_scope();
@@ -465,7 +465,34 @@ fn every_item_in_every_state_has_a_deterministic_tour_but_a_fixed_obligation_fai
             }
         }
     }
-    assert_eq!(unbindable, [("i-retry-after".to_owned(), "fixed")]);
+    assert!(unbindable.is_empty(), "unbindable: {unbindable:?}");
+}
+
+#[test]
+fn a_failed_obligation_that_was_fixed_and_fails_again_is_captioned_as_a_failure() {
+    // Failure, then a fix, then a regression on the same item: the receipt of the regressed run
+    // names the failed class with the fixed state. The caption names the class and quotes nothing
+    // the receipt does not hold.
+    let index = fixture_receipt()
+        .items
+        .iter()
+        .position(|item| item.item_id.as_str() == "i-retry-after")
+        .expect("the fixture has the item");
+    let receipt: Receipt = decode_value(&receipt_with_state(index, "fixed"));
+    let plain = plain_view();
+    let (plate, machines) = plate_and_machines(&plain);
+    let view = plant_view(&receipt, &fixture_scope(), &plate, &machines).expect("the view builds");
+
+    let tour = acan_intent::deterministic(&view).expect("the regressed item has a tour");
+
+    let (template, _) = caption_of(&tour, "i-retry-after");
+    assert!(
+        matches!(
+            template.as_str(),
+            "failed.obligation" | "failed.obligation.bare"
+        ),
+        "{template}"
+    );
 }
 
 #[test]

@@ -24,7 +24,7 @@ mod worktree;
 pub use acan_core;
 
 pub use error::Error;
-pub use prepare::{InstallOutcome, Preparation, PrepareOutcome};
+pub use prepare::{InstallOutcome, Preparation, PrepareOutcome, ProtectedExport};
 pub use protected::ProtectedPaths;
 pub use repo::{LandOutcome, Repo, Worktrees};
 pub use worktree::{Author, TaskWorktree};
