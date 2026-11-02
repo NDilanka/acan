@@ -57,6 +57,7 @@ fn config(dir: &tempfile::TempDir) -> ServerConfig {
         protected_branch: None,
         witness_http_base_url: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
+        vision: None,
     }
 }
 
@@ -101,6 +102,7 @@ async fn host_for(dir: &tempfile::TempDir) -> (Host<Stub>, EventStore) {
         witness_http_base_url: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
         probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
+        vision: None,
     });
     (host, store)
 }

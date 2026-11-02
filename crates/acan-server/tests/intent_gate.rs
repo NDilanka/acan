@@ -1077,6 +1077,7 @@ async fn host_over(root: &Path, client: Stub) -> Host<Stub> {
         witness_http_base_url: None,
         witness_concurrency: 2,
         probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
+        vision: None,
     })
 }
 

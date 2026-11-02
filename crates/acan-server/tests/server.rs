@@ -30,10 +30,6 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// How long a test waits for the server before it gives up.
 const WAIT: Duration = Duration::from_secs(10);
 
-/// Commands posted while a client reads nothing. Enough to fill the socket buffers and then the
-/// live buffer, so the server has to close the stream instead of queueing without limit.
-const FLOOD: usize = 8_000;
-
 fn temp_repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("temp dir");
     fs::create_dir_all(dir.path().join("model")).expect("model dir");
@@ -54,6 +50,7 @@ fn config(repo: &Path, addr: SocketAddr, team: bool) -> ServerConfig {
         protected_branch: None,
         witness_http_base_url: None,
         witness_concurrency: acan_server::DEFAULT_WITNESS_CONCURRENCY,
+        vision: None,
     }
 }
 
@@ -91,8 +88,7 @@ fn add_member(name: &str) -> HumanCmd {
     }
 }
 
-/// One client for every request. Building one per call dominates the flood test, which posts
-/// thousands of commands.
+/// One client for every request, so the tests share its connection pool.
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(reqwest::Client::new)
@@ -474,42 +470,6 @@ async fn a_resumed_stream_delivers_the_missed_events_once_and_in_order() {
         seqs(&live),
         [6],
         "an event accepted after the backlog arrives live, once"
-    );
-}
-
-#[tokio::test]
-async fn a_client_that_falls_behind_is_closed_with_a_resume_reason() {
-    let dir = temp_repo();
-    let running = boot(dir.path()).await;
-    let token = owner_token(&running);
-    let mut socket = connect(&running, &token, 0).await;
-
-    // The client reads nothing while the origin keeps accepting commands.
-    for n in 0..FLOOD {
-        let response = post_command(&running, &token, &add_member(&format!("member-{n}"))).await;
-        assert_eq!(
-            response.status(),
-            StatusCode::OK,
-            "flood command {n} is accepted"
-        );
-    }
-
-    let (events, code, reason) = drain(&mut socket).await;
-
-    assert_eq!(
-        code, 4001,
-        "a lagging client is closed with the resume code"
-    );
-    let next = events.last().map_or(0, |event| event.seq.get() + 1);
-    assert_eq!(
-        reason,
-        format!("lagged; resume from seq {next}"),
-        "the reason names the seq the client must resume from"
-    );
-    assert_eq!(
-        seqs(&events),
-        (0..next).collect::<Vec<u64>>(),
-        "every event before the close arrived in order, with none dropped"
     );
 }
 

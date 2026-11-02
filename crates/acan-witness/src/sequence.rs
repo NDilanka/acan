@@ -115,6 +115,38 @@ pub struct SequenceInput<'a> {
     pub config: &'a RunnerConfig,
 }
 
+/// The whole response body of one HTTP step, as the driver returned it. Observations keep only a
+/// hash of a body that is not JSON, so a caller that needs the text asks for it by step id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptBody {
+    /// The step whose final response this is, after any redirects it followed.
+    pub step_id: StepId,
+    /// The response status.
+    pub status: Option<u16>,
+    /// The response's `content-type` header.
+    pub content_type: Option<String>,
+    /// The body text, at most the app contract's `max_output_bytes`.
+    pub body: String,
+    /// Whether the driver cut the body at that bound.
+    pub truncated: bool,
+}
+
+impl KeptBody {
+    /// The body of `reply` for `step_id`. A binary body or a reply without one keeps nothing.
+    fn of(step_id: &StepId, reply: &Reply) -> Option<Self> {
+        if reply.binary {
+            return None;
+        }
+        Some(Self {
+            step_id: step_id.clone(),
+            status: reply.status,
+            content_type: record::header(reply, "content-type"),
+            body: reply.body.clone()?,
+            truncated: reply.truncated,
+        })
+    }
+}
+
 /// Runs one probe sequence and returns its admitted record.
 ///
 /// `cancel` ends the run as soon as it resolves: the container is removed and the record keeps
@@ -129,8 +161,24 @@ pub async fn run_sequence(
     input: &SequenceInput<'_>,
     cancel: impl Future<Output = ()>,
 ) -> Result<ObservedRun, AdmitError> {
+    run_sequence_keeping(input, &[], cancel)
+        .await
+        .map(|(run, _)| run)
+}
+
+/// Runs one probe sequence like [`run_sequence`], and also keeps the response body of every HTTP
+/// step named in `keep` that the run reached. The record is the same as [`run_sequence`]'s.
+///
+/// # Errors
+///
+/// Returns the errors of [`run_sequence`].
+pub async fn run_sequence_keeping(
+    input: &SequenceInput<'_>,
+    keep: &[StepId],
+    cancel: impl Future<Output = ()>,
+) -> Result<(ObservedRun, Vec<KeptBody>), AdmitError> {
     let identity = Identity::of(input)?;
-    let mut sequence = Sequence::new(input, identity);
+    let mut sequence = Sequence::new(input, identity, keep);
     let outcome = {
         let execution = sequence.execute();
         tokio::pin!(execution);
@@ -262,10 +310,12 @@ struct Sequence<'a> {
     observations: Vec<(ObservationHash, Observation)>,
     captures: Vec<CaptureOutcome>,
     values: BTreeMap<CaptureName, Value>,
+    keep: &'a [StepId],
+    kept: Vec<KeptBody>,
 }
 
 impl<'a> Sequence<'a> {
-    fn new(input: &'a SequenceInput<'a>, identity: Identity) -> Self {
+    fn new(input: &'a SequenceInput<'a>, identity: Identity, keep: &'a [StepId]) -> Self {
         let started = Instant::now();
         let cap_ms = input
             .policy
@@ -299,6 +349,8 @@ impl<'a> Sequence<'a> {
             observations: Vec::new(),
             captures: Vec::new(),
             values: BTreeMap::new(),
+            keep,
+            kept: Vec::new(),
         }
     }
 
@@ -525,6 +577,9 @@ impl<'a> Sequence<'a> {
         } else {
             reply
         };
+        if self.keep.contains(&step.id) {
+            self.kept.extend(KeptBody::of(&step.id, &reply));
+        }
         let (channels, reasons) = record::channels(&reply);
         let status = reply.status;
         let observation = self.observation(&step.id, Some(record), channels, reasons);
@@ -927,7 +982,10 @@ impl<'a> Sequence<'a> {
     }
 
     /// Ends the container, removes the workspace, and admits the record.
-    async fn finish(mut self, outcome: RunOutcome) -> Result<ObservedRun, AdmitError> {
+    async fn finish(
+        mut self,
+        outcome: RunOutcome,
+    ) -> Result<(ObservedRun, Vec<KeptBody>), AdmitError> {
         let force = !matches!(outcome, RunOutcome::Completed {});
         match self.container.take() {
             Some(container) => container.finish(force).await,
@@ -951,7 +1009,9 @@ impl<'a> Sequence<'a> {
             finished_at: unix_millis(),
         };
         let observations = std::mem::take(&mut self.observations);
+        let kept = std::mem::take(&mut self.kept);
         admit::observed_run(self.input.probe, self.input.fixture, run, observations)
+            .map(|run| (run, kept))
     }
 }
 
@@ -1053,6 +1113,41 @@ fn unix_millis() -> UnixMillis {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reply(value: serde_json::Value) -> Reply {
+        serde_json::from_value(value).expect("a driver reply")
+    }
+
+    #[test]
+    fn a_kept_body_is_the_reply_text_with_its_status_and_type() {
+        let step = StepId::from_str("s4").expect("a step id");
+        let page = reply(serde_json::json!({
+            "ok": true,
+            "status": 200,
+            "headers": { "content-type": "text/html; charset=utf-8" },
+            "body": "<h1>Links</h1>",
+        }));
+        assert_eq!(
+            KeptBody::of(&step, &page),
+            Some(KeptBody {
+                step_id: step.clone(),
+                status: Some(200),
+                content_type: Some("text/html; charset=utf-8".to_owned()),
+                body: "<h1>Links</h1>".to_owned(),
+                truncated: false,
+            })
+        );
+    }
+
+    #[test]
+    fn a_binary_or_empty_reply_keeps_no_body() {
+        let step = StepId::from_str("s4").expect("a step id");
+        let binary =
+            reply(serde_json::json!({ "ok": true, "status": 200, "body": "AAEC", "binary": true }));
+        assert_eq!(KeptBody::of(&step, &binary), None);
+        let empty = reply(serde_json::json!({ "ok": true, "status": 204 }));
+        assert_eq!(KeptBody::of(&step, &empty), None);
+    }
 
     #[test]
     fn an_unreachable_runtime_is_isolation_unavailable() {

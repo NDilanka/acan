@@ -15,6 +15,8 @@ pub enum Role {
     Worker,
     /// Quick, cheap calls such as clash triage.
     Fast,
+    /// Image input. Compares page screenshots in the advisory vision witness.
+    Vision,
 }
 
 impl Role {
@@ -24,6 +26,7 @@ impl Role {
             Self::Foreman => "foreman",
             Self::Worker => "worker",
             Self::Fast => "fast",
+            Self::Vision => "vision",
         }
     }
 }
@@ -42,6 +45,7 @@ impl FromStr for Role {
             "foreman" => Ok(Self::Foreman),
             "worker" => Ok(Self::Worker),
             "fast" => Ok(Self::Fast),
+            "vision" => Ok(Self::Vision),
             other => Err(UnknownRole(other.to_owned())),
         }
     }

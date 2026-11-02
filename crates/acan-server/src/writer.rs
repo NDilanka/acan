@@ -37,6 +37,10 @@ enum Request {
         command: Command,
         reply: oneshot::Sender<Result<Vec<Stamped>, SubmitError>>,
     },
+    Advisory {
+        command: Command,
+        reply: oneshot::Sender<Result<Vec<Stamped>, SubmitError>>,
+    },
     Rescan {
         scan: Scan,
         reply: oneshot::Sender<Result<Vec<Stamped>, SubmitError>>,
@@ -44,6 +48,15 @@ enum Request {
     Shutdown {
         reply: oneshot::Sender<()>,
     },
+}
+
+/// How the origin decides a command.
+#[derive(Debug, Clone, Copy)]
+enum Mode {
+    /// Lease, barrier, clash and build maintenance run around the command.
+    Ordinary,
+    /// Only the command is decided; see [`Origin::execute_advisory`].
+    Advisory,
 }
 
 /// A handle to the writer task. Cloning shares the same task.
@@ -85,20 +98,28 @@ impl Writer {
     }
 
     pub(crate) async fn submit(&self, command: Command) -> Result<Vec<Stamped>, SubmitError> {
-        let (reply, wait) = oneshot::channel();
-        self.tx
-            .send(Request::Command { command, reply })
+        self.call(|reply| Request::Command { command, reply }).await
+    }
+
+    pub(crate) async fn submit_advisory(
+        &self,
+        command: Command,
+    ) -> Result<Vec<Stamped>, SubmitError> {
+        self.call(|reply| Request::Advisory { command, reply })
             .await
-            .map_err(|_| SubmitError::Internal(anyhow::anyhow!("the writer task is gone")))?;
-        wait.await.map_err(|_| {
-            SubmitError::Internal(anyhow::anyhow!("the writer task dropped a reply"))
-        })?
     }
 
     pub(crate) async fn rescan(&self, scan: Scan) -> Result<Vec<Stamped>, SubmitError> {
+        self.call(|reply| Request::Rescan { scan, reply }).await
+    }
+
+    async fn call(
+        &self,
+        request: impl FnOnce(oneshot::Sender<Result<Vec<Stamped>, SubmitError>>) -> Request,
+    ) -> Result<Vec<Stamped>, SubmitError> {
         let (reply, wait) = oneshot::channel();
         self.tx
-            .send(Request::Rescan { scan, reply })
+            .send(request(reply))
             .await
             .map_err(|_| SubmitError::Internal(anyhow::anyhow!("the writer task is gone")))?;
         wait.await.map_err(|_| {
@@ -146,6 +167,7 @@ async fn run(
                     &mut scan,
                     None,
                     command,
+                    Mode::Ordinary,
                     &store,
                     &events,
                     &wake,
@@ -154,6 +176,22 @@ async fn run(
                 )
                 .await;
                 // A gone receiver means the caller was cancelled; the write still stands.
+                let _ = reply.send(result);
+            }
+            Request::Advisory { command, reply } => {
+                let result = commit(
+                    &mut origin,
+                    &mut scan,
+                    None,
+                    command,
+                    Mode::Advisory,
+                    &store,
+                    &events,
+                    &wake,
+                    &snapshots,
+                    &mut broken,
+                )
+                .await;
                 let _ = reply.send(result);
             }
             Request::Rescan {
@@ -165,6 +203,7 @@ async fn run(
                     &mut scan,
                     Some(candidate),
                     Command::System(SystemCmd::IndexUpdated),
+                    Mode::Ordinary,
                     &store,
                     &events,
                     &wake,
@@ -178,15 +217,16 @@ async fn run(
     }
 }
 
-/// Decides `command`, persists its batch, and publishes the new snapshot, in that order. A
-/// `candidate` scan is decided against and committed only together with its batch, so a failed
-/// rescan keeps the previous origin and scan pair.
+/// Decides `command` in `mode`, persists its batch, and publishes the new snapshot, in that
+/// order. A `candidate` scan is decided against and committed only together with its batch, so a
+/// failed rescan keeps the previous origin and scan pair.
 #[expect(clippy::too_many_arguments, reason = "one call site per request kind")]
 async fn commit(
     origin: &mut Origin,
     scan: &mut Arc<Scan>,
     candidate: Option<Scan>,
     command: Command,
+    mode: Mode,
     store: &EventStore,
     broadcast_tx: &broadcast::Sender<Stamped>,
     wake: &Notify,
@@ -205,7 +245,10 @@ async fn commit(
         index: &staged_scan.index,
     };
     let mut staged = origin.clone();
-    let batch = staged.execute(&ctx, command)?;
+    let batch = match mode {
+        Mode::Ordinary => staged.execute(&ctx, command)?,
+        Mode::Advisory => staged.execute_advisory(&ctx, command)?,
+    };
     if batch.is_empty() {
         // An already-satisfied command changes nothing. A rescan to the same revision still
         // adopts the freshly scanned structures.
@@ -243,11 +286,14 @@ async fn commit(
         let _ = broadcast_tx.send(event.clone());
     }
     // Accounting-only batches must not wake the job loop: a job whose reply was unusable would
-    // otherwise requeue itself and every other failed job without any user activity.
-    if batch
-        .iter()
-        .any(|stamped| !matches!(&stamped.event, Event::ModelUsed { .. }))
-    {
+    // otherwise requeue itself and every other failed job without any user activity. An advisory
+    // vision summary is no job's input either.
+    if batch.iter().any(|stamped| {
+        !matches!(
+            &stamped.event,
+            Event::ModelUsed { .. } | Event::VisionChecked { .. }
+        )
+    }) {
         wake.notify_one();
     }
     Ok(batch)

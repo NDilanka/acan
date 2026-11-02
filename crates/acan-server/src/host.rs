@@ -18,6 +18,7 @@ use crate::git::Workspace;
 use crate::index::Scan;
 use crate::jobs;
 use crate::store::EventStore;
+use crate::vision::Vision;
 use crate::writer::{Snapshot, Writer};
 
 /// How many events a live subscriber may fall behind before the server disconnects it.
@@ -66,6 +67,8 @@ pub struct HostParts<C> {
     /// after another. Their container runs still take permits from the witness pool, so this does
     /// not raise how many containers run at once.
     pub probe_concurrency: usize,
+    /// The advisory vision witness. `None` runs no vision checks.
+    pub vision: Option<Vision>,
 }
 
 /// One world's host. Cloning shares the same writer, log and broadcast.
@@ -89,10 +92,13 @@ struct Inner<C> {
     witness_http_base_url: Option<String>,
     witness_slots: Arc<Semaphore>,
     probe_concurrency: usize,
+    vision: Option<Vision>,
     /// Held by a land from its final check through its install, and by every command that
     /// [`invalidates_landing`]. A command cannot change what a land is checking while the land
     /// checks and installs.
     landing: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    stream_hold: crate::stream::StreamHold,
 }
 
 impl<C> Clone for Host<C> {
@@ -149,7 +155,10 @@ impl<C: ModelClient> Host<C> {
                 witness_http_base_url: parts.witness_http_base_url,
                 witness_slots: Arc::new(Semaphore::new(parts.witness_concurrency)),
                 probe_concurrency: parts.probe_concurrency,
+                vision: parts.vision,
                 landing: tokio::sync::Mutex::new(()),
+                #[cfg(test)]
+                stream_hold: crate::stream::StreamHold::default(),
             }),
         }
     }
@@ -195,6 +204,11 @@ impl<C: ModelClient> Host<C> {
     /// How many probes of one contrast run at once.
     pub(crate) fn probe_concurrency(&self) -> usize {
         self.inner.probe_concurrency
+    }
+
+    /// The advisory vision witness, when this server runs one.
+    pub(crate) fn vision(&self) -> Option<&Vision> {
+        self.inner.vision.as_ref()
     }
 
     /// The bearer tokens.
@@ -291,6 +305,22 @@ impl<C: ModelClient> Host<C> {
         Ok(events)
     }
 
+    /// Sends an advisory command (`VisionChecked`, `ModelUsed`) to the writer, which decides it
+    /// without expiring leases or barriers or clearing builds, so a vision report never moves
+    /// gate state. Neither command can invalidate a land, so no landing fence is taken.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubmitError::Rejected`] when the origin refuses the command, which it does for
+    /// any command that is not advisory, and [`SubmitError::Internal`] when the events cannot be
+    /// stored or the writer is gone.
+    pub(crate) async fn submit_advisory(
+        &self,
+        command: Command,
+    ) -> Result<Vec<Stamped>, SubmitError> {
+        self.inner.writer.submit_advisory(command).await
+    }
+
     /// Holds the landing fence until the guard drops. A land takes it before it checks the
     /// queued delivery and keeps it through the install, so no invalidating command writes in
     /// between.
@@ -334,6 +364,11 @@ impl<C: ModelClient> Host<C> {
     /// Signalled when the server shuts down.
     pub(crate) fn shutdown_signal(&self) -> watch::Receiver<bool> {
         self.inner.shutdown.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stream_hold(&self) -> &crate::stream::StreamHold {
+        &self.inner.stream_hold
     }
 
     /// The set of live stream tasks, joined during shutdown.

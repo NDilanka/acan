@@ -59,13 +59,16 @@ pub struct Route {
     pub model: Option<String>,
 }
 
-/// One route per role. Every role must be routed, so a missing role fails at load time.
+/// One route per role. Foreman, worker and fast must be routed, so a missing one fails at load
+/// time. Vision is optional: without a vision route, vision calls use the foreman's route.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Routing {
     pub foreman: Route,
     pub worker: Route,
     pub fast: Route,
+    #[serde(default)]
+    pub vision: Option<Route>,
 }
 
 impl Routing {
@@ -74,6 +77,7 @@ impl Routing {
             Role::Foreman => &self.foreman,
             Role::Worker => &self.worker,
             Role::Fast => &self.fast,
+            Role::Vision => self.vision.as_ref().unwrap_or(&self.foreman),
         }
     }
 
@@ -82,6 +86,7 @@ impl Routing {
             Role::Foreman => &mut self.foreman,
             Role::Worker => &mut self.worker,
             Role::Fast => &mut self.fast,
+            Role::Vision => self.vision.get_or_insert_with(|| self.foreman.clone()),
         }
     }
 }
@@ -183,7 +188,7 @@ impl LlmConfig {
                 });
             }
         }
-        for role in [Role::Foreman, Role::Worker, Role::Fast] {
+        for role in [Role::Foreman, Role::Worker, Role::Fast, Role::Vision] {
             self.resolve(role)?;
         }
         Ok(())

@@ -1,9 +1,9 @@
 use crate::config::ConfigError;
 use crate::role::Role;
 
-/// A role name that is not foreman, worker, or fast.
+/// A role name that is not foreman, worker, fast, or vision.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("unknown role \"{0}\", expected foreman, worker, or fast")]
+#[error("unknown role \"{0}\", expected foreman, worker, fast, or vision")]
 pub struct UnknownRole(pub String);
 
 /// Why a model call failed. Each HTTP status class and timeout has its own variant.
