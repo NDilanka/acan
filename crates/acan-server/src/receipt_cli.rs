@@ -14,7 +14,7 @@
 //! merges are written to its object store, and every run writes into a temporary directory that
 //! is removed when the command ends.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -484,7 +484,8 @@ fn commit_sha(text: &str) -> Result<CommitSha, ShadowError> {
 /// Writes the protected paths of `commit` into `dir`, in the layout `observe::read_protected`
 /// reads. The files are listed and read with git's read-only commands, so the clone gets no
 /// index, objects or refs. A link or a submodule under a protected path is refused, because a
-/// contract is only ever plain files.
+/// contract is only ever plain files. Every listed name must be a portable repo path, and no two
+/// names may name one file. The whole listing is checked before the first file is written.
 async fn write_protected(
     root: &Path,
     commit: &CommitSha,
@@ -492,6 +493,7 @@ async fn write_protected(
     dir: &Path,
 ) -> Result<(), ShadowError> {
     let commit = commit.to_string();
+    let mut files: BTreeMap<RepoPath, String> = BTreeMap::new();
     for path in protected {
         let listing = git_stdout(
             root,
@@ -510,29 +512,89 @@ async fn write_protected(
             .split(|byte| *byte == 0)
             .filter(|entry| !entry.is_empty())
         {
-            let entry = String::from_utf8_lossy(entry);
-            let malformed = || ShadowError::Observe(format!("git listed {entry:?} oddly"));
-            let (meta, name) = entry.split_once('\t').ok_or_else(malformed)?;
-            let mut fields = meta.split(' ');
-            let (Some(mode), Some(kind), Some(oid)) = (fields.next(), fields.next(), fields.next())
-            else {
-                return Err(malformed());
-            };
-            if kind != "blob" || mode == "120000" {
+            let (name, oid) = listed_blob(entry)?;
+            files.insert(name, oid);
+        }
+    }
+    check_no_collisions(&files)?;
+    for (name, oid) in &files {
+        let bytes = git_stdout(root, &["cat-file", "blob", oid]).await?;
+        let target = dir.join(name.as_str());
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                ShadowError::Observe(format!("cannot create {}: {err}", parent.display()))
+            })?;
+        }
+        fs::write(&target, bytes).map_err(|err| {
+            ShadowError::Observe(format!("cannot write {}: {err}", target.display()))
+        })?;
+    }
+    Ok(())
+}
+
+/// One entry of `git ls-tree -z`, read as the portable repo path it names and its blob id. The
+/// name is decoded strictly, so bytes that are not UTF-8 are refused rather than replaced.
+fn listed_blob(entry: &[u8]) -> Result<(RepoPath, String), ShadowError> {
+    let malformed = || {
+        ShadowError::Observe(format!(
+            "git listed {:?} oddly",
+            String::from_utf8_lossy(entry)
+        ))
+    };
+    let tab = entry
+        .iter()
+        .position(|byte| *byte == b'\t')
+        .ok_or_else(malformed)?;
+    let (meta, name) = (&entry[..tab], &entry[tab + 1..]);
+    let name = std::str::from_utf8(name).map_err(|_| {
+        ShadowError::Contract(format!(
+            "{:?} is not UTF-8; a contract is only plain files with portable names",
+            String::from_utf8_lossy(name)
+        ))
+    })?;
+    let meta = std::str::from_utf8(meta).map_err(|_| malformed())?;
+    let mut fields = meta.split(' ');
+    let (Some(mode), Some(kind), Some(oid), None) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return Err(malformed());
+    };
+    if kind != "blob" || mode == "120000" {
+        return Err(ShadowError::Contract(format!(
+            "{name} is a link or a submodule; a contract is only plain files"
+        )));
+    }
+    let path = RepoPath::from_str(name).map_err(|_| {
+        ShadowError::Contract(format!(
+            "{name:?} is not a portable repo path, so it is refused: it may hold a backslash, a \
+             colon, a reserved device name, or a segment that ends in a dot or a space"
+        ))
+    })?;
+    Ok((path, oid.to_owned()))
+}
+
+/// Refuses names that cannot all be written as files of one tree. Two names that differ only by
+/// case name one file on a case-insensitive file system, and a name that is a file cannot also
+/// be a directory on the way to another name, in any case.
+fn check_no_collisions(files: &BTreeMap<RepoPath, String>) -> Result<(), ShadowError> {
+    let mut folded: BTreeMap<String, &str> = BTreeMap::new();
+    for path in files.keys() {
+        if let Some(other) = folded.insert(path.as_str().to_lowercase(), path.as_str()) {
+            return Err(ShadowError::Contract(format!(
+                "{other:?} and {:?} name one file on a case-insensitive file system, so a \
+                 contract cannot hold both",
+                path.as_str()
+            )));
+        }
+    }
+    for (name, original) in &folded {
+        for (end, _) in name.match_indices('/') {
+            if let Some(ancestor) = folded.get(&name[..end]) {
                 return Err(ShadowError::Contract(format!(
-                    "{name} is a link or a submodule; a contract is only plain files"
+                    "{ancestor:?} is a file and {original:?} lies under it, so a contract cannot \
+                     hold both"
                 )));
             }
-            let bytes = git_stdout(root, &["cat-file", "blob", oid]).await?;
-            let target = dir.join(name);
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent).map_err(|err| {
-                    ShadowError::Observe(format!("cannot create {}: {err}", parent.display()))
-                })?;
-            }
-            fs::write(&target, bytes).map_err(|err| {
-                ShadowError::Observe(format!("cannot write {}: {err}", target.display()))
-            })?;
         }
     }
     Ok(())
@@ -1245,6 +1307,113 @@ mod tests {
             .expect_err("the contract's contents are missing and are not fetched");
 
         assert!(!marker.exists(), "git fetched a missing object: {error}");
+    }
+
+    /// The clone's HEAD and the snapshot a protected `.acan` is written to. Returns the result of
+    /// the write, the snapshot directory, and the scratch directory that holds it.
+    async fn write_protected_at_head(
+        repo: &Path,
+    ) -> (Result<(), ShadowError>, PathBuf, tempfile::TempDir) {
+        let head = git_output(repo, &["rev-parse", "HEAD"]);
+        let commit = commit_sha(&head).expect("HEAD is a commit");
+        let protected: BTreeSet<RepoPath> = [RepoPath::from_str(".acan").expect("a path")].into();
+        let scratch = tempfile::TempDir::new().expect("scratch directory");
+        let snapshot = scratch.path().join("snapshot");
+        let written = write_protected(repo, &commit, &protected, &snapshot).await;
+        (written, snapshot, scratch)
+    }
+
+    /// Trimmed standard output of git in `dir`.
+    fn git_output(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    #[tokio::test]
+    async fn names_that_escape_or_are_not_portable_are_refused_before_any_file_is_written() {
+        // Each name is one that Windows would read as a path outside `.acan`, as a device, or as a
+        // name it cannot store. Each sorts after the valid contract files, so a materializer that
+        // wrote as it listed would have written the contract before it refused the name.
+        let names = [
+            ".acan/zz..\\..\\escape.txt",
+            ".acan/zzC:escape.txt",
+            ".acan/zz/NUL.json",
+            ".acan/zzapp.json.",
+            ".acan/zzapp.json ",
+        ];
+        for name in names {
+            let mut files = contract_files();
+            files.push((name, "not a contract"));
+            let repo = clone_with(&files);
+
+            let (written, snapshot, scratch) = write_protected_at_head(repo.path()).await;
+
+            let error = written.expect_err(name);
+            assert!(
+                matches!(error, ShadowError::Contract(_)),
+                "{name}: {error:?}"
+            );
+            assert!(
+                !snapshot.join(".acan").exists(),
+                "{name}: nothing under .acan was written"
+            );
+            assert!(
+                !scratch.path().join("escape.txt").exists(),
+                "{name}: nothing was written outside the snapshot"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn names_that_differ_only_by_case_are_refused_before_any_file_is_written() {
+        let mut files = contract_files();
+        files.push((".acan/APP.json", "a second app"));
+        let repo = clone_with(&files);
+
+        let (written, snapshot, _scratch) = write_protected_at_head(repo.path()).await;
+
+        let error = written.expect_err("two names for one file are refused");
+        assert!(error.to_string().contains("one file"), "{error}");
+        assert!(!snapshot.join(".acan").exists(), "nothing was written");
+    }
+
+    #[tokio::test]
+    async fn a_file_that_differs_only_by_case_from_a_directory_is_refused() {
+        // `.acan/Probes` is a file, and `.acan/probes/` is a directory on a case-insensitive
+        // file system, so the two cannot both be written.
+        let mut files = contract_files();
+        files.push((".acan/Probes", "a file, not a directory"));
+        let repo = clone_with(&files);
+
+        let (written, snapshot, _scratch) = write_protected_at_head(repo.path()).await;
+
+        let error = written.expect_err("a file and a directory of one name are refused");
+        assert!(error.to_string().contains("lies under it"), "{error}");
+        assert!(!snapshot.join(".acan").exists(), "nothing was written");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_name_that_is_not_utf8_is_refused_before_any_file_is_written() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let repo = clone_with(&contract_files());
+        let name = repo.path().join(OsStr::from_bytes(b".acan/zz\xff.json"));
+        fs::write(&name, "not UTF-8").expect("a file with a byte that is not UTF-8");
+        git(repo.path(), &["add", "-A"]);
+        git(repo.path(), &["commit", "-q", "-m", "odd name"]);
+
+        let (written, snapshot, _scratch) = write_protected_at_head(repo.path()).await;
+
+        let error = written.expect_err("a name that is not UTF-8 is refused");
+        assert!(error.to_string().contains("not UTF-8"), "{error}");
+        assert!(!snapshot.join(".acan").exists(), "nothing was written");
     }
 
     #[tokio::test]
