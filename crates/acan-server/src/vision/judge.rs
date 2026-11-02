@@ -412,10 +412,12 @@ mod tests {
     }
 
     /// The live two-image check on the o-7 dashboard pair. It spends one real Muse Spark call per
-    /// candidate, so it runs only when `ACAN_LIVE_PROOF` is set and `ACAN_VISION_PAIR` names a
-    /// folder holding `baseline.html`, `keep.html` and `break.html`. Each page is rendered with the
-    /// installed browser, as the witness renders it. The keys come from the `.env` copied into the
-    /// worktree, and nothing is printed except the verdicts and receipt fields.
+    /// candidate, and one real Muse Wonder call for each candidate the first look finds
+    /// inconsistent or unclear. It runs only when `ACAN_LIVE_PROOF` is set and `ACAN_VISION_PAIR`
+    /// names a folder holding `baseline.html`, `keep.html` and `break.html`. Each page is rendered
+    /// with the installed browser, as the witness renders it. The keys come from the environment;
+    /// a `.env` next to `llm.toml` is read when it exists. Nothing is printed except the verdicts
+    /// and receipt fields.
     #[tokio::test]
     async fn the_live_vision_call_reads_the_dashboard_pair() {
         use crate::vision::{browser, sha256_hex};
@@ -430,7 +432,7 @@ mod tests {
             return;
         };
         let llm_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../acan-llm"));
-        dotenvy::from_path(llm_dir.join(".env")).expect("the worktree holds a copy of .env");
+        let _ = dotenvy::from_path(llm_dir.join(".env"));
         let config = LlmConfig::load(llm_dir.join("llm.toml"))
             .expect("the worktree holds a copy of llm.toml");
         let keys = ApiKeys::from_env(&config);
@@ -470,16 +472,13 @@ mod tests {
             ("break.html", Verdict::Inconsistent),
         ] {
             let candidate = shot(file).await;
-            let judged = judge(
-                &client,
-                &Pair {
-                    route: "/dashboard",
-                    must_keep: &items,
-                    baseline: Some(&baseline.png),
-                    candidate: &candidate.png,
-                },
-            )
-            .await;
+            let pair = Pair {
+                route: "/dashboard",
+                must_keep: &items,
+                baseline: Some(&baseline.png),
+                candidate: &candidate.png,
+            };
+            let judged = judge(&client, &pair).await;
             let call = judged.call.as_ref();
             println!(
                 "LIVE_PROOF_VISION file={file} verdict={:?} expected={expected:?} reason={:?} raw_reply={:?} not_checked={:?} request_id={:?} provider={:?} model={:?} prompt_tokens={:?} completion_tokens={:?} latency_ms={:?} candidate_sha256={} candidate={}x{}",
@@ -498,6 +497,31 @@ mod tests {
                 candidate.height,
             );
             assert_eq!(judged.verdict, expected, "the live verdict for {file}");
+            if matches!(judged.verdict, Verdict::Inconsistent | Verdict::Unclear) {
+                let second = second_look(&client, &pair, judged.verdict)
+                    .await
+                    .expect("an inconsistent or unclear first look gets a second look");
+                let call = second.call.as_ref();
+                println!(
+                    "LIVE_PROOF_WONDER file={file} first={:?} verdict={:?} reason={:?} raw_reply={:?} not_checked={:?} request_id={:?} provider={:?} model={:?} prompt_tokens={:?} completion_tokens={:?} latency_ms={:?} candidate_sha256={}",
+                    judged.verdict,
+                    second.verdict,
+                    second.reason,
+                    second.raw_reply,
+                    second.not_checked_reason,
+                    second.request_id,
+                    call.map(|call| call.provider.as_str()),
+                    second.model,
+                    call.map(|call| call.usage.prompt_tokens),
+                    call.map(|call| call.usage.completion_tokens),
+                    call.map(|call| call.latency.as_millis()),
+                    sha256_hex(&candidate.png),
+                );
+                assert!(
+                    second.not_checked_reason.is_none(),
+                    "the second look for {file} was not checked"
+                );
+            }
         }
     }
 }
