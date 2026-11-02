@@ -1,6 +1,6 @@
-//! The setup routes over HTTP: the page, the key status, and saving a key. No test sends a key to a
-//! real provider. A save that the provider would check is refused before any request, or tested in
-//! `acan-llm` against a mock.
+//! The setup routes over HTTP: the page, the key status, saving and removing a key, and picking the
+//! provider a role uses. No test sends a key to a real provider. A save that the provider would
+//! check is refused before any request, or tested in `acan-llm` against a mock.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -59,7 +59,8 @@ async fn boot(repo: &Path, models: Models) -> Running {
 fn models_without_routing(dir: &Path, saved: Option<(&str, &str)>) -> Models {
     let keys = KeyFile::new(dir.join("keys").join("keys.toml"));
     if let Some((provider, key)) = saved {
-        keys.save(provider, key).expect("the keys file is written");
+        keys.set_key(provider, key)
+            .expect("the keys file is written");
     }
     Models::open(&dir.join("no-routing.toml"), Some(keys)).expect("the models open")
 }
@@ -77,16 +78,47 @@ async fn get_with(running: &Running, path: &str, token: Option<&str>) -> reqwest
     request.send().await.expect("the request is sent")
 }
 
-async fn post_key(running: &Running, token: Option<&str>, body: &str) -> reqwest::Response {
-    let request = reqwest::Client::new()
-        .post(url(running, "/api/setup/keys"))
-        .header("content-type", "application/json")
-        .body(body.to_owned());
+async fn send_json(
+    running: &Running,
+    method: reqwest::Method,
+    path: &str,
+    token: Option<&str>,
+    body: Option<&str>,
+) -> reqwest::Response {
+    let mut request = reqwest::Client::new().request(method, url(running, path));
+    if let Some(body) = body {
+        request = request
+            .header("content-type", "application/json")
+            .body(body.to_owned());
+    }
     let request = match token {
         Some(token) => request.bearer_auth(token),
         None => request,
     };
     request.send().await.expect("the request is sent")
+}
+
+async fn pick_role(running: &Running, role: &str, body: &str) -> reqwest::Response {
+    let path = format!("/api/setup/roles/{role}");
+    send_json(
+        running,
+        reqwest::Method::PUT,
+        &path,
+        Some(OWNER_TOKEN),
+        Some(body),
+    )
+    .await
+}
+
+async fn post_key(running: &Running, token: Option<&str>, body: &str) -> reqwest::Response {
+    send_json(
+        running,
+        reqwest::Method::POST,
+        "/api/setup/keys",
+        token,
+        Some(body),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -98,6 +130,7 @@ async fn the_setup_page_is_served_without_a_token_and_holds_no_token() {
     assert_eq!(response.status(), StatusCode::OK);
     let page = response.text().await.expect("the page");
     assert!(page.contains("/api/setup/keys"), "the page posts its key");
+    assert!(page.contains("/api/setup/roles/"), "the page picks roles");
     assert!(!page.contains(OWNER_TOKEN) && !page.contains(AGENT_TOKEN));
     assert!(
         !page.contains("acan_0000"),
@@ -108,7 +141,7 @@ async fn the_setup_page_is_served_without_a_token_and_holds_no_token() {
 }
 
 #[tokio::test]
-async fn the_status_names_the_provider_but_never_the_key() {
+async fn the_status_lists_providers_and_roles_but_never_a_key() {
     let repo = temp_repo();
     let running = boot(repo.path(), models_without_routing(repo.path(), None)).await;
 
@@ -120,8 +153,19 @@ async fn the_status_names_the_provider_but_never_the_key() {
     let status: Value = agent.json().await.expect("json");
     assert_eq!(status["configured"], false);
     assert_eq!(status["can_save"], true);
-    assert!(status["provider"].is_null());
-    assert_eq!(status["providers"], json!(["baseten", "fireworks", "meta"]));
+    assert!(status["source"].is_null());
+    let providers: Vec<&str> = status["providers"]
+        .as_array()
+        .expect("providers")
+        .iter()
+        .map(|provider| provider["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(providers, ["meta", "baseten", "fireworks"]);
+    assert_eq!(status["roles"].as_array().expect("roles").len(), 3);
+    assert!(
+        status["roles"][0]["off_reason"].is_string(),
+        "an off role says why"
+    );
 
     running.stop().await.expect("the server stops");
 
@@ -135,8 +179,9 @@ async fn the_status_names_the_provider_but_never_the_key() {
     let text = response.text().await.expect("the status");
     let status: Value = serde_json::from_str(&text).expect("json");
     assert_eq!(status["configured"], true);
-    assert_eq!(status["provider"], "meta");
-    assert_eq!(status["source"], "saved_key");
+    assert_eq!(status["source"], "setup");
+    assert_eq!(status["providers"][0]["saved"], true);
+    assert_eq!(status["roles"][0]["provider"], "meta");
     assert!(!text.contains(SAVED_KEY), "the status carries no key");
 
     running.stop().await.expect("the server stops");
@@ -193,7 +238,137 @@ async fn saving_a_key_is_for_members_and_refuses_bad_input_before_any_request() 
 }
 
 #[tokio::test]
-async fn a_routing_file_decides_and_a_saved_key_is_refused() {
+async fn a_removed_key_leaves_the_others_and_its_picks_go_with_it() {
+    let repo = temp_repo();
+    let keys = KeyFile::new(repo.path().join("keys").join("keys.toml"));
+    keys.set_key("meta", SAVED_KEY).expect("saves");
+    keys.set_key("baseten", "baseten-saved-key-0123456789")
+        .expect("saves");
+    let models = Models::open(&repo.path().join("no-routing.toml"), Some(keys)).expect("opens");
+    let running = boot(repo.path(), models).await;
+
+    let agent = send_json(
+        &running,
+        reqwest::Method::DELETE,
+        "/api/setup/keys/baseten",
+        Some(AGENT_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(agent.status(), StatusCode::FORBIDDEN);
+
+    let removed = send_json(
+        &running,
+        reqwest::Method::DELETE,
+        "/api/setup/keys/baseten",
+        Some(OWNER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(removed.status(), StatusCode::OK);
+    let body: Value = removed.json().await.expect("json");
+    assert_eq!(body["removed"], true);
+
+    let text = get_with(&running, "/api/setup", Some(OWNER_TOKEN))
+        .await
+        .text()
+        .await
+        .expect("the status");
+    let status: Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(status["providers"][1]["saved"], false, "baseten is gone");
+    assert_eq!(status["providers"][0]["saved"], true, "meta stays");
+    assert_eq!(status["roles"][1]["provider"], "meta", "worker falls back");
+    assert!(!text.contains(SAVED_KEY), "the status carries no key");
+
+    let unknown = send_json(
+        &running,
+        reqwest::Method::DELETE,
+        "/api/setup/keys/openai",
+        Some(OWNER_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+
+    running.stop().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn a_role_is_picked_only_for_a_provider_that_has_a_key() {
+    let repo = temp_repo();
+    let running = boot(repo.path(), models_without_routing(repo.path(), None)).await;
+    let agent = send_json(
+        &running,
+        reqwest::Method::PUT,
+        "/api/setup/roles/worker",
+        Some(AGENT_TOKEN),
+        Some(r#"{"provider": "meta"}"#),
+    )
+    .await;
+    assert_eq!(agent.status(), StatusCode::FORBIDDEN);
+
+    let no_key = pick_role(&running, "worker", r#"{"provider": "meta"}"#).await;
+    assert_eq!(no_key.status(), StatusCode::CONFLICT);
+    let body: Value = no_key.json().await.expect("json");
+    assert_eq!(body["what"], "no_key");
+
+    let unknown_role = pick_role(&running, "reviewer", r#"{"provider": "meta"}"#).await;
+    assert_eq!(unknown_role.status(), StatusCode::NOT_FOUND);
+
+    let unknown_provider = pick_role(&running, "worker", r#"{"provider": "openai"}"#).await;
+    assert_eq!(unknown_provider.status(), StatusCode::BAD_REQUEST);
+    let body: Value = unknown_provider.json().await.expect("json");
+    assert_eq!(body["what"], "provider");
+
+    running.stop().await.expect("the server stops");
+
+    let repo = temp_repo();
+    let running = boot(
+        repo.path(),
+        models_without_routing(repo.path(), Some(("meta", SAVED_KEY))),
+    )
+    .await;
+    let picked = send_json(
+        &running,
+        reqwest::Method::PUT,
+        "/api/setup/roles/worker",
+        Some(OWNER_TOKEN),
+        Some(r#"{"provider": "meta"}"#),
+    )
+    .await;
+    assert_eq!(picked.status(), StatusCode::OK);
+    let status: Value = get_with(&running, "/api/setup", Some(OWNER_TOKEN))
+        .await
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(status["roles"][1]["picked"], true);
+    assert_eq!(status["roles"][1]["provider"], "meta");
+
+    let cleared = send_json(
+        &running,
+        reqwest::Method::PUT,
+        "/api/setup/roles/worker",
+        Some(OWNER_TOKEN),
+        Some(r#"{"provider": null}"#),
+    )
+    .await;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    let status: Value = get_with(&running, "/api/setup", Some(OWNER_TOKEN))
+        .await
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(
+        status["roles"][1]["picked"], false,
+        "the default serves it again"
+    );
+
+    running.stop().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn a_routing_file_decides_and_a_saved_key_or_pick_is_refused() {
     let repo = temp_repo();
     let state = repo.path().join(".acan");
     fs::create_dir_all(&state).expect("the state dir");
@@ -229,12 +404,23 @@ provider = "meta"
         .expect("json");
     assert_eq!(status["source"], "routing_file");
     assert_eq!(status["can_save"], false);
+    assert_eq!(status["roles"][0]["provider"], "meta");
 
     let body = json!({ "provider": "meta", "key": TYPED_KEY }).to_string();
     let response = post_key(&running, Some(OWNER_TOKEN), &body).await;
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["what"], "routing_file");
+
+    let pick = send_json(
+        &running,
+        reqwest::Method::PUT,
+        "/api/setup/roles/worker",
+        Some(OWNER_TOKEN),
+        Some(r#"{"provider": "meta"}"#),
+    )
+    .await;
+    assert_eq!(pick.status(), StatusCode::CONFLICT);
     assert!(!repo.path().join("keys.toml").exists(), "nothing is saved");
 
     running.stop().await.expect("the server stops");

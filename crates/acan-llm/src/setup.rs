@@ -1,54 +1,68 @@
-//! Model keys a tester saves from the setup page: the status the page shows, the file the key is
-//! kept in, and the provider check that runs before a key is written.
+//! Model keys and role picks a tester saves from the setup page: the keys file, the provider check
+//! that runs before a key is written, and the status the page shows.
 //!
-//! A key is sent only to the `base_url` of its provider. Nothing here prints, logs or returns the
-//! key. A save reports its outcome, never the key. The file is private to its user on Unix: mode
-//! 0600 in a folder that only the user can enter. On Windows it sits in the user's profile folder,
-//! which only that user can read by default.
+//! A tester keys any number of providers, one key each, and may pick the provider a role uses. The
+//! keys file holds both. A key is sent only to the `base_url` of its own provider. Nothing here
+//! prints, logs or returns a key. A save reports its outcome, never the key. The file is private to
+//! its user on Unix: mode 0600 in a folder that only the user can enter. On Windows it sits in the
+//! user's profile folder, which only that user can read by default.
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ConfigError, LlmConfig};
 use crate::key::ApiKey;
-use crate::preset::{KeyCheck, check_key};
+use crate::plan::{ProviderStatus, RoleStatus};
+use crate::providers::{KeyCheck, check_key, is_provider};
+use crate::role::Role;
 
-/// The file the saved key is kept in, inside the acan folder of the user's config directory.
+/// The file the saved keys and picks are kept in, inside the acan folder of the user's config
+/// directory.
 pub const KEYS_FILE: &str = "keys.toml";
 
 /// The longest key a save accepts. Provider keys are far shorter.
 const MAX_KEY_LEN: usize = 512;
 
-/// The header written above a saved key, so a tester who opens the file knows what it is.
-const HEADER: &str = "# The model key saved from the acan setup page. Keep this file private.\n";
+/// The header written above the saved setup, so a tester who opens the file knows what it is.
+const HEADER: &str =
+    "# The model keys and role picks saved from the acan setup page. Keep this file private.\n";
 
-/// Where the live model client gets its keys.
+/// Serializes the read-modify-write of the keys file within this process, so two saves at once
+/// keep both.
+static WRITE: Mutex<()> = Mutex::new(());
+
+/// Where the live model client gets its providers and keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeySource {
     /// The repository's routing file names the providers. Their keys come from the environment
     /// or the repository's `.env`.
     RoutingFile,
-    /// A key saved from the setup page, for the provider it was saved for.
-    SavedKey,
+    /// The setup page's saved keys and role picks, with any keys the environment sets.
+    Setup,
 }
 
-/// What the setup page shows: whether model calls have a key, and which provider it belongs to.
+/// What the setup page shows: whether model calls go to live models, which providers have keys,
+/// and which provider serves each role.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct KeyStatus {
-    /// Whether a live model client with a key is in use. `false` means calls get built-in replies.
+    /// Whether every role has a provider, so calls go to live models. `false` means calls get
+    /// built-in replies.
     pub configured: bool,
-    /// The provider a saved key belongs to. `None` when a routing file chose the providers.
-    pub provider: Option<String>,
-    /// Where the calls get their providers and keys: a routing file, or a saved key. `None` when
-    /// neither is set, so calls get built-in replies.
+    /// Where the providers and keys come from. `None` when no key is set.
     pub source: Option<KeySource>,
-    /// Whether the setup page can save a key here. A routing file decides the providers itself,
+    /// Whether the setup page can save keys and picks here. A routing file decides them itself,
     /// so it cannot.
     pub can_save: bool,
+    /// One entry per provider the page offers. A routing file lists the providers it names.
+    pub providers: Vec<ProviderStatus>,
+    /// One entry per role. A role that is off says why.
+    pub roles: Vec<RoleStatus>,
 }
 
 /// What a key check and save found.
@@ -63,7 +77,7 @@ pub enum KeyOutcome {
     Unreachable,
 }
 
-/// Why a key could not be saved at all.
+/// Why a key or pick could not be saved at all.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SetupError {
@@ -79,6 +93,12 @@ pub enum SetupError {
     #[error("the key is empty, too long, or not a single line of text")]
     InvalidKey,
 
+    #[error("that role needs a Meta key, and no other provider can serve it")]
+    NeedsMeta,
+
+    #[error("no key is set for that provider")]
+    NoKey,
+
     #[error("cannot write the keys file")]
     Write(#[source] io::Error),
 
@@ -86,14 +106,16 @@ pub enum SetupError {
     Client(#[from] ConfigError),
 }
 
-/// A key read from the keys file: the provider it belongs to, and the key.
-#[derive(Debug)]
-pub struct SavedKey {
-    pub provider: String,
-    pub key: ApiKey,
+/// The keys and role picks a tester saved.
+#[derive(Debug, Default)]
+pub struct SavedSetup {
+    /// One key per provider, by provider name.
+    pub keys: BTreeMap<String, ApiKey>,
+    /// The provider a role is picked to use. A role with no entry takes the default.
+    pub roles: BTreeMap<Role, String>,
 }
 
-/// The per-user file that holds the saved key.
+/// The per-user file that holds the saved keys and picks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyFile {
     path: PathBuf,
@@ -118,50 +140,147 @@ impl KeyFile {
         &self.path
     }
 
-    /// Reads the saved key. `Ok(None)` when there is no file.
+    /// Reads the saved keys and picks. A missing file reads as an empty setup. An entry that names
+    /// a provider or role the setup page does not offer is skipped, with a warning.
     ///
     /// # Errors
     ///
-    /// Returns an error when the file cannot be read, or does not hold one provider and one key.
-    /// The error names no part of the file, since a parser error can quote the text it failed on.
-    pub fn load(&self) -> io::Result<Option<SavedKey>> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
+    /// Returns an error when the file cannot be read or does not parse. The error names no part of
+    /// the file, since a parser error can quote the text it failed on.
+    pub fn load(&self) -> io::Result<SavedSetup> {
+        #[derive(Deserialize, Default)]
+        #[serde(deny_unknown_fields, default)]
         struct Stored {
-            provider: String,
-            key: String,
+            keys: BTreeMap<String, String>,
+            roles: BTreeMap<String, String>,
         }
 
         let text = match fs::read_to_string(&self.path) {
             Ok(text) => text,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Ok(SavedSetup::default());
+            }
             Err(err) => return Err(err),
         };
         let stored: Stored = toml::from_str(&text).map_err(|_| not_a_key())?;
-        if stored.key.trim().is_empty() || stored.provider.trim().is_empty() {
-            return Err(not_a_key());
+
+        let mut saved = SavedSetup::default();
+        for (provider, key) in stored.keys {
+            let key = key.trim();
+            if !is_provider(&provider) || key.is_empty() {
+                tracing::warn!(
+                    "the keys file has an entry the setup page does not use; it is skipped"
+                );
+                continue;
+            }
+            saved.keys.insert(provider, ApiKey::new(key));
         }
-        Ok(Some(SavedKey {
-            provider: stored.provider,
-            key: ApiKey::new(stored.key),
-        }))
+        for (role, provider) in stored.roles {
+            match role.parse::<Role>() {
+                Ok(role) if is_provider(&provider) => {
+                    saved.roles.insert(role, provider);
+                }
+                _ => tracing::warn!(
+                    "the keys file has a role pick the setup page does not use; it is skipped"
+                ),
+            }
+        }
+        Ok(saved)
     }
 
-    /// Replaces the saved key with `key` for `provider`. The file is written to a temporary
-    /// name and renamed over the old one, so a crash leaves the old key or the new one, never a
-    /// half-written file.
+    /// Saves `key` for `provider`, replacing the key it had. Role picks are kept.
     ///
     /// # Errors
     ///
-    /// Returns the I/O error of the write. A failed write leaves no temporary file behind.
-    pub fn save(&self, provider: &str, key: &str) -> io::Result<()> {
+    /// Returns [`SetupError::UnknownProvider`] or [`SetupError::InvalidKey`] before the file is
+    /// touched, and [`SetupError::Write`] when the file cannot be read or written.
+    pub fn set_key(&self, provider: &str, key: &str) -> Result<(), SetupError> {
+        if !is_provider(provider) {
+            return Err(SetupError::UnknownProvider);
+        }
+        if !valid_key(key) {
+            return Err(SetupError::InvalidKey);
+        }
+        self.update(|saved| {
+            saved.keys.insert(provider.to_owned(), ApiKey::new(key));
+        })
+    }
+
+    /// Removes the key for `provider`, and any role pick that named it. Returns `false` when the
+    /// provider had no key saved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetupError::Write`] when the file cannot be read or written.
+    pub fn remove_key(&self, provider: &str) -> Result<bool, SetupError> {
+        let mut removed = false;
+        self.update(|saved| {
+            removed = saved.keys.remove(provider).is_some();
+            saved.roles.retain(|_, pick| pick != provider);
+        })?;
+        Ok(removed)
+    }
+
+    /// Picks `provider` for `role`, or clears the pick when `provider` is `None`. Whether the
+    /// provider has a key is for the caller to check, since an environment key counts too.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetupError::UnknownProvider`] for a provider the page does not offer,
+    /// [`SetupError::NeedsMeta`] when a role that needs Meta is picked for another provider, and
+    /// [`SetupError::Write`] when the file cannot be read or written.
+    pub fn set_role(&self, role: Role, provider: Option<&str>) -> Result<(), SetupError> {
+        if let Some(name) = provider {
+            if !is_provider(name) {
+                return Err(SetupError::UnknownProvider);
+            }
+            if role.needs_meta() && name != "meta" {
+                return Err(SetupError::NeedsMeta);
+            }
+        }
+        self.update(|saved| match provider {
+            Some(name) => {
+                saved.roles.insert(role, name.to_owned());
+            }
+            None => {
+                saved.roles.remove(&role);
+            }
+        })
+    }
+
+    /// Reads the file, applies `change`, and writes it back. Two changes at once are serialized, so
+    /// each keeps the other.
+    fn update(&self, change: impl FnOnce(&mut SavedSetup)) -> Result<(), SetupError> {
+        let _write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut saved = self.load().map_err(SetupError::Write)?;
+        change(&mut saved);
+        self.store(&saved).map_err(SetupError::Write)
+    }
+
+    /// Replaces the file with `saved`. The file is written to a temporary name and renamed over the
+    /// old one, so a crash leaves the old setup or the new one, never a half-written file.
+    fn store(&self, saved: &SavedSetup) -> io::Result<()> {
         #[derive(Serialize)]
         struct Stored<'a> {
-            provider: &'a str,
-            key: &'a str,
+            #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+            keys: BTreeMap<&'a str, &'a str>,
+            #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+            roles: BTreeMap<&'static str, &'a str>,
         }
 
-        let body = toml::to_string(&Stored { provider, key })
+        let stored = Stored {
+            keys: saved
+                .keys
+                .iter()
+                .map(|(provider, key)| (provider.as_str(), key.expose()))
+                .collect(),
+            roles: saved
+                .roles
+                .iter()
+                .map(|(role, provider)| (role.as_str(), provider.as_str()))
+                .collect(),
+        };
+        let body = toml::to_string(&stored)
             .map_err(|_| io::Error::other("cannot encode the keys file"))?;
         let dir = self
             .path
@@ -210,7 +329,7 @@ pub async fn save_checked(
         KeyCheck::Accepted => true,
         KeyCheck::Unchecked => false,
     };
-    file.save(provider, key).map_err(SetupError::Write)?;
+    file.set_key(provider, key)?;
     Ok(KeyOutcome::Stored { checked })
 }
 
@@ -223,7 +342,7 @@ fn valid_key(key: &str) -> bool {
 fn not_a_key() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        "the keys file does not hold one provider and one key",
+        "the keys file does not parse as a keys and roles file",
     )
 }
 

@@ -1,7 +1,10 @@
-//! The setup side of model keys: the provider check, the save that follows it, and the keys file.
-//! Providers are mocks, so no test sends a key anywhere real.
+//! The setup side of model keys: the provider check, the save that follows it, the keys file with
+//! one key per provider and the role picks, and the plan that resolves them. Providers are mocks,
+//! so no test sends a key anywhere real.
 
-use acan_llm::{KeyCheck, KeyFile, KeyOutcome, LlmConfig, SetupError, check_key, save_checked};
+use acan_llm::{
+    KeyCheck, KeyFile, KeyOutcome, LlmConfig, Role, SetupError, check_key, resolve, save_checked,
+};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -82,9 +85,9 @@ async fn an_accepted_key_is_saved_and_reported_as_checked() {
         .expect("the save runs");
 
     assert_eq!(outcome, KeyOutcome::Stored { checked: true });
-    let saved = file.load().expect("readable").expect("a key is saved");
-    assert_eq!(saved.provider, "meta");
-    assert_eq!(saved.key.secret_text(), KEY);
+    let saved = file.load().expect("readable");
+    let key = saved.keys.get("meta").expect("a key is saved for meta");
+    assert_eq!(key.secret_text(), KEY);
 }
 
 #[tokio::test]
@@ -98,7 +101,7 @@ async fn an_unchecked_key_is_saved_and_reported_as_unchecked() {
         .expect("the save runs");
 
     assert_eq!(outcome, KeyOutcome::Stored { checked: false });
-    assert!(file.load().expect("readable").is_some());
+    assert!(file.load().expect("readable").keys.contains_key("meta"));
 }
 
 #[tokio::test]
@@ -162,7 +165,7 @@ async fn an_unknown_provider_or_a_bad_key_is_refused_before_any_request() {
     let file = KeyFile::new(dir.path().join("keys.toml"));
     let config = config_for(&server);
 
-    let unknown = save_checked(&file, &config, "baseten", KEY).await;
+    let unknown = save_checked(&file, &config, "openai", KEY).await;
     assert!(matches!(unknown, Err(SetupError::UnknownProvider)));
 
     for bad in ["", "two words", "line\nbreak", " spaced "] {
@@ -173,23 +176,124 @@ async fn an_unknown_provider_or_a_bad_key_is_refused_before_any_request() {
 }
 
 #[test]
-fn a_saved_key_round_trips_and_a_second_save_replaces_it() {
+fn each_provider_keeps_its_own_key_and_a_second_save_replaces_only_its_own() {
     let dir = tempfile::tempdir().expect("temp dir");
     let file = KeyFile::new(dir.path().join("acan").join("keys.toml"));
-    assert!(file.load().expect("no file reads as none").is_none());
+    assert!(file.load().expect("no file reads as empty").keys.is_empty());
 
-    file.save("meta", "first-key-0123456789").expect("saves");
-    file.save("fireworks", "second-key-0123456789")
-        .expect("saves again");
+    file.set_key("meta", "first-key-0123456789").expect("saves");
+    file.set_key("fireworks", "second-key-0123456789")
+        .expect("saves another provider");
+    file.set_key("meta", "third-key-0123456789")
+        .expect("replaces meta");
 
-    let saved = file.load().expect("readable").expect("a key");
-    assert_eq!(saved.provider, "fireworks");
-    assert_eq!(saved.key.secret_text(), "second-key-0123456789");
+    let saved = file.load().expect("readable");
+    assert_eq!(saved.keys.len(), 2);
+    assert_eq!(saved.keys["meta"].secret_text(), "third-key-0123456789");
+    assert_eq!(
+        saved.keys["fireworks"].secret_text(),
+        "second-key-0123456789"
+    );
     let leftovers: Vec<_> = std::fs::read_dir(file.path().parent().expect("a folder"))
         .expect("the folder reads")
         .map(|entry| entry.expect("an entry").file_name())
         .collect();
     assert_eq!(leftovers.len(), 1, "no temporary file is left behind");
+}
+
+#[test]
+fn a_role_pick_survives_a_key_save_and_a_removed_key_takes_its_picks_with_it() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = KeyFile::new(dir.path().join("keys.toml"));
+    file.set_key("meta", "meta-key-0123456789").expect("saves");
+    file.set_key("baseten", "baseten-key-0123456789")
+        .expect("saves");
+    file.set_role(Role::Worker, Some("baseten")).expect("picks");
+    file.set_role(Role::Fast, Some("meta")).expect("picks");
+
+    file.set_key("fireworks", "fireworks-key-0123456789")
+        .expect("saves");
+    let saved = file.load().expect("readable");
+    assert_eq!(
+        saved.roles.get(&Role::Worker).map(String::as_str),
+        Some("baseten")
+    );
+    assert_eq!(
+        saved.roles.get(&Role::Fast).map(String::as_str),
+        Some("meta")
+    );
+
+    assert!(
+        file.remove_key("baseten").expect("removes"),
+        "a key was removed"
+    );
+    assert!(
+        !file.remove_key("baseten").expect("removes"),
+        "and then none"
+    );
+    let saved = file.load().expect("readable");
+    assert!(!saved.keys.contains_key("baseten"));
+    assert!(
+        !saved.roles.contains_key(&Role::Worker),
+        "its pick went with it"
+    );
+    assert_eq!(
+        saved.roles.get(&Role::Fast).map(String::as_str),
+        Some("meta")
+    );
+}
+
+#[test]
+fn a_role_pick_names_only_a_provider_the_page_offers_and_clears() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = KeyFile::new(dir.path().join("keys.toml"));
+
+    assert!(matches!(
+        file.set_role(Role::Worker, Some("openai")),
+        Err(SetupError::UnknownProvider)
+    ));
+    file.set_role(Role::Worker, Some("fireworks"))
+        .expect("picks");
+    file.set_role(Role::Worker, None).expect("clears");
+    assert!(file.load().expect("readable").roles.is_empty());
+}
+
+#[test]
+fn a_keys_file_with_an_entry_the_page_does_not_use_skips_it() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = KeyFile::new(dir.path().join("keys.toml"));
+    std::fs::write(
+        file.path(),
+        "[keys]\nmeta = \"meta-key-0123456789\"\nopenai = \"other-key-0123456789\"\n\n[roles]\nworker = \"baseten\"\nreviewer = \"meta\"\n",
+    )
+    .expect("writes");
+
+    let saved = file.load().expect("readable");
+    assert_eq!(saved.keys.keys().collect::<Vec<_>>(), ["meta"]);
+    assert_eq!(saved.roles.len(), 1, "the unknown role is skipped");
+}
+
+#[test]
+fn a_saved_setup_resolves_each_role_to_the_provider_that_has_a_key() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = KeyFile::new(dir.path().join("keys.toml"));
+    file.set_key("meta", "meta-key-0123456789").expect("saves");
+    file.set_key("baseten", "baseten-key-0123456789")
+        .expect("saves");
+    file.set_role(Role::Fast, Some("meta")).expect("picks");
+
+    let plan = resolve(
+        &file.load().expect("readable"),
+        &acan_llm::ApiKeys::default(),
+    )
+    .expect("resolves");
+    let served: Vec<Option<&str>> = plan
+        .roles
+        .iter()
+        .map(|role| role.provider.as_deref())
+        .collect();
+    assert_eq!(served, [Some("meta"), Some("baseten"), Some("meta")]);
+    assert!(plan.config.is_some());
 }
 
 #[cfg(unix)]
@@ -200,11 +304,12 @@ fn the_keys_file_and_its_folder_are_private_to_the_user() {
     let dir = tempfile::tempdir().expect("temp dir");
     let folder = dir.path().join("acan");
     let file = KeyFile::new(folder.join("keys.toml"));
-    file.save("meta", "private-key-0123456789").expect("saves");
+    file.set_key("meta", "private-key-0123456789")
+        .expect("saves");
     // A file that was readable by others is replaced, and the replacement is private too.
     std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o644))
         .expect("loosen the file");
-    file.save("meta", "private-key-0123456789")
+    file.set_key("meta", "private-key-0123456789")
         .expect("saves again");
 
     let mode = |path: &std::path::Path| {
@@ -222,20 +327,16 @@ fn the_keys_file_and_its_folder_are_private_to_the_user() {
 fn a_malformed_keys_file_is_an_error_that_quotes_nothing() {
     let dir = tempfile::tempdir().expect("temp dir");
     let file = KeyFile::new(dir.path().join("keys.toml"));
-    std::fs::write(
-        file.path(),
-        "provider = \"meta\"\nkey = \"SECRET-VALUE-0123456789\n",
-    )
-    .expect("writes");
+    std::fs::write(file.path(), "[keys]\nmeta = \"SECRET-VALUE-0123456789\n").expect("writes");
 
     let err = file.load().expect_err("a broken file is an error");
     assert!(!err.to_string().contains("SECRET-VALUE"), "{err}");
 
     std::fs::write(
         file.path(),
-        "provider = \"meta\"\nkey = \"SECRET-VALUE-0123456789\"\nextra = \"x\"\n",
+        "[keys]\nmeta = \"SECRET-VALUE-0123456789\"\n\n[extra]\nx = \"y\"\n",
     )
     .expect("writes");
-    let err = file.load().expect_err("an unknown field is an error");
+    let err = file.load().expect_err("an unknown table is an error");
     assert!(!format!("{err:?}").contains("SECRET-VALUE"), "{err:?}");
 }

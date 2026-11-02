@@ -25,7 +25,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -56,6 +56,8 @@ pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<Public
         .route("/setup", get(setup::page))
         .route("/api/setup", get(setup::get_status::<C>))
         .route("/api/setup/keys", post(setup::post_key::<C>))
+        .route("/api/setup/keys/{provider}", delete(setup::delete_key::<C>))
+        .route("/api/setup/roles/{role}", put(setup::put_role::<C>))
         .route("/api/stream", get(stream::upgrade::<C>))
         .route("/api/tasks/{task}/worktree", get(get_worktree::<C>))
         .route("/api/tasks/{task}/scope", get(get_scope::<C>))

@@ -1,10 +1,11 @@
-//! The model client the server runs: the providers in a routing file, or the one provider whose key
-//! was saved from the setup page, with the offline replies behind them.
+//! The model client the server runs: the providers and role picks a tester saved from the setup
+//! page, or the providers in a repository's routing file, with the offline replies behind them.
 //!
 //! A repository's routing file decides the providers, and its keys come from the environment or
-//! its `.env`. Without one, a key saved from the setup page picks one provider (see
-//! [`acan_llm::preset`]). Until a key is in use, calls get the offline replies. A key saved while
-//! the server runs takes effect at once, so no restart is needed.
+//! its `.env`. Without one, each provider with a key (saved from the setup page, or set in the
+//! environment) serves the roles it is picked for, or the default provider for each role. A role
+//! with no provider is off, and the setup page says why. Until every role has a provider, calls
+//! get the offline replies. A key or pick saved while the server runs takes effect at once.
 //!
 //! A foreman call never falls back. When it fails, its job fails with the provider error, so no
 //! offline split or draft stands in for a live one. Other roles keep a labelled offline answer for
@@ -12,12 +13,13 @@
 //! and offline calls are metered in one ledger, so the usage panel shows which calls were offline.
 
 use std::path::Path;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use acan_llm::{
-    ApiKey, ApiKeys, ChatRequest, ChatResponse, ConfigError, KeyFile, KeyOutcome, KeySource,
-    KeyStatus, LlmConfig, LlmError, ModelClient, OpenAiCompatible, Role, SavedKey, SetupError,
-    Structured, UsageLedger, preset, save_checked,
+    ApiKeys, ChatRequest, ChatResponse, ConfigError, KeyFile, KeyOutcome, KeySource, KeyStatus,
+    LlmConfig, LlmError, ModelClient, OpenAiCompatible, Plan, ProviderStatus, Role, RoleStatus,
+    SavedSetup, SetupError, Structured, UsageLedger, catalog, environment_keys, is_provider,
+    resolve, save_checked,
 };
 use anyhow::Context;
 use schemars::JsonSchema;
@@ -32,22 +34,89 @@ use crate::release;
 pub struct Models {
     ledger: UsageLedger,
     offline: Offline,
-    /// The live client, when one is in use. A key saved from the setup page replaces it.
-    live: RwLock<Option<Arc<Live>>>,
-    /// Where a key saved from the setup page is kept. `None` when a routing file decides, or when
-    /// the user has no config folder.
+    /// The live client and the status the setup page shows. Replaced whole on each change, so a
+    /// call reads one consistent state.
+    state: RwLock<Arc<State>>,
+    /// Held while a change to the keys file is read and the state rebuilt from it. The last change
+    /// to finish then leaves the state that matches the file.
+    changes: Mutex<()>,
+    /// Where keys and role picks saved from the setup page are kept. `None` when the user has no
+    /// config folder.
     keys_file: Option<KeyFile>,
     /// Whether a routing file decides the providers.
     routing: bool,
 }
 
-/// A live client and what it was built from.
-struct Live {
-    client: OpenAiCompatible,
-    /// Whether a provider has a key. Without one, live calls fail with a missing key.
-    has_key: bool,
-    /// The provider a saved key belongs to. `None` when a routing file chose the providers.
-    saved_provider: Option<String>,
+/// The live client, when every role has a provider, and the status the setup page shows.
+struct State {
+    /// `None` until every role has a provider. Then calls get the offline replies.
+    live: Option<OpenAiCompatible>,
+    status: KeyStatus,
+}
+
+impl State {
+    /// The state for a setup from the setup page: the plan's providers, picks and keys. `can_save`
+    /// is whether the setup page can write keys here.
+    fn from_plan(plan: Plan, can_save: bool, ledger: &UsageLedger) -> Result<Self, ConfigError> {
+        for (_, key) in plan.keys.iter() {
+            release::add_secret(key.secret_text());
+        }
+        let status = KeyStatus {
+            configured: plan.config.is_some(),
+            source: (!plan.keys.is_empty()).then_some(KeySource::Setup),
+            can_save,
+            providers: plan.providers,
+            roles: plan.roles,
+        };
+        let live = match plan.config {
+            Some(config) => {
+                Some(OpenAiCompatible::new(config, plan.keys)?.with_ledger(ledger.clone()))
+            }
+            None => None,
+        };
+        Ok(Self { live, status })
+    }
+
+    /// The state for a routing file: every role uses the provider the file names for it.
+    fn from_routing(
+        config: LlmConfig,
+        keys: ApiKeys,
+        ledger: &UsageLedger,
+    ) -> Result<Self, ConfigError> {
+        for (_, key) in keys.iter() {
+            release::add_secret(key.secret_text());
+        }
+        let providers = config
+            .providers()
+            .iter()
+            .map(|provider| ProviderStatus {
+                name: provider.name.clone(),
+                saved: false,
+                environment: keys.has(&provider.name),
+            })
+            .collect();
+        let roles = Role::ALL
+            .iter()
+            .map(|&role| RoleStatus {
+                role,
+                provider: Some(config.route_of(role).to_owned()),
+                picked: false,
+                off_reason: None,
+            })
+            .collect();
+        let status = KeyStatus {
+            configured: !keys.is_empty(),
+            source: Some(KeySource::RoutingFile),
+            can_save: false,
+            providers,
+            roles,
+        };
+        let live = OpenAiCompatible::new(config, keys)?.with_ledger(ledger.clone());
+        Ok(Self {
+            live: Some(live),
+            status,
+        })
+    }
 }
 
 impl Models {
@@ -61,11 +130,12 @@ impl Models {
         Self::open(path, None)
     }
 
-    /// Loads the routing file at `path`, or, when there is none, the key saved in `keys_file`.
+    /// Loads the routing file at `path`, or, when there is none, the keys and picks saved in
+    /// `keys_file` and the keys the environment sets.
     ///
-    /// A routing file decides everything, so `keys_file` is not read when the file exists. A saved
-    /// key that cannot be read is logged, and the server answers with the offline replies, so the
-    /// setup page can replace it.
+    /// A routing file decides everything, so `keys_file` is not read when the file exists. Saved
+    /// setup that cannot be read is logged, and the server answers with the offline replies until
+    /// the setup page replaces it.
     ///
     /// # Errors
     ///
@@ -76,20 +146,24 @@ impl Models {
                 LlmConfig::load(path).with_context(|| format!("loading {}", path.display()))?;
             let keys = ApiKeys::from_env(&config);
             let models = Self::build(None, true);
-            models.set_live(config, keys, None)?;
+            models.replace(State::from_routing(config, keys, &models.ledger)?);
             return Ok(models);
         }
 
         let models = Self::build(keys_file, false);
-        match models.keys_file.as_ref().map(KeyFile::load) {
-            Some(Ok(Some(saved))) => models.activate_saved(saved)?,
-            Some(Err(err)) => tracing::warn!(
-                error = %err,
-                "the saved model key cannot be read; answering with built-in replies"
-            ),
-            Some(Ok(None)) | None => {}
-        }
-        if models.active().is_none() {
+        let saved = match models.keys_file.as_ref().map(KeyFile::load) {
+            Some(Ok(saved)) => saved,
+            Some(Err(err)) => {
+                tracing::warn!(
+                    error = %err,
+                    "the saved model keys cannot be read; answering with built-in replies"
+                );
+                SavedSetup::default()
+            }
+            None => SavedSetup::default(),
+        };
+        models.install(&saved)?;
+        if !models.current().status.configured {
             tracing::warn!("no model key is set; model jobs get built-in offline replies");
         }
         Ok(models)
@@ -103,7 +177,7 @@ impl Models {
     /// Returns [`ConfigError::Client`] when the HTTP client cannot be built.
     pub fn live(config: LlmConfig, keys: ApiKeys) -> Result<Self, ConfigError> {
         let models = Self::build(None, true);
-        models.set_live(config, keys, None)?;
+        models.replace(State::from_routing(config, keys, &models.ledger)?);
         Ok(models)
     }
 
@@ -118,50 +192,53 @@ impl Models {
         Self {
             offline: Offline::with_ledger(ledger.clone()),
             ledger,
-            live: RwLock::new(None),
+            state: RwLock::new(Arc::new(State {
+                live: None,
+                status: KeyStatus::default(),
+            })),
+            changes: Mutex::new(()),
             keys_file,
             routing,
         }
     }
 
-    /// Uses the provider a saved key belongs to. A provider name the presets do not know is logged
-    /// and ignored, so the server answers offline.
-    fn activate_saved(&self, saved: SavedKey) -> anyhow::Result<()> {
-        let SavedKey { provider, key } = saved;
-        let Some(config) = preset(&provider) else {
-            tracing::warn!("the saved model key names a provider the setup page does not offer");
-            return Ok(());
-        };
-        release::add_secret(key.secret_text());
-        let keys = ApiKeys::from_env(&config).with_fallback(&provider, key);
-        self.set_live(config, keys, Some(provider))?;
-        Ok(())
-    }
-
-    fn set_live(
-        &self,
-        config: LlmConfig,
-        keys: ApiKeys,
-        saved_provider: Option<String>,
-    ) -> Result<(), ConfigError> {
-        let has_key = !keys.is_empty();
-        let client = OpenAiCompatible::new(config, keys)?.with_ledger(self.ledger.clone());
-        let live = Live {
-            client,
-            has_key,
-            saved_provider,
-        };
-        *self.live.write().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(live));
-        Ok(())
-    }
-
-    /// The live client in use now, if there is one. The lock is released before this returns, so
-    /// no call holds it across an await.
-    fn active(&self) -> Option<Arc<Live>> {
-        self.live
+    /// The state in use now. The lock is released before this returns, so no call holds it across
+    /// an await.
+    fn current(&self) -> Arc<State> {
+        self.state
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    fn replace(&self, state: State) {
+        *self.state.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(state);
+    }
+
+    /// Resolves `saved` against the environment and makes the result the state in use.
+    fn install(&self, saved: &SavedSetup) -> Result<(), ConfigError> {
+        let environment = environment_keys()?;
+        let plan = resolve(saved, &environment)?;
+        let state = State::from_plan(plan, self.keys_file.is_some(), &self.ledger)?;
+        self.replace(state);
+        Ok(())
+    }
+
+    /// Rebuilds the state from the keys file after a change was written to it.
+    fn sync_from(&self, file: &KeyFile) -> Result<(), SetupError> {
+        let _changes = self.changes.lock().unwrap_or_else(PoisonError::into_inner);
+        let saved = file.load().map_err(SetupError::Write)?;
+        self.install(&saved)?;
+        Ok(())
+    }
+
+    /// The keys file a change may be written to. A routing file decides everything, so none is.
+    fn writable(&self) -> Result<&KeyFile, SetupError> {
+        match (&self.keys_file, self.routing) {
+            (_, true) => Err(SetupError::RoutingFile),
+            (None, false) => Err(SetupError::Unavailable),
+            (Some(file), false) => Ok(file),
+        }
     }
 }
 
@@ -202,10 +279,11 @@ impl ModelClient for Models {
         if is_retired(&request) {
             return Err(refuse_review(role));
         }
-        let Some(live) = self.active() else {
+        let state = self.current();
+        let Some(live) = state.live.as_ref() else {
             return self.offline.chat(role, request).await;
         };
-        let err = match live.client.chat(role, request.clone()).await {
+        let err = match live.chat(role, request.clone()).await {
             Ok(response) => return Ok(response),
             Err(err) => err,
         };
@@ -228,12 +306,13 @@ impl ModelClient for Models {
         if is_retired(&request) {
             return Err(refuse_review(role));
         }
-        let Some(live) = self.active() else {
+        let state = self.current();
+        let Some(live) = state.live.as_ref() else {
             return self.offline.chat_json::<T>(role, request).await;
         };
         // The live result ends its statement before the fallback awaits, so the future stays
         // Send even when `T` is not.
-        let err = match live.client.chat_json::<T>(role, request.clone()).await {
+        let err = match live.chat_json::<T>(role, request.clone()).await {
             Ok(structured) => return Ok(structured),
             Err(err) => err,
         };
@@ -246,41 +325,51 @@ impl ModelClient for Models {
     }
 
     fn key_status(&self) -> KeyStatus {
-        let can_save = self.keys_file.is_some() && !self.routing;
-        let live = self.active();
-        let configured = live.as_ref().is_some_and(|live| live.has_key);
-        let provider = live
-            .filter(|_| configured)
-            .and_then(|live| live.saved_provider.clone());
-        let source = if self.routing {
-            Some(KeySource::RoutingFile)
-        } else if configured {
-            Some(KeySource::SavedKey)
-        } else {
-            None
-        };
-        KeyStatus {
-            configured,
-            provider,
-            source,
-            can_save,
-        }
+        self.current().status.clone()
     }
 
     async fn save_key(&self, provider: &str, key: &str) -> Result<KeyOutcome, SetupError> {
-        let file = match (&self.keys_file, self.routing) {
-            (_, true) => return Err(SetupError::RoutingFile),
-            (None, false) => return Err(SetupError::Unavailable),
-            (Some(file), false) => file,
-        };
-        let config = preset(provider).ok_or(SetupError::UnknownProvider)?;
+        let file = self.writable()?;
+        if !is_provider(provider) {
+            return Err(SetupError::UnknownProvider);
+        }
+        let config = catalog()?;
         let outcome = save_checked(file, &config, provider, key).await?;
         if matches!(outcome, KeyOutcome::Stored { .. }) {
-            release::add_secret(key);
-            let keys = ApiKeys::from_env(&config).with_fallback(provider, ApiKey::new(key));
-            self.set_live(config, keys, Some(provider.to_owned()))?;
+            self.sync_from(file)?;
         }
         Ok(outcome)
+    }
+
+    fn remove_key(&self, provider: &str) -> Result<bool, SetupError> {
+        let file = self.writable()?;
+        if !is_provider(provider) {
+            return Err(SetupError::UnknownProvider);
+        }
+        let removed = file.remove_key(provider)?;
+        self.sync_from(file)?;
+        Ok(removed)
+    }
+
+    fn set_role(&self, role: Role, provider: Option<&str>) -> Result<(), SetupError> {
+        let file = self.writable()?;
+        if let Some(name) = provider {
+            let has_key = self
+                .current()
+                .status
+                .providers
+                .iter()
+                .any(|known| known.name == name && (known.saved || known.environment));
+            if !has_key {
+                return Err(if is_provider(name) {
+                    SetupError::NoKey
+                } else {
+                    SetupError::UnknownProvider
+                });
+            }
+        }
+        file.set_role(role, provider)?;
+        self.sync_from(file)
     }
 }
 
@@ -297,34 +386,43 @@ mod tests {
         KeyFile::new(dir.path().join("acan").join("keys.toml"))
     }
 
+    fn models_with(dir: &tempfile::TempDir, file: &KeyFile) -> Models {
+        Models::open(&dir.path().join("no-routing.toml"), Some(file.clone())).expect("opens")
+    }
+
     #[test]
-    fn a_saved_key_selects_its_provider_and_the_status_never_holds_the_key() {
+    fn a_saved_key_serves_the_roles_and_the_status_never_holds_the_key() {
         let dir = tempfile::tempdir().expect("temp dir");
         let file = keys_file(&dir);
-        file.save("meta", SAVED).expect("saves");
+        file.set_key("meta", SAVED).expect("saves");
 
-        let models =
-            Models::open(&dir.path().join("no-routing.toml"), Some(file)).expect("the models open");
+        let models = models_with(&dir, &file);
 
         let status = models.key_status();
         assert!(status.configured);
-        assert_eq!(status.provider.as_deref(), Some("meta"));
-        assert_eq!(status.source, Some(KeySource::SavedKey));
+        assert_eq!(status.source, Some(KeySource::Setup));
         assert!(status.can_save);
+        let meta = status
+            .providers
+            .iter()
+            .find(|provider| provider.name == "meta")
+            .expect("meta is listed");
+        assert!(meta.saved);
+        assert_eq!(status.roles[0].provider.as_deref(), Some("meta"));
         let text = serde_json::to_string(&status).expect("the status serializes");
         assert!(!text.contains(SAVED), "the status carries no key");
     }
 
     #[test]
-    fn without_a_key_calls_are_offline_and_a_key_can_be_saved() {
+    fn without_a_key_every_role_is_off_and_the_status_says_so() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let models = Models::open(&dir.path().join("no-routing.toml"), Some(keys_file(&dir)))
-            .expect("the models open");
+        let models = models_with(&dir, &keys_file(&dir));
 
         let status = models.key_status();
         assert!(!status.configured);
         assert_eq!(status.source, None);
         assert!(status.can_save);
+        assert!(status.roles.iter().all(|role| role.off_reason.is_some()));
     }
 
     #[test]
@@ -357,11 +455,81 @@ provider = "meta"
         assert!(!status.configured, "the test environment has no key");
         assert!(!status.can_save);
         assert_eq!(status.source, Some(KeySource::RoutingFile));
-        assert_eq!(status.provider, None);
+        assert_eq!(status.roles[1].provider.as_deref(), Some("meta"));
+        assert!(matches!(
+            models.set_role(Role::Worker, None),
+            Err(SetupError::RoutingFile)
+        ));
+    }
+
+    #[test]
+    fn a_key_saved_while_running_takes_effect_without_a_restart() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = keys_file(&dir);
+        let models = models_with(&dir, &file);
+        assert!(!models.key_status().configured);
+
+        file.set_key("baseten", "baseten-saved-key-0123456789")
+            .expect("saves");
+        models.sync_from(&file).expect("the state follows the file");
+
+        let status = models.key_status();
+        assert!(status.configured);
+        assert_eq!(status.roles[1].provider.as_deref(), Some("baseten"));
+    }
+
+    #[test]
+    fn a_pick_takes_effect_and_a_pick_needs_a_key_for_its_provider() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = keys_file(&dir);
+        file.set_key("meta", SAVED).expect("saves");
+        file.set_key("baseten", "baseten-saved-key-0123456789")
+            .expect("saves");
+        let models = models_with(&dir, &file);
+
+        models
+            .set_role(Role::Worker, Some("meta"))
+            .expect("meta has a key");
+        let status = models.key_status();
+        assert_eq!(status.roles[1].provider.as_deref(), Some("meta"));
+        assert!(status.roles[1].picked);
+
+        assert!(matches!(
+            models.set_role(Role::Worker, Some("fireworks")),
+            Err(SetupError::NoKey)
+        ));
+        assert!(matches!(
+            models.set_role(Role::Worker, Some("openai")),
+            Err(SetupError::UnknownProvider)
+        ));
+    }
+
+    #[test]
+    fn removing_a_key_drops_it_and_the_picks_that_used_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = keys_file(&dir);
+        file.set_key("meta", SAVED).expect("saves");
+        file.set_key("baseten", "baseten-saved-key-0123456789")
+            .expect("saves");
+        let models = models_with(&dir, &file);
+        models
+            .set_role(Role::Worker, Some("baseten"))
+            .expect("picks");
+
+        assert!(models.remove_key("baseten").expect("removes"));
+
+        let status = models.key_status();
+        let baseten = status
+            .providers
+            .iter()
+            .find(|provider| provider.name == "baseten")
+            .expect("baseten is listed");
+        assert!(!baseten.saved);
+        assert!(!status.roles[1].picked, "the pick went with the key");
     }
 
     #[tokio::test]
-    async fn a_saved_key_takes_effect_without_a_restart() {
+    async fn a_client_built_from_a_config_answers_through_its_provider() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
@@ -375,18 +543,6 @@ provider = "meta"
             })))
             .mount(&server)
             .await;
-        let dir = tempfile::tempdir().expect("temp dir");
-        let models = Models::open(&dir.path().join("no-routing.toml"), Some(keys_file(&dir)))
-            .expect("the models open");
-        let request = || ChatRequest {
-            messages: vec![acan_llm::Message::user("hello")],
-            ..ChatRequest::default()
-        };
-        assert!(
-            models.chat(Role::Worker, request()).await.is_err(),
-            "with no key, a non-model call has no offline reply"
-        );
-
         let config = LlmConfig::from_toml_str(&format!(
             r#"
 [[providers]]
@@ -408,10 +564,14 @@ provider = "meta"
         ))
         .expect("the test config is valid");
         let mut keys = ApiKeys::default();
-        keys.insert("meta", ApiKey::new(SAVED));
-        models
-            .set_live(config, keys, Some("meta".to_owned()))
-            .expect("the live client builds");
+        keys.insert("meta", acan_llm::ApiKey::new(SAVED));
+        let dir = tempfile::tempdir().expect("temp dir");
+        let models = Models::open(&dir.path().join("no-routing.toml"), None).expect("opens");
+        models.replace(State::from_routing(config, keys, &models.ledger).expect("builds"));
+        let request = || ChatRequest {
+            messages: vec![acan_llm::Message::user("hello")],
+            ..ChatRequest::default()
+        };
 
         let response = models
             .chat(Role::Worker, request())
@@ -419,5 +579,19 @@ provider = "meta"
             .expect("the live provider answers");
         assert_eq!(response.content.as_deref(), Some("answered live"));
         assert!(models.key_status().configured);
+    }
+
+    #[tokio::test]
+    async fn with_no_key_a_non_model_call_has_no_offline_reply() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let models = models_with(&dir, &keys_file(&dir));
+        let request = ChatRequest {
+            messages: vec![acan_llm::Message::user("hello")],
+            ..ChatRequest::default()
+        };
+        assert!(
+            models.chat(Role::Worker, request).await.is_err(),
+            "with no key, a non-model call has no offline reply"
+        );
     }
 }

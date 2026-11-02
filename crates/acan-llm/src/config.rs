@@ -132,6 +132,12 @@ impl LlmConfig {
         &self.providers
     }
 
+    /// The name of the provider `role` is routed to.
+    #[must_use]
+    pub fn route_of(&self, role: Role) -> &str {
+        &self.routing.route(role).provider
+    }
+
     /// Points `role` at `provider`, using that provider's default model.
     ///
     /// # Errors

@@ -55,6 +55,20 @@ impl ApiKeys {
         self.0.insert(provider.into(), key);
     }
 
+    /// Whether `provider` has a key here.
+    #[must_use]
+    pub fn has(&self, provider: &str) -> bool {
+        self.0.contains_key(provider)
+    }
+
+    /// Each provider's name with its key, for the bug report's redaction list. Never print a key
+    /// from here.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &ApiKey)> {
+        self.0
+            .iter()
+            .map(|(provider, key)| (provider.as_str(), key))
+    }
+
     /// Adds `key` for `provider` unless a key is already set, so an environment variable wins over
     /// a saved key.
     #[must_use]
