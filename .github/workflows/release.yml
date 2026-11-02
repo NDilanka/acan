@@ -96,28 +96,11 @@ jobs:
           path: dist/web
       - name: Build acan
         run: cargo build -p acan-server --bin acan --release --locked --target ${{ matrix.target }}
-      - name: Package (unix)
-        if: matrix.archive == 'tar.gz'
-        shell: bash
-        run: |
-          name="acan-${{ matrix.target }}"
-          stage="dist/$name"
-          mkdir -p "$stage"
-          cp "target/${{ matrix.target }}/release/acan" "$stage/acan"
-          cp -r dist/web "$stage/web"
-          cp README.md LICENSE "$stage/"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-      - name: Package (windows)
-        if: matrix.archive == 'zip'
+      - name: Build acan-worker
+        run: cargo build -p acan-agent --bin acan-worker --release --locked --target ${{ matrix.target }}
+      - name: Package
         shell: pwsh
-        run: |
-          $name = "acan-${{ matrix.target }}"
-          $stage = "dist/$name"
-          New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/acan.exe" "$stage/acan.exe"
-          Copy-Item -Recurse "dist/web" "$stage/web"
-          Copy-Item README.md, LICENSE "$stage/"
-          Compress-Archive -Path $stage -DestinationPath "dist/$name.zip"
+        run: pwsh ./scripts/package.ps1 -Target ${{ matrix.target }} -BinDir target/${{ matrix.target }}/release -WebDir dist/web -OutDir dist
       - uses: actions/upload-artifact@v4
         with:
           name: acan-${{ matrix.target }}
