@@ -1480,7 +1480,7 @@
             }
           }
         },
-        "catalog_version": "captions-3"
+        "catalog_version": "captions-4"
       },
       {
         "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
@@ -1505,7 +1505,7 @@
             }
           }
         },
-        "catalog_version": "captions-3"
+        "catalog_version": "captions-4"
       },
       {
         "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
@@ -1527,7 +1527,7 @@
             }
           }
         },
-        "catalog_version": "captions-3"
+        "catalog_version": "captions-4"
       },
       {
         "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
@@ -1552,7 +1552,7 @@
             }
           }
         },
-        "catalog_version": "captions-3"
+        "catalog_version": "captions-4"
       },
       {
         "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
@@ -1594,7 +1594,7 @@
             }
           }
         },
-        "catalog_version": "captions-3"
+        "catalog_version": "captions-4"
       },
       {
         "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
@@ -1619,7 +1619,7 @@
             }
           }
         },
-        "catalog_version": "captions-3"
+        "catalog_version": "captions-4"
       },
       {
         "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
@@ -1644,7 +1644,7 @@
             }
           }
         },
-        "catalog_version": "captions-3"
+        "catalog_version": "captions-4"
       },
       {
         "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
@@ -1669,9 +1669,9 @@
             }
           }
         },
-        "catalog_version": "captions-3"
+        "catalog_version": "captions-4"
       }
     ]
   },
-  "catalog_version": "captions-3"
+  "catalog_version": "captions-4"
 }
