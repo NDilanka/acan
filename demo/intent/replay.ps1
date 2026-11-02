@@ -599,7 +599,9 @@ function Invoke-ReplayOrder {
         $view = Wait-Until -What "the foreman draft for $id" -Probe { Invoke-Api404Tolerant -Path "/api/orders/$oid/scope-draft" } -Terminal { $null }
         if ($view.state -ne 'drafted') { throw "draft_not_ready: the draft state is $($view.state)" }
         $draftPath = Join-Path $dir 'scope-draft.json'
-        $draftKey = ConvertTo-Json -Depth 60 -Compress @{ order = $view.draft.order; rev = $view.draft.rev; base_commit = $view.draft.base_commit; proposal = $view.draft.draft.proposal }
+        # [ordered]: a plain hashtable enumerates its keys in an order that differs between PowerShell processes, so
+        # the same draft hashed differently on a resume and stopped it as draft_changed (run x01-20261102-145159).
+        $draftKey = ConvertTo-Json -Depth 60 -Compress ([ordered]@{ order = $view.draft.order; rev = $view.draft.rev; base_commit = $view.draft.base_commit; proposal = $view.draft.draft.proposal })
         $draftSha = Get-TextSha256 -Text $draftKey
         if (-not $state.draft_sha256) {
             Write-JsonFile -Path $draftPath -Object $view.draft
