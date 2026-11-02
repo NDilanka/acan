@@ -19,7 +19,7 @@ import { historyBlock } from "./guard.js";
 import { forgetToken, hold } from "./stream.js";
 
 // An accepted order's panel shows its line this long, then closes.
-const SENT_HOLD_MS = 900;
+const SENT_HOLD_MS = 2000;
 
 // A pulse is kept this long, the length of its CSS animation.
 const PULSE_MS = 1900;
