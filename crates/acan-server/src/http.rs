@@ -18,7 +18,7 @@ use acan_intent::{
     GetRulingsResponse, GetScopeRequest, GetScopeResponse, MachineId, McpError, McpErrorCode,
     McpV1, TaskRef,
 };
-use acan_llm::{ModelClient, UsageTotals};
+use acan_llm::{ModelClient, Role, RoleStatus, UsageTotals};
 use acan_scan::Plant;
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, State};
@@ -277,13 +277,38 @@ async fn get_events<C: ModelClient + 'static>(
     Ok(Json(views))
 }
 
+/// The plant, with the two flags the UI reads from it: whether the protected app contract is in
+/// place, and whether the advisory vision check runs. The plant's own fields stay at the top level.
+#[derive(Serialize)]
+struct PlantResponse {
+    #[serde(flatten)]
+    plant: Plant,
+    contract: ContractView,
+    vision: VisionView,
+}
+
 async fn get_plant<C: ModelClient + 'static>(
     State(host): State<Host<C>>,
     headers: HeaderMap,
-) -> Result<Json<Plant>, ApiError> {
+) -> Result<Json<PlantResponse>, ApiError> {
     authenticate(&host, bearer(&headers))?;
-    let scan = host.scan();
-    Ok(Json(scan.plant.clone()))
+    let plant = host.scan().plant.clone();
+    // The plant still loads when the protected head cannot be read. The contract then reads absent.
+    let contract = match contract_of(&host).await {
+        Ok(contract) => contract,
+        Err(err) => {
+            tracing::warn!(error = ?err, "the protected app contract could not be read for the plant");
+            ContractView {
+                present: false,
+                version: None,
+            }
+        }
+    };
+    Ok(Json(PlantResponse {
+        plant,
+        contract,
+        vision: vision_of(&host),
+    }))
 }
 
 /// Whether the protected app contract is in place, and its version. Any authenticated principal may
@@ -368,6 +393,41 @@ pub(crate) async fn contract_of<C: ModelClient>(host: &Host<C>) -> Result<Contra
             version: None,
         },
     })
+}
+
+/// Whether the advisory vision check runs, and why it does not. The UI reads this rather than
+/// parsing the reason a vision record gives.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct VisionView {
+    on: bool,
+    reason: Option<String>,
+}
+
+/// The vision flag of this server: the check runs when the server runs it and a provider serves
+/// the vision role.
+fn vision_of<C: ModelClient>(host: &Host<C>) -> VisionView {
+    let keys = host.client().key_status();
+    vision_view(host.vision().is_some(), keys.role(Role::Vision))
+}
+
+/// The vision flag from whether the server runs the check and the status of the vision role.
+fn vision_view(configured: bool, role: Option<&RoleStatus>) -> VisionView {
+    if !configured {
+        return VisionView {
+            on: false,
+            reason: Some("the server runs no vision checks".to_owned()),
+        };
+    }
+    match role {
+        Some(status) => VisionView {
+            on: status.off_reason.is_none(),
+            reason: status.off_reason.map(str::to_owned),
+        },
+        None => VisionView {
+            on: false,
+            reason: Some("no model serves vision".to_owned()),
+        },
+    }
 }
 
 /// Where a claimed task's worktree is, the branch it is on, and the protected-head snapshot its
@@ -684,4 +744,67 @@ fn invalid_request(detail: &str) -> ApiError {
         },
         detail,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vision_role(off_reason: Option<&'static str>) -> RoleStatus {
+        RoleStatus {
+            role: Role::Vision,
+            provider: off_reason.is_none().then(|| "meta".to_owned()),
+            picked: false,
+            off_reason,
+            meta_only: true,
+        }
+    }
+
+    #[test]
+    fn a_server_that_runs_no_vision_checks_says_so() {
+        let view = vision_view(false, Some(&vision_role(None)));
+        assert_eq!(
+            view,
+            VisionView {
+                on: false,
+                reason: Some("the server runs no vision checks".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn vision_is_on_when_a_provider_serves_its_role() {
+        let view = vision_view(true, Some(&vision_role(None)));
+        assert_eq!(
+            view,
+            VisionView {
+                on: true,
+                reason: None,
+            }
+        );
+    }
+
+    #[test]
+    fn vision_is_off_with_the_reason_its_role_gives() {
+        let view = vision_view(true, Some(&vision_role(Some("it needs a Meta key"))));
+        assert_eq!(
+            view,
+            VisionView {
+                on: false,
+                reason: Some("it needs a Meta key".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn vision_is_off_when_no_model_lists_its_role() {
+        let view = vision_view(true, None);
+        assert_eq!(
+            view,
+            VisionView {
+                on: false,
+                reason: Some("no model serves vision".to_owned()),
+            }
+        );
+    }
 }

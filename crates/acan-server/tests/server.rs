@@ -353,10 +353,29 @@ async fn plant_endpoint_returns_the_scanned_plant() {
     let (status, body) = get_json(&running, "/api/plant", &token).await;
 
     assert_eq!(status, StatusCode::OK);
+    let mut plant = body;
+    let contract = plant
+        .as_object_mut()
+        .expect("the plant is a JSON object")
+        .remove("contract");
+    let vision = plant
+        .as_object_mut()
+        .expect("the plant is a JSON object")
+        .remove("vision");
     let expected = serde_json::to_value(scan(dir.path()).expect("scan").plant).expect("plant JSON");
     assert_eq!(
-        body, expected,
+        plant, expected,
         "the endpoint returns the same plant as a fresh scan"
+    );
+    assert_eq!(
+        contract,
+        Some(json!({ "present": false, "version": null })),
+        "a repository with no app contract says so"
+    );
+    assert_eq!(
+        vision,
+        Some(json!({ "on": false, "reason": "the server runs no vision checks" })),
+        "this server runs no vision checks"
     );
 }
 
