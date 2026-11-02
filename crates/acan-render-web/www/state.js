@@ -11,6 +11,10 @@ export const params = new URLSearchParams(location.search);
 // the marks.
 export const freeze = params.get("freeze") === "1";
 
+// `?replay=1` plays a recorded run from the files in `replay/`. The page then makes no API call,
+// opens no socket and sends no command.
+export const replay = params.get("replay") === "1";
+
 // `?upto=N` folds only the events before seq N. A frozen screenshot uses it to show the demo at
 // an earlier point, such as after a witness passes and before its task lands.
 export const upto = params.has("upto") ? Number(params.get("upto")) : null;

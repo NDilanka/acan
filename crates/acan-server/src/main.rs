@@ -5,6 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use acan_server::release::{self, Redaction};
+use acan_server::replay;
 use acan_server::{DEFAULT_WITNESS_CONCURRENCY, Models, ServerConfig, start};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -21,6 +22,19 @@ struct Cli {
 enum Command {
     /// Serves the world of one repository.
     Serve(ServeArgs),
+    /// Exports the recorded run of one repository as static files for the replay page.
+    ExportReplay(ExportReplayArgs),
+}
+
+#[derive(Debug, Args)]
+struct ExportReplayArgs {
+    /// The repository whose recorded run to export.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// The folder to write `plant.json`, `events.json` and `manifest.json` into. Created when it
+    /// is missing, such as `site/replay` beside the web bundle.
+    #[arg(long)]
+    out: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -66,18 +80,39 @@ async fn main() -> Result<()> {
         .with_writer(release::LogTee)
         .with_max_level(tracing::Level::INFO)
         .init();
-    let Command::Serve(args) = Cli::parse().command;
-    serve(args).await
+    match Cli::parse().command {
+        Command::Serve(args) => serve(args).await,
+        Command::ExportReplay(args) => export_replay(args).await,
+    }
+}
+
+/// Loads the repository's `.env` file. A repository without one is the normal case. A file that
+/// exists but does not parse is an error, so the keys it was meant to set are not silently
+/// missing.
+fn load_dotenv(repo: &std::path::Path) -> Result<()> {
+    match dotenvy::from_path(repo.join(".env")) {
+        Ok(()) => Ok(()),
+        Err(dotenvy::Error::Io(err)) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).context("loading .env"),
+    }
+}
+
+/// Exports the recorded run. The keys of `.env` are loaded first, so the privacy scan removes
+/// them from the files as it would from a bug report.
+async fn export_replay(args: ExportReplayArgs) -> Result<()> {
+    load_dotenv(&args.repo)?;
+    let redaction = Redaction::for_repo(&args.repo);
+    let exported = replay::export(&args.repo, &args.out, &redaction).await?;
+    println!(
+        "exported {} events to {}",
+        exported.events,
+        exported.dir.display()
+    );
+    Ok(())
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {
-    // A repository without a .env file is the normal case. A file that exists but does not parse
-    // is an error, so the keys it was meant to set are not silently missing.
-    match dotenvy::from_path(args.repo.join(".env")) {
-        Ok(()) => {}
-        Err(dotenvy::Error::Io(err)) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(err) => return Err(err).context("loading .env"),
-    }
+    load_dotenv(&args.repo)?;
 
     // The bug report removes the keys this process was given, so it is set after `.env` is loaded.
     release::configure(Redaction::for_repo(&args.repo));

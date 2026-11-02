@@ -17,8 +17,10 @@ import {
   noticeEl,
   params,
   repoEl,
+  replay,
   state,
 } from "./state.js";
+import { startReplay } from "./replay.js";
 import { setLink, start } from "./stream.js";
 
 const PAN_KEY_PX = 80;
@@ -345,12 +347,15 @@ async function createApp() {
   }
 }
 
-// The page loads its plant one of three ways. `?plant=stress&machines=N` builds a generated
-// plant for the benchmark. `?plant=fixture` loads the demo plant with no log. Otherwise the
-// page reads the live origin, which needs the owner token.
+// The page loads its plant one of four ways. `?replay=1` plays a recorded run from `replay/`,
+// with no server. `?plant=stress&machines=N` builds a generated plant for the benchmark.
+// `?plant=fixture` loads the demo plant with no log. Otherwise the page reads the live origin,
+// which needs the owner token.
 async function loadPlant() {
   const source = params.get("plant");
-  if (source === "stress") {
+  if (replay) {
+    await startReplay();
+  } else if (source === "stress") {
     const machines = Number(params.get("machines") || 2000);
     const started = performance.now();
     state.app.set_stress(machines);

@@ -129,6 +129,10 @@
   #pov-chip kbd { margin-left: 4px; }
   #pov-chip .alt { flex-basis: 100%; max-width: 56vw; overflow: hidden; text-overflow: ellipsis;
     font: 11px var(--mono); color: var(--muted); }
+  /* The replay panel shows on a recorded run only (`?replay=1`). */
+  #replay { right: 12px; bottom: 12px; display: flex; gap: 10px; align-items: center; font: 12px var(--mono); }
+  #replay button { font: 12px var(--mono); padding: 2px 8px; background: var(--face); color: var(--ink); border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+  #replay button:hover { border-color: var(--ink); }
 </style>
 </head>
 <body>
@@ -159,6 +163,13 @@
     </thead>
     <tbody id="usage-body"></tbody>
   </table>
+</div>
+<div class="island" id="replay" hidden>
+  <span>Replay of a recorded run</span>
+  <span id="replay-progress" class="muted"></span>
+  <button type="button" id="replay-toggle">Pause</button>
+  <button type="button" id="replay-restart">Restart</button>
+  <button type="button" id="replay-speed">1x</button>
 </div>
 <div class="island" id="notice" hidden></div>
 <script type="module" src="main.js"></script>
