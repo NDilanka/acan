@@ -1344,6 +1344,49 @@ mod tests {
     }
 
     #[test]
+    fn generated_bytes_hold_no_value_from_the_tree() {
+        let mut tree = node_workspace();
+        tree.0.insert(
+            ".env".to_owned(),
+            b"PAYPAL_CLIENT_SECRET=live-real-secret-value\n".to_vec(),
+        );
+        let plan = detect(&tree, &Options::default()).expect("detected");
+        for path in [APP_PATH, CORPUS_PATH, REVIEW_PATH] {
+            let text = plan.file(path).expect("the file is generated");
+            assert!(
+                !text.contains("live-real-secret-value"),
+                "{path} holds a value from .env"
+            );
+        }
+        assert!(!render(&plan).contains("live-real-secret-value"));
+    }
+
+    #[test]
+    fn the_same_tree_gives_the_same_bytes_every_time() {
+        let first = detect(&node_workspace(), &Options::default()).expect("detected");
+        let second = detect(&node_workspace(), &Options::default()).expect("detected");
+        for path in [APP_PATH, CORPUS_PATH, REVIEW_PATH] {
+            assert_eq!(first.file(path), second.file(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_probe_naming_a_fixture_the_corpus_lacks_is_refused() {
+        let plan = detect(&node_workspace(), &Options::default()).expect("detected");
+        let mut corpus = file_json(&plan, CORPUS_PATH);
+        corpus["fixtures"] = json!([]);
+        let decoded: ProbeCorpus =
+            serde_json::from_value(corpus).expect("the corpus still decodes");
+        let error = cross_check(&decoded).expect_err("a probe with no fixture is refused");
+        assert!(
+            error
+                .to_string()
+                .contains("names a fixture the corpus does not have"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn the_bytes_written_decode_and_encode_back_unchanged() {
         let plan = detect(&node_workspace(), &Options::default()).expect("detected");
         for path in [APP_PATH, CORPUS_PATH] {
