@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import {
   askRoute,
+  budgetWords,
   confirmationFor,
   leaseWords,
   picksFor,
@@ -21,6 +22,13 @@ const ROUTE = JSON.parse(
 );
 
 const ORDER = 3;
+
+test("the budget names the limits the server enforces, and only records the rest", () => {
+  const words = budgetWords({ repair_rounds: 2, wall_time_ms: 1800000, model_cost_micros: 2000000, max_episodes: 6 });
+  assert.deepEqual(words.enforced, ["repair rounds: at most 2 rounds", "new episodes: at most 6"]);
+  assert.deepEqual(words.recorded, ["30 min wall time", "$2.00 model cost"]);
+  assert.equal(words.enforced.some((line) => line.includes("$")), false, "no cost is shown as enforced");
+});
 
 // A plot of the lane as the view names it. `broad` marks one that needs its own acknowledgement.
 function mayView(id, broad) {

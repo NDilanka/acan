@@ -4,7 +4,7 @@
 // Seal paints solid only once the view carries the origin's confirmation, never on the click.
 import { requestRender } from "./main.js";
 import { shownOrder } from "./panels.js";
-import { askRoute, confirmationFor, leaseWords, picksFor, sealOf, strikeScope } from "./seal.js";
+import { askRoute, budgetWords, confirmationFor, leaseWords, picksFor, sealOf, strikeScope } from "./seal.js";
 import { freeze, slipEl, state } from "./state.js";
 import { forgetToken, get } from "./stream.js";
 
@@ -77,11 +77,11 @@ function withheld(seal) {
   const { check } = seal;
   let text;
   if (seal.confirmed !== undefined) {
-    text = `The seal on this page is for scope hash ${short(seal.confirmed)}, not the origin's ${short(check.origin_hash)}. No Seal is shown.`;
+    text = `The seal on this page is for scope hash ${short(seal.confirmed)}, not the server's ${short(check.origin_hash)}. No Seal is shown.`;
   } else if (check.page_hash === null) {
     text = "This page could not hash the scope, so no Seal is shown.";
   } else {
-    text = `The origin's scope hash does not match this page's, so no Seal is shown. Page: rev ${check.page_rev}, hash ${short(check.page_hash)}. Origin: rev ${check.origin_rev}, hash ${short(check.origin_hash)}.`;
+    text = `The server's scope hash does not match this page's, so no Seal is shown. Page: rev ${check.page_rev}, hash ${short(check.page_hash)}. Server: rev ${check.origin_rev}, hash ${short(check.origin_hash)}.`;
   }
   return el("p", "mismatch", text);
 }
@@ -91,13 +91,9 @@ function sealedStamp(confirmation) {
   stamp.append(el("b", null, `SEALED rev ${confirmation.scope_rev}`));
   stamp.append(el("span", null, `by ${confirmation.by} · ${when(confirmation.at)}`));
   stamp.append(el("span", null, `hash ${short(confirmation.scope_hash)} · base ${confirmation.base_commit.slice(0, 8)}`));
-  const budget = confirmation.budget;
-  const rounds = budget.repair_rounds;
-  stamp.append(el(
-    "span",
-    null,
-    `repair budget: ${rounds} ${plural(rounds, "round")}, ${Math.round(budget.wall_time_ms / 60000)} min, $${(budget.model_cost_micros / 1e6).toFixed(2)}, ${budget.max_episodes} new episodes`,
-  ));
+  const budget = budgetWords(confirmation.budget);
+  stamp.append(el("span", null, `enforced: ${budget.enforced.join("; ")}.`));
+  stamp.append(el("span", null, `recorded, not enforced: ${budget.recorded.join(", ")}.`));
   if (confirmation.ruling_versions.length > 0) {
     const ids = confirmation.ruling_versions.map((ruling) => ruling.ruling_id).join(", ");
     stamp.append(el("span", null, `rulings bound: ${ids}. A ruling binds only where a human chose it.`));
@@ -241,7 +237,7 @@ async function seal(lane) {
   try {
     const { body, check } = await askRoute(state, get, lane.order);
     if (check.verdict !== "match") {
-      state.slipNote = "The origin's scope no longer matches this page. Nothing was sent.";
+      state.slipNote = "The server's scope no longer matches this page. Nothing was sent.";
       return;
     }
     const built = confirmationFor(body, lane, picksFor(state, lane), Date.now());
@@ -251,7 +247,7 @@ async function seal(lane) {
     }
     await post({ cmd: "confirm_scope", order: lane.order, confirmation: built.confirmation });
   } catch (err) {
-    state.slipNote = `the seal did not reach the origin: ${err?.message ?? err}`;
+    state.slipNote = `the seal did not reach the server: ${err?.message ?? err}`;
   } finally {
     state.slipPending = false;
     paintSlip();
@@ -268,7 +264,7 @@ async function strike(lane, item) {
     const scope = strikeScope(lane.scope, item.id);
     if (await post({ cmd: "revise_scope", order: lane.order, scope })) state.strikeArmed = null;
   } catch (err) {
-    state.slipNote = `the strike did not reach the origin: ${err?.message ?? err}`;
+    state.slipNote = `the strike did not reach the server: ${err?.message ?? err}`;
   } finally {
     state.slipPending = false;
     paintSlip();
@@ -288,7 +284,7 @@ async function post(command) {
     return false;
   }
   if (!res.ok) {
-    state.slipNote = `the origin refused: ${(await res.text()).slice(0, 160)}`;
+    state.slipNote = `the server refused: ${(await res.text()).slice(0, 160)}`;
     return false;
   }
   if (freeze) {

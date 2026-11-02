@@ -112,3 +112,20 @@ export function leaseWords(count) {
   if (count === 0) return "ends no live leases";
   return `ends ${count} live ${count === 1 ? "lease" : "leases"}`;
 }
+
+// The repair budget a confirmation fixes, split as the slip states it. The server enforces the
+// repair rounds (a bounce after the last round has no round left) and the new episodes (past the
+// cap, the open episodes stop). It records the wall time and the model cost and enforces neither.
+export function budgetWords(budget) {
+  const rounds = budget.repair_rounds;
+  return {
+    enforced: [
+      `repair rounds: at most ${rounds} ${rounds === 1 ? "round" : "rounds"}`,
+      `new episodes: at most ${budget.max_episodes}`,
+    ],
+    recorded: [
+      `${Math.round(budget.wall_time_ms / 60000)} min wall time`,
+      `$${(budget.model_cost_micros / 1e6).toFixed(2)} model cost`,
+    ],
+  };
+}
