@@ -42,6 +42,7 @@ mod receipt;
 )]
 mod receipt_cli;
 mod redact;
+pub mod release;
 mod store;
 mod stream;
 #[allow(dead_code, reason = "the guided tour has no caller in the server yet")]

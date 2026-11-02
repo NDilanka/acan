@@ -23,7 +23,9 @@ axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4", features = ["derive"] }
 dotenvy = "0.15"
 percent-encoding = "2"
+reqwest = { version = "0.12", features = ["json"] }
 schemars = "1"
+semver = "1"
 serde.workspace = true
 serde_json.workspace = true
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
@@ -36,6 +38,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 futures-util = "0.3"
-reqwest = { version = "0.12", features = ["json"] }
 tempfile = "3"
 tokio-tungstenite = "0.29"

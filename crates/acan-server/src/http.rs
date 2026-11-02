@@ -37,18 +37,22 @@ use crate::intent_api::{self, IntentError};
 use crate::jobs;
 use crate::mcp;
 use crate::public::{self, PublicRoot};
+use crate::release::{self, BugReport, UpdateStatus, VersionInfo};
 use crate::{STATE_DIR, redact, stream};
 
 /// Builds the router. The public files are served for every path the API does not claim.
 pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<PublicRoot>) -> Router {
     let router = Router::new()
         .route("/health", get(health))
+        .route("/version", get(version))
         .route("/mcp", post(mcp::post::<C>))
         .route("/api/commands", post(post_command::<C>))
         .route("/api/events", get(get_events::<C>))
         .route("/api/plant", get(get_plant::<C>))
         .route("/api/scan", post(post_scan::<C>))
         .route("/api/usage", get(get_usage::<C>))
+        .route("/api/update", get(get_update::<C>))
+        .route("/api/bug-report", get(get_bug_report::<C>))
         .route("/api/stream", get(stream::upgrade::<C>))
         .route("/api/tasks/{task}/worktree", get(get_worktree::<C>))
         .route("/api/tasks/{task}/scope", get(get_scope::<C>))
@@ -193,6 +197,12 @@ async fn health() -> &'static str {
     "ok"
 }
 
+/// The build's identity. Public, since it holds nothing private and the app shows it before anyone
+/// has signed in.
+async fn version() -> Json<VersionInfo> {
+    Json(release::version_info())
+}
+
 /// Every human command. The scope-first human commands arrive here too, as bodies: ReviseScope,
 /// ConfirmScope, ResolveContest and RecordRuling. Only a member reaches the origin, and the origin
 /// checks that the member is the order's poster or an owner. An agent token gets 403 here.
@@ -252,6 +262,25 @@ async fn get_usage<C: ModelClient + 'static>(
 ) -> Result<Json<Vec<UsageTotals>>, ApiError> {
     authenticate(&host, bearer(&headers))?;
     Ok(Json(host.ledger().snapshot()))
+}
+
+/// The update check's status. Any principal may read it.
+async fn get_update<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+) -> Result<Json<UpdateStatus>, ApiError> {
+    authenticate(&host, bearer(&headers))?;
+    Ok(Json(release::update_status()))
+}
+
+/// The bug report: a pre-filled issue link, and its full text. Members only, since the person
+/// using the app is the one who files it.
+async fn get_bug_report<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+) -> Result<Json<BugReport>, ApiError> {
+    member(&host, &headers)?;
+    Ok(Json(release::bug_report()))
 }
 
 /// Where a claimed task's worktree is, the branch it is on, and the protected-head snapshot its

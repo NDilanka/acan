@@ -4,6 +4,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
+use acan_server::release::{self, Redaction};
 use acan_server::{DEFAULT_WITNESS_CONCURRENCY, Models, ServerConfig, start};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -36,7 +37,8 @@ struct ServeArgs {
     /// Allows a non-loopback address, for a shared team origin.
     #[arg(long)]
     team: bool,
-    /// A directory served at `/`, such as the renderer page.
+    /// A directory served at `/`, such as the renderer page. Without it, the `web` folder beside
+    /// the binary is served, when there is one.
     #[arg(long)]
     web: Option<PathBuf>,
     /// The model routing file. Defaults to `<repo>/.acan/llm.toml`.
@@ -52,12 +54,16 @@ struct ServeArgs {
     /// How many witness runs may run at once.
     #[arg(long, default_value_t = DEFAULT_WITNESS_CONCURRENCY)]
     witness_concurrency: usize,
+    /// Does not check GitHub Releases for a newer build. The check is also off when the
+    /// ACAN_UPDATE_CHECK variable is 0, false, no or off.
+    #[arg(long)]
+    no_update_check: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
+        .with_writer(release::LogTee)
         .with_max_level(tracing::Level::INFO)
         .init();
     let Command::Serve(args) = Cli::parse().command;
@@ -73,6 +79,17 @@ async fn serve(args: ServeArgs) -> Result<()> {
         Err(err) => return Err(err).context("loading .env"),
     }
 
+    // The bug report removes the keys this process was given, so it is set after `.env` is loaded.
+    release::configure(Redaction::for_repo(&args.repo));
+    tracing::info!(
+        version = release::version(),
+        commit = release::commit(),
+        "acan starting"
+    );
+    if update_check_enabled(args.no_update_check) {
+        release::spawn_update_check();
+    }
+
     let llm = args
         .llm
         .unwrap_or_else(|| args.repo.join(".acan").join("llm.toml"));
@@ -82,7 +99,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         repo: args.repo.clone(),
         addr: SocketAddr::new(args.bind, args.port),
         team: args.team,
-        web: args.web,
+        web: args.web.or_else(bundled_web),
         protected_branch: args.protected_branch,
         witness_http_base_url: args.witness_http_base_url,
         witness_concurrency: args.witness_concurrency,
@@ -110,4 +127,31 @@ async fn serve(args: ServeArgs) -> Result<()> {
     };
     let stopped = running.stop().await;
     outcome.and(stopped)
+}
+
+/// Whether the update check runs. It is on unless `--no-update-check` or `ACAN_UPDATE_CHECK`
+/// turns it off.
+fn update_check_enabled(flag_off: bool) -> bool {
+    if flag_off {
+        return false;
+    }
+    match std::env::var("ACAN_UPDATE_CHECK") {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
+/// The web UI shipped beside this binary: a `web` folder next to it, or `../share/acan/web` for the
+/// layout the install scripts create. `None` when neither holds an `index.html`.
+fn bundled_web() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    [
+        dir.join("web"),
+        dir.join("..").join("share").join("acan").join("web"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.join("index.html").is_file())
 }
