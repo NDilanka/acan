@@ -1,0 +1,103 @@
+{
+  "note": "A fixture vision record for ?vision=fixture. Not a real check.",
+  "machine": null,
+  "record": {
+    "version": "vision_witness/1",
+    "task": "t-2",
+    "gate_run": "g-3",
+    "status": "done",
+    "model": "muse-spark-1.3",
+    "provider": "meta",
+    "failed_reason": null,
+    "checks": [
+      {
+        "index": 0,
+        "route": "/dashboard",
+        "comparison": "baseline_vs_candidate",
+        "must_keep": [
+          {
+            "id": "k-1",
+            "text": "The signed-in dashboard shows the usage card."
+          },
+          {
+            "id": "k-2",
+            "text": "The sign-out button stays in the header."
+          }
+        ],
+        "baseline_image_sha256": "sha256:fixture-0-before",
+        "candidate_image_sha256": "sha256:fixture-0-after",
+        "width": 640,
+        "height": 400,
+        "verdict": "consistent",
+        "reason": "Both pages show the usage card and the sign-out button in the header.",
+        "raw_reply": null,
+        "request_id": null,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "latency_ms": 0,
+        "not_checked_reason": null,
+        "second_look": null
+      },
+      {
+        "index": 1,
+        "route": "/dashboard/settings",
+        "comparison": "baseline_vs_candidate",
+        "must_keep": [
+          {
+            "id": "k-2",
+            "text": "The sign-out button stays in the header."
+          }
+        ],
+        "baseline_image_sha256": "sha256:fixture-1-before",
+        "candidate_image_sha256": "sha256:fixture-1-after",
+        "width": 640,
+        "height": 400,
+        "verdict": "inconsistent",
+        "reason": "The after page has no sign-out button in the header.",
+        "raw_reply": null,
+        "request_id": null,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "latency_ms": 0,
+        "not_checked_reason": null,
+        "second_look": {
+          "model": "muse-wonder",
+          "provider": "meta",
+          "verdict": "inconsistent",
+          "agrees": true,
+          "reason": "The header on the after page ends at the search field; the sign-out button is gone.",
+          "raw_reply": null,
+          "request_id": null,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "latency_ms": 0,
+          "not_checked_reason": null
+        }
+      },
+      {
+        "index": 2,
+        "route": "/dashboard/billing",
+        "comparison": "candidate_only",
+        "must_keep": [
+          {
+            "id": "k-1",
+            "text": "The signed-in dashboard shows the usage card."
+          }
+        ],
+        "baseline_image_sha256": null,
+        "candidate_image_sha256": null,
+        "width": null,
+        "height": null,
+        "verdict": "not_checked",
+        "reason": null,
+        "raw_reply": null,
+        "request_id": null,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "latency_ms": 0,
+        "not_checked_reason": "the after page did not render",
+        "second_look": null
+      }
+    ]
+  }
+}

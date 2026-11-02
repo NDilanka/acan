@@ -28,6 +28,7 @@ import { startReplay } from "./replay.js";
 import { bindShell, startShell } from "./shell.js";
 import { get, setLink, start } from "./stream.js";
 import { requestUsage } from "./usage.js";
+import { installVision, placeVisionPins, syncVision } from "./vision-pins.js";
 
 const PAN_KEY_PX = 80;
 
@@ -68,6 +69,7 @@ function drawFrame(now = performance.now()) {
     syncView();
     paintRide();
     placeLabels();
+    placeVisionPins();
     if (turning) {
       requestRender();
     } else {
@@ -102,6 +104,7 @@ function paint() {
   syncSeals(state, get, paintSlip);
   paintSlip();
   requestUsage(state, get, paintUsage);
+  syncVision();
 }
 
 // Sets the drawing buffer to the CSS box times the device pixel ratio. The wasm side rounds
@@ -450,6 +453,7 @@ async function boot() {
   reducedMotion.addEventListener("change", followReducedMotion);
   await loadPlant();
   bindPlate();
+  await installVision();
   // The replay page makes no API call, so the shell (version, update, bug report, setup) stays off.
   if (!replay) {
     bindShell();
