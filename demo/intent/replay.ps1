@@ -135,7 +135,8 @@ function Show-Plan {
     Write-Output '  4. Each order once: post, split, draft, scope edits and confirm, worker-r (model), receipts,'
     Write-Output '     rulings, and the injected candidate when the draw picked the order. Paused orders resume with'
     Write-Output '     -ResumeRun <run folder>; an order that finished in an earlier invocation is not run again.'
-    Write-Output '     The injected candidate of a drawn order runs after that order, on its worker candidate (the task worktree HEAD).'
+    Write-Output '     The injected candidate of a drawn order runs after that order, on its control task (a split task the worker did not build; the task worktree HEAD).'
+    Write-Output '     After the order and its controls, its tasks that did not land end through cancel_order (member route), so no later worker takes them.'
     Write-Output '  5. Controls after o-1: m-overfit and m-harmless-difference. m-broad-scope: a separate order with the'
     Write-Output '     o-1 sentence, revised with one broad item (ANY on /api/*), confirmation tried with no broad'
     Write-Output '     acknowledgement. m-missing-fixture: the f-accounts copy without f5 and its static prediction;'
@@ -359,7 +360,7 @@ function Test-TakeFunctions {
         'Send-Command', 'Invoke-Api', 'Invoke-Api404Tolerant', 'Wait-Until', 'Get-OrderTasks', 'Start-Worker',
         'Get-AgentEvents', 'Read-ControlResult', 'Read-KeyFile', 'Read-Routing', 'Assert-OutsideGit', 'Get-DemoRefs',
         'New-TakeClone', 'Start-TakeServer', 'Invoke-ScopeEdits', 'Invoke-ScopeConfirm', 'Invoke-ControlWithRuling',
-        'Wait-TaskClaimable', 'Get-TaskView'
+        'Wait-TaskClaimable', 'Get-TaskView', 'Get-WorkerTask', 'Close-OrderLeftovers'
     )
     $missing = @($needed | Where-Object { -not (Get-Command -Name $_ -CommandType Function -ErrorAction SilentlyContinue) })
     if ($missing.Count -gt 0) {
@@ -424,12 +425,12 @@ function New-InjectedChangeRecord {
     param([string]$OrderId)
     [ordered]@{
         injector = $script:InjectorId; route = $script:InjectorRoute; header = $script:InjectorHeader; value = $OrderId
-        placement = 'worker candidate: the task worktree HEAD of the first task, through control.ps1 -OnWorkerCandidate'
+        placement = 'the task worktree HEAD of the order''s control task (a split task worker-r did not build; the order''s base there), through control.ps1 -OnWorkerCandidate'
     }
 }
 
 function New-InjectedBundle {
-    # The acan-demo-control/1 bundle for one drawn order. control.ps1 -OnWorkerCandidate applies it to the worker's candidate.
+    # The acan-demo-control/1 bundle for one drawn order. control.ps1 -OnWorkerCandidate applies it at the HEAD of the order's control task.
     param([string]$OrderId)
     $edit = Get-InjectorEdit -OrderId $OrderId
     [ordered]@{
@@ -465,16 +466,16 @@ function New-SeededNotRun {
 }
 
 function Invoke-SeededCandidate {
-    # A drawn order gets one injected out-of-scope change, run as a control on the order's first task.
-    # control.ps1 -OnWorkerCandidate reads the task worktree's files, which hold worker-r's candidate at its
-    # HEAD, and commits the injected header on top of that HEAD. The gate sees no ruling from the replay, so
-    # an injected item that stays unruled is judged as blocked. If the gate has already landed the candidate,
-    # the task is closed and the claim is refused: that line is error, and it is not a catch.
+    # A drawn order gets one injected out-of-scope change, run as a control on the order's control task: a split
+    # task that worker-r did not build (Get-ControlTask). control.ps1 -OnWorkerCandidate reads that task's worktree
+    # at its HEAD (the order's base there, since no worker built it) and commits the injected header on top of it.
+    # The gate sees no ruling from the replay, so an injected item that stays unruled is judged as blocked. A claim
+    # refused because the task already landed or was closed is an error line, and it is not a catch.
     param([string]$OrderId, [string]$Task, [string]$RunId)
     $bundle = Join-Path $script:CtrlDir "injected-$OrderId.json"
     $out = Join-Path $script:CtrlDir "seeded-$OrderId.json"
     $line = [ordered]@{
-        schema = $ResultsSchema; run_id = $RunId; kind = 'seeded'; id = "seeded-$OrderId"; order = $OrderId
+        schema = $ResultsSchema; run_id = $RunId; kind = 'seeded'; id = "seeded-$OrderId"; order = $OrderId; task = $(if ($Task) { $Task } else { $null })
         injected_change = (New-InjectedChangeRecord -OrderId $OrderId)
         bundle = "controls\injected-$OrderId.json"; bundle_sha256 = $script:InjectedHashes[$OrderId]
         actor = 'control-seeded (control identity, not a model)'
@@ -485,8 +486,9 @@ function Invoke-SeededCandidate {
     }
     $watch = [Diagnostics.Stopwatch]::StartNew()
     try {
-        if (-not $Task) { throw 'not_run: the order split into no task, so there is no task to inject into' }
-        & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $script:Tokens['control-seeded'] -Repo $script:Repo -Task $Task -Bundle $bundle -Out $out -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -OnWorkerCandidate
+        if (-not $Task) { throw 'not_run: the order has no task other than the worker''s, so there is no task to inject into' }
+        Wait-TaskClaimable -Task $Task -Token $script:Tokens['control-seeded'] -Seconds $ClaimWaitSec | Out-Null
+        & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $script:Tokens['control-seeded'] -Repo $script:Repo -Task $Task -Bundle $bundle -Out $out -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -OnWorkerCandidate -RedeclareOnce
         $r = Read-ControlResult -Path $out
         if ($null -eq $r) { throw 'error: the seeded control wrote no result file' }
         if (-not $r.receipt_hash) { throw "error: the seeded control got no receipt; its error: $([string]$r.error)" }
@@ -510,6 +512,29 @@ function Invoke-SeededCandidate {
         Add-ResultLine -Record $line
     }
     $line
+}
+
+function Get-ControlTask {
+    # The task an order's control or seeded change uses: the first split task that the worker did not build, so
+    # no control claims the worker's task. Null when the order split into one task only.
+    param([string[]]$Tasks, [string]$WorkerTask)
+    $other = @($Tasks | Where-Object { $_ -and $_ -ne $WorkerTask })
+    if ($other.Count -gt 0) { return [string]$other[0] }
+    return $null
+}
+
+function Close-ReplayOrder {
+    # Ends the order's tasks that did not land, after the order and its controls. Until then they stay open
+    # for the controls; after it they would be claimable by a later order's worker, because list_tasks has no
+    # order filter. The result goes into the order's state.json; a finished order is closed once.
+    param($Ord)
+    $dir = Join-Path $run ([string]$Ord.id)
+    $state = Read-OrderState -Dir $dir
+    if (-not $state.raw -or $state.leftovers_closed) { return }
+    $res = Close-OrderLeftovers -Raw ([string]$state.raw) -Tasks @($state.tasks)
+    $state.leftovers = [ordered]@{ dropped = @($res.dropped); reply = @($res.reply) }
+    $state.leftovers_closed = $true
+    Save-OrderState -Dir $dir -State $state
 }
 
 function Invoke-ReplayOrder {
@@ -613,13 +638,23 @@ function Invoke-ReplayOrder {
             if ($wrTypes -notcontains 'build_reported' -and $wrTypes -notcontains 'landed') {
                 throw "worker_no_build: worker-r reported no build (events: $($wrTypes -join ', '))"
             }
+            # list_tasks has no order filter, so worker-r takes the first open task on the board. The order's task is
+            # the one its own events name, not tasks[0]; the control task is another split task of the order.
+            $wrTask = Get-WorkerTask -WorkerEvents $wrEvents
+            if (-not $wrTask) { throw 'worker_no_build: worker-r''s events name no task' }
+            $state.worker_task = $wrTask
+            $state.control_task = Get-ControlTask -Tasks $tasks -WorkerTask $wrTask
             $state.worker_done = $true
             Save-OrderState -Dir $dir -State $state
         }
+        $line['worker_task'] = $(if ($state.worker_task) { [string]$state.worker_task } else { $null })
+        $line['control_task'] = $(if ($state.control_task) { [string]$state.control_task } else { $null })
 
-        # the gate's receipt for each task
-        for ($i = 0; $i -lt $tasks.Count; $i++) {
-            $t = $tasks[$i]
+        # the gate's receipt for the task the worker built. The order's other tasks have no build in this run;
+        # they stay open for the order's controls until Close-ReplayOrder ends them.
+        $receiptTasks = @($state.worker_task | Where-Object { $_ })
+        for ($i = 0; $i -lt $receiptTasks.Count; $i++) {
+            $t = [string]$receiptTasks[$i]
             $body = Wait-Until -What "the receipt of $t" -Probe { Invoke-Api404Tolerant -Path "/api/tasks/$t/receipt" } -Terminal { $null }
             $receipts += [pscustomobject]@{ task = $t; body = $body }
         }
@@ -732,8 +767,8 @@ function Invoke-ReplayOrder {
     Add-ResultLine -Record $line
 
     if ($Drawn) {
-        $firstTask = if ($tasks.Count -gt 0) { [string]$tasks[0] } else { $null }
-        $null = Invoke-SeededCandidate -OrderId $id -Task $firstTask -RunId $script:RunId
+        # the order's control task (not the worker's); a one-task order has none, and its seeded line is not_run
+        $null = Invoke-SeededCandidate -OrderId $id -Task ([string]$state.control_task) -RunId $script:RunId
     }
 }
 
@@ -752,12 +787,14 @@ function New-ControlLine {
 }
 
 function Invoke-O1Controls {
-    # The two controls that apply to o-1, run on o-1's first task as take.ps1 runs them. Once per run.
+    # The two controls that apply to o-1, run on o-1's control task: a split task that worker-r did not build, so
+    # the controls never claim the task the worker built (take.ps1 runs them on its first task). Once per run.
     if (Test-ControlLine -Id 'm-overfit') { return }
-    $t0 = if ($script:TasksByOrder.ContainsKey('o-1')) { [string]$script:TasksByOrder['o-1'][0] } else { $null }
-    if (-not $t0) {
+    $o1 = Read-OrderState -Dir (Join-Path $run 'o-1')
+    $ctl = if ($o1.control_task) { [string]$o1.control_task } else { $null }
+    if (-not $ctl) {
         foreach ($c in @('m-overfit', 'm-harmless-difference')) {
-            Add-ResultLine -Record (New-ControlLine -Id $c -AppliesTo 'o-1' -Expected ([string](@($controlList | Where-Object { $_.id -eq $c })[0].expected_outcome)) -Outcome 'not_run' -Result $null -Reason 'o-1 has no task in this run')
+            Add-ResultLine -Record (New-ControlLine -Id $c -AppliesTo 'o-1' -Expected ([string](@($controlList | Where-Object { $_.id -eq $c })[0].expected_outcome)) -Outcome 'not_run' -Result $null -Reason 'o-1 has no task other than the worker''s task in this run')
         }
         return
     }
@@ -772,8 +809,8 @@ function Invoke-O1Controls {
     try {
         # As take.ps1 (its step 1): the task must be open for the claim, and the first control on the order
         # claims and declares again once if its claim ends before the build is cleared (-RedeclareOnce).
-        $null = Wait-TaskClaimable -Task $t0 -Token $script:Tokens['control-seeded'] -Seconds $ClaimWaitSec
-        & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $script:Tokens['control-seeded'] -Repo $script:Repo -Task $t0 -Bundle (Join-Path $intentDir 'controls\m-overfit.json') -Out $mo -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -RedeclareOnce
+        $null = Wait-TaskClaimable -Task $ctl -Token $script:Tokens['control-seeded'] -Seconds $ClaimWaitSec
+        & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $script:Tokens['control-seeded'] -Repo $script:Repo -Task $ctl -Bundle (Join-Path $intentDir 'controls\m-overfit.json') -Out $mo -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -RedeclareOnce
         $r = Read-ControlResult -Path $mo
         $moGate = [string]$r.gate_state
         $moObl = @($r.items | Where-Object { $_.class -eq 'obligation_failed' }).Count
@@ -807,8 +844,8 @@ function Invoke-O1Controls {
     try {
         # The task must be open for the m-harmless claim (take.ps1's step 2). The rulings on m-overfit's receipt
         # come first, as take.ps1 does (D02Q); then the re-gate and the land.
-        $null = Wait-TaskClaimable -Task $t0 -Token $script:Tokens['control-seeded'] -Seconds $ClaimWaitSec
-        $ruled = Invoke-ControlWithRuling -Task $t0 -Bundle (Join-Path $intentDir 'controls\m-harmless-difference.json') -Out $mh -Order 'o-1' -OrderId $script:OidByOrder['o-1'] -RulesFile (Join-Path $intentDir 'rulings\o-1-rulings.json') -PriorReceipt "$mo.receipt.json" -PriorRulingsOut (Join-Path $script:CtrlDir 'rulings-o-1-moverfit.json') -FinalReceipt (Join-Path $script:CtrlDir 'm-harmless-final-receipt.json') -ControlWaitSec $ControlWaitSec -RulingWaitSec $RulingWaitSec
+        $null = Wait-TaskClaimable -Task $ctl -Token $script:Tokens['control-seeded'] -Seconds $ClaimWaitSec
+        $ruled = Invoke-ControlWithRuling -Task $ctl -Bundle (Join-Path $intentDir 'controls\m-harmless-difference.json') -Out $mh -Order 'o-1' -OrderId $script:OidByOrder['o-1'] -RulesFile (Join-Path $intentDir 'rulings\o-1-rulings.json') -PriorReceipt "$mo.receipt.json" -PriorRulingsOut (Join-Path $script:CtrlDir 'rulings-o-1-moverfit.json') -FinalReceipt (Join-Path $script:CtrlDir 'm-harmless-final-receipt.json') -ControlWaitSec $ControlWaitSec -RulingWaitSec $RulingWaitSec
         if ($ruled.no_receipt) { throw 'error: the m-harmless control produced no receipt to rule on' }
         if ($ruled.ruling_error) { throw "ruling_refused: $($ruled.ruling_error)" }
         foreach ($rid in @($ruled.ruling_ids)) { $script:RulingOwners["$rid"] = 'control:m-harmless-difference' }
@@ -819,7 +856,7 @@ function Invoke-O1Controls {
         $line['x_request_id_out_of_scope'] = $xr.Count
         $line['ruling_ids'] = @($ruled.ruling_ids)
         $line['ruling_decided_by'] = Get-DecisionLabel -Doc ([pscustomobject]@{ decided_by = [string]$ruled.rulings_decided_by }) -Order 'o-1'
-        if ([string]$r.gate_state -eq 'landed') { $line['merged_sha'] = Get-LandedCommit -Task $t0 }
+        if ([string]$r.gate_state -eq 'landed') { $line['merged_sha'] = Get-LandedCommit -Task $ctl }
     } catch {
         $line = New-ControlLine -Id 'm-harmless-difference' -AppliesTo 'o-1' -Expected $expectedOf['m-harmless-difference'] -Outcome 'error' -Result $null -Reason ''
         $line['errors'] = @($_.Exception.Message)
@@ -1132,7 +1169,7 @@ if (-not $DryRun) {
                 schema = $DrawSchema; run_id = $script:RunId; drawn_at = (Get-Date).ToString('o')
                 algorithm = 'the orders with the smallest SHA-256 of "<seed>|<order id>", first 4, in orders.json order'
                 seed = $seed; pool = $orderIds; drawn = $drawn
-                injector = [ordered]@{ id = $script:InjectorId; route = $script:InjectorRoute; header = $script:InjectorHeader; file = $script:InjectorFile; anchor_sha256 = $script:AnchorSha; placement = 'worker candidate of the first task, through control.ps1 -OnWorkerCandidate' }
+                injector = [ordered]@{ id = $script:InjectorId; route = $script:InjectorRoute; header = $script:InjectorHeader; file = $script:InjectorFile; anchor_sha256 = $script:AnchorSha; placement = 'the task worktree HEAD of the order''s control task (not the worker''s task), through control.ps1 -OnWorkerCandidate' }
                 injected_bundles = $injectedRecord
                 orders_json_sha256 = Get-FileSha256 -Path (Join-Path $intentDir 'orders.json')
                 mutants_json_sha256 = Get-FileSha256 -Path (Join-Path $intentDir 'mutants.json')
@@ -1189,6 +1226,8 @@ if (-not $DryRun) {
                 if ($script:Pause) { break }
             }
             if ($ordId -eq 'o-1') { Invoke-O1Controls }
+            # after the order and its controls: its tasks that did not land end here, so no later worker takes them
+            Close-ReplayOrder -Ord $ord
         }
         if (-not $script:Pause) {
             if (-not ($selected | Where-Object { [string]$_.id -eq 'o-1' }) -and -not (Test-ControlLine -Id 'm-overfit')) {
@@ -1259,6 +1298,13 @@ if (-not $DryRun) {
         $script:Summary['finished'] = (Get-Date).ToString('o')
         $script:Summary['orders'] = @($orderLines | ForEach-Object { [ordered]@{ id = $_.id; outcome = $_.outcome; scope = $_.scope; scope_decided_by = $_.scope_decided_by; rulings_decided_by = $_.rulings_decided_by; drawn_seeded = $_.drawn_seeded; gate_state = $_.gate_state; wall_seconds = $_.wall_seconds; model_calls = $_.model_calls } })
         $script:Summary['controls'] = @($controlLines + $seededLines | ForEach-Object { [ordered]@{ id = $_.id; outcome = $_.outcome } })
+        # each order's leftover tasks: the ones that did not land and were ended by cancel_order after the order
+        if ($run) {
+            $script:Summary['leftovers'] = @($selected | ForEach-Object {
+                    $st = Read-OrderState -Dir (Join-Path $run ([string]$_.id))
+                    if ($st.leftovers_closed) { [ordered]@{ order = [string]$_.id; dropped = @($st.leftovers.dropped); reply = @($st.leftovers.reply) } }
+                } | Where-Object { $_ })
+        }
         $drawPath = Join-Path $run 'draw.json'
         if (Test-Path -LiteralPath $drawPath) {
             $script:Summary['seed'] = (Read-JsonFile -Path $drawPath).seed

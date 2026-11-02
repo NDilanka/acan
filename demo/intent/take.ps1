@@ -382,6 +382,35 @@ function Get-AgentEvents {
         })
 }
 
+function Get-WorkerTask {
+    # The task a worker reports, from its own events: the task of its last build_reported event, or
+    # else of its last lease_granted. The origin's list_tasks has no order filter, so the worker takes
+    # whichever open task comes first; the take follows the task it reports, not the one it planned.
+    param($WorkerEvents)
+    $reported = @($WorkerEvents | Where-Object { $_.type -eq 'build_reported' -and $_.task -ne '' })
+    $granted = @($WorkerEvents | Where-Object { $_.type -eq 'lease_granted' -and $_.task -ne '' })
+    $pick = if ($reported.Count -gt 0) { $reported[-1] } elseif ($granted.Count -gt 0) { $granted[-1] } else { $null }
+    if ($null -eq $pick) { return $null }
+    "t-$($pick.task)"
+}
+
+function Close-OrderLeftovers {
+    # Ends the order's tasks that have not landed, through the member route cancel_order (any phase but
+    # landed; it drops the open and claimed tasks). Without it a later order's worker would claim them,
+    # because list_tasks has no order filter. Sends nothing when every task of the order has landed.
+    param([string]$Raw, [string[]]$Tasks)
+    $events = @(Invoke-Api -Path '/api/events')
+    # Once the order is cancelled, the call is done: a resumed replay does not send it again.
+    if (@($events | Where-Object { $_.event.type -eq 'order_cancelled' -and "$($_.event.order)" -eq $Raw }).Count -gt 0) {
+        return [ordered]@{ dropped = @(); reply = @('already cancelled') }
+    }
+    $landed = @($events | Where-Object { $_.event.type -eq 'landed' } | ForEach-Object { "t-$($_.event.task)" })
+    $left = @($Tasks | Where-Object { $_ -and ($landed -notcontains $_) })
+    if ($left.Count -eq 0) { return [ordered]@{ dropped = @(); reply = @() } }
+    $reply = Send-Command @{ cmd = 'cancel_order'; order = [int]$Raw }
+    [ordered]@{ dropped = $left; reply = @($reply | ForEach-Object { [string]$_.event.type }) }
+}
+
 function Get-LandCheck {
     param([string]$ReceiptFile, [string]$What)
     $rec = Get-Content -LiteralPath $ReceiptFile -Raw | ConvertFrom-Json
@@ -884,19 +913,27 @@ try {
         Save-State
         Add-Step -Name 'o-1 step 2: seeded harmless difference m-harmless-difference (control): rulings recorded through member HTTP, the re-gate passes and the gate lands o-1' -Actor 'control-seeded (control identity, not a model)' -Provider 'none' -Result $(if ($landedNow) { 'pass' } else { 'fail' }) -Evidence @{ task = $t0; receipt_hash = $r3.receipt_hash; gate_state = $r3.gate_state; final_gate_state = $landState; counts = $r3.counts; rulings_ok = $rulingsOk; killed_at_wait = $ctlKilled; land = $script:Evidence.lands['o-1']; result_file = $mh; final_receipt = $mhFinalPath }
 
+        # o-1's tasks other than t0 were never built here. They end through cancel_order, so no later
+        # order's worker can claim them (list_tasks has no order filter).
+        $o1Left = Close-OrderLeftovers -Raw $Raw -Tasks $tasks
+        Add-Step -Name 'o-1: its leftover tasks end through cancel_order (member route)' -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{ dropped = $o1Left.dropped; reply_events = $o1Left.reply } -Human
         # Worker A is not in this take: the o-1 land is m-harmless-difference's, and worker B builds
         # and lands in o-8.
         $outcome = $(if ($landedNow) { 'o1_landed' } else { 'o1_not_landed' })
     }
 
     if ($Order -eq 'o-8') {
+        # The control and the worker take different tasks of o-8. With one task the control runs first. With
+        # more, the worker runs first and takes the task the origin gives it; the control takes another one.
         $lastTask = $tasks[-1]
         $controlFirst = ($tasks.Count -lt 2)
+        $ctlTask = $lastTask
+        $wbTask = $null
         $viol = Join-Path $ctrlRoot 'm-ruling-violation.json'
         if ($controlFirst) {
             # One task only: the seeded violation runs first; the model worker builds after it releases the task.
-            & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $controlToken -Repo $script:Repo -Task $lastTask `
-                -Bundle (Join-Path $intentDir 'controls\m-ruling-violation.json') -Out $viol -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec
+            & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $controlToken -Repo $script:Repo -Task $ctlTask `
+                -Bundle (Join-Path $intentDir 'controls\m-ruling-violation.json') -Out $viol -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -RedeclareOnce
         }
         if (-not $SkipWorkers) {
             $wb = Start-Worker -Name 'worker-b' -Token $script:Tokens['worker-b'] -Tag 'o8'
@@ -906,30 +943,39 @@ try {
             Save-State
             $wbTypes = @($wbEvents | ForEach-Object { $_.type } | Select-Object -Unique)
             $wbBuilt = [bool]($wb.exited -and $wb.exit_code -eq 0 -and ($wbTypes -contains 'build_reported' -or $wbTypes -contains 'landed'))
+            $wbTask = Get-WorkerTask -WorkerEvents $wbEvents
+            if ($wbBuilt -and -not $wbTask) { $wbBuilt = $false }
             # A passing gate lands the candidate on its own; the take waits for the latest receipt.
             $wbFinal = Join-Path $ctrlRoot 'o-8-final-receipt.json'
             $wbState = ''
             if ($wbBuilt) {
-                try { $wbState = Wait-TaskLanded -Task $lastTask -Token $controlToken -Path $wbFinal -Seconds $LandWaitSec }
+                try { $wbState = Wait-TaskLanded -Task $wbTask -Token $controlToken -Path $wbFinal -Seconds $LandWaitSec }
                 catch { Write-Output "get_receipt: $($_.Exception.Message)" }
             }
             $wbLanded = [bool]($wbBuilt -and $wbState -eq 'landed' -and (Test-Path -LiteralPath $wbFinal))
             if ($wbLanded) { $script:Evidence.lands['o-8'] = Get-LandCheck -ReceiptFile $wbFinal -What 'o-8' }
             Save-State
-            Add-Step -Name 'o-8 step 4: worker B builds and lands Retry-After (model)' -Actor 'worker-b (model worker)' -Provider "$($script:Routes.worker.provider) / $($script:Routes.worker.model)" -Result $(if ($wbLanded) { 'pass' } else { 'fail' }) -Evidence @{ process = $wb; worker_finished = (Get-WorkerFinish -Name 'worker-b' -Tag 'o8'); event_types = $wbTypes; events = $wbEvents.Count; final_gate_state = $wbState; final_receipt = $wbFinal; land = $script:Evidence.lands['o-8']; note = 'pass only when the worker exited with code 0 (its build was committed and reported) and the latest receipt is landed with its merged commit equal to the protected head; a worker still running at the wait, or one that ended without a commit, is recorded as fail' }
+            Add-Step -Name 'o-8 step 4: worker B builds and lands Retry-After (model)' -Actor 'worker-b (model worker)' -Provider "$($script:Routes.worker.provider) / $($script:Routes.worker.model)" -Result $(if ($wbLanded) { 'pass' } else { 'fail' }) -Evidence @{ process = $wb; worker_task = $wbTask; worker_finished = (Get-WorkerFinish -Name 'worker-b' -Tag 'o8'); event_types = $wbTypes; events = $wbEvents.Count; final_gate_state = $wbState; final_receipt = $wbFinal; land = $script:Evidence.lands['o-8']; note = 'pass only when the worker exited with code 0 (its build was committed and reported) and the latest receipt is landed with its merged commit equal to the protected head; a worker still running at the wait, or one that ended without a commit, is recorded as fail' }
         } else {
             Add-Step -Name 'o-8 step 4: worker B (skipped by -SkipWorkers)' -Actor 'worker-b (model worker)' -Provider 'none' -Result 'not_run' -Evidence @{ reason = '-SkipWorkers' }
         }
         if (-not $controlFirst) {
-            & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $controlToken -Repo $script:Repo -Task $lastTask `
-                -Bundle (Join-Path $intentDir 'controls\m-ruling-violation.json') -Out $viol -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec
+            $ctlTask = @($tasks | Where-Object { $_ -ne $wbTask })[-1]
+            if (-not $ctlTask) { throw 'the worker took every task of o-8; none is left for m-ruling-violation' }
+        }
+        if (-not $controlFirst) {
+            & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $controlToken -Repo $script:Repo -Task $ctlTask `
+                -Bundle (Join-Path $intentDir 'controls\m-ruling-violation.json') -Out $viol -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -RedeclareOnce
         }
         $r5 = Read-ControlResult -Path $viol
         $violated = @($r5.items | Where-Object { $_.class -eq 'violates_ruling' })
         $r5Ok = ($violated.Count -ge 1)
-        $script:Evidence.controls['m-ruling-violation'] = @{ task = $lastTask; result = $viol; receipt_hash = $r5.receipt_hash; gate_state = $r5.gate_state; counts = $r5.counts; violates_ruling = $violated.Count; ruling_ids = @($violated | ForEach-Object { $_.ruling_id } | Select-Object -Unique); ok = $r5Ok }
+        $script:Evidence.controls['m-ruling-violation'] = @{ task = $ctlTask; result = $viol; receipt_hash = $r5.receipt_hash; gate_state = $r5.gate_state; counts = $r5.counts; violates_ruling = $violated.Count; ruling_ids = @($violated | ForEach-Object { $_.ruling_id } | Select-Object -Unique); ok = $r5Ok }
         Save-State
-        Add-Step -Name 'o-8 step 5: seeded ruling violation m-ruling-violation (control) is blocked by the step 3 ruling' -Actor 'control-seeded (control identity, not a model)' -Provider 'none' -Result $(if ($r5Ok) { 'pass' } else { 'fail' }) -Evidence @{ task = $lastTask; receipt_hash = $r5.receipt_hash; gate_state = $r5.gate_state; counts = $r5.counts; ruling_ids = $script:Evidence.controls['m-ruling-violation'].ruling_ids; control_first = $controlFirst; result_file = $viol }
+        Add-Step -Name 'o-8 step 5: seeded ruling violation m-ruling-violation (control) is blocked by the step 3 ruling' -Actor 'control-seeded (control identity, not a model)' -Provider 'none' -Result $(if ($r5Ok) { 'pass' } else { 'fail' }) -Evidence @{ task = $ctlTask; receipt_hash = $r5.receipt_hash; gate_state = $r5.gate_state; counts = $r5.counts; ruling_ids = $script:Evidence.controls['m-ruling-violation'].ruling_ids; control_first = $controlFirst; result_file = $viol }
+        # o-8's leftover tasks end here, so they are not claimed by a later order's worker.
+        $o8Left = Close-OrderLeftovers -Raw $Raw -Tasks $tasks
+        Add-Step -Name 'o-8: its leftover tasks end through cancel_order (member route)' -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{ dropped = $o8Left.dropped; reply_events = $o8Left.reply } -Human
         $outcome = $(if ($r5Ok) { 'o8_violation_blocked' } else { 'o8_violation_not_blocked' })
     }
 }
