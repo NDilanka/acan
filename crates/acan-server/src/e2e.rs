@@ -496,6 +496,7 @@ async fn a_reclaim_without_waiting_for_cleanup_starts_at_the_protected_head() {
 async fn a_queued_task_keeps_its_branch_until_it_lands() {
     let repo = user_repo();
     let root = repo.path();
+    let hold = hold_protected_updates(root);
     let running = start_plant(root).await;
     let task = TaskId::from_str("t-0").expect("valid task id");
     post_order(&running).await;
@@ -511,23 +512,24 @@ async fn a_queued_task_keeps_its_branch_until_it_lands() {
         }
     })
     .await;
-    // The branch is still the one the gate passed, not a leftover the loop should remove.
-    settle(
-        &running,
-        "the queued branch to stay at its generation",
-        |_, _| {
-            let stays = worktree_dir(root, task).is_dir() && branch_exists(root, "acan/t-0");
-            let recorded = git_config(root, "branch.acan/t-0.acanGeneration");
-            (stays && recorded.trim() == generation.to_string()).then_some(())
-        },
-    )
-    .await;
+    // The land is held, so the task stays queued while its branch is checked. The branch is
+    // still the one the gate passed, not a leftover the loop should remove.
+    assert!(
+        worktree_dir(root, task).is_dir() && branch_exists(root, "acan/t-0"),
+        "the queued task keeps its worktree and branch"
+    );
+    assert_eq!(
+        git_config(root, "branch.acan/t-0.acanGeneration").trim(),
+        generation.to_string(),
+        "the queued branch stays at its generation"
+    );
     assert_eq!(
         git(&worktree_dir(root, task), &["rev-parse", "HEAD"]).trim(),
         built.to_string(),
         "the queued branch still holds the gated commit"
     );
 
+    fs::remove_file(&hold).expect("the hold file is removed");
     settle(&running, "the queued task to land", |_, world| {
         in_state(world, task, |state| {
             matches!(state, TaskState::Landed { .. })
@@ -1024,6 +1026,51 @@ fn commit_on_protected(root: &Path, file: &str, content: &str) -> CommitId {
     let commit = commit_file(&checkout, file, content);
     git(root, &["worktree", "remove", "--force", checkout_arg]);
     commit
+}
+
+/// How many polls the hook waits for the hold file to go, at 50 ms each. It matches [`WAIT`], so
+/// a test that never releases the hold fails at its own timeout.
+const HOLD_POLLS: u32 = 2400;
+
+/// Holds every update of the protected branch while the returned file exists.
+///
+/// Git runs the `reference-transaction` hook in the prepared state, before a ref moves, so a
+/// land that reaches the protected branch waits there, and the task stays queued. Only updates
+/// of `main` wait. Removing the file releases the land.
+fn hold_protected_updates(root: &Path) -> PathBuf {
+    let hold = root.join(".git").join("e2e-hold-protected");
+    fs::write(&hold, "").expect("the hold file is written");
+    let hooks = root.join(".git").join("hooks");
+    fs::create_dir_all(&hooks).expect("the hooks directory exists");
+    let hook = hooks.join("reference-transaction");
+    // Git runs hooks with its own shell, which reads forward slashes on every platform.
+    let hold_path = hold.to_string_lossy().replace('\\', "/");
+    let script = format!(
+        r#"#!/bin/sh
+# Written by the e2e test. Waits while the hold file exists.
+[ "$1" = prepared ] || exit 0
+held=
+while read -r _old _new name; do
+  [ "$name" = refs/heads/main ] && held=1
+done
+[ -n "$held" ] || exit 0
+polls=0
+while [ -e '{hold_path}' ]; do
+  [ "$polls" -lt {HOLD_POLLS} ] || exit 1
+  sleep 0.05
+  polls=$((polls + 1))
+done
+exit 0
+"#
+    );
+    fs::write(&hook, script).expect("the hook is written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+            .expect("the hook is executable");
+    }
+    hold
 }
 
 async fn worktree_route(running: &Running, token: &str, task: TaskId) -> reqwest::Response {
