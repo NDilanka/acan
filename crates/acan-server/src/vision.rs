@@ -292,6 +292,54 @@ pub struct VisionCheck {
     pub completion_tokens: u32,
     pub latency_ms: u64,
     pub not_checked_reason: Option<String>,
+    /// The wonder role's second look, when the first look was `inconsistent` or `unclear`.
+    /// The fields above stay the first look's, so the verdict, counts and event never change.
+    #[serde(default)]
+    pub second_look: Option<SecondLook>,
+}
+
+/// The advisory second look at one check: one call to the wonder role, with the same images and
+/// must-keep items as the first look.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecondLook {
+    /// The model that judged the second look; null when no call returned.
+    pub model: Option<String>,
+    /// The provider of that call; null when no call returned.
+    pub provider: Option<String>,
+    pub verdict: Verdict,
+    /// Whether the second look reached the first look's verdict; null when it is `not_checked`.
+    pub agrees: Option<bool>,
+    pub reason: Option<String>,
+    /// The model's text, kept only when it did not parse.
+    pub raw_reply: Option<String>,
+    pub request_id: Option<String>,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub latency_ms: u64,
+    pub not_checked_reason: Option<String>,
+}
+
+impl SecondLook {
+    fn of(first: Verdict, judged: judge::Judgement) -> Self {
+        let call = judged.call.as_ref();
+        Self {
+            model: judged.model,
+            provider: call.map(|call| call.provider.clone()),
+            verdict: judged.verdict,
+            agrees: (judged.verdict != Verdict::NotChecked).then_some(judged.verdict == first),
+            reason: judged.reason,
+            raw_reply: judged.raw_reply,
+            request_id: judged.request_id,
+            prompt_tokens: call.map_or(0, |call| call.usage.prompt_tokens),
+            completion_tokens: call.map_or(0, |call| call.usage.completion_tokens),
+            latency_ms: call.map_or(0, latency_ms),
+            not_checked_reason: judged.not_checked_reason,
+        }
+    }
+}
+
+fn latency_ms(call: &acan_llm::CallRecord) -> u64 {
+    u64::try_from(call.latency.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// What the candidate was compared with.
@@ -515,6 +563,7 @@ async fn checks<C: ModelClient>(
         completion_tokens: 0,
         latency_ms: 0,
         not_checked_reason: None,
+        second_look: None,
     };
     if let Err(reason) = &baseline {
         tracing::info!(%task, %run, %reason, "the vision check has no baseline");
@@ -551,8 +600,16 @@ async fn checks<C: ModelClient>(
     if let Some(call) = &judged.call {
         check.prompt_tokens = call.usage.prompt_tokens;
         check.completion_tokens = call.usage.completion_tokens;
-        check.latency_ms = u64::try_from(call.latency.as_millis()).unwrap_or(u64::MAX);
+        check.latency_ms = latency_ms(call);
         record_usage(host, task, run, call).await;
+    }
+    if let Some(second) = judge::second_look(host.client(), &pair, check.verdict).await {
+        if let Some(call) = &second.call {
+            record_usage(host, task, run, call).await;
+        }
+        let second = SecondLook::of(check.verdict, second);
+        tracing::info!(%task, %run, verdict = ?second.verdict, agrees = ?second.agrees, "the vision check had a second look");
+        check.second_look = Some(second);
     }
     Ok((vec![check], judged.model, provider))
 }
@@ -657,7 +714,8 @@ async fn keep_image(
     }
 }
 
-/// Meters the vision call in the usage panel. Metering is best-effort, as for every model call.
+/// Meters a vision call in the usage panel. A second look is metered under the vision step too,
+/// so it gets its own row by its model's name. Metering is best-effort, as for every model call.
 async fn record_usage<C: ModelClient>(
     host: &Host<C>,
     task: TaskId,
@@ -707,7 +765,103 @@ mod tests {
             completion_tokens: 2,
             latency_ms: 300,
             not_checked_reason: None,
+            second_look: None,
         }
+    }
+
+    fn judged(verdict: Verdict, call: bool) -> judge::Judgement {
+        judge::Judgement {
+            verdict,
+            reason: call.then(|| "The summary line is shown.".to_owned()),
+            raw_reply: None,
+            not_checked_reason: (!call).then(|| "the second look failed: no route".to_owned()),
+            request_id: call.then(|| "req-2".to_owned()),
+            model: call.then(|| "muse-wonder-1.0".to_owned()),
+            call: call.then(|| acan_llm::CallRecord {
+                role: acan_llm::Role::Wonder,
+                provider: "meta".to_owned(),
+                model: "muse-wonder-1.0".to_owned(),
+                usage: acan_llm::Usage {
+                    prompt_tokens: 40,
+                    completion_tokens: 700,
+                },
+                latency: std::time::Duration::from_millis(6_100),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_second_look_records_its_model_and_whether_it_agrees() {
+        let disagrees = SecondLook::of(Verdict::Inconsistent, judged(Verdict::Consistent, true));
+        assert_eq!(disagrees.model.as_deref(), Some("muse-wonder-1.0"));
+        assert_eq!(disagrees.provider.as_deref(), Some("meta"));
+        assert_eq!(disagrees.agrees, Some(false));
+        assert_eq!(
+            (
+                disagrees.prompt_tokens,
+                disagrees.completion_tokens,
+                disagrees.latency_ms
+            ),
+            (40, 700, 6_100)
+        );
+
+        let agrees = SecondLook::of(Verdict::Unclear, judged(Verdict::Unclear, true));
+        assert_eq!(agrees.agrees, Some(true));
+
+        let failed = SecondLook::of(Verdict::Inconsistent, judged(Verdict::NotChecked, false));
+        assert_eq!(failed.agrees, None);
+        assert_eq!(failed.model, None);
+        assert_eq!(failed.provider, None);
+        assert_eq!((failed.prompt_tokens, failed.latency_ms), (0, 0));
+        assert!(failed.not_checked_reason.is_some());
+    }
+
+    #[test]
+    fn a_second_look_is_kept_beside_the_first_verdict() {
+        let (task, run) = ids();
+        let mut escalated = check(Verdict::Inconsistent);
+        escalated.second_look = Some(SecondLook::of(
+            Verdict::Inconsistent,
+            judged(Verdict::Consistent, true),
+        ));
+        let record = VisionWitness {
+            checks: vec![check(Verdict::Consistent), escalated],
+            ..VisionWitness::new(task, run, WitnessStatus::Done)
+        };
+        let json = serde_json::to_value(&record).expect("serializes");
+        assert_eq!(json["checks"][0]["second_look"], serde_json::Value::Null);
+        let second = &json["checks"][1]["second_look"];
+        assert_eq!(json["checks"][1]["verdict"], "inconsistent");
+        assert_eq!(second["verdict"], "consistent");
+        assert_eq!(second["agrees"], false);
+        assert_eq!(second["model"], "muse-wonder-1.0");
+        assert_eq!(
+            record.counts().inconsistent,
+            1,
+            "the first look stays the counted verdict"
+        );
+        assert_eq!(
+            serde_json::from_value::<VisionWitness>(json).expect("parses back"),
+            record
+        );
+    }
+
+    #[test]
+    fn a_record_written_before_second_looks_still_reads() {
+        let (task, run) = ids();
+        let record = VisionWitness {
+            checks: vec![check(Verdict::Unclear)],
+            ..VisionWitness::new(task, run, WitnessStatus::Done)
+        };
+        let mut json = serde_json::to_value(&record).expect("serializes");
+        json["checks"][0]
+            .as_object_mut()
+            .expect("an object")
+            .remove("second_look");
+        assert_eq!(
+            serde_json::from_value::<VisionWitness>(json).expect("parses"),
+            record
+        );
     }
 
     #[test]
@@ -757,6 +911,7 @@ mod tests {
             "completion_tokens",
             "latency_ms",
             "not_checked_reason",
+            "second_look",
         ] {
             assert!(keys.contains(&key), "{key} in {keys:?}");
         }

@@ -1,5 +1,7 @@
-//! The one vision call of a check: the baseline and candidate screenshots, labelled, and the
-//! must-keep items they are compared against. The reply is one JSON object read with serde.
+//! The vision calls of a check: the baseline and candidate screenshots, labelled, and the
+//! must-keep items they are compared against. The reply is one JSON object read with serde. A
+//! first look the vision role found inconsistent or unclear gets one second look from the wonder
+//! role, with the same request and no word of the first verdict.
 
 use acan_llm::{CallRecord, ChatRequest, ContentPart, LlmError, Message, ModelClient, Role};
 use serde::Deserialize;
@@ -15,6 +17,14 @@ pub(crate) const MAX_TOKENS: u32 = 1_200;
 const _: () = assert!(
     MAX_TOKENS >= 800,
     "a vision check needs at least 800 output tokens"
+);
+
+/// Output budget for the second look. Muse Wonder spent 600 reasoning tokens on a short live
+/// text and image call, so it gets more room than the first look.
+pub(crate) const WONDER_MAX_TOKENS: u32 = 2_000;
+const _: () = assert!(
+    WONDER_MAX_TOKENS >= 1_500,
+    "a second look needs at least 1500 output tokens"
 );
 
 /// The images and items of one check.
@@ -65,8 +75,33 @@ impl From<ReplyVerdict> for Verdict {
     }
 }
 
-/// The request for `pair`: one user turn, each image after the text part that labels it.
-pub(crate) fn request(pair: &Pair<'_>) -> ChatRequest {
+/// Which call of a check is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Look {
+    First,
+    Second,
+}
+
+impl Look {
+    fn role(self) -> Role {
+        match self {
+            Self::First => Role::Vision,
+            Self::Second => Role::Wonder,
+        }
+    }
+
+    fn what(self) -> &'static str {
+        match self {
+            Self::First => "the vision call",
+            Self::Second => "the second look",
+        }
+    }
+}
+
+/// The request of `look` at `pair`: one user turn, each image after the text part that labels
+/// it. The second look sends no temperature, since the wonder model has not accepted one in a
+/// live call yet.
+fn request(look: Look, pair: &Pair<'_>) -> ChatRequest {
     let mut parts = Vec::with_capacity(5);
     if let Some(baseline) = pair.baseline {
         parts.push(ContentPart::text("BASELINE"));
@@ -83,10 +118,14 @@ pub(crate) fn request(pair: &Pair<'_>) -> ChatRequest {
         "Page: {}\nMust-keep items:{items}",
         pair.route
     )));
+    let (temperature, max_tokens) = match look {
+        Look::First => (Some(0.0), MAX_TOKENS),
+        Look::Second => (None, WONDER_MAX_TOKENS),
+    };
     ChatRequest {
         messages: vec![Message::system(VISION_PROMPT), Message::user_parts(parts)],
-        temperature: Some(0.0),
-        max_tokens: Some(MAX_TOKENS),
+        temperature,
+        max_tokens: Some(max_tokens),
         ..ChatRequest::default()
     }
 }
@@ -94,7 +133,25 @@ pub(crate) fn request(pair: &Pair<'_>) -> ChatRequest {
 /// Asks `client` to compare `pair` as the vision role. A failed call is `not_checked`, never a
 /// verdict.
 pub(crate) async fn judge<C: ModelClient>(client: &C, pair: &Pair<'_>) -> Judgement {
-    match client.chat_traced(Role::Vision, request(pair)).await {
+    look(client, Look::First, pair).await
+}
+
+/// The second look at `pair` when the first look's verdict is `inconsistent` or `unclear`, and
+/// `None` otherwise. Exactly one wonder call is made. A failed call, an unrouted wonder role
+/// included, is a `not_checked` second look.
+pub(crate) async fn second_look<C: ModelClient>(
+    client: &C,
+    pair: &Pair<'_>,
+    first: Verdict,
+) -> Option<Judgement> {
+    match first {
+        Verdict::Inconsistent | Verdict::Unclear => Some(look(client, Look::Second, pair).await),
+        Verdict::Consistent | Verdict::NotChecked => None,
+    }
+}
+
+async fn look<C: ModelClient>(client: &C, look: Look, pair: &Pair<'_>) -> Judgement {
+    match client.chat_traced(look.role(), request(look, pair)).await {
         Ok(traced) => {
             let response = traced.value;
             let (verdict, reason, raw_reply) = read_reply(response.content.as_deref());
@@ -110,16 +167,16 @@ pub(crate) async fn judge<C: ModelClient>(client: &C, pair: &Pair<'_>) -> Judgem
                 call: Some(response.call),
             }
         }
-        Err(err) => not_checked(&err),
+        Err(err) => not_checked(look, &err),
     }
 }
 
-fn not_checked(err: &LlmError) -> Judgement {
+fn not_checked(look: Look, err: &LlmError) -> Judgement {
     Judgement {
         verdict: Verdict::NotChecked,
         reason: None,
         raw_reply: None,
-        not_checked_reason: Some(clip(&format!("the vision call failed: {err}"))),
+        not_checked_reason: Some(clip(&format!("{} failed: {err}", look.what()))),
         request_id: None,
         model: None,
         call: None,
@@ -182,7 +239,7 @@ mod tests {
     #[test]
     fn the_request_labels_the_baseline_before_the_candidate() {
         let items = items();
-        let request = request(&pair(&items, Some(b"baseline-png")));
+        let request = request(Look::First, &pair(&items, Some(b"baseline-png")));
         assert_eq!(request.max_tokens, Some(MAX_TOKENS));
         let messages = wire(&request);
         assert_eq!(
@@ -204,7 +261,7 @@ mod tests {
     #[test]
     fn a_check_without_a_baseline_sends_the_candidate_alone() {
         let items = items();
-        let messages = wire(&request(&pair(&items, None)));
+        let messages = wire(&request(Look::First, &pair(&items, None)));
         let parts = messages[1]["content"]
             .as_array()
             .expect("an array of parts");
@@ -266,6 +323,71 @@ mod tests {
             "{judged:?}"
         );
         assert_eq!(judged.call, None);
+    }
+
+    #[tokio::test]
+    async fn an_inconsistent_or_unclear_first_look_gets_one_wonder_call() {
+        let stub = Stub::default().when(
+            Role::Wonder,
+            |_| true,
+            Reply::text(r#"{"verdict":"consistent","reason":"Both items are still shown."}"#),
+        );
+        let items = items();
+        for first in [Verdict::Inconsistent, Verdict::Unclear] {
+            let second = second_look(&stub, &pair(&items, Some(b"b")), first)
+                .await
+                .expect("a second look");
+            assert_eq!(second.verdict, Verdict::Consistent);
+            assert_eq!(
+                second.reason.as_deref(),
+                Some("Both items are still shown.")
+            );
+            assert!(second.call.is_some());
+        }
+        let calls = stub.ledger().records();
+        assert_eq!(calls.len(), 2, "one wonder call per escalated check");
+        assert!(calls.iter().all(|call| call.role == Role::Wonder));
+    }
+
+    #[tokio::test]
+    async fn a_consistent_or_unchecked_first_look_is_not_escalated() {
+        let stub = Stub::default().when(Role::Wonder, |_| true, Reply::text("{}"));
+        let items = items();
+        for first in [Verdict::Consistent, Verdict::NotChecked] {
+            assert_eq!(
+                second_look(&stub, &pair(&items, Some(b"b")), first).await,
+                None
+            );
+        }
+        assert!(stub.ledger().records().is_empty(), "no wonder call is made");
+    }
+
+    #[tokio::test]
+    async fn a_second_look_that_cannot_be_sent_is_not_checked() {
+        let items = items();
+        let second = second_look(&Stub::default(), &pair(&items, None), Verdict::Inconsistent)
+            .await
+            .expect("a second look");
+        assert_eq!(second.verdict, Verdict::NotChecked);
+        assert!(
+            second
+                .not_checked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("the second look failed")),
+            "{second:?}"
+        );
+        assert_eq!(second.call, None);
+    }
+
+    #[test]
+    fn the_second_look_has_its_own_budget_and_the_same_images() {
+        let items = items();
+        let pair = pair(&items, Some(b"baseline-png"));
+        let first = request(Look::First, &pair);
+        let second = request(Look::Second, &pair);
+        assert_eq!(second.max_tokens, Some(WONDER_MAX_TOKENS));
+        assert_eq!(second.temperature, None);
+        assert_eq!(wire(&second), wire(&first), "no word of the first verdict");
     }
 
     #[test]

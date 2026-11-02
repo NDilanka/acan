@@ -47,3 +47,9 @@ provider = "baseten"
 # the foreman's route.
 [routing.vision]
 provider = "meta"
+
+# The second look at a vision check the first call found inconsistent or unclear. Without this
+# block no second look is sent; there is no fallback route.
+[routing.wonder]
+provider = "meta"
+model = "muse-wonder-1.0"
