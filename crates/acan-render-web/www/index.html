@@ -26,13 +26,13 @@
   canvas.dragging { cursor: grabbing; }
   #labels { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
   /* A paper halo round the text, so no belt or grid line crosses a word. */
-  .label { position: absolute; left: 0; top: 0; white-space: nowrap;
+  #labels .label { position: absolute; left: 0; top: 0; white-space: nowrap;
     font: 12px system-ui, sans-serif; color: #57575a;
     text-shadow: 1.5px 0 0 #fff, -1.5px 0 0 #fff, 0 1.5px 0 #fff, 0 -1.5px 0 #fff,
       1px 1px 0 #fff, -1px 1px 0 #fff, 1px -1px 0 #fff, -1px -1px 0 #fff, 0 0 3px #fff; }
   #labels.alt .label { background: rgba(255, 255, 255, 0.92); border-radius: 4px; padding: 0 5px;
     box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.05); }
-  .label .count { display: none; margin-left: 6px; color: #8a8a8f; }
+  #labels .label .count { display: none; margin-left: 6px; color: #8a8a8f; }
   #labels.alt .count { display: inline; }
   /* Flags are the marks the plant draws: an agent with its activity, the order, a clash, a
      question. Each is one fixed-size label with a hue dot; an amber dot means it waits on you. */
@@ -224,8 +224,9 @@
   #question button.option kbd { min-width: 16px; text-align: center; background: var(--card); border-color: var(--rule); border-radius: 3px; }
   #question button.close { flex: none; font: 11px var(--mono); color: var(--muted); border: none; background: none; padding: 0; cursor: pointer; }
   .flag.question { pointer-events: auto; cursor: pointer; }
-  /* The command bar on "/": a field and its results, under the key bar. */
-  #command { top: 52px; left: 50%; transform: translateX(-50%); width: min(540px, calc(100vw - 32px)); box-sizing: border-box; padding: 8px; }
+  /* The command bar on "/": a field and its results, under the key bar and the order island, and
+     over the map's names. */
+  #command { top: 92px; z-index: 3; left: 50%; transform: translateX(-50%); width: min(540px, calc(100vw - 32px)); box-sizing: border-box; padding: 8px; }
   #command input { display: block; width: 100%; box-sizing: border-box; padding: 7px 10px; font: 14px/1.3 var(--mono); color: var(--ink);
     background: var(--face); border: 1px solid var(--ink); border-radius: 6px; outline: none; }
   #command ul { list-style: none; margin: 6px 0 0; padding: 0; max-height: 50vh; overflow-y: auto; }
