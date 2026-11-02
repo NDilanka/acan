@@ -44,6 +44,7 @@ mod receipt_cli;
 mod redact;
 pub mod release;
 pub mod replay;
+mod ruling;
 mod setup;
 mod store;
 mod stream;

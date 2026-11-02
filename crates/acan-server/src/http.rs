@@ -14,13 +14,12 @@ use acan_core::{
     ScopeConfirmation, ScopeDraftOutcome, Seq, Stamped, TaskId, TaskState,
 };
 use acan_intent::{
-    ContrastExample, ContrastExampleHash, EpisodeId, GetReceiptRequest, GetReceiptResponse,
-    GetRulingsRequest, GetRulingsResponse, GetScopeRequest, GetScopeResponse, LedgerHead,
-    MachineId, McpError, McpErrorCode, McpV1, NormalizationHash, NormalizationVersion, ProbeHash,
-    ScopeHash, Selector, TaskRef,
+    EpisodeId, GetReceiptRequest, GetReceiptResponse, GetRulingsRequest, GetRulingsResponse,
+    GetScopeRequest, GetScopeResponse, MachineId, McpError, McpErrorCode, McpV1, TaskRef,
 };
 use acan_llm::{ModelClient, UsageTotals};
 use acan_scan::Plant;
+use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use axum::http::{HeaderMap, StatusCode};
@@ -31,13 +30,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::auth::Principal;
-use crate::examples;
 use crate::host::{Host, SubmitError};
 use crate::intent_api::{self, IntentError};
 use crate::jobs;
 use crate::mcp;
 use crate::public::{self, PublicRoot};
 use crate::release::{self, BugReport, UpdateStatus, VersionInfo};
+use crate::ruling::{self, RulingBody, RulingDraftView};
 use crate::vision::{self, Side, VisionWitness};
 use crate::workers::{Board, WorkersView};
 use crate::{STATE_DIR, redact, setup, stream};
@@ -74,6 +73,10 @@ pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<Public
         .route(
             "/api/orders/{order}/episodes/{episode}/ruling-draft",
             get(get_ruling_draft::<C>),
+        )
+        .route(
+            "/api/orders/{order}/episodes/{episode}/ruling",
+            post(post_ruling::<C>),
         )
         .route("/api/tasks/{task}/vision", get(get_vision::<C>))
         .route(
@@ -507,38 +510,8 @@ async fn get_scope_confirmation<C: ModelClient + 'static>(
     Ok(Json(body))
 }
 
-/// What a member needs to rule on one discrepancy episode: the contrast examples kept for it, the
-/// example the ruling is on, and the hashes and versions a decision names. Members only, since a
-/// human rules. The draft confirms nothing. `RecordRuling` checks the decision a member sends.
-#[derive(Serialize)]
-struct RulingDraftView {
-    order: String,
-    episode: EpisodeId,
-    scope_hash: ScopeHash,
-    ledger_head: LedgerHead,
-    selector: Selector,
-    probe_hash: ProbeHash,
-    /// The example the ruling is on: the episode's latest candidate run, for its probe.
-    ruled_on: ContrastExampleHash,
-    normalization_version: NormalizationVersion,
-    normalization_hash: NormalizationHash,
-    /// Every example kept for the episode, by run and then hash.
-    examples: Vec<DraftExample>,
-}
-
-/// One example kept for an episode, with the normalization it was compared under.
-#[derive(Serialize)]
-struct DraftExample {
-    run: String,
-    hash: ContrastExampleHash,
-    probe_hash: ProbeHash,
-    normalization_version: NormalizationVersion,
-    normalization_hash: NormalizationHash,
-    example: ContrastExample,
-}
-
-/// The ruling draft of an episode. The episode's latest evidence names the candidate run the
-/// ruling is on, so the example of that run and the episode's probe is `ruled_on`.
+/// The ruling draft of an episode: what a member rules from. Members only, since a human rules.
+/// See [`ruling::draft`].
 async fn get_ruling_draft<C: ModelClient + 'static>(
     State(host): State<Host<C>>,
     headers: HeaderMap,
@@ -547,89 +520,26 @@ async fn get_ruling_draft<C: ModelClient + 'static>(
     member(&host, &headers)?;
     let order: OrderId = order.parse().map_err(|_| ApiError::NotFound("order"))?;
     let episode: EpisodeId = episode.parse().map_err(|_| ApiError::NotFound("episode"))?;
-    let (scope_hash, ledger_head, selector, latest) = host.read(|world| {
-        let lane = world
-            .lane(order)
-            .ok_or(ApiError::NotFound("scope for this order"))?;
-        let found = lane
-            .episodes
-            .get(&episode)
-            .ok_or(ApiError::NotFound("episode"))?;
-        let latest = found
-            .evidence
-            .last()
-            .ok_or(ApiError::NotFound("evidence for this episode"))?;
-        Ok::<_, ApiError>((
-            lane.scope_hash,
-            world.ledger().head(),
-            found.selector.clone(),
-            (latest.run.to_string(), latest.probe_hash),
-        ))
-    })?;
-    let (run, probe_hash) = latest;
-    let dir = host.repo().join(STATE_DIR).join(examples::DIR);
-    let kept = examples::read(&dir, &episode).map_err(|err| ApiError::Internal(err.into()))?;
-    let examples = kept
-        .into_iter()
-        .map(|stored| {
-            let internal = |err| ApiError::Internal(anyhow::Error::from(err));
-            let probe = stored.example.probe.spec.probe_hash().map_err(internal)?;
-            let normalization = &stored.example.probe.normalization;
-            Ok(DraftExample {
-                run: stored.run,
-                hash: stored.hash,
-                probe_hash: probe,
-                normalization_version: normalization.version.clone(),
-                normalization_hash: normalization.normalization_hash().map_err(internal)?,
-                example: stored.example,
-            })
-        })
-        .collect::<Result<Vec<_>, ApiError>>()?;
-    let ruled = ruled_example(&examples, &run, probe_hash)?;
-    Ok(Json(RulingDraftView {
-        order: order.to_string(),
-        episode,
-        scope_hash,
-        ledger_head,
-        selector,
-        probe_hash,
-        ruled_on: ruled.hash,
-        normalization_version: ruled.normalization_version.clone(),
-        normalization_hash: ruled.normalization_hash,
-        examples,
-    }))
+    Ok(Json(ruling::draft(&host, order, episode)?))
 }
 
-/// The example a ruling is on: the one kept for the episode's latest run and probe. A run that
-/// crashed before its receipt was recorded is run again under the same id, and the store then holds
-/// an example from each attempt. The receipt does not say which attempt it rests on, so when more
-/// than one example matches, the draft refuses rather than pick one.
-fn ruled_example<'a>(
-    examples: &'a [DraftExample],
-    run: &str,
-    probe_hash: ProbeHash,
-) -> Result<&'a DraftExample, ApiError> {
-    let mut matching = examples
-        .iter()
-        .filter(|kept| kept.run == run && kept.probe_hash == probe_hash);
-    match (matching.next(), matching.next()) {
-        (None, _) => Err(ApiError::NotFound(
-            "retained example for the episode's latest run",
-        )),
-        (Some(kept), None) => Ok(kept),
-        (Some(_), Some(_)) => {
-            let message = format!(
-                "two retained examples match run {run}: the receipt does not say which \
-                 attempt it rests on, so the ruling draft refuses"
-            );
-            Err(ApiError::Refused(McpError::new(
-                McpErrorCode::StaleEvidence {
-                    detail: message.clone(),
-                },
-                message,
-            )))
-        }
-    }
+/// A member's ruling on one episode. The body is the decision and predicate the member chose and
+/// the draft it was made from; the server builds the ledger event. Members only, since a human
+/// rules. See [`ruling::record`].
+async fn post_ruling<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+    Path((order, episode)): Path<(String, String)>,
+    body: Bytes,
+) -> Result<Json<Vec<Stamped>>, ApiError> {
+    let member = member(&host, &headers)?;
+    let order: OrderId = order.parse().map_err(|_| ApiError::NotFound("order"))?;
+    let episode: EpisodeId = episode.parse().map_err(|_| ApiError::NotFound("episode"))?;
+    let body: RulingBody =
+        serde_json::from_slice(&body).map_err(|_| ApiError::BadRequest("ruling body"))?;
+    Ok(Json(
+        ruling::record(&host, &member, order, episode, body).await?,
+    ))
 }
 
 /// The latest receipt of a task's gate runs.
@@ -735,64 +645,4 @@ fn invalid_request(detail: &str) -> ApiError {
         },
         detail,
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A kept example of the fixture's probe, filed under `run`. `digit` names its hash.
-    fn kept(run: &str, digit: &str) -> DraftExample {
-        let example: ContrastExample = serde_json::from_str(include_str!(
-            "../../acan-intent/fixtures/contrast-example.json"
-        ))
-        .expect("the fixture decodes");
-        DraftExample {
-            run: run.to_owned(),
-            hash: ContrastExampleHash::from_str(&format!("sha256:{}", digit.repeat(64)))
-                .expect("a hash"),
-            probe_hash: example.probe.spec.probe_hash().expect("hashing"),
-            normalization_version: example.probe.normalization.version.clone(),
-            normalization_hash: example
-                .probe
-                .normalization
-                .normalization_hash()
-                .expect("hashing"),
-            example,
-        }
-    }
-
-    #[test]
-    fn the_one_example_of_the_latest_run_and_probe_is_the_ruled_one() {
-        let examples = [kept("run-1", "a"), kept("run-2", "b")];
-        let probe = examples[0].probe_hash;
-        let ruled = ruled_example(&examples, "run-1", probe).expect("one example matches");
-        assert_eq!(ruled.hash, examples[0].hash);
-    }
-
-    #[test]
-    fn two_examples_of_the_latest_run_refuse_rather_than_pick_one() {
-        // A run that crashed before its receipt was recorded runs again under the same id, and
-        // the store then keeps an example from each attempt.
-        let examples = [kept("run-1", "a"), kept("run-1", "b")];
-        let probe = examples[0].probe_hash;
-        match ruled_example(&examples, "run-1", probe).err() {
-            Some(ApiError::Refused(err)) => assert!(
-                matches!(err.error, McpErrorCode::StaleEvidence { .. }),
-                "two matches are stale evidence: {:?}",
-                err.error
-            ),
-            other => panic!("two matching examples must refuse, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn no_example_of_the_latest_run_is_not_found() {
-        let examples = [kept("run-1", "a")];
-        let probe = examples[0].probe_hash;
-        assert!(matches!(
-            ruled_example(&examples, "run-2", probe).err(),
-            Some(ApiError::NotFound(_))
-        ));
-    }
 }

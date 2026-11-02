@@ -88,7 +88,7 @@ const APP_PORT: u16 = 3000;
 const CONTRAST_DIR: &str = "contrasts";
 
 /// The state directory's folder that holds the stored observations, by hash.
-const OBSERVATIONS_DIR: &str = "observations";
+pub(crate) const OBSERVATIONS_DIR: &str = "observations";
 
 /// The state directory's folder that holds one protected-head snapshot per commit.
 const SNAPSHOT_DIR: &str = "snapshots";

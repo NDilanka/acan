@@ -22,7 +22,9 @@ use acan_core::{
     HumanCmd, LEASE_TTL_MS, LaneVerdict, MachineKey, OrderId, Origin, ScopeBinding, Stage, Stamped,
     TaskId, TaskState, World,
 };
-use acan_intent::{ContrastExample, ItemClass, LedgerEvent, Scope, ScopeConfirmation};
+use acan_intent::{
+    ContrastExample, EpisodeId, ItemClass, LedgerEvent, Scope, ScopeConfirmation, Supersedes,
+};
 use acan_llm::{
     CallRecord, ChatRequest, ChatResponse, LlmError, ModelClient, Role, Usage, UsageLedger,
 };
@@ -1202,42 +1204,7 @@ async fn a_member_rules_on_a_kept_example_from_the_ruling_draft() {
     let _docker = DOCKER.lock().await;
     let repo = demo_repo();
     let root = repo.path();
-    let running = start_plant(root).await;
-    let task = TaskId::from_str("t-0").expect("valid task id");
-    post_order(&running).await;
-    scope_first(&running, root, task).await;
-    let fence = claim(&running, task).await;
-    wait_for_worktree(root, task, fence.generation).await;
-    build_with(
-        &running,
-        root,
-        task,
-        fence,
-        &["src/auth.ts"],
-        seed_regression,
-    )
-    .await;
-    settle(&running, "the gate to block the regression", |log, _| {
-        log.iter().find_map(|stamped| match &stamped.event {
-            Event::ReceiptRecorded { record, .. }
-                if matches!(record.verdict, LaneVerdict::Blocked { .. }) =>
-            {
-                Some(())
-            }
-            _ => None,
-        })
-    })
-    .await;
-    let order = settle(&running, "the order", |_, world| {
-        world.orders().next().map(|found| found.id)
-    })
-    .await;
-    let episode = settle(&running, "the episode the regression opened", |_, world| {
-        world
-            .lane(order)
-            .and_then(|lane| lane.episodes.keys().next().copied())
-    })
-    .await;
+    let (running, order, episode) = blocked_signup_episode(root).await;
 
     let path = format!("/api/orders/{order}/episodes/{episode}/ruling-draft");
     let refused = client()
@@ -1332,6 +1299,361 @@ async fn a_member_rules_on_a_kept_example_from_the_ruling_draft() {
         origin.world().ledger().head().event_seq,
         1,
         "the ruling built from the draft is the ledger's first event"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// Builds the seeded signup regression on the scope-first lane until the gate blocks it. Returns
+/// the running server with the order and the episode the regression opened.
+async fn blocked_signup_episode(root: &Path) -> (Running, OrderId, EpisodeId) {
+    let running = start_plant(root).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+    post_order(&running).await;
+    scope_first(&running, root, task).await;
+    let fence = claim(&running, task).await;
+    wait_for_worktree(root, task, fence.generation).await;
+    build_with(
+        &running,
+        root,
+        task,
+        fence,
+        &["src/auth.ts"],
+        seed_regression,
+    )
+    .await;
+    settle(&running, "the gate to block the regression", |log, _| {
+        log.iter().find_map(|stamped| match &stamped.event {
+            Event::ReceiptRecorded { record, .. }
+                if matches!(record.verdict, LaneVerdict::Blocked { .. }) =>
+            {
+                Some(())
+            }
+            _ => None,
+        })
+    })
+    .await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let episode = settle(&running, "the episode the regression opened", |_, world| {
+        world
+            .lane(order)
+            .and_then(|lane| lane.episodes.keys().next().copied())
+    })
+    .await;
+    (running, order, episode)
+}
+
+/// The predicate the signup must-keep rule names: the signup answer's body equals base. The
+/// regressed answer differs from base, so this predicate fails on the example.
+fn same_as_base() -> Value {
+    json!({
+        "predicate": "equals_base",
+        "step_id": "s1",
+        "path": "body",
+        "anchor": { "kind": "fresh" }
+    })
+}
+
+/// A predicate the regressed answer holds: the signup answers 201 Created.
+fn created() -> Value {
+    json!({ "predicate": "status_in", "step_id": "s1", "statuses": [201] })
+}
+
+/// The body of a ruling made from `draft`: the member's decision and predicate, with the head and
+/// the example the draft named.
+fn ruling_body(draft: &Value, decision: &str, predicate: Value) -> Value {
+    json!({
+        "decision": decision,
+        "draft_head": draft["ledger_head"],
+        "ruled_on": draft["ruled_on"],
+        "predicate": predicate,
+        "applicability": "standing_predicate_approval",
+        "label": "the signup body",
+    })
+}
+
+/// The ruling draft of `episode`, read as the owner. Fails the test unless it is served.
+async fn draft_of(running: &Running, order: OrderId, episode: EpisodeId) -> Value {
+    let response = client()
+        .get(url(
+            running,
+            &format!("/api/orders/{order}/episodes/{episode}/ruling-draft"),
+        ))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .expect("the draft request is sent");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "the owner reads the draft"
+    );
+    response.json().await.expect("the draft is JSON")
+}
+
+/// Posts a ruling on `episode` as `token`. Returns the status and the response body.
+async fn post_ruling(
+    running: &Running,
+    token: &str,
+    order: OrderId,
+    episode: EpisodeId,
+    body: &Value,
+) -> (reqwest::StatusCode, String) {
+    let response = client()
+        .post(url(
+            running,
+            &format!("/api/orders/{order}/episodes/{episode}/ruling"),
+        ))
+        .bearer_auth(token)
+        .json(body)
+        .send()
+        .await
+        .expect("the ruling is sent");
+    let status = response.status();
+    (status, response.text().await.unwrap_or_default())
+}
+
+/// A member allows the kept example through the ruling route. The predicate holds on the regressed
+/// answer, so the server builds the decision from the draft and the origin records it.
+#[tokio::test]
+async fn a_member_allows_an_episode_through_the_ruling_route() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let draft = draft_of(&running, order, episode).await;
+    let ruled_on = draft["ruled_on"]
+        .as_str()
+        .expect("the draft names its example");
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&draft, "allow", created()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the allow is recorded: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    match origin.world().ledger().events() {
+        [LedgerEvent::DecisionConfirmed(decision)] => {
+            let accepts: Vec<String> = decision.accepts.iter().map(ToString::to_string).collect();
+            assert_eq!(
+                accepts,
+                [ruled_on],
+                "the allow accepts the example it is on"
+            );
+            assert!(decision.rejects.is_empty(), "an allow rejects nothing");
+            assert_eq!(decision.ruled_on.to_string(), ruled_on);
+            assert_eq!(decision.episode_id, Some(episode));
+            assert_eq!(
+                decision.actor.as_str(),
+                "owner",
+                "the member signs the ruling"
+            );
+        }
+        other => panic!("one decision is recorded, got {other:?}"),
+    }
+    running.stop().await.expect("the server stops");
+}
+
+/// A member forbids the kept example through the ruling route. The predicate fails on the
+/// regressed answer, so the example is rejected and the origin records it so.
+#[tokio::test]
+async fn a_member_forbids_an_episode_through_the_ruling_route() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let draft = draft_of(&running, order, episode).await;
+    let ruled_on = draft["ruled_on"]
+        .as_str()
+        .expect("the draft names its example");
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&draft, "forbid", same_as_base()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the forbid is recorded: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    match origin.world().ledger().events() {
+        [LedgerEvent::DecisionConfirmed(decision)] => {
+            assert!(decision.accepts.is_empty(), "a forbid accepts nothing");
+            let rejects: Vec<String> = decision.rejects.iter().map(ToString::to_string).collect();
+            assert_eq!(
+                rejects,
+                [ruled_on],
+                "the forbid rejects the example it is on"
+            );
+        }
+        other => panic!("one decision is recorded, got {other:?}"),
+    }
+    running.stop().await.expect("the server stops");
+}
+
+/// The server checks the predicate on the example before it records anything. Allowing with a
+/// predicate the regressed answer fails is refused, and so is forbidding with one it holds on. The
+/// log does not move.
+#[tokio::test]
+async fn a_predicate_that_does_not_give_the_decisions_answer_is_refused() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let draft = draft_of(&running, order, episode).await;
+    let (allow, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&draft, "allow", same_as_base()),
+    )
+    .await;
+    assert_eq!(
+        allow,
+        reqwest::StatusCode::BAD_REQUEST,
+        "an allow with a predicate the example fails is refused: {body}"
+    );
+    let (forbid, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&draft, "forbid", created()),
+    )
+    .await;
+    assert_eq!(
+        forbid,
+        reqwest::StatusCode::BAD_REQUEST,
+        "a forbid with a predicate the example holds is refused: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        0,
+        "a refused ruling is not recorded"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A draft is stale once the ruling log moves. A ruling sent from a stale draft is refused with
+/// 409 and records nothing. A ruling made from the fresh draft supersedes the first one.
+#[tokio::test]
+async fn a_stale_draft_is_refused_and_a_fresh_draft_supersedes_the_ruling() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let first = draft_of(&running, order, episode).await;
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&first, "allow", created()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the first ruling is recorded: {body}"
+    );
+
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&first, "forbid", same_as_base()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::CONFLICT,
+        "a ruling from the draft read before the first ruling is stale: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        1,
+        "the stale ruling is not recorded"
+    );
+
+    let second = draft_of(&running, order, episode).await;
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&second, "forbid", same_as_base()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the fresh ruling is recorded: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    match origin.world().ledger().events() {
+        [
+            LedgerEvent::DecisionConfirmed(_),
+            LedgerEvent::DecisionConfirmed(decision),
+        ] => {
+            assert_eq!(decision.event_seq, 2);
+            assert_eq!(
+                decision.supersedes,
+                Some(Supersedes { event_seq: 1 }),
+                "the fresh ruling supersedes the first in the same lineage"
+            );
+        }
+        other => panic!("two decisions are recorded, got {other:?}"),
+    }
+    running.stop().await.expect("the server stops");
+}
+
+/// Only a member rules. An agent's token gets 403 and no token gets 401, and neither reaches the
+/// log, even with a ruling the draft would accept.
+#[tokio::test]
+async fn only_a_member_rules_through_the_ruling_route() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let draft = draft_of(&running, order, episode).await;
+    let body = ruling_body(&draft, "allow", created());
+    let (agent, text) = post_ruling(&running, AGENT_TOKEN, order, episode, &body).await;
+    assert_eq!(
+        agent,
+        reqwest::StatusCode::FORBIDDEN,
+        "an agent never rules: {text}"
+    );
+    let anonymous = client()
+        .post(url(
+            &running,
+            &format!("/api/orders/{order}/episodes/{episode}/ruling"),
+        ))
+        .json(&body)
+        .send()
+        .await
+        .expect("the anonymous ruling is sent");
+    assert_eq!(
+        anonymous.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "a ruling without a token is unauthorized"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        0,
+        "no refused ruling is recorded"
     );
     running.stop().await.expect("the server stops");
 }
