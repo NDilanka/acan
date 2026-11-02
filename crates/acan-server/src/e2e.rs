@@ -1658,6 +1658,50 @@ async fn only_a_member_rules_through_the_ruling_route() {
     running.stop().await.expect("the server stops");
 }
 
+/// The contract flag reads the protected app contract at the protected head. The demo carries one,
+/// so the flag is present and names the contract's version.
+#[tokio::test]
+async fn the_contract_flag_reads_the_protected_app_contract() {
+    let repo = demo_repo();
+    let running = start_plant(repo.path()).await;
+    let response = client()
+        .get(url(&running, "/api/contract"))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .expect("the contract request is sent");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let contract: Value = response.json().await.expect("the contract is JSON");
+    assert_eq!(
+        contract,
+        json!({ "present": true, "version": "acan-app/1" })
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A protected head with no app contract reports none, with no version. The contract is removed on
+/// the protected branch before the server starts, so the flag reads the head as it is.
+#[tokio::test]
+async fn a_protected_head_without_a_contract_reports_none() {
+    let repo = demo_repo();
+    let root = repo.path();
+    git(root, &["checkout", "-q", PROTECTED_BRANCH]);
+    git(root, &["rm", "-q", ".acan/app.json"]);
+    git(root, &["commit", "-q", "-m", "drop the app contract"]);
+    git(root, &["switch", "-q", "user-work"]);
+    let running = start_plant(root).await;
+    let response = client()
+        .get(url(&running, "/api/contract"))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .expect("the contract request is sent");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let contract: Value = response.json().await.expect("the contract is JSON");
+    assert_eq!(contract, json!({ "present": false, "version": null }));
+    running.stop().await.expect("the server stops");
+}
+
 /// The offline models, except that a split makes two tasks on the order's machine.
 #[derive(Default)]
 struct TwoTasks {

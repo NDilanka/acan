@@ -14,8 +14,9 @@ use acan_core::{
     ScopeConfirmation, ScopeDraftOutcome, Seq, Stamped, TaskId, TaskState,
 };
 use acan_intent::{
-    EpisodeId, GetReceiptRequest, GetReceiptResponse, GetRulingsRequest, GetRulingsResponse,
-    GetScopeRequest, GetScopeResponse, MachineId, McpError, McpErrorCode, McpV1, TaskRef,
+    AppContractV1, EpisodeId, GetReceiptRequest, GetReceiptResponse, GetRulingsRequest,
+    GetRulingsResponse, GetScopeRequest, GetScopeResponse, MachineId, McpError, McpErrorCode,
+    McpV1, TaskRef,
 };
 use acan_llm::{ModelClient, UsageTotals};
 use acan_scan::Plant;
@@ -39,7 +40,7 @@ use crate::release::{self, BugReport, UpdateStatus, VersionInfo};
 use crate::ruling::{self, RulingBody, RulingDraftView};
 use crate::vision::{self, Side, VisionWitness};
 use crate::workers::{Board, WorkersView};
-use crate::{STATE_DIR, redact, setup, stream};
+use crate::{STATE_DIR, observe, redact, setup, stream};
 
 /// Builds the router. The public files are served for every path the API does not claim.
 pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<PublicRoot>) -> Router {
@@ -50,6 +51,7 @@ pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<Public
         .route("/api/commands", post(post_command::<C>))
         .route("/api/events", get(get_events::<C>))
         .route("/api/plant", get(get_plant::<C>))
+        .route("/api/contract", get(get_contract::<C>))
         .route("/api/scan", post(post_scan::<C>))
         .route("/api/usage", get(get_usage::<C>))
         .route("/api/workers", get(get_workers::<C>))
@@ -284,6 +286,16 @@ async fn get_plant<C: ModelClient + 'static>(
     Ok(Json(scan.plant.clone()))
 }
 
+/// Whether the protected app contract is in place, and its version. Any authenticated principal may
+/// read it: it is the protected head's file, and the agent's worktree holds the same one.
+async fn get_contract<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+) -> Result<Json<ContractView>, ApiError> {
+    authenticate(&host, bearer(&headers))?;
+    Ok(Json(contract_of(&host).await?))
+}
+
 async fn post_scan<C: ModelClient + 'static>(
     State(host): State<Host<C>>,
     headers: HeaderMap,
@@ -329,6 +341,33 @@ async fn get_bug_report<C: ModelClient + 'static>(
 ) -> Result<Json<BugReport>, ApiError> {
     member(&host, &headers)?;
     Ok(Json(release::bug_report()))
+}
+
+/// Whether the protected app contract is in place at the protected head, and its version.
+#[derive(Serialize)]
+pub(crate) struct ContractView {
+    present: bool,
+    version: Option<String>,
+}
+
+/// The contract at the protected head, read from the same snapshot the gate tests against. It is
+/// present when the app contract and the probe corpus both read and decode, since the gate needs
+/// both. A server with no git repository has no protected head to read, so that is an error.
+pub(crate) async fn contract_of<C: ModelClient>(host: &Host<C>) -> Result<ContractView, ApiError> {
+    let workspace = host
+        .workspace()
+        .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("the server has no git repository")))?;
+    let snapshot = jobs::protected_snapshot(workspace.repo(), &host.repo().join(STATE_DIR)).await?;
+    Ok(match observe::read_protected(&snapshot) {
+        Ok(_) => ContractView {
+            present: true,
+            version: Some(AppContractV1::TAG.to_owned()),
+        },
+        Err(_) => ContractView {
+            present: false,
+            version: None,
+        },
+    })
 }
 
 /// Where a claimed task's worktree is, the branch it is on, and the protected-head snapshot its
