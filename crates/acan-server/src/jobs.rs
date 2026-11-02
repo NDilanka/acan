@@ -79,10 +79,10 @@ const MAX_JOB_ATTEMPTS: u32 = 5;
 const RETRY_BACKOFF: Duration = Duration::from_millis(20);
 
 /// The program the containers run under.
-const RUNNER_PROGRAM: &str = "docker";
+pub(crate) const RUNNER_PROGRAM: &str = "docker";
 
 /// The port the app listens on inside its container.
-const APP_PORT: u16 = 3000;
+pub(crate) const APP_PORT: u16 = 3000;
 
 /// The state directory's folder that holds one directory per observe pass.
 const CONTRAST_DIR: &str = "contrasts";

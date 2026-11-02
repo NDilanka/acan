@@ -4,6 +4,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
+use acan_server::receipt_cli::{self, Format, ShadowArgs};
 use acan_server::{
     DEFAULT_WITNESS_CONCURRENCY, Models, ServerConfig, VisionConfig, default_browser,
     default_data_dir, start,
@@ -23,6 +24,20 @@ struct Cli {
 enum Command {
     /// Serves the world of one repository.
     Serve(ServeArgs),
+    /// Runs the contrast between two refs of a clone and prints its shadow receipt.
+    Receipt(ReceiptArgs),
+}
+
+#[derive(Debug, Args)]
+struct ReceiptArgs {
+    #[command(flatten)]
+    shadow: ShadowArgs,
+    /// The format printed to stdout.
+    #[arg(long, value_enum, default_value_t = Format::Json)]
+    format: Format,
+    /// A directory that also receives `shadow-receipt.json` and `shadow-receipt.md`.
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -73,8 +88,24 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .with_max_level(tracing::Level::INFO)
         .init();
-    let Command::Serve(args) = Cli::parse().command;
-    serve(args).await
+    match Cli::parse().command {
+        Command::Serve(args) => serve(args).await,
+        Command::Receipt(args) => receipt(args).await,
+    }
+}
+
+/// Prints the shadow receipt of one run. A refusal is an error with no receipt.
+async fn receipt(args: ReceiptArgs) -> Result<()> {
+    let report = receipt_cli::run(&args.shadow).await?;
+    if let Some(dir) = &args.out {
+        receipt_cli::write_out(&report, dir)?;
+    }
+    let text = match args.format {
+        Format::Json => receipt_cli::json_text(&report)?,
+        Format::Markdown => receipt_cli::markdown_text(&report)?,
+    };
+    println!("{text}");
+    Ok(())
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {

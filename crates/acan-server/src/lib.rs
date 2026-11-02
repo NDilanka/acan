@@ -40,7 +40,7 @@ mod receipt;
     dead_code,
     reason = "the receipt command line has no caller in the server yet; it renders the receipt renderer, which has none"
 )]
-mod receipt_cli;
+pub mod receipt_cli;
 mod redact;
 mod store;
 mod stream;
