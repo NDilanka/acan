@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { MAX_RESULTS, idScore, parseQuery, receiptItems, score, search } from "../../www/command.js";
+import { MAX_RESULTS, emptyNote, idScore, parseQuery, receiptItems, score, search } from "../../www/command.js";
 
 const VIEW = {
   machines: [
@@ -146,4 +146,19 @@ test("the receipt items come from each plant view, admitted play or not", () => 
     { order: 3, item_id: "a", machine_id: "auth", class: "pass" },
     { order: 4, item_id: "b", machine_id: "store", class: "fail" },
   ]);
+});
+
+test("an empty result list says why in the words of its verb", () => {
+  const bare = { ...VIEW, agents: [], lanes: [] };
+  assert.equal(emptyNote(VIEW, "   "), "");
+  assert.equal(emptyNote(VIEW, "zzz"), 'Nothing on the map matches "zzz".');
+  assert.equal(emptyNote(bare, "seal"), "No scope is ready to seal yet.");
+  assert.equal(emptyNote(VIEW, "seal o-9"), 'No scope lane matches "o-9".');
+  assert.equal(emptyNote(bare, "agent w2"), "No agent is on the map yet.");
+  assert.equal(emptyNote(bare, "ride"), "No agent is on the map yet.");
+  assert.equal(emptyNote(VIEW, "ride zzz"), 'No agent matches "zzz".');
+  assert.equal(emptyNote(VIEW, "go zzz"), 'No machine, agent or order on the map matches "zzz".');
+  assert.equal(emptyNote(VIEW, "touched zzz"), 'No declared path or receipt item names "zzz".');
+  assert.equal(emptyNote(VIEW, "order zzz"), 'No machine matches "zzz" to order on.');
+  for (const text of ["seal", "agent w2"]) assert.deepEqual(search(bare, text), [], `${text} finds nothing`);
 });

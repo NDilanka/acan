@@ -259,6 +259,31 @@ function lanes(view, term, shownOrder, push) {
   }
 }
 
+// The line an empty result list shows for `text`, in the words of its verb, or "" when the query
+// is blank. A verb that finds nothing because the view holds none of its things says so, rather
+// than that the term matched nothing.
+export function emptyNote(view, text) {
+  if (String(text ?? "").trim() === "") return "";
+  const { verb, term } = parseQuery(text);
+  const quoted = `"${term}"`;
+  switch (verb) {
+    case "go":
+      return `No machine, agent or order on the map matches ${quoted}.`;
+    case "ride":
+    case "agent":
+      if (view.agents.length === 0) return "No agent is on the map yet.";
+      return term === "" ? "No agent is on the map now." : `No agent matches ${quoted}.`;
+    case "touched":
+      return `No declared path or receipt item names ${quoted}.`;
+    case "order":
+      return `No machine matches ${quoted} to order on.`;
+    case "seal":
+      if (view.lanes.length === 0) return "No scope is ready to seal yet.";
+      return `No scope lane matches ${quoted}.`;
+    default:
+      return `Nothing on the map matches ${quoted}.`;
+  }
+}
 // The receipt items of every order the page holds a plant view of, for `touched`.
 export function receiptItems(plantViews) {
   const out = [];

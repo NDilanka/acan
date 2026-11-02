@@ -3,7 +3,7 @@
 // this file runs them on the page.
 import { openCard, openQuestionCard } from "./cards.js";
 import { announce, noteMachine, openCompose, orderHere, pulse } from "./compose.js";
-import { VERB_WORDS, receiptItems, search } from "./command.js";
+import { VERB_WORDS, emptyNote, receiptItems, search } from "./command.js";
 import { requestRender } from "./main.js";
 import { shownOrder } from "./panels.js";
 import { $, canvas, state } from "./state.js";
@@ -108,9 +108,7 @@ function refresh() {
       shownOrder: shownOrder(state.view)?.id ?? null,
     });
   bar.active = 0;
-  $("command-note").textContent = bar.results.length === 0 && text.trim() !== ""
-    ? `Nothing on the map matches "${text.trim()}".`
-    : "";
+  $("command-note").textContent = bar.results.length === 0 && state.view !== null ? emptyNote(state.view, text) : "";
   paintList();
 }
 
