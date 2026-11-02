@@ -31,10 +31,11 @@ pub const CHAR_CSS_PX: f32 = 6.5;
 /// label's offset and line height in `index.html`.
 pub const LABEL_DROP_CSS_PX: f32 = 13.0;
 /// The size of the screen rectangle the fixed usage panel covers, in CSS pixels: width and height.
-/// Measured in headless Chrome at 1440 by 900 with three history rows: at rest the panel spans 577
-/// by 191 pixels, and with Alt held it spans 630 by 311. Each history row adds about 19 pixels of
-/// height, so the room leaves about one more row of headroom. The labels stay clear in both states.
-pub const USAGE_PANEL_CSS: [f32; 2] = [660.0, 340.0];
+/// Measured in headless Chrome at 1440 by 900: at rest the panel spans 577 by 191 pixels, and with
+/// Alt held it spans 630 by 329, with the three history rows the view carries and its "+N earlier"
+/// line. The room leaves about 18 pixels of headroom on each axis, so the labels stay clear in both
+/// states.
+pub const USAGE_PANEL_CSS: [f32; 2] = [660.0, 360.0];
 /// The label's bottom edge sits this many `LABEL_DROP_CSS_PX` below the plate's front edge.
 const LABEL_BOTTOM_DROPS: f32 = 1.6;
 /// Below the size to name, this many of the largest machines are still named, down to
@@ -519,9 +520,9 @@ mod tests {
         }
     }
 
-    /// The Alt size of the usage panel, measured in headless Chrome with three history rows, and
-    /// the viewport height it was measured at.
-    const ALT_PANEL_CSS: [f32; 2] = [630.1, 310.5];
+    /// The Alt size of the usage panel, measured in headless Chrome with three history rows and the
+    /// "+N earlier" line, and the viewport height it was measured at.
+    const ALT_PANEL_CSS: [f32; 2] = [630.1, 329.3];
     const MEASURED_VIEWPORT_CSS: f32 = 900.0;
     /// The panel's distance from the viewport's left and bottom edges, in CSS pixels.
     const PANEL_INSET_CSS: f32 = 12.0;
