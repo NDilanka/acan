@@ -1,6 +1,6 @@
 // The first-run checklist, with no DOM, so Node can test it. It walks a new tester from sign-in to
-// watching the map: each step's state comes from the token, the GET /api/setup answer, the plant,
-// and the view the page already folds. This file decides what each step says; firstrun-panel.js
+// watching the map: each step's state comes from the token, the GET /api/setup and GET /api/workers
+// answers, the plant, and the view the page already folds. This file decides what each step says; firstrun-panel.js
 // shows it and wires each step to the control that does it.
 
 // localStorage key: set once the tester dismisses the checklist, so it does not come back.
@@ -23,18 +23,63 @@ export function setupState(answer) {
   return answer.body?.configured === true ? DONE : TODO;
 }
 
-// HOOK: the app contract step. The server does not say yet whether the repository has an app
-// contract (.acan/app.json). When GET /api/plant carries a `contract` boolean, this reads it; until
-// then every plant reads as unknown.
-export function contractState(plant) {
-  if (typeof plant?.contract !== "boolean") return UNKNOWN;
-  return plant.contract ? DONE : TODO;
+// Whether `acan init` ships in the build testers run. Until it does, the contract step says the
+// command is coming.
+export const INIT_SHIPPED = false;
+
+// The app contract (.acan/app.json) as GET /api/plant reports it: `contract: { present, version }`.
+// A plant without that field, from a server that does not report it yet, gives null.
+export function contractOf(plant) {
+  const contract = plant?.contract;
+  if (!contract || typeof contract !== "object" || typeof contract.present !== "boolean") return null;
+  return { present: contract.present, version: typeof contract.version === "string" ? contract.version : null };
 }
 
-// The command that starts one worker against this origin. Each worker needs an agent token, which
-// is an entry in the repository's .acan/tokens.json.
+export function contractState(plant) {
+  const contract = contractOf(plant);
+  if (contract === null) return UNKNOWN;
+  return contract.present ? DONE : TODO;
+}
+
+// What GET /api/workers says about the workers `acan serve --workers N` runs, from its answer
+// `{ status, body }`: `running` with how many run, `no_key` when every one waits for a key, `none`
+// when the server runs none, or `outside` when the server has no such route (or no answer), so
+// workers connect from outside and the view's agents are the signal.
+export function workersState(answer) {
+  const list = answer?.status === 200 && Array.isArray(answer.body?.workers) ? answer.body.workers : null;
+  if (list === null) return { kind: "outside", running: 0 };
+  if (list.length === 0) return { kind: "none", running: 0 };
+  const running = list.filter((worker) => worker?.state === "running").length;
+  if (running > 0) return { kind: "running", running };
+  return { kind: list.every((worker) => worker?.state === "no_key") ? "no_key" : "none", running: 0 };
+}
+
+// The command that starts one outside worker against this origin. Its agent token comes from
+// ACAN_AGENT_TOKEN, so it never shows in the process list.
 export function workerCommand(origin) {
-  return `acan-worker --server ${origin} --token <agent token> --repo <path to your repo>`;
+  return `acan-worker --server ${origin} --repo <path to your repo>`;
+}
+
+function workerStep(workers, agents, origin) {
+  const step = { id: "worker", title: "Connect a worker" };
+  const state = workersState(workers);
+  if (state.kind === "running") {
+    return { ...step, state: DONE, detail: `${plural(state.running, "local worker")} running.`, action: null };
+  }
+  if (state.kind === "no_key") {
+    return { ...step, state: TODO, detail: "Workers are waiting for a model key.", action: { kind: "setup", label: "Set a key" } };
+  }
+  if (state.kind === "none") {
+    return { ...step, state: TODO, detail: "Start `acan serve` with `--workers 1`, so it runs a worker for you.", action: null };
+  }
+  if (agents > 0) return { ...step, state: DONE, detail: `${plural(agents, "worker")} connected.`, action: null };
+  return {
+    ...step,
+    state: TODO,
+    detail: "Set `ACAN_AGENT_TOKEN` to an agent token from .acan/tokens.json, then start a worker. The demo's `pwsh demo/run.ps1` starts its own server and workers instead.",
+    command: workerCommand(origin),
+    action: { kind: "copy", label: "Copy command" },
+  };
 }
 
 function plural(count, word) {
@@ -54,12 +99,16 @@ function keyStep(token, setup) {
   return { ...step, detail: "Add a provider key, so model jobs stop getting built-in replies.", action: { kind: "setup", label: "Set a key" } };
 }
 
-// `contract` is undefined before the page has asked, null when the server did not say, or a boolean.
+// `contract` is undefined before the page has asked, null when the server did not say, or
+// `{ present, version }`.
 function contractStep(token, contract) {
-  const state = contract === undefined || contract === null ? UNKNOWN : (contract ? DONE : TODO);
+  const state = contract === undefined || contract === null ? UNKNOWN : (contract.present ? DONE : TODO);
   const step = { id: "contract", title: "Add the app contract", state };
-  if (state === DONE) return { ...step, detail: "Your repository has an app contract.", action: null };
-  const run = "Run `acan init` in your repo, so the gate has an app contract to check against.";
+  if (state === DONE) {
+    const version = contract.version ? ` (${contract.version})` : "";
+    return { ...step, detail: `Your repository has an app contract${version}.`, action: null };
+  }
+  const run = `Run \`acan init\` in your repo${INIT_SHIPPED ? "" : " (coming in this alpha)"}, so the gate has an app contract to check against.`;
   const detail = contract === null ? `${run} This acan does not report the contract yet, so check for .acan/app.json yourself.` : run;
   return { ...step, detail, action: token ? { kind: "contract", label: "Check again" } : null };
 }
@@ -67,7 +116,7 @@ function contractStep(token, contract) {
 // Each step, in order, with its state, its words and the control that does it. `current` marks the
 // first step still to do. A step this page cannot check is never current, so a server that cannot
 // say yet does not hold the tester at it.
-export function steps({ token = false, setup = null, contract, view = null, watched = false, origin = "" } = {}) {
+export function steps({ token = false, setup = null, contract, workers = null, view = null, watched = false, origin = "" } = {}) {
   const agents = view?.agents?.length ?? 0;
   const orders = view?.orders?.length ?? 0;
   const sealed = (view?.lanes ?? []).some((lane) => lane.state === "confirmed");
@@ -77,16 +126,7 @@ export function steps({ token = false, setup = null, contract, view = null, watc
       : { id: "signin", title: "Sign in", state: TODO, detail: "Paste the owner token that `acan serve` printed.", action: { kind: "focus", target: "token", label: "Sign in" } },
     keyStep(token, setup),
     contractStep(token, contract),
-    agents > 0
-      ? { id: "worker", title: "Connect a worker", state: DONE, detail: `${plural(agents, "worker")} connected.`, action: null }
-      : {
-        id: "worker",
-        title: "Connect a worker",
-        state: TODO,
-        detail: "Start a worker with an agent token from .acan/tokens.json. The demo's `pwsh demo/run.ps1` starts its own server and workers instead.",
-        command: workerCommand(origin),
-        action: { kind: "copy", label: "Copy command" },
-      },
+    workerStep(workers, agents, origin),
     orders > 0
       ? { id: "order", title: "Send a first order", state: DONE, detail: `${plural(orders, "order")} sent.`, action: null }
       : { id: "order", title: "Send a first order", state: TODO, detail: "Click a machine and write one sentence about what should change there.", action: { kind: "focus", target: "compose", label: "Write an order" } },

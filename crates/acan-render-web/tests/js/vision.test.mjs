@@ -17,6 +17,7 @@ import {
   verdictCounts,
   verdictInfo,
   visionTasks,
+  witnessOff,
 } from "../../www/vision.js";
 
 function check(verdict, overrides = {}) {
@@ -107,6 +108,15 @@ test("a server with no vision witness shows no pin, but a check that stopped doe
   assert.equal(hasPin(record([], { status: "pending" })), true);
   assert.equal(hasPin(record([check("consistent")])), true);
   assert.equal(hasPin(null), false);
+});
+
+test("only a failed record with the no-witness reason and no checks reads as vision off", () => {
+  const off = record([], { status: "failed", failed_reason: "this server runs no vision witness" });
+  assert.equal(witnessOff(off), true);
+  assert.equal(witnessOff({ ...off, checks: [check("not_checked")] }), false);
+  assert.equal(witnessOff({ ...off, status: "done" }), false);
+  assert.equal(witnessOff(record([], { status: "failed", failed_reason: "the server stopped before the vision check finished" })), false);
+  assert.equal(witnessOff(null), false);
 });
 
 test("a check that was not judged gives the server's reason, not a model's", () => {

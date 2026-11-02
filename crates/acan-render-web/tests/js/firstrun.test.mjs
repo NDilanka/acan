@@ -6,18 +6,22 @@ import { test } from "node:test";
 import {
   DONE,
   FIRSTRUN_KEY,
+  INIT_SHIPPED,
   TODO,
   UNAVAILABLE,
   UNKNOWN,
+  contractOf,
   contractState,
   progressText,
   setupState,
   shouldShow,
   steps,
   workerCommand,
+  workersState,
 } from "../../www/firstrun.js";
 
 const ORIGIN = "http://127.0.0.1:7311";
+const CONTRACT = { present: true, version: "acan-app/2" };
 
 // A view as the wasm side folds it, cut down to the fields the checklist reads.
 function view({ agents = 0, orders = 0, lanes = [] } = {}) {
@@ -75,25 +79,67 @@ test("with no key the step opens the key setup, and a routing file points at its
   assert.match(routed.detail, /llm\.toml/);
 });
 
-test("the contract step says to run acan init until the server reports a contract", () => {
+test("the contract step reads the plant's contract field, and a plant without it is unknown", () => {
+  assert.equal(contractOf({ machines: [] }), null);
+  assert.equal(contractOf({ contract: true }), null);
+  assert.deepEqual(contractOf({ contract: { present: true, version: "acan-app/2" } }), { present: true, version: "acan-app/2" });
+  assert.deepEqual(contractOf({ contract: { present: false, version: null } }), { present: false, version: null });
   assert.equal(contractState({ machines: [] }), UNKNOWN);
-  assert.equal(contractState({ contract: true }), DONE);
-  assert.equal(contractState({ contract: false }), TODO);
+  assert.equal(contractState({ contract: { present: true, version: "acan-app/2" } }), DONE);
+  assert.equal(contractState({ contract: { present: false, version: null } }), TODO);
+  const present = byId(steps({ token: true, setup: KEYED, contract: { present: true, version: "acan-app/2" } })).contract;
+  assert.equal(present.state, DONE);
+  assert.equal(present.detail, "Your repository has an app contract (acan-app/2).");
+  const absent = byId(steps({ token: true, setup: KEYED, contract: { present: false, version: null } })).contract;
+  assert.equal(absent.state, TODO);
+  assert.equal(absent.current, true);
+});
+
+test("the contract step says to run acan init, marked as coming while the command does not ship", () => {
+  assert.equal(INIT_SHIPPED, false);
   const asked = byId(steps({ token: true, setup: KEYED })).contract;
   assert.equal(asked.state, UNKNOWN);
   assert.equal(asked.current, false);
-  assert.match(asked.detail, /^Run `acan init` in your repo/);
+  assert.match(asked.detail, /^Run `acan init` in your repo \(coming in this alpha\), so the gate/);
   assert.deepEqual(asked.action, { kind: "contract", label: "Check again" });
   const silent = byId(steps({ token: true, setup: KEYED, contract: null })).contract;
   assert.match(silent.detail, /does not report the contract yet/);
-  assert.equal(byId(steps({ token: true, setup: KEYED, contract: true })).contract.state, DONE);
 });
 
-test("the worker step gives the start command for this origin until a worker connects", () => {
-  const waiting = byId(steps({ token: true, setup: KEYED, contract: true, view: view(), origin: ORIGIN })).worker;
+function workers(...states) {
+  return { status: 200, body: { workers: states.map((state, i) => ({ id: `local-${i + 1}`, state, last: null })) } };
+}
+
+test("GET /api/workers decides the worker step when the server has it", () => {
+  assert.deepEqual(workersState(workers("running", "no_key")), { kind: "running", running: 1 });
+  assert.deepEqual(workersState(workers("no_key", "no_key")), { kind: "no_key", running: 0 });
+  assert.deepEqual(workersState(workers()), { kind: "none", running: 0 });
+  assert.deepEqual(workersState({ status: 404, body: null }), { kind: "outside", running: 0 });
+  assert.deepEqual(workersState({ status: 403, body: null }), { kind: "outside", running: 0 });
+  assert.deepEqual(workersState(null), { kind: "outside", running: 0 });
+  const base = { token: true, setup: KEYED, contract: CONTRACT, view: view(), origin: ORIGIN };
+  const running = byId(steps({ ...base, workers: workers("running") })).worker;
+  assert.equal(running.state, DONE);
+  assert.equal(running.detail, "1 local worker running.");
+  const waiting = byId(steps({ ...base, workers: workers("no_key", "no_key") })).worker;
+  assert.equal(waiting.state, TODO);
+  assert.equal(waiting.detail, "Workers are waiting for a model key.");
+  assert.deepEqual(waiting.action, { kind: "setup", label: "Set a key" });
+  const none = byId(steps({ ...base, workers: workers() })).worker;
+  assert.equal(none.detail, "Start `acan serve` with `--workers 1`, so it runs a worker for you.");
+  assert.equal(none.command, undefined);
+  assert.equal(none.action, null);
+  // With the route, the outside worker's token path is not offered, even with no agent in the view.
+  for (const step of [running, waiting, none]) assert.doesNotMatch(step.detail, /tokens\.json/);
+});
+
+test("a server without GET /api/workers falls back to the view's agents and the outside command", () => {
+  const waiting = byId(steps({ token: true, setup: KEYED, contract: CONTRACT, workers: { status: 404, body: null }, view: view(), origin: ORIGIN })).worker;
   assert.equal(waiting.state, TODO);
   assert.equal(waiting.current, true);
-  assert.equal(waiting.command, "acan-worker --server http://127.0.0.1:7311 --token <agent token> --repo <path to your repo>");
+  assert.match(waiting.detail, /^Set `ACAN_AGENT_TOKEN` to an agent token from \.acan\/tokens\.json/);
+  assert.equal(waiting.command, "acan-worker --server http://127.0.0.1:7311 --repo <path to your repo>");
+  assert.doesNotMatch(waiting.command, /--token/);
   assert.equal(waiting.command, workerCommand(ORIGIN));
   assert.deepEqual(waiting.action, { kind: "copy", label: "Copy command" });
   const connected = byId(steps({ token: true, view: view({ agents: 2 }) })).worker;
@@ -102,14 +148,14 @@ test("the worker step gives the start command for this origin until a worker con
 });
 
 test("the order and seal steps follow the view's orders and lanes", () => {
-  const before = byId(steps({ token: true, setup: KEYED, contract: true, view: view({ agents: 1 }) }));
+  const before = byId(steps({ token: true, setup: KEYED, contract: CONTRACT, view: view({ agents: 1 }) }));
   assert.equal(before.order.current, true);
   assert.deepEqual(before.order.action, { kind: "focus", target: "compose", label: "Write an order" });
-  const drafted = byId(steps({ token: true, setup: KEYED, contract: true, view: view({ agents: 1, orders: 1, lanes: [{ state: "unconfirmed" }] }) }));
+  const drafted = byId(steps({ token: true, setup: KEYED, contract: CONTRACT, view: view({ agents: 1, orders: 1, lanes: [{ state: "unconfirmed" }] }) }));
   assert.equal(drafted.order.state, DONE);
   assert.equal(drafted.seal.current, true);
   assert.deepEqual(drafted.seal.action, { kind: "focus", target: "slip", label: "Open the slip" });
-  const sealed = byId(steps({ token: true, setup: KEYED, contract: true, view: view({ agents: 1, orders: 1, lanes: [{ state: "unconfirmed" }, { state: "confirmed" }] }) }));
+  const sealed = byId(steps({ token: true, setup: KEYED, contract: CONTRACT, view: view({ agents: 1, orders: 1, lanes: [{ state: "unconfirmed" }, { state: "confirmed" }] }) }));
   assert.equal(sealed.seal.state, DONE);
   assert.equal(sealed.watch.current, true);
   assert.deepEqual(sealed.watch.action, { kind: "dismiss", label: "Done" });
@@ -124,9 +170,9 @@ test("a step this page cannot check does not hold the tester at it", () => {
 
 test("the progress line counts done steps, and a step the server does not offer", () => {
   assert.equal(progressText(steps()), "0 of 7 done");
-  const list = steps({ token: true, setup: { status: 404, body: null }, contract: true, view: view({ agents: 1, orders: 1, lanes: [{ state: "confirmed" }] }) });
+  const list = steps({ token: true, setup: { status: 404, body: null }, contract: CONTRACT, view: view({ agents: 1, orders: 1, lanes: [{ state: "confirmed" }] }) });
   assert.equal(progressText(list), "6 of 7 done");
-  assert.equal(progressText(steps({ token: true, setup: KEYED, contract: true, view: view({ agents: 1, orders: 1, lanes: [{ state: "confirmed" }] }), watched: true })), "7 of 7 done");
+  assert.equal(progressText(steps({ token: true, setup: KEYED, contract: CONTRACT, view: view({ agents: 1, orders: 1, lanes: [{ state: "confirmed" }] }), watched: true })), "7 of 7 done");
 });
 
 test("the checklist never shows on a replay, nor once dismissed", () => {

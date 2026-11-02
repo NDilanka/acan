@@ -9,6 +9,12 @@ export const ADVISORY = "Advisory only: a model compared these pages, and the ga
 // the map shows no pin for it.
 const NO_WITNESS = "this server runs no vision witness";
 
+// Whether the record says this server runs no vision witness at all. The server has no field for
+// it, so its failed_reason wording is the only sign; this is the one place that reads it.
+export function witnessOff(record) {
+  return record?.status === "failed" && record.failed_reason === NO_WITNESS && checksOf(record).length === 0;
+}
+
 // What each verdict reads as, and its tone. `doubt` asks for a look; `none` makes no claim.
 const VERDICTS = {
   consistent: { word: "consistent", tone: "consistent", line: "The model saw every must-keep item kept." },
@@ -35,7 +41,7 @@ function checksOf(record) {
 export function hasPin(record) {
   if (!record || typeof record !== "object") return false;
   if (record.status === "pending") return true;
-  if (record.status === "failed") return record.failed_reason !== NO_WITNESS || checksOf(record).length > 0;
+  if (record.status === "failed") return !witnessOff(record);
   return record.status === "done";
 }
 
