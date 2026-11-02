@@ -289,10 +289,17 @@ function Get-OrderTasks {
 
 function Start-Worker {
     param([string]$Name, [string]$Token, [string]$Tag)
-    $argLine = "--server $script:Base --token $Token --repo `"$script:Repo`" --llm `"$script:LlmPath`" --env `"$script:EnvPath`" --test-command `"bun test`" --wait-secs 600 --max-steps $WorkerMaxSteps --heartbeat-secs 20"
-    $p = Start-Process -FilePath $WorkerExe -ArgumentList $argLine `
-        -RedirectStandardOutput (Join-Path $run "logs\$Name.$Tag.out.log") `
-        -RedirectStandardError (Join-Path $run "logs\$Name.$Tag.err.log") -PassThru -WindowStyle Hidden
+    $argLine = "--server $script:Base --repo `"$script:Repo`" --llm `"$script:LlmPath`" --env `"$script:EnvPath`" --test-command `"bun test`" --wait-secs 600 --max-steps $WorkerMaxSteps --heartbeat-secs 20"
+    # The token reaches acan-worker in ACAN_AGENT_TOKEN, not on its command line. Start-Process copies this
+    # process's environment into the child when it starts, so the variable is set only around the start.
+    $env:ACAN_AGENT_TOKEN = $Token
+    try {
+        $p = Start-Process -FilePath $WorkerExe -ArgumentList $argLine `
+            -RedirectStandardOutput (Join-Path $run "logs\$Name.$Tag.out.log") `
+            -RedirectStandardError (Join-Path $run "logs\$Name.$Tag.err.log") -PassThru -WindowStyle Hidden
+    } finally {
+        Remove-Item -Path Env:ACAN_AGENT_TOKEN -ErrorAction SilentlyContinue
+    }
     if (-not $p.WaitForExit($WorkerWaitSec * 1000)) {
         Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
         return [ordered]@{ exited = $false; exit_code = $null }
@@ -718,8 +725,14 @@ try {
         foreach ($stale in @($mh, "$mh.receipt.json", $mhFinalPath, $rulingsOut, $moRulingsOut)) {
             if (Test-Path -LiteralPath $stale) { Move-Item -LiteralPath $stale -Destination "$stale.prev-$staleStamp" }
         }
-        $ctlArgs = "-NoProfile -File `"$(Join-Path $intentDir 'control.ps1')`" -Server $script:Base -Token $controlToken -Repo `"$script:Repo`" -Task $t0 -Bundle `"$(Join-Path $intentDir 'controls\m-harmless-difference.json')`" -Out `"$mh`" -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -AwaitRuling -RulingWaitSec $RulingWaitSec -RulingsDone `"$done`""
-        $ctl = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList $ctlArgs -RedirectStandardOutput "$mh.log" -RedirectStandardError "$mh.err.log" -PassThru -WindowStyle Hidden
+        # The control token goes in ACAN_AGENT_TOKEN, not on the command line; control.ps1 reads it when -Token is absent.
+        $ctlArgs = "-NoProfile -File `"$(Join-Path $intentDir 'control.ps1')`" -Server $script:Base -Repo `"$script:Repo`" -Task $t0 -Bundle `"$(Join-Path $intentDir 'controls\m-harmless-difference.json')`" -Out `"$mh`" -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -AwaitRuling -RulingWaitSec $RulingWaitSec -RulingsDone `"$done`""
+        $env:ACAN_AGENT_TOKEN = $controlToken
+        try {
+            $ctl = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList $ctlArgs -RedirectStandardOutput "$mh.log" -RedirectStandardError "$mh.err.log" -PassThru -WindowStyle Hidden
+        } finally {
+            Remove-Item -Path Env:ACAN_AGENT_TOKEN -ErrorAction SilentlyContinue
+        }
         $recEnd = (Get-Date).AddSeconds(300 + $ControlWaitSec)
         while (-not (Test-Path -LiteralPath "$mh.receipt.json")) {
             if ($ctl.HasExited) { break }

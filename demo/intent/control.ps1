@@ -15,7 +15,8 @@ Waits are bounded: each wait ends on a terminal state or on its timeout, whichev
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Server,
-    [Parameter(Mandatory)][string]$Token,
+    # The control's agent token. Without it, the ACAN_AGENT_TOKEN variable is used, so the token need not be on the command line.
+    [string]$Token = $env:ACAN_AGENT_TOKEN,
     [Parameter(Mandatory)][string]$Repo,
     [Parameter(Mandatory)][string]$Task,
     [Parameter(Mandatory)][string]$Bundle,
@@ -35,6 +36,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrEmpty($Token)) { throw 'no agent token: pass -Token or set ACAN_AGENT_TOKEN' }
 $mcpUrl = "$($Server.TrimEnd('/'))/mcp"
 $authHeaders = @{ Authorization = "Bearer $Token" }
 $script:RpcId = 0

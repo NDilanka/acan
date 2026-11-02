@@ -90,7 +90,7 @@ Pending. This runs after the two-order take lands. No numbers are published befo
 
 - The live take runs on Windows with PowerShell 7, and on Linux with the POSIX scripts in `demo/`. The POSIX path has run a take without provider keys. A live take on the POSIX path has not run yet. The take scripts under `demo/intent` are Windows-only.
 - Live takes need your own provider keys. `llm.toml` and `.env` are git-ignored and are not in the repository.
-- The worker slots pass each worker its per-take local acan agent token in the `ACAN_AGENT_TOKEN` variable, not on the command line, so the process list does not show it. The Windows intent take (`demo/intent/take.ps1`) still passes its token on the command line. These tokens are created by the take for its own server. They are not provider keys.
+- The take and the worker slots pass each worker its per-take local acan agent token in the `ACAN_AGENT_TOKEN` variable, not on the command line, so the process list does not show it. The control identity's token goes the same way. These tokens are created by the take for its own server. They are not provider keys.
 - The probe driver runs in the same container as the candidate code. The container has a read-only root and all Linux capabilities dropped.
 - `model_cost_micros` is stored in each order's repair budget, but no check reads it. The model cost cap is not enforced.
 - There is no hosted replay yet. The recorded receipts replay the provider calls, not the full UI.
