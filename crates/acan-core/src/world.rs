@@ -60,6 +60,8 @@ pub enum Step {
     Explain,
     /// Comparing a screenshot witness.
     Screenshot,
+    /// Comparing a page's screenshots with a vision model.
+    Vision,
 }
 
 /// Token totals.
@@ -717,6 +719,10 @@ impl World {
             | Event::AgentRegistered { .. }
             | Event::IndexUpdated { .. }
             | Event::ModelUsed { .. } => Ok(()),
+            Event::VisionChecked { task, gate_run, .. } => match self.gates.get(gate_run) {
+                Some(gate) if gate.task == *task => Ok(()),
+                _ => Err(format!("unknown gate run {gate_run} of task {task}")),
+            },
             Event::OrderPosted {
                 order, witnesses, ..
             } => {
@@ -1381,6 +1387,7 @@ impl World {
                 }
             }
             Event::RulingRecorded { event } => self.ledger.append((**event).clone()),
+            Event::VisionChecked { .. } => {}
         }
         self.next_seq = stamped.seq.next();
     }
@@ -1594,6 +1601,33 @@ impl Origin {
         let cleared = clash::build_clear(&next);
         next.record(ctx.now, &Actor::System, cleared, &mut batch);
         self.world = next;
+        Ok(batch)
+    }
+
+    /// Decides an advisory command and applies its events, and nothing else.
+    ///
+    /// An advisory command (`VisionChecked`, `ModelUsed`) reports what a check or a model call
+    /// saw; it never moves gate state. So this path skips lease expiry, barrier expiry, orphan
+    /// dissolution and build clearing on purpose: a lease or barrier already due stays in place
+    /// until the next ordinary command expires it.
+    ///
+    /// # Errors
+    /// Returns [`Rejection::Invalid`] for any command that is not advisory, and [`Rejection`]
+    /// when the advisory command is not allowed in the current state. Either way nothing changes.
+    pub fn execute_advisory(
+        &mut self,
+        ctx: &Ctx<'_>,
+        cmd: Command,
+    ) -> Result<Vec<Stamped>, Rejection> {
+        if !matches!(
+            cmd,
+            Command::System(SystemCmd::VisionChecked { .. } | SystemCmd::ModelUsed { .. })
+        ) {
+            return Err(Rejection::invalid("not an advisory command"));
+        }
+        let (actor, decided) = decide(&self.world, ctx, cmd)?;
+        let mut batch = Vec::new();
+        self.world.record(ctx.now, &actor, decided, &mut batch);
         Ok(batch)
     }
 
@@ -1845,5 +1879,21 @@ fn decide_system(world: &World, ctx: &Ctx<'_>, cmd: SystemCmd) -> Result<Vec<Eve
         SystemCmd::ScopeDraftFailed { order, rev, reason } => {
             lane::decide_draft_failed(world, order, rev, reason)
         }
+        SystemCmd::VisionChecked {
+            task,
+            gate_run,
+            status,
+            counts,
+            human_questions,
+        } => match world.gate(gate_run) {
+            Some(gate) if gate.task == task => Ok(vec![Event::VisionChecked {
+                task,
+                gate_run,
+                status,
+                counts,
+                human_questions,
+            }]),
+            _ => Err(Rejection::unknown("gate run", gate_run)),
+        },
     }
 }

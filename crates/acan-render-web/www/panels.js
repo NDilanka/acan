@@ -4,6 +4,10 @@ import { label } from "./marks.js";
 import {
   hintEl,
   hintRest,
+  historyBody,
+  historyEl,
+  metaBody,
+  metaNote,
   orderEl,
   orderLine,
   povAgent,
@@ -15,9 +19,9 @@ import {
   povLine,
   stale,
   state,
-  usageBody,
   usagePanel,
 } from "./state.js";
+import { OFFLINE_PROVIDER, roleLabel, splitUsage } from "./usage.js";
 
 // The usage panel shows this many rows at rest. Alt shows every row.
 const USAGE_REST_ROWS = 3;
@@ -145,22 +149,65 @@ function paintOrderShown() {
   orderEl.classList.toggle("on", state.hasOrder);
 }
 
-// The usage panel reads the model calls the view has recorded: one row per model and step. It is
-// hidden until the first call. At rest it shows the first few rows; Alt shows every row.
+// The usage panel has two sections. The first is the origin's count since its start, one row per
+// role, provider and model, with the legend that says what each provider name is. Alt also shows
+// the history of this log, which the page folds from the model calls in the log. The panel is
+// hidden until there is something to show. At rest the first section shows its first few rows;
+// Alt shows every origin row and the newest history rows the view carries.
 export function paintUsage() {
-  const rows = state.view === null ? [] : state.view.usage;
-  usagePanel.hidden = rows.length === 0;
+  const served = state.serverUsage;
+  const history = state.view === null ? [] : state.view.usage;
+  const { live, offline, total } = splitUsage(served?.rows ?? []);
+  const rows = [...live, ...offline];
+  usagePanel.hidden = rows.length === 0 && history.length === 0 && !served?.error;
   const shown = state.altDown ? rows : rows.slice(0, USAGE_REST_ROWS);
-  usageBody.replaceChildren(...shown.map(usageRow));
+  metaBody.replaceChildren(...shown.map(metaRow));
+  metaNote.textContent = metaNoteText(served, live.length, offline.length, total);
+  historyEl.hidden = !state.altDown || history.length === 0;
+  const earlier = state.view === null ? 0 : state.view.usage_earlier;
+  historyBody.replaceChildren(...history.map(historyRow), ...(earlier > 0 ? [earlierRow(earlier)] : []));
 }
 
-function usageRow(row) {
+// The view carries only the newest few history rows; one line counts the older ones.
+function earlierRow(count) {
   const tr = document.createElement("tr");
-  const cells = [row.role, row.model, row.calls, row.input, row.output];
-  cells.forEach((value, i) => {
+  const td = document.createElement("td");
+  td.colSpan = 5;
+  td.className = "earlier";
+  td.textContent = `+${count} earlier`;
+  tr.append(td);
+  return tr;
+}
+
+function metaNoteText(served, liveRows, offlineRows, total) {
+  if (served === null) return "";
+  if (served.error !== null) return `usage not read from the server: ${served.error}`;
+  if (liveRows + offlineRows === 0) return "no model calls since server start";
+  const live = `live total: ${total.calls} calls, ${total.input.toLocaleString("en-US")} in, ${total.output.toLocaleString("en-US")} out`;
+  return offlineRows === 0 ? live : `${live}. Offline stand-in: not a model call, not counted.`;
+}
+
+// An offline row is the stand-in's; its provider cell says so, and the note says what it is.
+function metaRow(row) {
+  const offline = row.provider === OFFLINE_PROVIDER;
+  const provider = offline ? "offline stand-in" : row.provider;
+  const values = [roleLabel(row.role), provider, row.model, row.calls, row.prompt_tokens, row.completion_tokens];
+  const tr = tableRow(values, 3);
+  if (offline) tr.classList.add("standin");
+  return tr;
+}
+
+function historyRow(row) {
+  return tableRow([row.role, row.model, row.calls, row.input, row.output], 2);
+}
+
+// A table row with one cell per value. Values from `firstNumeric` on are right-aligned.
+function tableRow(values, firstNumeric) {
+  const tr = document.createElement("tr");
+  values.forEach((value, i) => {
     const td = document.createElement("td");
     td.textContent = typeof value === "number" ? value.toLocaleString("en-US") : String(value);
-    if (i >= 2) td.className = "num";
+    if (i >= firstNumeric) td.className = "num";
     tr.append(td);
   });
   return tr;

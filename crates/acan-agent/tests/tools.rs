@@ -798,9 +798,9 @@ fn a_link_or_junction_into_a_protected_directory_is_refused() {
     let dir = repo();
     let root = dir.path();
     link(&root.join(".acan"), &root.join("model/settings"), true);
-    let mut declared = vec!["model/settings/app.json".to_owned()];
+    let declared = vec!["model/settings/app.json".to_owned()];
     #[cfg(windows)]
-    {
+    let declared = {
         let made = Process::new("cmd")
             .args(["/C", "mklink", "/J"])
             .arg(root.join("model").join("junction"))
@@ -808,8 +808,10 @@ fn a_link_or_junction_into_a_protected_directory_is_refused() {
             .output()
             .expect("cmd runs");
         assert!(made.status.success(), "the junction is created");
+        let mut declared = declared;
         declared.push("model/junction/app.json".to_owned());
-    }
+        declared
+    };
     let tools = Worktree::new(root.to_path_buf(), &declared, None);
     for path in &declared {
         assert!(

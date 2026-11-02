@@ -3,9 +3,9 @@ mod common;
 use std::collections::BTreeMap;
 
 use acan_core::{
-    AgentCmd, CommitId, Event, Fence, GateRun, GateRunId, GateVerdict, Generation, Job,
-    LEASE_TTL_MS, LeaseEnd, OrderRev, Rejection, Stage, SystemCmd, TaskId, TaskState, WitnessId,
-    WitnessOutcome,
+    AgentCmd, Claim, CommitId, DECLARE_BARRIER_MS, Event, Fence, GateRun, GateRunId, GateVerdict,
+    Generation, Job, LEASE_TTL_MS, LeaseEnd, OrderRev, Rejection, Stage, Step, SystemCmd, TaskId,
+    TaskState, VisionCounts, VisionStatus, WitnessId, WitnessOutcome,
 };
 use acan_core::{HumanCmd, TaskSpec};
 use common::{Fx, events, machine, sym};
@@ -491,4 +491,131 @@ fn a_late_clash_renews_the_lease_that_paused_while_gating() {
     };
     assert!(matches!(stage, Stage::Declared { .. }));
     assert_eq!(claim.lease.expires_at, fx.now.plus_millis(LEASE_TTL_MS));
+}
+
+/// task1 is gating and task2's lease is past its deadline, with no command since to expire it.
+/// Returns task1's run.
+fn overdue_while_gating(fx: &mut Fx) -> GateRunId {
+    let (a, b, t1, t2) = (fx.agent_a.clone(), fx.agent_b.clone(), fx.task1, fx.task2);
+    let fence = fx.build(&a, t1);
+    fx.agent(
+        &a,
+        AgentCmd::ReportBuilt {
+            fence,
+            head: commit("abc123"),
+        },
+    )
+    .expect("report accepted");
+    fx.claim(&b, t2);
+    fx.advance(LEASE_TTL_MS + 1);
+    run_of(fx, t1)
+}
+
+fn vision_check(task: TaskId, gate_run: GateRunId) -> SystemCmd {
+    SystemCmd::VisionChecked {
+        task,
+        gate_run,
+        status: VisionStatus::Done,
+        counts: VisionCounts::default(),
+        human_questions: 0,
+    }
+}
+
+fn claim_of(fx: &Fx, task: TaskId) -> Option<Claim> {
+    match &fx.origin.world().task(task).expect("task").state {
+        TaskState::Claimed { claim, .. } => Some(claim.clone()),
+        _ => None,
+    }
+}
+
+#[test]
+fn an_advisory_vision_check_leaves_an_overdue_lease_in_place() {
+    let mut fx = Fx::new();
+    let run = overdue_while_gating(&mut fx);
+    let (t1, t2) = (fx.task1, fx.task2);
+    let held = claim_of(&fx, t2).expect("task2 is claimed");
+    let batch = fx
+        .advise(vision_check(t1, run))
+        .expect("the check is recorded");
+    assert!(
+        matches!(events(&batch).as_slice(), [Event::VisionChecked { .. }]),
+        "{batch:?}"
+    );
+    assert_eq!(claim_of(&fx, t2), Some(held));
+    assert_eq!(run_of(&fx, t1), run);
+}
+
+#[test]
+fn an_ordinary_vision_check_expires_the_same_overdue_lease() {
+    let mut fx = Fx::new();
+    let run = overdue_while_gating(&mut fx);
+    let (t1, t2) = (fx.task1, fx.task2);
+    let batch = fx
+        .system(vision_check(t1, run))
+        .expect("the check is recorded");
+    assert!(
+        events(&batch).iter().any(|e| matches!(
+            e,
+            Event::LeaseEnded {
+                task,
+                why: LeaseEnd::Expired,
+                ..
+            } if *task == t2
+        )),
+        "{batch:?}"
+    );
+    assert!(matches!(
+        fx.origin.world().task(t2).expect("task").state,
+        TaskState::Open
+    ));
+}
+
+#[test]
+fn the_advisory_path_refuses_a_command_that_is_not_advisory() {
+    let mut fx = Fx::new();
+    let run = overdue_while_gating(&mut fx);
+    let witness = fx.witnesses()[0];
+    let before = fx.origin.world().clone();
+    for cmd in [
+        SystemCmd::Tick,
+        SystemCmd::WitnessResult {
+            run,
+            witness,
+            outcome: WitnessOutcome::Pass,
+        },
+    ] {
+        let got = fx.advise(cmd);
+        assert!(matches!(got, Err(Rejection::Invalid { .. })), "got {got:?}");
+        assert_eq!(fx.origin.world(), &before);
+    }
+}
+
+#[test]
+fn an_advisory_usage_row_leaves_a_declare_barrier_past_its_deadline() {
+    let mut fx = Fx::new();
+    let (a, t1, order) = (fx.agent_a.clone(), fx.task1, fx.order);
+    let fence = fx.claim(&a, t1);
+    fx.declare(&a, fence, rate_limit())
+        .expect("declare accepted");
+    fx.advance(DECLARE_BARRIER_MS);
+    let batch = fx
+        .advise(SystemCmd::ModelUsed {
+            model: "muse-spark".to_owned(),
+            step: Step::Vision,
+            input_tokens: 900,
+            output_tokens: 120,
+        })
+        .expect("usage recorded");
+    assert!(
+        matches!(events(&batch).as_slice(), [Event::ModelUsed { .. }]),
+        "{batch:?}"
+    );
+    assert!(fx.origin.world().barrier(order).is_some());
+    let ticked = fx.system(SystemCmd::Tick).expect("tick accepted");
+    assert!(
+        events(&ticked)
+            .iter()
+            .any(|e| matches!(e, Event::BarrierExpired { order: o } if *o == order)),
+        "{ticked:?}"
+    );
 }

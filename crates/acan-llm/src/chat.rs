@@ -1,3 +1,5 @@
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,6 +15,12 @@ pub enum Message {
     },
     User {
         content: String,
+    },
+    /// A user turn made of parts, such as text with images. It is sent with role `user` and an
+    /// array `content`; a text-only turn stays [`Message::User`], whose `content` is a string.
+    #[serde(rename = "user")]
+    UserParts {
+        content: Vec<ContentPart>,
     },
     Assistant {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -38,6 +46,48 @@ impl Message {
             content: content.into(),
         }
     }
+
+    /// A user turn with text and image parts, in the order given.
+    pub fn user_parts(content: Vec<ContentPart>) -> Self {
+        Self::UserParts { content }
+    }
+}
+
+/// One part of a [`Message::UserParts`] turn, in the OpenAI chat-completions shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+impl ContentPart {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    /// A PNG image sent inline as a `data:` URL.
+    pub fn png(bytes: &[u8]) -> Self {
+        Self::ImageUrl {
+            image_url: ImageUrl {
+                url: format!("data:image/png;base64,{}", BASE64.encode(bytes)),
+            },
+        }
+    }
+
+    /// The text of a text part.
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text { text } => Some(text),
+            Self::ImageUrl { .. } => None,
+        }
+    }
+}
+
+/// Where an image part's image is: a `data:` URL or a link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImageUrl {
+    pub url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -82,15 +132,20 @@ pub struct ChatRequest {
 }
 
 impl ChatRequest {
-    /// The text of the last user message, if there is one.
+    /// The text of the last user message, if there is one. For a turn made of parts, that is
+    /// its first text part.
     pub fn last_user_text(&self) -> Option<&str> {
         self.messages
             .iter()
             .rev()
             .find_map(|message| match message {
-                Message::User { content } => Some(content.as_str()),
+                Message::User { content } => Some(Some(content.as_str())),
+                Message::UserParts { content } => {
+                    Some(content.iter().find_map(ContentPart::as_text))
+                }
                 _ => None,
             })
+            .flatten()
     }
 }
 
@@ -137,4 +192,67 @@ pub struct ChatResponse {
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: Option<String>,
     pub call: CallRecord,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_text_only_user_message_keeps_its_string_content() {
+        let encoded =
+            serde_json::to_string(&Message::user("Plan the login fix.")).expect("encodes");
+        assert_eq!(
+            encoded,
+            r#"{"role":"user","content":"Plan the login fix."}"#
+        );
+    }
+
+    #[test]
+    fn a_user_turn_with_parts_sends_an_array_of_text_and_image_parts() {
+        let message = Message::user_parts(vec![
+            ContentPart::text("BASELINE"),
+            ContentPart::png(b"png"),
+        ]);
+        assert_eq!(
+            serde_json::to_value(&message).expect("encodes"),
+            json!({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "BASELINE"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,cG5n"}}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn the_last_user_text_of_a_turn_with_parts_is_its_first_text_part() {
+        let request = ChatRequest {
+            messages: vec![
+                Message::user("older"),
+                Message::user_parts(vec![
+                    ContentPart::png(b"png"),
+                    ContentPart::text("compare these"),
+                    ContentPart::text("CANDIDATE"),
+                ]),
+            ],
+            ..ChatRequest::default()
+        };
+        assert_eq!(request.last_user_text(), Some("compare these"));
+    }
+
+    #[test]
+    fn a_last_user_turn_with_only_images_has_no_text() {
+        let request = ChatRequest {
+            messages: vec![
+                Message::user("older"),
+                Message::user_parts(vec![ContentPart::png(b"png")]),
+            ],
+            ..ChatRequest::default()
+        };
+        assert_eq!(request.last_user_text(), None);
+    }
 }
