@@ -270,9 +270,7 @@ impl Welded {
     /// The triangles that have three distinct corners and a usable normal.
     fn faces(&self, mesh: &Mesh) -> Vec<Face> {
         mesh.indices
-            .as_chunks::<3>()
-            .0
-            .iter()
+            .chunks_exact(3)
             .filter_map(|tri| {
                 let verts = [tri[0], tri[1], tri[2]].map(|i| self.index[i as usize]);
                 if verts[0] == verts[1] || verts[1] == verts[2] || verts[0] == verts[2] {

@@ -798,7 +798,7 @@ fn a_link_or_junction_into_a_protected_directory_is_refused() {
     let dir = repo();
     let root = dir.path();
     link(&root.join(".acan"), &root.join("model/settings"), true);
-    let declared = vec!["model/settings/app.json".to_owned()];
+    let mut declared = vec!["model/settings/app.json".to_owned()];
     #[cfg(windows)]
     {
         let made = Process::new("cmd")

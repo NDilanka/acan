@@ -544,12 +544,7 @@ mod tests {
             tint: 3,
         };
         let vertices = hue_vertices(&[line]);
-        let alphas: Vec<f32> = vertices
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|quad| quad[0].alpha)
-            .collect();
+        let alphas: Vec<f32> = vertices.chunks_exact(4).map(|quad| quad[0].alpha).collect();
         assert_eq!(alphas.len(), 10, "one piece per plan unit");
         assert!(
             alphas[0] < alphas[1] && alphas[1] < alphas[2],
