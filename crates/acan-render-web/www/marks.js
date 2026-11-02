@@ -3,6 +3,7 @@
 // only places the elements.
 import { openCard, paintCard } from "./cards.js";
 import { canvas, flagsEl, labelsEl, leadersEl, state } from "./state.js";
+import { boxAt, clearOf, inView, placeOverlays } from "./place.js";
 
 const ID_PREFIX = { order: "o", clash: "c", question: "q", task: "t" };
 
@@ -24,15 +25,17 @@ function isRiderFlag(flag) {
 }
 
 // Labels come in priority order, larger and nearer first. A label that would overlap one
-// already placed stays hidden, so the plant never shows a pile of names. The flags are placed
-// first, so a machine name never hides one.
+// already placed stays hidden, so the plant never shows a pile of names. The drones and the flags
+// that stay put are placed first, so no name lands on them. The names come next, and the plot
+// flags last: a plot flag moves clear of a name, so a name is never hidden by one.
 export function placeLabels() {
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
   state.labelGeneration += 1;
   const placedBoxes = [];
-  placeFlags(placedBoxes);
+  const plots = placeFlags(placedBoxes);
   const quads = state.app.label_layout(state.altDown);
+  const shown = [];
   for (let k = 0; k < quads.length; k += 4) {
     const index = quads[k];
     const x = quads[k + 1];
@@ -50,29 +53,30 @@ export function placeLabels() {
       el.sizedAlt = state.altDown;
     }
     const [w, h] = el.size;
-    const box = {
-      left: x - w / 2 - LABEL_PAD_PX,
-      right: x + w / 2 + LABEL_PAD_PX,
-      top: y + LABEL_OFFSET_PX - LABEL_PAD_PX,
-      bottom: y + LABEL_OFFSET_PX + h + LABEL_PAD_PX,
-    };
-    const inside = box.right >= 0 && box.left <= width && box.bottom >= 0 && box.top <= height;
-    const clear = inside && placedBoxes.every((other) => !overlaps(box, other));
-    if (clear) placedBoxes.push(box);
-    el.style.visibility = clear ? "visible" : "hidden";
+    shown.push({ el, x, y, opacity, w, h });
+  }
+  const { labelShown, plotTops } = placeOverlays({
+    placed: placedBoxes,
+    labels: shown.map(({ x, y, w, h }) => ({
+      box: boxAt(x - w / 2, y + LABEL_OFFSET_PX, w, h, LABEL_PAD_PX),
+    })),
+    plots,
+    width,
+    height,
+    pad: LABEL_PAD_PX,
+  });
+  shown.forEach(({ el, x, y, opacity }, i) => {
+    el.style.visibility = labelShown[i] ? "visible" : "hidden";
     el.style.opacity = String(opacity);
     el.style.transform = `translate(${x}px, ${y}px) translate(-50%, ${LABEL_OFFSET_PX}px)`;
-  }
+  });
+  plots.forEach((plot, i) => showFlag(plot.el, plot.left, plotTops[i]));
   for (const [index, el] of state.labels) {
     if (el.generation !== state.labelGeneration) {
       el.remove();
       state.labels.delete(index);
     }
   }
-}
-
-function overlaps(a, b) {
-  return a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
 }
 
 function makeLabel(index) {
@@ -182,8 +186,10 @@ function checkChip(check) {
 // a leader line to its drone's crown, and a flag never sits on a drone because the column starts
 // above the crowns. A clash label starts to the right of its diamond, and the order flag sits
 // above its machine. A flag that would cover a flag placed before it moves up clear of it. Each
-// flag keeps its place as the drones and diamonds move.
+// flag keeps its place as the drones and diamonds move. The plot flags are the exception: they are
+// returned, not placed here, and placed after the names, so they move clear of a name.
 function placeFlags(placedBoxes) {
+  const plots = [];
   // The drones come first, so no flag or name is placed over one.
   const discs = state.app.drone_layout();
   for (let k = 0; k < discs.length; k += 3) {
@@ -201,6 +207,11 @@ function placeFlags(placedBoxes) {
     const x = quads[k + 2];
     const y = quads[k + 3];
     if (el.size === undefined) el.size = [el.offsetWidth, el.offsetHeight];
+    if (machine < 0 && el.classList.contains("plot")) {
+      const [w, h] = el.size;
+      plots.push({ el, left: x - w / 2, top: y - LABEL_OFFSET_PX - h, w, h });
+      continue;
+    }
     if (machine >= 0) {
       if (!columns.has(machine)) columns.set(machine, []);
       columns.get(machine).push({ el, x, y });
@@ -209,7 +220,14 @@ function placeFlags(placedBoxes) {
     const [w, h] = el.size;
     const beside = el.classList.contains("clash") || el.classList.contains("landed");
     const left = beside ? x : x - w / 2;
-    const top = clearOf(left, beside ? y - h / 2 : y - LABEL_OFFSET_PX - h, w, h, placedBoxes);
+    const top = clearOf(
+      left,
+      beside ? y - h / 2 : y - LABEL_OFFSET_PX - h,
+      w,
+      h,
+      placedBoxes,
+      LABEL_PAD_PX,
+    );
     placeFlag(el, left, top, placedBoxes);
   }
   let leaders = 0;
@@ -218,7 +236,7 @@ function placeFlags(placedBoxes) {
     let bottom = Math.min(...column.map((item) => item.y)) - LABEL_OFFSET_PX;
     for (const item of column) {
       const [w, h] = item.el.size;
-      const top = clearOf(centre - w / 2, bottom - h, w, h, placedBoxes);
+      const top = clearOf(centre - w / 2, bottom - h, w, h, placedBoxes, LABEL_PAD_PX);
       placeFlag(item.el, centre - w / 2, top, placedBoxes);
       drawLeader(leaders, centre, top + h, item.x, item.y);
       leaders += 1;
@@ -228,39 +246,19 @@ function placeFlags(placedBoxes) {
   for (let i = leaders; i < state.leaderEls.length; i += 1) {
     state.leaderEls[i].style.display = "none";
   }
-}
-
-// The top a flag takes so it clears every box placed before it. A flag that overlaps one moves up
-// to sit on its top edge, and the check starts again, so the flag ends clear of all of them. A
-// flag only ever moves up, so the search ends.
-function clearOf(left, top, w, h, placedBoxes) {
-  let y = top;
-  let moved = true;
-  while (moved) {
-    moved = false;
-    for (const box of placedBoxes) {
-      const overlapsX = left - LABEL_PAD_PX < box.right && left + w + LABEL_PAD_PX > box.left;
-      const overlapsY = y - LABEL_PAD_PX < box.bottom && y + h + LABEL_PAD_PX > box.top;
-      if (overlapsX && overlapsY) {
-        y = box.top - LABEL_PAD_PX - h;
-        moved = true;
-      }
-    }
-  }
-  return y;
+  return plots;
 }
 
 function placeFlag(el, left, top, placedBoxes) {
   const [w, h] = el.size;
-  const box = {
-    left: left - LABEL_PAD_PX,
-    right: left + w + LABEL_PAD_PX,
-    top: top - LABEL_PAD_PX,
-    bottom: top + h + LABEL_PAD_PX,
-  };
-  placedBoxes.push(box);
-  const inside = box.right >= 0 && box.left <= canvas.clientWidth
-    && box.bottom >= 0 && box.top <= canvas.clientHeight;
+  placedBoxes.push(boxAt(left, top, w, h, LABEL_PAD_PX));
+  showFlag(el, left, top);
+}
+
+// Shows a flag at (left, top), unless it, with its padding, is off the canvas.
+function showFlag(el, left, top) {
+  const [w, h] = el.size;
+  const inside = inView(boxAt(left, top, w, h, LABEL_PAD_PX), canvas.clientWidth, canvas.clientHeight);
   el.style.visibility = inside ? "visible" : "hidden";
   el.style.transform = `translate(${left}px, ${top}px)`;
 }
