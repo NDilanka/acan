@@ -2,50 +2,58 @@
   "schema": "acan-demo-intent-edits/2",
   "order": "o-1",
   "decided_by": "coordinator, delegated by the owner",
-  "note": "Written for the o-1 draft in replay run x01-20261102-145159 (o-1/scope-draft.json, rev 1, base f919621), under the same decisions as o-1-edits-d02m7.json (coordinator, delegated by the owner). Only the draft ids and question wording differ; every answer is unchanged. Nothing here is a verdict: the edits state the order rules and the gate checks them.",
+  "note": "Written for the o-1 draft in replay run x01-r5-20261102-172232 (o-1/scope-draft.json, rev 1, base f919621), under the same decisions as o-1-edits-d02m7.json (coordinator, delegated by the owner). Only the draft ids and question wording differ; every earlier answer is unchanged. The window-reset question is new in this draft and is answered fixed, matching the window items already in this file. Nothing here is a verdict: the edits state the order rules and the gate checks them.",
   "choice_rules": [
     {
       "id": "cr-bucket-scope",
-      "question_match": "(?i)(shared across all link routes or separate per route|quota shared across GET,? POST,? (and )?DELETE link routes or separate per route|quota shared across link routes or per route)",
-      "option_label_match": "(?i)^(Shared across GET,? POST,? (and )?DELETE link routes|Single 10 per 60s budget shared across all link routes|Shared across all link API routes|Shared 10 across all link API routes)$",
+      "question_match": "(?i)(shared across .*link (API )?routes|separate per route|or per route)",
+      "option_label_match": "(?i)^(Shared across|Single 10 per 60s budget shared)",
       "when_no_option_matches": "fail",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "The order says each signed-in user gets ten requests per 60 seconds on the link API, one budget for the API, not one per route. Recorded bucket-scope = shared (D19). The d02m-fresh7 draft words the question as \"Is the 10-request quota shared across GET, POST, DELETE link routes or separate per route?\" and the option as \"Shared across all link API routes\"; the answer is unchanged (shared). This run asks it as q-scope with the option \"Shared 10 across all link API routes\"; the answer is unchanged."
+      "reason": "The order says each signed-in user gets ten requests per 60 seconds on the link API, one budget for the API, not one per route. Recorded bucket-scope = shared (D19). The d02m-fresh7 draft words the question as \"Is the 10-request quota shared across GET, POST, DELETE link routes or separate per route?\" and the option as \"Shared across all link API routes\"; the answer is unchanged (shared). This run asks it as q-scope with the option \"Shared 10 across all link API routes\"; the answer is unchanged. The rule now matches the question by its shared-or-per-route wording, because each draft words it differently. This run asks it as link-budget-shared with the option \"Shared across all link routes\"; the answer is unchanged."
     },
     {
       "id": "cr-anon-auth-only",
-      "question_match": "(?i)(anonymous requests to the link API|unauthenticated link API requests|requests without a session|anonymous link requests be handled)",
-      "option_label_match": "(?i)^(Only limit signed-in users, leave anonymous unchanged|No additional limit for unauthenticated requests|Leave requests without a session unlimited|Anonymous requests remain unlimited)$",
+      "question_match": "(?i)(anonymous|unauthenticated|without a session)",
+      "option_label_match": "(?i)(remain unlimited|leave anonymous unchanged|no additional limit|without a session unlimited)",
       "when_no_option_matches": "fail",
       "decided_by": "coordinator, delegated by the owner",
       "reason": "q-anon: no. The order says each signed-in user (orders.json, the rate-limit sentence), so anonymous requests are not limited. The link API already answers anonymous callers 401. The d02m-fresh7 draft asks it as anon-limit with the option \"No additional limit for unauthenticated requests\"; the answer is unchanged. This run asks it as anon-handling with the option \"Leave requests without a session unlimited\"; the answer is unchanged. This run asks it as q-anon with the option \"Anonymous requests remain unlimited\"; the answer is unchanged."
+    },
+    {
+      "id": "cr-window-fixed",
+      "question_match": "(?i)(window reset|reset .*window|fixed or sliding|sliding window)",
+      "option_label_match": "(?i)^Fixed window",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The order says ten requests per 60 seconds. The window items in this file already state a fixed window anchored on the first request (anchor first_match), with the first request at or after 60 s allowed again (recovers), and the probe sends a request at 59999 ms that must still get 429. So the answer is fixed. This run asks it as window-reset with the option \"Fixed window from first request\"."
     }
   ],
   "scope_edits": [
     {
       "op": "remove_may",
-      "id": "limit-get-links",
+      "id": "limit-get-api-links",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "The drafted item (limit-get-links) names no probe step. The over-limit GET /api/links is anchored on probe step s14 of login-over-quota by i-quota-get-links, which is kept."
+      "reason": "The drafted item covers every GET /api/links at any step and names no probe step. The over-limit GET /api/links is anchored on probe step s14 of login-over-quota by i-quota-get-links, which is kept. (drafted id in this run is limit-get-api-links)"
     },
     {
       "op": "remove_may",
-      "id": "limit-post-links",
+      "id": "limit-post-api-links",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "The drafted item covers every POST /api/links at any step. The same rule is anchored on the corpus steps that send the 11th request, a relogin, a request inside the window, and bob's own quota (i-quota-window, i-quota-relogin, i-quota-inside-window, mk-bob-quota). Boundary is exclusive: a request at 60 s starts a new window."
+      "reason": "The drafted item covers every POST /api/links at any step. The same rule is anchored on the corpus steps that send the 11th request, a relogin, a request inside the window, and bob's own quota (i-quota-window, i-quota-relogin, i-quota-inside-window, mk-bob-quota). Boundary is exclusive: a request at 60 s starts a new window. (drafted id in this run is limit-post-api-links)"
     },
     {
       "op": "remove_may",
-      "id": "limit-delete-links",
+      "id": "limit-delete-api-links-code",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "No probe sends more than ten DELETE requests, so this item cannot be judged; a DELETE status change stays out of scope and is reported. Coordinator decision 4: DELETE /api/links/:code is accepted as is and is named in the window items' text. The d02m-fresh4 draft names this item limit-delete-link; the decision is the same. (drafted id in this run is limit-delete-links)"
+      "reason": "No probe sends more than ten DELETE requests, so this item cannot be judged; a DELETE status change stays out of scope and is reported. Coordinator decision 4: DELETE /api/links/:code is accepted as is and is named in the window items' text. (drafted id in this run is limit-delete-api-links-code)"
     },
     {
       "op": "replace_must_keep",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "Standing rule 2: the drafted must-keep names step health-check, which is not a corpus step. Re-anchored on the first corpus step with GET /health and principal kind any (probe health, step s1), equals_base on status. This run drafts it as mk-health.",
+      "reason": "Standing rule 2: the drafted keep-health names a step that is not a corpus step. Re-anchored on probe step s1 (GET /health), equals_base on status.",
       "rule": {
-        "id": "mk-health",
+        "id": "keep-health",
         "selector": {
           "surface": "http",
           "method": "GET",
@@ -84,54 +92,11 @@
       }
     },
     {
-      "op": "add_must_keep",
-      "decided_by": "coordinator, delegated by the owner",
-      "reason": "Same rule as the earlier drafts' keep-signup (D10), re-anchored on probe signup-store, step s1 (POST /api/signup, principal any, equals_base status). This run's draft has no signup must-keep, so it is added.",
-      "rule": {
-        "id": "keep-signup",
-        "selector": {
-          "surface": "http",
-          "method": "POST",
-          "route_template": "/api/signup",
-          "step_context": {
-            "kind": "step",
-            "step_id": "s1"
-          },
-          "principal": {
-            "kind": "any"
-          },
-          "channel": "status"
-        },
-        "obligations": [
-          {
-            "obligation_id": "ob-signup-same",
-            "predicate": {
-              "predicate": "equals_base",
-              "step_id": "s1",
-              "path": "status",
-              "anchor": {
-                "kind": "fresh"
-              }
-            },
-            "text": "Signup status unchanged from base."
-          }
-        ],
-        "text": "POST /api/signup keeps prior behavior",
-        "machine_ids": [
-          "server",
-          "middleware",
-          "auth",
-          "store",
-          "errors"
-        ]
-      }
-    },
-    {
       "op": "replace_must_keep",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "Earlier decision D9 and standing rule 2: the drafted mk-login names step login-ok, which is not a corpus step. Re-anchored on login-over-quota s11 (POST /api/login after the link quota is used), equals_base on status.",
+      "reason": "Standing rule 2: the drafted keep-login names a step that is not a corpus step. Re-anchored on probe step s11 (POST /api/login), equals_base on status.",
       "rule": {
-        "id": "mk-login",
+        "id": "keep-login",
         "selector": {
           "surface": "http",
           "method": "POST",
@@ -173,7 +138,50 @@
     {
       "op": "add_must_keep",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "Same rule as the earlier drafts' keep-redirect, anchored on probe step s3 (GET /:code, anonymous, status equals base). This run's draft has no redirect must-keep, so it is added.",
+      "reason": "This run's draft has no POST /api/signup must-keep, so the earlier rule is added (anchored on probe step s1, equals_base on status).",
+      "rule": {
+        "id": "keep-signup",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/signup",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s1"
+          },
+          "principal": {
+            "kind": "any"
+          },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "ob-signup-same",
+            "predicate": {
+              "predicate": "equals_base",
+              "step_id": "s1",
+              "path": "status",
+              "anchor": {
+                "kind": "fresh"
+              }
+            },
+            "text": "Signup status unchanged from base."
+          }
+        ],
+        "text": "POST /api/signup keeps prior behavior",
+        "machine_ids": [
+          "server",
+          "middleware",
+          "auth",
+          "store",
+          "errors"
+        ]
+      }
+    },
+    {
+      "op": "add_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "This run's draft has no GET /:code must-keep, so the earlier rule is added (anchored on probe step s3, equals_base on status).",
       "rule": {
         "id": "keep-redirect",
         "selector": {
@@ -1829,64 +1837,64 @@
     }
   ],
   "draft_mapping": {
-    "run": "D:\\dev\\acan-demo-runs\\intent\\x01-20261102-145159",
-    "draft_file": "D:\\dev\\acan-demo-runs\\intent\\x01-20261102-145159\\o-1\\scope-draft.json",
+    "run": "D:\\dev\\acan-demo-runs\\intent\\x01-r5-20261102-172232",
+    "draft_file": "D:\\dev\\acan-demo-runs\\intent\\x01-r5-20261102-172232\\o-1\\scope-draft.json",
     "draft_rev": 1,
     "decided_by": "coordinator, delegated by the owner",
     "items": [
       {
-        "draft_id": "limit-get-links",
+        "draft_id": "limit-get-api-links",
         "kind": "may",
         "action": "remove_may",
-        "decision": "replaced by i-quota-get-links (s14)"
+        "decision": "GET /api/links"
       },
       {
-        "draft_id": "limit-post-links",
+        "draft_id": "limit-post-api-links",
         "kind": "may",
         "action": "remove_may",
-        "decision": "replaced by i-quota-window, i-quota-relogin, i-quota-inside-window, mk-bob-quota"
+        "decision": "POST /api/links"
       },
       {
-        "draft_id": "limit-delete-links",
+        "draft_id": "limit-delete-api-links-code",
         "kind": "may",
         "action": "remove_may",
-        "decision": "decision 4: no probe sends more than ten DELETEs"
+        "decision": "DELETE /api/links/:code"
       },
       {
-        "draft_id": "mk-health",
+        "draft_id": "keep-health",
         "kind": "must_keep",
         "action": "replace_must_keep",
         "decision": "re-anchored on s1"
       },
       {
-        "draft_id": "mk-login",
+        "draft_id": "keep-login",
         "kind": "must_keep",
         "action": "replace_must_keep",
-        "decision": "re-anchored on s11 (D9)"
+        "decision": "re-anchored on s11"
       },
       {
         "draft_id": "(none)",
         "kind": "must_keep",
         "action": "add_must_keep",
-        "decision": "keep-signup added on signup-store s1 (D10)"
+        "decision": "keep-signup on s1"
       },
       {
         "draft_id": "(none)",
         "kind": "must_keep",
         "action": "add_must_keep",
-        "decision": "keep-redirect added on s3"
+        "decision": "keep-redirect on s3"
       },
       {
-        "draft_id": "q-scope",
+        "draft_id": "link-budget-shared",
         "kind": "open",
-        "action": "cr-bucket-scope: Shared 10 across all link API routes",
-        "decision": "shared"
+        "action": "choice rule",
+        "decision": "see choice_rules"
       },
       {
-        "draft_id": "q-anon",
+        "draft_id": "window-reset",
         "kind": "open",
-        "action": "cr-anon-auth-only: Anonymous requests remain unlimited",
-        "decision": "q-anon: no"
+        "action": "choice rule",
+        "decision": "see choice_rules"
       }
     ]
   },
