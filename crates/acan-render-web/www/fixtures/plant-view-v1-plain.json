@@ -1,0 +1,1117 @@
+{
+  "version": "plant-view/1",
+  "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+  "base_sha": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+  "merged_sha": "a27a5f30da19543ee34362516e29bf7561214156",
+  "gate_state": "blocked",
+  "order": {
+    "id": "o-3",
+    "sentence": "Rate-limit failed logins: after five failures from one client within a minute, answer 429",
+    "machine_id": "ratelimit",
+    "scope_rev": 2,
+    "confirmed_at": 1793259060000
+  },
+  "machines": [
+    {
+      "machine_id": "auth",
+      "coverage": "partial",
+      "probes": 5,
+      "routes": [
+        "/api/signup",
+        "/api/login",
+        "/api/logout",
+        "/api/links",
+        "/api/links/:code",
+        "/dashboard"
+      ],
+      "rulings": []
+    },
+    {
+      "machine_id": "dashboard",
+      "coverage": "covered",
+      "probes": 1,
+      "routes": [
+        "/dashboard"
+      ],
+      "rulings": [
+        {
+          "ruling_id": "r-3",
+          "enforced": true,
+          "state": "active",
+          "label": "Dashboard keeps answering 200"
+        }
+      ]
+    },
+    {
+      "machine_id": "errors",
+      "coverage": "partial",
+      "probes": 1,
+      "routes": [
+        "/health",
+        "/api/signup",
+        "/api/login",
+        "/api/logout",
+        "/api/links",
+        "/api/links/:code",
+        "/dashboard",
+        "/:code"
+      ],
+      "rulings": [
+        {
+          "ruling_id": "r-2",
+          "enforced": false,
+          "state": "active",
+          "label": "Error pages read as plain sentences"
+        }
+      ]
+    },
+    {
+      "machine_id": "links",
+      "coverage": "partial",
+      "probes": 2,
+      "routes": [
+        "/api/links",
+        "/api/links/:code",
+        "/:code"
+      ],
+      "rulings": [
+        {
+          "ruling_id": "r-1",
+          "enforced": true,
+          "state": "active",
+          "label": "Links list stays newest first"
+        }
+      ]
+    },
+    {
+      "machine_id": "middleware",
+      "coverage": "partial",
+      "probes": 5,
+      "routes": [
+        "/api/signup",
+        "/api/login",
+        "/api/logout",
+        "/api/links",
+        "/api/links/:code",
+        "/dashboard",
+        "/:code"
+      ],
+      "rulings": []
+    },
+    {
+      "machine_id": "ratelimit",
+      "coverage": "partial",
+      "probes": 5,
+      "routes": [
+        "/api/signup",
+        "/api/login",
+        "/api/logout",
+        "/api/links",
+        "/api/links/:code",
+        "/dashboard",
+        "/:code"
+      ],
+      "rulings": []
+    },
+    {
+      "machine_id": "server",
+      "coverage": "partial",
+      "probes": 6,
+      "routes": [
+        "/health",
+        "/api/signup",
+        "/api/login",
+        "/api/logout",
+        "/api/links",
+        "/api/links/:code",
+        "/dashboard",
+        "/:code"
+      ],
+      "rulings": []
+    },
+    {
+      "machine_id": "store",
+      "coverage": "covered",
+      "probes": 3,
+      "routes": [
+        "/api/signup",
+        "/api/links",
+        "/api/links/:code"
+      ],
+      "rulings": []
+    },
+    {
+      "machine_id": "test",
+      "coverage": "uncovered",
+      "probes": 0,
+      "routes": [],
+      "rulings": []
+    }
+  ],
+  "scope": {
+    "rev": 2,
+    "items": [
+      {
+        "item_id": "i-login-limit",
+        "machine_ids": [
+          "ratelimit",
+          "auth"
+        ],
+        "selector_text": "POST /api/login · status · anonymous",
+        "obligations": [
+          "obl-login-window",
+          "obl-login-429"
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "before": {
+            "state": "present",
+            "value": 401
+          },
+          "after": {
+            "state": "present",
+            "value": 429
+          }
+        }
+      },
+      {
+        "item_id": "i-retry-after",
+        "machine_ids": [
+          "ratelimit"
+        ],
+        "selector_text": "POST /api/login · header retry-after · anonymous",
+        "obligations": [
+          "obl-retry-after"
+        ],
+        "provenance": "model",
+        "example": {
+          "kind": "target",
+          "after": {
+            "state": "present",
+            "value": "60"
+          }
+        }
+      },
+      {
+        "item_id": "i-login-body",
+        "machine_ids": [
+          "auth",
+          "errors"
+        ],
+        "selector_text": "POST /api/login · body error · anonymous",
+        "obligations": [
+          "obl-login-body-string"
+        ],
+        "provenance": "open",
+        "example": {
+          "kind": "target",
+          "before": {
+            "state": "present",
+            "value": "invalid credentials"
+          },
+          "after": {
+            "state": "present",
+            "value": "too many attempts"
+          }
+        }
+      }
+    ],
+    "must_keep": [
+      {
+        "id": "mk-login-ok",
+        "machine_ids": [
+          "auth"
+        ],
+        "text": "A correct password still logs in after the window"
+      },
+      {
+        "id": "mk-links-order",
+        "machine_ids": [
+          "links"
+        ],
+        "text": "The links list stays newest first",
+        "ruling_id": "r-1"
+      }
+    ],
+    "open": [
+      {
+        "id": "c-window",
+        "machine_id": "ratelimit",
+        "question": "Count failed logins per client address or per account?",
+        "options": [
+          {
+            "key": "client",
+            "label": "Per client address"
+          },
+          {
+            "key": "account",
+            "label": "Per account"
+          }
+        ]
+      }
+    ]
+  },
+  "items": [
+    {
+      "item_id": "i-login-limit",
+      "class": "obligation_fulfilled",
+      "machine_id": "ratelimit",
+      "probe_id": "sha256:762703905cfc5ffa376dfb1b89d53c9ce693dc5f3e1628b39b06935364f62b45",
+      "episode_id": "sha256:5cae95664e405e87f78315af33e159b4022d6e3f52b1e08abab26c9a130bb64a",
+      "attempts": 1,
+      "budget": 2,
+      "state": "fixed",
+      "route_path": {
+        "machines": [
+          "server",
+          "middleware",
+          "ratelimit",
+          "auth",
+          "errors"
+        ],
+        "source": "static"
+      },
+      "sequence": [
+        {
+          "step_id": "s1",
+          "request": 1,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 401,
+          "tint": "same"
+        },
+        {
+          "step_id": "s2",
+          "request": 2,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 401,
+          "tint": "same"
+        },
+        {
+          "step_id": "s3",
+          "request": 3,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 401,
+          "tint": "same"
+        },
+        {
+          "step_id": "s4",
+          "request": 4,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 401,
+          "tint": "same"
+        },
+        {
+          "step_id": "s5",
+          "request": 5,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 401,
+          "tint": "same"
+        },
+        {
+          "step_id": "s6",
+          "request": 6,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 429,
+          "tint": "differed"
+        },
+        {
+          "step_id": "s8",
+          "request": 7,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 200,
+          "tint": "same"
+        }
+      ],
+      "evidence": [
+        {
+          "slot": "base_a",
+          "run_id": "run-basea-login",
+          "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+          "step": "s6",
+          "field": "status",
+          "value": {
+            "state": "present",
+            "value": 401
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:593f5e1e25b38795d44208574161c9b22d191340a38d8ebbc9c2e6206a8b28cd"
+        },
+        {
+          "slot": "base_b",
+          "run_id": "run-baseb-login",
+          "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+          "step": "s6",
+          "field": "status",
+          "value": {
+            "state": "present",
+            "value": 401
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:a9a325389879c4f83e9632651bd6c9cbbadd10388d147a18e85261b5c7d402fb"
+        },
+        {
+          "slot": "candidate",
+          "run_id": "run-candidate-login",
+          "commit": "a27a5f30da19543ee34362516e29bf7561214156",
+          "step": "s6",
+          "field": "status",
+          "value": {
+            "state": "present",
+            "value": 429
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:442efc8c55e82a971ed67e3ae431c6a3c39211c6869bce9a69aa42b369692258"
+        },
+        {
+          "slot": "target",
+          "step": "s6",
+          "field": "status",
+          "value": {
+            "state": "present",
+            "value": 429
+          },
+          "provenance": "human_spec"
+        },
+        {
+          "slot": "prediction",
+          "step": "s6",
+          "field": "status",
+          "value": {
+            "state": "present",
+            "value": 429
+          },
+          "provenance": "model_proposal"
+        }
+      ]
+    },
+    {
+      "item_id": "i-retry-after",
+      "class": "obligation_failed",
+      "machine_id": "ratelimit",
+      "probe_id": "sha256:762703905cfc5ffa376dfb1b89d53c9ce693dc5f3e1628b39b06935364f62b45",
+      "episode_id": "sha256:1acc401ccb3ea61be044f545a3612c535b8aebe6d8333b3d55cc56773f59e736",
+      "attempts": 1,
+      "budget": 2,
+      "state": "bounced",
+      "route_path": {
+        "machines": [
+          "server",
+          "middleware",
+          "ratelimit",
+          "auth",
+          "errors"
+        ],
+        "source": "static"
+      },
+      "sequence": [
+        {
+          "step_id": "s1",
+          "request": 1,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 401,
+          "tint": "same"
+        },
+        {
+          "step_id": "s2",
+          "request": 2,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 401,
+          "tint": "same"
+        },
+        {
+          "step_id": "s3",
+          "request": 3,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 401,
+          "tint": "same"
+        },
+        {
+          "step_id": "s4",
+          "request": 4,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 401,
+          "tint": "same"
+        },
+        {
+          "step_id": "s5",
+          "request": 5,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 401,
+          "tint": "same"
+        },
+        {
+          "step_id": "s6",
+          "request": 6,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 429,
+          "tint": "differed"
+        },
+        {
+          "step_id": "s8",
+          "request": 7,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 200,
+          "tint": "same"
+        }
+      ],
+      "evidence": [
+        {
+          "slot": "candidate",
+          "run_id": "run-candidate-login",
+          "commit": "a27a5f30da19543ee34362516e29bf7561214156",
+          "step": "s6",
+          "field": "header.retry-after",
+          "value": {
+            "state": "missing"
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:442efc8c55e82a971ed67e3ae431c6a3c39211c6869bce9a69aa42b369692258"
+        },
+        {
+          "slot": "target",
+          "step": "s6",
+          "field": "header.retry-after",
+          "value": {
+            "state": "present",
+            "value": "60"
+          },
+          "provenance": "human_spec"
+        }
+      ]
+    },
+    {
+      "item_id": "chk-health",
+      "class": "preserved",
+      "machine_id": "server",
+      "probe_id": "sha256:ae99b31d87b1b3608a609a4ebc0bcd9a72a5078698e07b2c6733ad2e405ae8c5",
+      "attempts": 0,
+      "budget": 2,
+      "state": "open",
+      "route_path": {
+        "machines": [
+          "server"
+        ],
+        "source": "static"
+      },
+      "sequence": [
+        {
+          "step_id": "s1",
+          "request": 1,
+          "run_id": "run-candidate-health",
+          "role": "candidate",
+          "status": 200,
+          "tint": "same"
+        }
+      ],
+      "evidence": [
+        {
+          "slot": "base_a",
+          "run_id": "run-basea-health",
+          "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+          "step": "s1",
+          "field": "status",
+          "value": {
+            "state": "present",
+            "value": 200
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:9fc3267c0fa56c5513c430af483a0460533cc40a338fcb272e5f6d3268b6c644"
+        },
+        {
+          "slot": "base_b",
+          "run_id": "run-baseb-health",
+          "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+          "step": "s1",
+          "field": "status",
+          "value": {
+            "state": "present",
+            "value": 200
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:a35e30788a0880751444cc10cd6b1020ce56e8ebcc126c5d4dc8b3388194b6a1"
+        },
+        {
+          "slot": "candidate",
+          "run_id": "run-candidate-health",
+          "commit": "a27a5f30da19543ee34362516e29bf7561214156",
+          "step": "s1",
+          "field": "status",
+          "value": {
+            "state": "present",
+            "value": 200
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:9eca723664f68d09d9296a0b6060e0f70823e7ab13a7c4abc3e34133500871ae"
+        }
+      ]
+    },
+    {
+      "item_id": "d-login-error-body",
+      "class": "authorized_but_unspecified",
+      "machine_id": "auth",
+      "probe_id": "sha256:762703905cfc5ffa376dfb1b89d53c9ce693dc5f3e1628b39b06935364f62b45",
+      "episode_id": "sha256:0246f2e45f5981c983725959c37ab3d5350b73f535ca37af14c2283069441a92",
+      "attempts": 0,
+      "budget": 2,
+      "state": "residue",
+      "route_path": {
+        "machines": [
+          "server",
+          "middleware",
+          "ratelimit",
+          "auth",
+          "errors"
+        ],
+        "source": "static"
+      },
+      "sequence": [
+        {
+          "step_id": "s1",
+          "request": 1,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 401,
+          "tint": "same"
+        },
+        {
+          "step_id": "s2",
+          "request": 2,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 401,
+          "tint": "same"
+        },
+        {
+          "step_id": "s3",
+          "request": 3,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 401,
+          "tint": "same"
+        },
+        {
+          "step_id": "s4",
+          "request": 4,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 401,
+          "tint": "same"
+        },
+        {
+          "step_id": "s5",
+          "request": 5,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 401,
+          "tint": "same"
+        },
+        {
+          "step_id": "s6",
+          "request": 6,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 429,
+          "tint": "differed"
+        },
+        {
+          "step_id": "s8",
+          "request": 7,
+          "run_id": "run-candidate-login",
+          "role": "candidate",
+          "status": 200,
+          "tint": "same"
+        }
+      ],
+      "evidence": [
+        {
+          "slot": "base_a",
+          "run_id": "run-basea-login",
+          "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+          "step": "s6",
+          "field": "body.error",
+          "value": {
+            "state": "present",
+            "value": "invalid credentials"
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:593f5e1e25b38795d44208574161c9b22d191340a38d8ebbc9c2e6206a8b28cd"
+        },
+        {
+          "slot": "base_b",
+          "run_id": "run-baseb-login",
+          "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+          "step": "s6",
+          "field": "body.error",
+          "value": {
+            "state": "present",
+            "value": "invalid credentials"
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:a9a325389879c4f83e9632651bd6c9cbbadd10388d147a18e85261b5c7d402fb"
+        },
+        {
+          "slot": "candidate",
+          "run_id": "run-candidate-login",
+          "commit": "a27a5f30da19543ee34362516e29bf7561214156",
+          "step": "s6",
+          "field": "body.error",
+          "value": {
+            "state": "present",
+            "value": "too many attempts"
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:442efc8c55e82a971ed67e3ae431c6a3c39211c6869bce9a69aa42b369692258"
+        },
+        {
+          "slot": "target",
+          "step": "s6",
+          "field": "body.error",
+          "value": {
+            "state": "present",
+            "value": "too many attempts"
+          },
+          "provenance": "human_spec"
+        }
+      ]
+    },
+    {
+      "item_id": "d-links-clicks",
+      "class": "out_of_scope",
+      "machine_id": "links",
+      "probe_id": "sha256:8199bdc4720dbc54756c8c7778a1dec62c5ed03a3d6489d6279de0d9eb572e5a",
+      "episode_id": "sha256:f11834e907288a4bda5dce1b104d65542010dfc746ec645386aa4d602fc37683",
+      "attempts": 2,
+      "budget": 2,
+      "state": "stopped",
+      "route_path": {
+        "machines": [
+          "server",
+          "middleware",
+          "ratelimit",
+          "auth",
+          "links",
+          "store"
+        ],
+        "source": "static"
+      },
+      "sequence": [
+        {
+          "step_id": "s1",
+          "request": 1,
+          "run_id": "run-candidate-links",
+          "role": "candidate",
+          "status": 200,
+          "tint": "same"
+        },
+        {
+          "step_id": "s2",
+          "request": 2,
+          "run_id": "run-candidate-links",
+          "role": "candidate",
+          "status": 200,
+          "tint": "same"
+        },
+        {
+          "step_id": "s3",
+          "request": 3,
+          "run_id": "run-candidate-links",
+          "role": "candidate",
+          "status": 201,
+          "tint": "same"
+        },
+        {
+          "step_id": "s4",
+          "request": 4,
+          "run_id": "run-candidate-links",
+          "role": "candidate",
+          "status": 200,
+          "tint": "differed"
+        }
+      ],
+      "evidence": [
+        {
+          "slot": "base_a",
+          "run_id": "run-basea-links",
+          "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+          "step": "s4",
+          "field": "body.links[0].clicks",
+          "value": {
+            "state": "present",
+            "value": 0
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:f9f82156bead5da4cab94a71f9d61bb8bdce1486bde10e487d66d82123224d52"
+        },
+        {
+          "slot": "base_b",
+          "run_id": "run-baseb-links",
+          "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+          "step": "s4",
+          "field": "body.links[0].clicks",
+          "value": {
+            "state": "present",
+            "value": 0
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:05743d0e18a73cf004f23bfdb11ff0de18798395a4e57075e9fbb5283cd21749"
+        },
+        {
+          "slot": "candidate",
+          "run_id": "run-candidate-links",
+          "commit": "a27a5f30da19543ee34362516e29bf7561214156",
+          "step": "s4",
+          "field": "body.links[0].clicks",
+          "value": {
+            "state": "missing"
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:c6fbaf3983bd31bf4cd5c03981c44688dfa2b36344d8b89b7ea9b1e79a0814ea"
+        }
+      ]
+    },
+    {
+      "item_id": "d-links-sort",
+      "class": "violates_ruling",
+      "machine_id": "links",
+      "probe_id": "sha256:8199bdc4720dbc54756c8c7778a1dec62c5ed03a3d6489d6279de0d9eb572e5a",
+      "episode_id": "sha256:03612417db992b26214f1f58962bbf4ad9937acb6f82746e00fb39c99f876f28",
+      "ruling_id": "r-1",
+      "attempts": 1,
+      "budget": 2,
+      "state": "bounced",
+      "route_path": {
+        "machines": [
+          "server",
+          "middleware",
+          "ratelimit",
+          "auth",
+          "links",
+          "store"
+        ],
+        "source": "static"
+      },
+      "sequence": [
+        {
+          "step_id": "s1",
+          "request": 1,
+          "run_id": "run-candidate-links",
+          "role": "candidate",
+          "status": 200,
+          "tint": "same"
+        },
+        {
+          "step_id": "s2",
+          "request": 2,
+          "run_id": "run-candidate-links",
+          "role": "candidate",
+          "status": 200,
+          "tint": "same"
+        },
+        {
+          "step_id": "s3",
+          "request": 3,
+          "run_id": "run-candidate-links",
+          "role": "candidate",
+          "status": 201,
+          "tint": "same"
+        },
+        {
+          "step_id": "s4",
+          "request": 4,
+          "run_id": "run-candidate-links",
+          "role": "candidate",
+          "status": 200,
+          "tint": "differed"
+        }
+      ],
+      "evidence": [
+        {
+          "slot": "base_a",
+          "run_id": "run-basea-links",
+          "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+          "step": "s4",
+          "field": "body.links[0].code",
+          "value": {
+            "state": "present",
+            "value": "b2"
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:f9f82156bead5da4cab94a71f9d61bb8bdce1486bde10e487d66d82123224d52"
+        },
+        {
+          "slot": "base_b",
+          "run_id": "run-baseb-links",
+          "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+          "step": "s4",
+          "field": "body.links[0].code",
+          "value": {
+            "state": "present",
+            "value": "b2"
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:05743d0e18a73cf004f23bfdb11ff0de18798395a4e57075e9fbb5283cd21749"
+        },
+        {
+          "slot": "candidate",
+          "run_id": "run-candidate-links",
+          "commit": "a27a5f30da19543ee34362516e29bf7561214156",
+          "step": "s4",
+          "field": "body.links[0].code",
+          "value": {
+            "state": "present",
+            "value": "a1"
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:c6fbaf3983bd31bf4cd5c03981c44688dfa2b36344d8b89b7ea9b1e79a0814ea"
+        }
+      ]
+    },
+    {
+      "item_id": "chk-dashboard",
+      "class": "unstable_base",
+      "machine_id": "dashboard",
+      "probe_id": "sha256:bb36b4c7d8622010106daa200016ee3467d01b5cf3ce89217fbdb2d4f50d92c7",
+      "attempts": 0,
+      "budget": 2,
+      "state": "open",
+      "route_path": {
+        "machines": [
+          "server",
+          "middleware",
+          "ratelimit",
+          "auth",
+          "dashboard"
+        ],
+        "source": "static"
+      },
+      "sequence": [
+        {
+          "step_id": "s1",
+          "request": 1,
+          "run_id": "run-candidate-dashboard",
+          "role": "candidate",
+          "status": 200,
+          "tint": "unknown"
+        }
+      ],
+      "evidence": [
+        {
+          "slot": "base_a",
+          "run_id": "run-basea-dashboard",
+          "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+          "step": "s1",
+          "field": "status",
+          "value": {
+            "state": "present",
+            "value": 200
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:a3eef6e0d9c409cb54205a6f936aebbd4555793576d4c8cd7828d612493a314e"
+        },
+        {
+          "slot": "base_b",
+          "run_id": "run-baseb-dashboard",
+          "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+          "step": "s1",
+          "field": "status",
+          "value": {
+            "state": "present",
+            "value": 500
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:e44940d1793a175eca991f33d3d29e2f709e5af2648d5aa26c7597c6842e5105"
+        },
+        {
+          "slot": "candidate",
+          "run_id": "run-candidate-dashboard",
+          "commit": "a27a5f30da19543ee34362516e29bf7561214156",
+          "step": "s1",
+          "field": "status",
+          "value": {
+            "state": "present",
+            "value": 200
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:4e8809e9664091d6de9698ef448eb346791935bfd4e31b2e2ef9dc59705ab6f3"
+        }
+      ]
+    },
+    {
+      "item_id": "chk-links-delete",
+      "class": "incomparable",
+      "machine_id": "links",
+      "probe_id": "sha256:163893f58c800b1631b33107a5eca30e002202c84f1f7c55b2240fff48a53452",
+      "attempts": 0,
+      "budget": 2,
+      "state": "open",
+      "route_path": {
+        "machines": [
+          "server",
+          "middleware",
+          "ratelimit",
+          "auth",
+          "links",
+          "store"
+        ],
+        "source": "static"
+      },
+      "sequence": [
+        {
+          "step_id": "s1",
+          "request": 1,
+          "run_id": "run-candidate-delete",
+          "role": "candidate",
+          "status": 201,
+          "tint": "same"
+        },
+        {
+          "step_id": "s2",
+          "request": 2,
+          "run_id": "run-candidate-delete",
+          "role": "candidate",
+          "status": 204,
+          "tint": "unknown"
+        },
+        {
+          "step_id": "s3",
+          "request": 3,
+          "run_id": "run-candidate-delete",
+          "role": "candidate",
+          "tint": "unknown"
+        }
+      ],
+      "evidence": [
+        {
+          "slot": "base_a",
+          "run_id": "run-basea-delete",
+          "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+          "step": "s3",
+          "field": "status",
+          "value": {
+            "state": "present",
+            "value": 404
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:edb15bdfddd59e35465e9c6c182442a7320def834ec3bd37520ba1072f9db114"
+        },
+        {
+          "slot": "base_b",
+          "run_id": "run-baseb-delete",
+          "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+          "step": "s3",
+          "field": "status",
+          "value": {
+            "state": "present",
+            "value": 404
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:05bbd74d79800137beda8adae4d738774d4b2e12a70c2c42eecade9507745df1"
+        }
+      ]
+    },
+    {
+      "item_id": "chk-signup-store",
+      "class": "error",
+      "machine_id": "store",
+      "probe_id": "sha256:4ec9ed851c57f319a4a0e263a5771cb59ad2676511eb233ac407667c31d6b118",
+      "attempts": 0,
+      "budget": 2,
+      "state": "open",
+      "route_path": {
+        "machines": [
+          "server",
+          "middleware",
+          "ratelimit",
+          "auth",
+          "store"
+        ],
+        "source": "static"
+      },
+      "sequence": [
+        {
+          "step_id": "s1",
+          "request": 1,
+          "run_id": "run-candidate-signup",
+          "role": "candidate",
+          "status": 201,
+          "tint": "same"
+        },
+        {
+          "step_id": "s2",
+          "request": 2,
+          "run_id": "run-candidate-signup",
+          "role": "candidate",
+          "tint": "unknown"
+        }
+      ],
+      "evidence": [
+        {
+          "slot": "base_a",
+          "run_id": "run-basea-signup",
+          "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+          "step": "s1",
+          "field": "status",
+          "value": {
+            "state": "present",
+            "value": 201
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:5f9844e3f7a60f48e5ad350b7e262c47f8f51d38db81809aec2ae24c31972e19"
+        },
+        {
+          "slot": "candidate",
+          "run_id": "run-candidate-signup",
+          "commit": "a27a5f30da19543ee34362516e29bf7561214156",
+          "step": "s1",
+          "field": "status",
+          "value": {
+            "state": "present",
+            "value": 201
+          },
+          "provenance": "observed",
+          "observation_hash": "sha256:acd06dcefa5e15b30bfe4d0629ac71aa6dc716ea09ce20e099f5763a2ccd8314"
+        }
+      ]
+    }
+  ],
+  "counts": {
+    "by_class": {
+      "preserved": 1,
+      "obligation_fulfilled": 1,
+      "obligation_failed": 1,
+      "authorized_but_unspecified": 1,
+      "out_of_scope": 1,
+      "violates_ruling": 1,
+      "unstable_base": 1,
+      "incomparable": 1,
+      "error": 1
+    },
+    "probes_run": 6,
+    "probes_total": 6,
+    "routes_covered": 7,
+    "routes_total": 9,
+    "masks_applied": 2,
+    "behavior": {
+      "obligations_total": 7,
+      "passed": 4,
+      "failed": 2,
+      "unknown": 1
+    }
+  },
+  "catalog_version": "captions-4"
+}

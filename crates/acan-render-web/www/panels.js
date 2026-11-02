@@ -17,6 +17,7 @@ import {
   povDot,
   povEls,
   povLine,
+  slipEl,
   stale,
   state,
   usagePanel,
@@ -58,6 +59,8 @@ function rideToggled(riding) {
   // The order island fades out with the point of view, and comes back when the ride ends.
   if (riding && !orderEl.hidden) hidePov(orderEl);
   if (!riding && state.hasOrder) showPov(orderEl);
+  // The slip has no fade of its own, so it is hidden and shown with the ride directly.
+  slipEl.hidden = riding || !state.hasSlip;
   hintEl.innerHTML = riding ? RIDE_HINT : hintRest;
 }
 
@@ -132,9 +135,15 @@ export function paintStale() {
     : `this page is older than the server: ${passed} ${passed === 1 ? "event" : "events"} not shown, rebuild the UI`;
 }
 
+// The order the order island shows, and the slip shows its scope: the first that is neither
+// cancelled nor landed, else the newest.
+export function shownOrder(view) {
+  return view.orders.find((item) => item.phase !== "cancelled" && item.phase !== "landed")
+    ?? view.orders.at(-1);
+}
+
 export function paintOrderLine() {
-  const order = state.view.orders.find((item) => item.phase !== "cancelled" && item.phase !== "landed")
-    ?? state.view.orders.at(-1);
+  const order = shownOrder(state.view);
   state.hasOrder = order !== undefined;
   orderLine.textContent = state.hasOrder
     ? `${label("order", order.id)} · ${order.machine} · ${order.phase.replace("_", " ")} · ${order.sentence}`

@@ -7,6 +7,8 @@ import init, { App } from "./pkg/acan_render_web.js";
 import { openCard, settleByKey, toggleCard } from "./cards.js";
 import { paintMarks, pinAt, placeLabels } from "./marks.js";
 import { paintOrderLine, paintRide, paintStale, paintUsage } from "./panels.js";
+import { syncSeals } from "./seal.js";
+import { paintSlip } from "./slip.js";
 import {
   $,
   TOKEN_KEY,
@@ -20,8 +22,10 @@ import {
   replay,
   state,
 } from "./state.js";
-import { syncPlantViews } from "./plant.js";
+import { playOf, syncPlantViews } from "./plant.js";
+import { bindPlate, paintPlate, stepBy, toggleMode, togglePlay } from "./plate.js";
 import { startReplay } from "./replay.js";
+import { bindShell, startShell } from "./shell.js";
 import { get, setLink, start } from "./stream.js";
 import { requestUsage } from "./usage.js";
 
@@ -93,7 +97,10 @@ function paint() {
   paintMarks();
   paintUsage();
   paintStale();
-  syncPlantViews(state, get);
+  syncPlantViews(state, get, paintPlate);
+  paintPlate();
+  syncSeals(state, get, paintSlip);
+  paintSlip();
   requestUsage(state, get, paintUsage);
 }
 
@@ -305,6 +312,20 @@ function bindKeys() {
       case "E":
         if (!event.repeat) turn(TURN_DEG);
         break;
+      case "p":
+      case "P":
+        if (!event.repeat) togglePlay();
+        break;
+      case "t":
+      case "T":
+        if (!event.repeat) toggleMode();
+        break;
+      case "[":
+        if (!event.repeat) stepBy(-1);
+        break;
+      case "]":
+        if (!event.repeat) stepBy(1);
+        break;
       default:
     }
   });
@@ -322,6 +343,7 @@ function bindKeys() {
     sessionStorage.setItem(TOKEN_KEY, value);
     state.token = value;
     gate.hidden = true;
+    startShell();
     start().catch((err) => {
       console.error(err);
       setLink("failed");
@@ -352,10 +374,12 @@ async function createApp() {
 }
 
 // The page loads its plant one of four ways. `?replay=1` plays a recorded run from `replay/`,
-// with no server. `?plant=stress&machines=N` builds a generated plant for the benchmark.
-// `?plant=fixture` loads the demo plant with no log. Otherwise the page reads the live origin,
-// which needs the owner token.
+// with no server, and holds no token. `?plant=stress&machines=N` builds a generated plant for the
+// benchmark. `?plant=fixture` loads the demo plant with no log. Otherwise the page reads the live
+// origin, which needs the owner token.
 async function loadPlant() {
+  // The token is adopted in every other mode, so the shell's calls can use it, even over a fixture.
+  state.token = replay ? null : adoptToken();
   const source = params.get("plant");
   if (replay) {
     await startReplay();
@@ -369,7 +393,6 @@ async function loadPlant() {
     if (!response.ok) throw new Error(`fixture HTTP ${response.status}`);
     state.app.set_plant(await response.text());
   } else {
-    state.token = adoptToken();
     if (!state.token) {
       gate.hidden = false;
       setLink("sign in");
@@ -390,6 +413,25 @@ function followReducedMotion() {
   requestRender();
 }
 
+const PLATE_FIXTURES = {
+  fixture: "fixtures/plant-view-v1.json",
+  plain: "fixtures/plant-view-v1-plain.json",
+};
+
+// Shows the receipt plate over a fixture plant view, marked FIXTURE, as if the origin had served it.
+async function loadPlateFixture(name) {
+  const file = PLATE_FIXTURES[name];
+  if (!file) throw new Error(`no plate fixture named ${name}`);
+  const response = await fetch(file);
+  if (!response.ok) throw new Error(`fixture HTTP ${response.status}`);
+  const text = await response.text();
+  const order = JSON.parse(text).order.id;
+  const { play, playError, items } = playOf(state.app, text);
+  const summary = JSON.parse(state.app.plant_view_summary(text));
+  state.plantViews.set(order, { recorded: -1, summary, error: null, play, playError, items, fixture: true });
+  paintPlate();
+}
+
 async function boot() {
   const started = performance.now();
   await init();
@@ -407,6 +449,15 @@ async function boot() {
   followReducedMotion();
   reducedMotion.addEventListener("change", followReducedMotion);
   await loadPlant();
+  bindPlate();
+  // The replay page makes no API call, so the shell (version, update, bug report, setup) stays off.
+  if (!replay) {
+    bindShell();
+    startShell();
+  }
+  // `?plate=fixture` or `?plate=plain` shows the receipt plate over a fixture plant view, without
+  // the origin. The plate is watermarked FIXTURE.
+  if (params.has("plate")) await loadPlateFixture(params.get("plate"));
   // `?view=azimuth,elevation` turns to a camera angle in degrees, such as a low tilt.
   if (params.has("view")) {
     const [azimuth, elevation] = params.get("view").split(",").map(Number);
