@@ -72,7 +72,7 @@ jobs:
         # The same kinds of text the bug report removes: keys, tokens, home and user-folder paths,
         # Windows user paths, and the private repository name. A match fails the deploy.
         run: |
-          pattern='acan_[0-9a-f]{32}|sk-[A-Za-z0-9_-]{16,}|Bearer [A-Za-z0-9._-]{16,}|/home/|/Users/|/root/|/tmp/|[A-Za-z]:\\Users\\'
+          pattern='acan_[a-z_]*[0-9a-f]{32}|sk-[A-Za-z0-9_-]{16,}|Bearer [A-Za-z0-9._-]{16,}|/home/|/Users/|/root/|/tmp/|[A-Za-z]:\\Users\\'
           if grep -rnE "$pattern" _site/replay; then
             echo "The recording holds private text. Re-export it after removing the cause." >&2
             exit 1

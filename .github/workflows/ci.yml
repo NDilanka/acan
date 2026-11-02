@@ -41,6 +41,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  package:
+    name: package self-test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: pwsh ./scripts/package.ps1 -SelfTest
+
   test:
     name: test (ubuntu, Docker and acan-demo)
     runs-on: ubuntu-latest

@@ -20,11 +20,13 @@ param(
     [string]$BinDir,
     [string]$WebDir,
     [string]$OutDir,
-    [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
+    [string]$RepoRoot,
     [switch]$SelfTest
 )
 
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 leaves $PSScriptRoot empty in a parameter default, so the default is set here.
+if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $PSScriptRoot }
 
 function Test-WindowsTarget([string]$Target) {
     $Target -like '*windows*'
