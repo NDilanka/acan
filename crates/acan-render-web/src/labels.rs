@@ -30,11 +30,11 @@ pub const CHAR_CSS_PX: f32 = 6.5;
 /// From the plate's front edge down to the middle of the label, in CSS pixels. Matches the
 /// label's offset and line height in `index.html`.
 pub const LABEL_DROP_CSS_PX: f32 = 13.0;
-/// The size of the screen rectangle the fixed usage panel covers at rest, in CSS pixels: width
-/// and height. Measured in headless Chrome at 1440 by 900 on the usage fixture: the panel spans
-/// 577 by 191 pixels, padded right and up. Holding Alt grows the panel to about 630 by 292, which
-/// this room does not cover.
-pub const USAGE_PANEL_CSS: [f32; 2] = [600.0, 220.0];
+/// The size of the screen rectangle the fixed usage panel covers, in CSS pixels: width and height.
+/// Measured in headless Chrome at 1440 by 900 with three history rows: at rest the panel spans 577
+/// by 191 pixels, and with Alt held it spans 630 by 311. Each history row adds about 19 pixels of
+/// height, so the room leaves about one more row of headroom. The labels stay clear in both states.
+pub const USAGE_PANEL_CSS: [f32; 2] = [660.0, 340.0];
 /// The label's bottom edge sits this many `LABEL_DROP_CSS_PX` below the plate's front edge.
 const LABEL_BOTTOM_DROPS: f32 = 1.6;
 /// Below the size to name, this many of the largest machines are still named, down to
@@ -517,6 +517,28 @@ mod tests {
                 "top is the panel's height up from the bottom"
             );
         }
+    }
+
+    /// The Alt size of the usage panel, measured in headless Chrome with three history rows, and
+    /// the viewport height it was measured at.
+    const ALT_PANEL_CSS: [f32; 2] = [630.1, 310.5];
+    const MEASURED_VIEWPORT_CSS: f32 = 900.0;
+    /// The panel's distance from the viewport's left and bottom edges, in CSS pixels.
+    const PANEL_INSET_CSS: f32 = 12.0;
+
+    #[test]
+    fn the_usage_panel_room_covers_the_panel_in_alt() {
+        let [_, room_top, room_right, _] = panel_avoid(MEASURED_VIEWPORT_CSS, 1.0);
+        let panel_right = PANEL_INSET_CSS + ALT_PANEL_CSS[0];
+        let panel_top = MEASURED_VIEWPORT_CSS - PANEL_INSET_CSS - ALT_PANEL_CSS[1];
+        assert!(
+            room_right >= panel_right,
+            "the room ends at {room_right}, short of the Alt panel's right edge at {panel_right}"
+        );
+        assert!(
+            room_top <= panel_top,
+            "the room starts at {room_top}, below the Alt panel's top edge at {panel_top}"
+        );
     }
 
     const W: f32 = 96.0;
