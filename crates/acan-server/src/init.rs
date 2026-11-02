@@ -900,8 +900,10 @@ fn app_value(
     ready: &str,
     env: &BTreeMap<String, String>,
 ) -> Value {
+    // `acan-app/1` never applies its environment, so a bun app that names one needs `acan-app/2`.
     let (version, id) = match runtime {
-        Runtime::Bun => ("acan-app/1", acan_intent::BUN_RUNTIME),
+        Runtime::Bun if env.is_empty() => ("acan-app/1", acan_intent::BUN_RUNTIME),
+        Runtime::Bun => ("acan-app/2", acan_intent::BUN_RUNTIME),
         Runtime::Node => ("acan-app/2", acan_intent::NODE_RUNTIME),
     };
     let mut value = json!({
@@ -1416,6 +1418,43 @@ mod tests {
         assert_eq!(app["runtime"], "bun-1.4.4");
         assert_eq!(app["boot"], json!(["bun", "run", "start"]));
         assert!(app.get("install").is_none());
+    }
+
+    #[test]
+    fn a_bun_app_with_environment_gets_acan_app_2_so_the_runner_gets_it() {
+        let tree = Memory::new(&[
+            (
+                "package.json",
+                r#"{"name":"demo","scripts":{"start":"bun run server.ts"}}"#,
+            ),
+            ("bun.lock", "{}"),
+            (
+                "server.ts",
+                "const key = process.env.PAYPAL_CLIENT_SECRET; app.get('/health', h); \
+                 const p = process.env.PORT;\n",
+            ),
+        ]);
+        let plan = detect(&tree, &Options::default()).expect("detected");
+        let app = file_json(&plan, APP_PATH);
+        assert_eq!(app["version"], "acan-app/2");
+        assert_eq!(app["runtime"], "bun-1.4.4");
+        assert_eq!(
+            app["env"]["PAYPAL_CLIENT_SECRET"],
+            "acan-placeholder-paypal-client-secret"
+        );
+        verify(&plan).expect("the plan verifies");
+
+        let decoded: AppContract =
+            serde_json::from_str(plan.file(APP_PATH).expect("written")).expect("decodes");
+        let policy = crate::observe::policy_for(&decoded).expect("the policy");
+        assert_eq!(
+            policy
+                .environment
+                .get("PAYPAL_CLIENT_SECRET")
+                .map(String::as_str),
+            Some("acan-placeholder-paypal-client-secret"),
+            "the runner passes the placeholder to the app"
+        );
     }
 
     #[test]
