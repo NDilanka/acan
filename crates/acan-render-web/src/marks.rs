@@ -14,13 +14,14 @@ use acan_iso::{
     BEACON_RADIUS, BODY_RADIUS, BOT_HEIGHT, EYE_DISTANCE, PIN_HEIGHT, PLINTH_TOP, STALK_HEIGHT,
 };
 use acan_render::theme::{
-    self, AGENT_SLOTS, TINT_BODY0, TINT_FOOTPRINT0, TINT_LEN, TINT_SHARED, TINT_SHELL0,
+    self, AGENT_SLOTS, TINT_BODY0, TINT_FOOTPRINT0, TINT_LEN, TINT_SCOPE0, TINT_SHARED, TINT_SHELL0,
 };
 use acan_render::{Beam, Instance};
 use serde::Serialize;
 
 use crate::mirror::{CheckView, ClashView, View};
 use crate::plan::Plan;
+use crate::slices::{ScopeTint, Slice, slice_layout};
 
 /// The height of a drone's centre above its machine's top when it hovers beside the machine,
 /// in world units. The drone floats level with the machine's top rather than high above it. The
@@ -227,6 +228,8 @@ pub enum FlagKind {
     Clash,
     Question,
     Landed,
+    /// One scope lane's plots and keeps on one machine.
+    Plot,
 }
 
 /// A label the page draws over the plant, with its anchor in world units.
@@ -245,6 +248,10 @@ pub struct Flag {
     /// Whether the flag is fading out. A flag that has left the view keeps its place for
     /// [`LEAVE_MS`] and then goes.
     pub leaving: bool,
+    /// The lines Alt adds under the flag. A plot flag lists its plots and keeps here.
+    pub detail: Vec<String>,
+    /// On a clash flag, the confirmed scope the clash sits inside, in words.
+    pub scope: Option<String>,
     /// The plan index of the machine an agent's flag stacks on, so the page groups them.
     #[serde(skip)]
     pub machine: Option<usize>,
@@ -266,6 +273,9 @@ pub enum CardRow {
     },
     /// The witness the clash would break, in red.
     Witness { text: String },
+    /// The confirmed scope the clash sits inside. The overlap is on ground a human allowed, so
+    /// it is a boundary dispute between two agents, not a scope violation.
+    Scope { text: String },
     /// The settlement the card suggests, always the last row. The key settles with it.
     Settle {
         key: usize,
@@ -307,6 +317,10 @@ pub struct Marks {
     /// The plan machines that live tasks' declared files sit on, each with the tint of the agent
     /// holding the task. Sorted and without repeats.
     pub belt_hues: Vec<(usize, u8)>,
+    /// For each plan machine, the scope tint its footprint takes when no agent tints it.
+    pub scope_tints: Vec<Option<ScopeTint>>,
+    /// Scope machine names the plan does not have, so the page can say they are not drawn.
+    pub unplaced: Vec<String>,
 }
 
 impl Marks {
@@ -324,21 +338,34 @@ impl Marks {
                 hues.sort_unstable();
             }
         }
-        let flags = flags(view, plan, stands, &bodies, &pins);
+        let scope = slice_layout(&view.lanes, plan);
+        let mut flags = flags(view, plan, stands, &bodies, &pins);
+        flags.extend(
+            scope
+                .slices
+                .iter()
+                .map(|slice| plot_flag(slice, plan, stands)),
+        );
         Self {
             bodies,
             pins,
             flags,
             footprints,
             belt_hues: live_hues(view, plan, slots),
+            scope_tints: scope.tints,
+            unplaced: scope.unplaced,
         }
     }
 
-    /// The tint slot of a plan machine's footprint: none, one agent's mix, or the shared mix.
+    /// The tint slot of a plan machine's footprint: one agent's mix, the shared mix, or with no
+    /// agent on it, its scope tint or none. Live work outranks the scope underneath it.
     #[must_use]
     pub fn footprint_tint(&self, machine: usize) -> u8 {
         let tint = match self.footprints.get(machine).map(Vec::as_slice) {
-            None | Some([]) => 0,
+            None | Some([]) => match self.scope_tints.get(machine).copied().flatten() {
+                Some(scope) => TINT_SCOPE0 + scope as u32,
+                None => 0,
+            },
             Some([slot]) => TINT_FOOTPRINT0 + *slot as u32,
             Some(_) => TINT_SHARED,
         };
@@ -382,6 +409,11 @@ pub fn card(view: &View, world: &World, index: usize, slots: &AgentSlots) -> Opt
     if let Some(witness) = &clash.breaks {
         rows.push(CardRow::Witness {
             text: format!("breaks {witness}"),
+        });
+    }
+    if let Some(scope) = &clash.scope {
+        rows.push(CardRow::Scope {
+            text: scope.clone(),
         });
     }
     let mut keys = Vec::new();
@@ -1076,7 +1108,7 @@ pub fn flag_anchor(flag: &Flag, at: [f32; 3], project: impl Fn([f32; 3]) -> [f32
             let [x, y] = project(at);
             [x + FLAG_GAP_PX, y]
         }
-        FlagKind::Order | FlagKind::Question => project(at),
+        FlagKind::Order | FlagKind::Question | FlagKind::Plot => project(at),
     }
 }
 
@@ -1262,6 +1294,8 @@ fn flags(view: &View, plan: &Plan, stands: &[Stand], bodies: &[Body], pins: &[Pi
             clash: None,
             check: body.check.clone(),
             leaving: false,
+            detail: Vec::new(),
+            scope: None,
             machine: Some(body.machine),
             at: body.at,
             follow: Follow::Body(body.agent.clone()),
@@ -1291,6 +1325,8 @@ fn flags(view: &View, plan: &Plan, stands: &[Stand], bodies: &[Body], pins: &[Pi
             clash: None,
             check: None,
             leaving: false,
+            detail: Vec::new(),
+            scope: None,
             machine: None,
             at: [centre[0], centre[1], top + ORDER_LIFT],
             follow: Follow::Still,
@@ -1305,6 +1341,8 @@ fn flags(view: &View, plan: &Plan, stands: &[Stand], bodies: &[Body], pins: &[Pi
             clash: Some(pin.clash),
             check: None,
             leaving: false,
+            detail: Vec::new(),
+            scope: view.clashes[pin.clash].scope.clone(),
             machine: None,
             at: [pin.at[0], pin.at[1], pin.at[2] + STALK_HEIGHT],
             follow: Follow::Pin(pin.id.clone()),
@@ -1322,12 +1360,36 @@ fn flags(view: &View, plan: &Plan, stands: &[Stand], bodies: &[Body], pins: &[Pi
             clash: None,
             check: None,
             leaving: false,
+            detail: Vec::new(),
+            scope: None,
             machine: None,
             at: [at[0], at[1], PLINTH_TOP + ORDER_LIFT],
             follow: Follow::Still,
         });
     }
     out
+}
+
+/// The flag of one lane's slice, above its machine. Alt lists its plots and keeps.
+fn plot_flag(slice: &Slice, plan: &Plan, stands: &[Stand]) -> Flag {
+    let centre = plan.machines[slice.machine].center();
+    let top = stands
+        .get(slice.machine)
+        .map_or(PLINTH_TOP, |stand| stand.top);
+    Flag {
+        kind: FlagKind::Plot,
+        text: slice.text(),
+        hue: None,
+        waiting: false,
+        clash: None,
+        check: None,
+        leaving: false,
+        detail: slice.detail(),
+        scope: None,
+        machine: None,
+        at: [centre[0], centre[1], top + ORDER_LIFT],
+        follow: Follow::Still,
+    }
 }
 
 /// The plan machines that live tasks' declared files sit on, each with the tint of the agent that
@@ -1376,6 +1438,8 @@ fn landed_flags(view: &View, plan: &Plan) -> Vec<Flag> {
                 clash: None,
                 check: None,
                 leaving: false,
+                detail: Vec::new(),
+                scope: None,
                 machine: None,
                 at: [x + LANDED_INSET, y + LANDED_INSET, PLINTH_TOP],
                 follow: Follow::Landed { machine, count },
@@ -1543,6 +1607,21 @@ mod tests {
         slots
     }
 
+    #[test]
+    fn an_agent_footprint_outranks_the_scope_tint_underneath() {
+        let marks = Marks {
+            footprints: vec![Vec::new(), vec![0], Vec::new()],
+            scope_tints: vec![Some(ScopeTint::Keep), Some(ScopeTint::Plot), None],
+            ..Marks::default()
+        };
+        assert_eq!(
+            u32::from(marks.footprint_tint(0)),
+            TINT_SCOPE0 + ScopeTint::Keep as u32
+        );
+        assert_eq!(u32::from(marks.footprint_tint(1)), TINT_FOOTPRINT0);
+        assert_eq!(marks.footprint_tint(2), 0);
+    }
+
     fn flag(kind: FlagKind) -> Flag {
         Flag {
             kind,
@@ -1552,6 +1631,8 @@ mod tests {
             clash: None,
             check: None,
             leaving: false,
+            detail: Vec::new(),
+            scope: None,
             machine: None,
             at: [0.0; 3],
             follow: Follow::Still,

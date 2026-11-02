@@ -7,6 +7,8 @@ import init, { App } from "./pkg/acan_render_web.js";
 import { openCard, settleByKey, toggleCard } from "./cards.js";
 import { paintMarks, pinAt, placeLabels } from "./marks.js";
 import { paintOrderLine, paintRide, paintStale, paintUsage } from "./panels.js";
+import { syncSeals } from "./seal.js";
+import { paintSlip } from "./slip.js";
 import {
   $,
   TOKEN_KEY,
@@ -92,6 +94,8 @@ function paint() {
   paintUsage();
   paintStale();
   syncPlantViews(state, get);
+  syncSeals(state, get, paintSlip);
+  paintSlip();
   requestUsage(state, get, paintUsage);
 }
 

@@ -169,7 +169,7 @@ async function settle(clash, option) {
     if (res.status === 401 || res.status === 403) {
       forgetToken();
     } else if (!res.ok) {
-      state.note = `the origin refused: ${(await res.text()).slice(0, 160)}`;
+      state.note = `the server refused: ${(await res.text()).slice(0, 160)}`;
     } else if (freeze) {
       // The frozen page does not hear the stream, so it folds the settle's own events here.
       for (const event of await res.json()) state.app.ingest(JSON.stringify(event));

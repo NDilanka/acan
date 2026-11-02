@@ -16,6 +16,7 @@ use serde::Serialize;
 use crate::feed::Entry;
 use crate::lanes::{LaneView, ReceiptCount, lane_views, receipt_counts};
 use crate::plan::Plan;
+use crate::slices::clash_scope;
 
 /// Where the first agent's body sits inside its machine, in world units from the corner.
 const BODY_OFFSET: [f32; 2] = [14.0, 44.0];
@@ -240,9 +241,20 @@ impl Mirror {
             .map(|question| question_view(plan, question))
             .collect();
 
+        let lanes = lane_views(world);
         let clashes = world
             .clashes()
-            .map(|clash| clash_view(plan, clash))
+            .map(|clash| {
+                let orders: Vec<OrderId> = [clash.key.a(), clash.key.b()]
+                    .into_iter()
+                    .filter_map(|task| world.task(task).map(|task| task.order))
+                    .collect();
+                let machines = plan.machines_at(clash.key.at());
+                ClashView {
+                    scope: clash_scope(&machines, &orders, &lanes, plan),
+                    ..clash_view(plan, clash)
+                }
+            })
             .collect();
 
         let (usage, usage_earlier) = self.usage_rows(world);
@@ -256,7 +268,7 @@ impl Mirror {
             clashes,
             usage,
             usage_earlier,
-            lanes: lane_views(world),
+            lanes,
             receipts: receipt_counts(world),
         }
     }
@@ -526,6 +538,10 @@ pub struct ClashView {
     pub options: Vec<OptionView>,
     /// How the clash was resolved, when it has been.
     pub resolved: Option<String>,
+    /// The confirmed scope the clash sits inside, in words, such as
+    /// `inside confirmed scope o-1 rev 2`: a confirmed lane of one of its tasks' orders has a
+    /// plot on the clash's machine. `None` otherwise, and always while the scope is a draft.
+    pub scope: Option<String>,
 }
 
 /// One numbered choice on a clash card.
@@ -572,6 +588,7 @@ fn clash_view(plan: &Plan, clash: &Clash) -> ClashView {
         breaks: breaks.map(|witness| witness.to_string()),
         options,
         resolved,
+        scope: None,
     }
 }
 
@@ -776,7 +793,8 @@ mod tests {
     use acan_core::{
         AgentCmd, Belt, Check, CodeIndex, CodeRev, Command, CommitId, Ctx, FilePath, HumanCmd,
         IndexedFile, IndexedSymbol, MachineKey, MemberId, Origin, Scope, ScopeBinding,
-        ScopeConfirmation, Seq, Step, SystemCmd, Timestamp, WitnessSpec, WorldId, WorldRef,
+        ScopeConfirmation, Seq, Step, SystemCmd, TaskSpec, Timestamp, WitnessSpec, WorldId,
+        WorldRef,
     };
     use serde_json::json;
 
@@ -784,6 +802,8 @@ mod tests {
     use crate::feed;
     use crate::plant::from_scan_json;
     use crate::scenario::{self, Target};
+    use crate::seal;
+    use crate::slices;
 
     const PLANT: &str = r#"{
         "root": "/repo",
@@ -1626,6 +1646,319 @@ mod tests {
         assert_eq!(view.lanes[0].may[0].machines, ["src/api", "billing"]);
     }
 
+    /// Confirms the fixture's scope as the founder.
+    fn confirm(fx: &mut LaneFixture) {
+        let confirmation = confirmation_for(&fx.origin, &fx.scope);
+        let events = accepted(
+            &mut fx.origin,
+            &fx.index,
+            Command::Human {
+                member: founder(),
+                cmd: HumanCmd::ConfirmScope {
+                    order: fx.order,
+                    confirmation: Box::new(confirmation),
+                },
+            },
+        );
+        fx.log.extend(events);
+    }
+
+    #[test]
+    fn a_draft_scope_lays_plots_and_keeps_on_its_machines_as_a_draft() {
+        let plan = plan();
+        let fx = lane_fixture(vec![
+            narrow_item(),
+            may_item("i-banner", login_selector(true), &["src/ui", "billing"]),
+        ]);
+        let view = Mirror::from_log(fx.log)
+            .expect("the log replays")
+            .view(&plan);
+        let layout = slices::slice_layout(&view.lanes, &plan);
+
+        let api = plan.index_of("src/api").expect("api");
+        let ui = plan.index_of("src/ui").expect("ui");
+        let [on_api, on_ui] = layout.slices.as_slice() else {
+            panic!("one slice per named machine on the plan");
+        };
+        assert_eq!((on_api.machine, on_ui.machine), (api, ui));
+        assert!(!on_api.confirmed, "a draft grants nothing yet");
+        assert_eq!(
+            on_api.text(),
+            format!("{} · api · plot + keep · draft rev 1", fx.order)
+        );
+        assert_eq!(
+            on_ui.text(),
+            format!("{} · ui · plot · draft rev 1", fx.order)
+        );
+        assert_eq!(
+            on_api.detail(),
+            [
+                "may POST /api/login · the sixth failed login gets a 429",
+                "keep login keeps working for a correct password"
+            ]
+        );
+        assert_eq!(
+            on_ui.detail(),
+            ["may POST /api/login · broad grant · the sixth failed login gets a 429"]
+        );
+        assert_eq!(layout.tints[api], Some(slices::ScopeTint::KeepDraft));
+        assert_eq!(layout.tints[ui], Some(slices::ScopeTint::PlotDraft));
+        assert_eq!(
+            layout.unplaced,
+            ["billing"],
+            "a name the plan lacks is not drawn"
+        );
+    }
+
+    #[test]
+    fn a_confirmed_scope_tints_its_machines_as_confirmed() {
+        let plan = plan();
+        let mut fx = lane_fixture(vec![may_item(
+            "i-banner",
+            login_selector(false),
+            &["src/ui"],
+        )]);
+        confirm(&mut fx);
+        let view = Mirror::from_log(fx.log)
+            .expect("the log replays")
+            .view(&plan);
+        let layout = slices::slice_layout(&view.lanes, &plan);
+
+        let api = plan.index_of("src/api").expect("api");
+        let ui = plan.index_of("src/ui").expect("ui");
+        assert_eq!(layout.tints[api], Some(slices::ScopeTint::Keep));
+        assert_eq!(layout.tints[ui], Some(slices::ScopeTint::Plot));
+        let on_ui = layout
+            .slices
+            .iter()
+            .find(|slice| slice.machine == ui)
+            .expect("the plot on ui");
+        assert!(on_ui.confirmed);
+        assert_eq!(
+            on_ui.text(),
+            format!("{} · ui · plot · confirmed rev 1", view.lanes[0].order)
+        );
+    }
+
+    #[test]
+    fn a_clash_is_inside_a_confirmed_scope_only_when_a_confirmed_plot_of_its_order_covers_it() {
+        let plan = plan();
+        let api = plan.index_of("src/api").expect("api");
+        let ui = plan.index_of("src/ui").expect("ui");
+        let mut fx = lane_fixture(vec![narrow_item()]);
+        let order = fx.order;
+        let draft = Mirror::from_log(fx.log.clone())
+            .expect("the log replays")
+            .view(&plan);
+        assert_eq!(
+            slices::clash_scope(&[api], &[order], &draft.lanes, &plan),
+            None,
+            "a draft never counts"
+        );
+
+        confirm(&mut fx);
+        let (other, posted) = post_order(&mut fx.origin, &fx.index, "Show the session");
+        fx.log.extend(posted);
+        let confirmed = Mirror::from_log(fx.log)
+            .expect("the log replays")
+            .view(&plan);
+        assert_eq!(
+            slices::clash_scope(&[api], &[order], &confirmed.lanes, &plan),
+            Some(format!("inside confirmed scope {order} rev 1"))
+        );
+        assert_eq!(
+            slices::clash_scope(&[ui], &[order], &confirmed.lanes, &plan),
+            None,
+            "the plot is on api, not ui"
+        );
+        assert_eq!(
+            slices::clash_scope(&[api], &[other], &confirmed.lanes, &plan),
+            None,
+            "another order's scope does not cover this clash"
+        );
+    }
+
+    /// Opens a lane on an order with two tasks, confirms it, and has agent A claim the first task
+    /// through a readback at the confirmed hash. Returns the fixture with the claim in its log,
+    /// the order's first task, and the scope.
+    fn claimed_lane() -> (LaneFixture, TaskId, Scope) {
+        let index = index();
+        let (mut origin, opened) = open_world();
+        let mut log = vec![opened];
+        let (order, posted) = post_order(&mut origin, &index, "Limit failed logins");
+        log.extend(posted);
+        let rev = origin.world().order(order).expect("the order").rev;
+        let machine = MachineKey::from_str("src/api").expect("a machine key");
+        let tasks = vec![
+            TaskSpec {
+                title: "Limit the login".to_owned(),
+                brief: "Add the 429.".to_owned(),
+                scope: vec![machine.clone()],
+            },
+            TaskSpec {
+                title: "Keep the session".to_owned(),
+                brief: "Keep the session.".to_owned(),
+                scope: vec![machine],
+            },
+        ];
+        log.extend(accepted(
+            &mut origin,
+            &index,
+            Command::System(SystemCmd::SplitReady { order, rev, tasks }),
+        ));
+        let task = origin.world().tasks_of(order).next().expect("a task").id;
+        let agent = AgentId::from_str(scenario::AGENTS[0]).expect("an agent id");
+        log.extend(accepted(
+            &mut origin,
+            &index,
+            Command::Human {
+                member: founder(),
+                cmd: HumanCmd::RegisterAgent {
+                    agent: agent.clone(),
+                },
+            },
+        ));
+        let scope = scope_for(order, vec![narrow_item()]);
+        log.extend(accepted(
+            &mut origin,
+            &index,
+            Command::Human {
+                member: founder(),
+                cmd: HumanCmd::ReviseScope {
+                    order,
+                    scope: Box::new(scope.clone()),
+                },
+            },
+        ));
+        let confirmation = confirmation_for(&origin, &scope);
+        log.extend(accepted(
+            &mut origin,
+            &index,
+            Command::Human {
+                member: founder(),
+                cmd: HumanCmd::ConfirmScope {
+                    order,
+                    confirmation: Box::new(confirmation),
+                },
+            },
+        ));
+        log.extend(accepted(
+            &mut origin,
+            &index,
+            Command::Agent {
+                agent: agent.clone(),
+                cmd: AgentCmd::PostScopedReadback {
+                    task,
+                    scope_rev: scope.rev,
+                    scope_hash: scope.scope_hash().expect("the scope hashes"),
+                    summary: "add the 429".to_owned(),
+                    predictions: Vec::new(),
+                },
+            },
+        ));
+        log.extend(accepted(
+            &mut origin,
+            &index,
+            Command::Agent {
+                agent,
+                cmd: AgentCmd::Claim { task },
+            },
+        ));
+        let fixture = LaneFixture {
+            origin,
+            log,
+            index,
+            order,
+            scope: scope.clone(),
+        };
+        (fixture, task, scope)
+    }
+
+    #[test]
+    fn a_lane_counts_its_live_leases_and_a_newer_revision_ends_them() {
+        let (mut fx, _task, scope) = claimed_lane();
+        let before = Mirror::from_log(fx.log.clone())
+            .expect("the log replays")
+            .view(&plan());
+        assert_eq!(
+            before.lanes[0].live_leases, 1,
+            "the claimed task holds a lease"
+        );
+
+        // A Strike sends the same scope one revision on, with its one plot removed.
+        let mut struck = serde_json::to_value(&scope).expect("a scope serializes");
+        struck["rev"] = json!(2);
+        struck["body"]["may"] = json!([]);
+        let revised = accepted(
+            &mut fx.origin,
+            &fx.index,
+            Command::Human {
+                member: founder(),
+                cmd: HumanCmd::ReviseScope {
+                    order: fx.order,
+                    scope: Box::new(serde_json::from_value(struck).expect("a scope decodes")),
+                },
+            },
+        );
+        let ended = revised
+            .iter()
+            .filter(|stamped| matches!(stamped.event, Event::LeaseEnded { .. }))
+            .count();
+        assert_eq!(ended, 1, "the revision ends the one live lease");
+        fx.log.extend(revised);
+
+        let after = Mirror::from_log(fx.log)
+            .expect("the log replays")
+            .view(&plan());
+        let [lane] = after.lanes.as_slice() else {
+            panic!("the order keeps its lane");
+        };
+        assert_eq!(serde_json::to_value(lane.rev).expect("a rev"), json!(2));
+        assert_eq!(lane.live_leases, 0);
+        assert!(lane.may.is_empty(), "the struck plot is gone");
+    }
+
+    #[test]
+    fn the_origin_route_names_the_page_scope_and_a_different_hash_or_revision_does_not() {
+        let fx = lane_fixture(vec![narrow_item()]);
+        let route = acan_core::confirmation_body(
+            fx.origin.world(),
+            fx.order,
+            &founder(),
+            Timestamp::from_millis(3_000),
+        )
+        .expect("the route body");
+        let view = Mirror::from_log(fx.log)
+            .expect("the log replays")
+            .view(&plan());
+        let [lane] = view.lanes.as_slice() else {
+            panic!("the one order with a scope has one lane");
+        };
+
+        let same = seal::check(lane, &route);
+        assert_eq!(same.verdict, "match");
+        assert_eq!(same.page_hash, Some(lane.scope_hash));
+        assert_eq!(same.origin_hash, lane.scope_hash);
+
+        let mut other_hash = serde_json::to_value(&route).expect("a body serializes");
+        other_hash["scope_hash"] = json!(format!("sha256:{}", "0".repeat(64)));
+        let other_hash: ScopeConfirmation =
+            serde_json::from_value(other_hash).expect("a body decodes");
+        assert_eq!(seal::check(lane, &other_hash).verdict, "mismatch");
+
+        let mut other_rev = serde_json::to_value(&route).expect("a body serializes");
+        other_rev["scope_rev"] = json!(2);
+        let other_rev: ScopeConfirmation =
+            serde_json::from_value(other_rev).expect("a body decodes");
+        let shown = seal::check(lane, &other_rev);
+        assert_eq!(shown.verdict, "mismatch");
+        assert_eq!(
+            serde_json::to_value(shown.origin_rev).expect("a rev"),
+            json!(2)
+        );
+        assert_eq!(shown.page_rev, lane.rev);
+    }
+
     fn keys(value: &serde_json::Value) -> BTreeSet<&str> {
         value
             .as_object()
@@ -1655,6 +1988,8 @@ mod tests {
                 "must_keep",
                 "open",
                 "confirmation",
+                "live_leases",
+                "stopped",
             ])
         );
         assert_eq!(
@@ -1662,6 +1997,7 @@ mod tests {
             BTreeSet::from([
                 "id",
                 "label",
+                "obligations",
                 "selector",
                 "change",
                 "provenance",
@@ -1689,6 +2025,7 @@ mod tests {
         assert_eq!(lane["rev"], 1);
         assert_eq!(lane["state"], "unconfirmed");
         assert!(lane["confirmation"].is_null());
+        assert_eq!(lane["live_leases"], 0);
         assert_eq!(
             lane["scope"],
             serde_json::to_value(&fx.scope).expect("a scope serializes")
@@ -1698,6 +2035,10 @@ mod tests {
             json!({
                 "id": "i-limit",
                 "label": "the sixth failed login gets a 429",
+                "obligations": [
+                    "the sixth failed login gets a 429",
+                    "the 429 says when to retry"
+                ],
                 "selector": "POST /api/login",
                 "change": "add",
                 "provenance": "user",
