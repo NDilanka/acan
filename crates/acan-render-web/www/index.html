@@ -154,7 +154,7 @@
   #hint { top: 12px; left: 50%; transform: translateX(-50%); color: #57575a; white-space: nowrap; }
   kbd { font: 11px ui-monospace, Consolas, monospace; color: var(--ink); background: var(--face);
     border: 1px solid #e5e5e2; border-radius: 4px; padding: 0 4px; }
-  #card { position: fixed; right: 16px; top: 16px; width: 300px; box-sizing: border-box; background: #ffffff; border: 1px solid var(--rule); border-radius: 6px; padding: 12px 14px; transition: opacity 0.4s ease; }
+  #card { box-sizing: border-box; font: 12px/1.4 var(--sans); transition: opacity 0.4s ease; }
   #card.fading { opacity: 0; }
   #card ol.options { list-style: none; margin: 8px 0 0; padding: 0; border-top: 1px solid var(--rule); }
   #card ol.options li { margin: 0; border-bottom: 1px solid var(--rule); }
@@ -206,7 +206,7 @@
   @keyframes order-still { 0%, 60% { opacity: 1; } to { opacity: 0; } }
   @media (prefers-reduced-motion: reduce) { .pulse.sent { animation: order-still 1900ms ease-out; } }
   /* The question card: the clash card's twin, beside the question's pin. */
-  #question { width: 300px; box-sizing: border-box; padding: 12px 14px; transition: opacity 0.4s ease; }
+  #question { width: 300px; box-sizing: border-box; padding: 10px 12px; font: 12px/1.4 var(--sans); transition: opacity 0.4s ease; }
   #question.fading { opacity: 0; }
   #question .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
   #question h2 { margin: 0 0 6px; font: 600 13px/1.3 var(--mono); }
@@ -260,8 +260,7 @@
   #notice { top: 50%; left: 50%; transform: translate(-50%, -50%); color: #57575a; }
   /* The slip: the scope of the order the order island shows. Its plots, keeps and open choices
      say what the order may change and must keep. The Seal and the Strike act on them. */
-  #slip { right: 16px; bottom: 16px; width: 340px; max-height: calc(100vh - 120px); overflow-y: auto;
-    box-sizing: border-box; padding: 10px 14px; color: var(--ink); font: 12px/1.4 var(--sans); }
+  #slip { box-sizing: border-box; color: var(--ink); font: 12px/1.4 var(--sans); }
   #slip h2 { margin: 0; font: 600 13px/1.3 var(--mono); }
   #slip h3 { margin: 10px 0 4px; font: 600 10px/1.2 var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
   #slip p { margin: 4px 0; }
@@ -358,15 +357,18 @@
   #receipt ol.items li.tone-residue .class { color: var(--amber); font-weight: 600; }
   #receipt ol.items li.tone-unknown .class { color: var(--muted); font-style: italic; }
   #receipt .foot { color: var(--muted); font-size: 11px; border-top: 1px solid var(--rule); margin-top: 8px; padding-top: 6px; }
-  /* The watch column, top right: who is doing what, what waits on you, and what happened. The
-     clash card opens over it. A row that changed glows once. */
+  /* The right rail, top right: the first-run checklist, the clash card and the slip, then who is
+     doing what, what waits on you, what happened, and the timeline. One column, so no two of them
+     overlap; the lists scroll when the window is short. A row that changed glows once. */
   #watch { position: fixed; top: 12px; right: 12px; width: 300px; max-height: calc(100vh - 24px);
     display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
-  #watch > .island { position: static; pointer-events: auto; padding: 8px 10px; min-height: 0;
+  #watch > .island { position: static; pointer-events: auto; padding: 10px 12px; min-height: 0;
     display: flex; flex-direction: column; overflow: hidden; }
   #watch > .island > * { flex: none; }
   #watch > .island > ol { flex: 0 1 auto; min-height: 0; }
   #watch > #scrub { flex: none; }
+  #watch > #firstrun, #watch > #card { flex: none; width: auto; }
+  #watch > #slip { display: block; width: auto; max-height: 50vh; overflow-y: auto; }
   #watch h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 0 4px;
     font: 600 11px/1.2 var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
   #watch h3 .keys { text-transform: none; letter-spacing: 0; font-weight: 400; }
@@ -509,12 +511,14 @@
 <div class="island" id="order" hidden><span id="order-line" class="muted"></span></div>
 <div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle&nbsp;&nbsp;<kbd>A</kbd> answer&nbsp;&nbsp;<kbd>O</kbd> order here&nbsp;&nbsp;<kbd>/</kbd> command</div>
 <div id="watch">
+  <aside id="firstrun" class="island" hidden aria-label="first run checklist"></aside>
+  <aside id="card" class="island" hidden></aside>
+  <aside id="slip" class="island" hidden></aside>
   <aside id="inbox" class="island" aria-label="needs you" hidden></aside>
   <aside id="lanes" class="island" aria-label="agents" hidden></aside>
   <aside id="history" class="island" aria-label="orders" hidden></aside>
   <aside id="scrub" class="island" aria-label="timeline" hidden></aside>
 </div>
-<aside id="card" class="island" hidden></aside>
 <div id="pulses" aria-hidden="true"><div class="pulse target" id="compose-target" hidden></div></div>
 <aside id="compose" class="island" role="dialog" aria-labelledby="compose-title" hidden>
   <form id="compose-form" autocomplete="off">
@@ -536,7 +540,6 @@
   <p class="foot"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Enter</kbd> run · <kbd>Tab</kbd> fill a verb · <kbd>Esc</kbd> close</p>
 </div>
 <p id="direct-live" class="sr" role="status" aria-live="polite"></p>
-<aside id="slip" class="island" hidden></aside>
 <aside id="receipt" class="island" hidden aria-label="receipt">
   <h2><span id="receipt-title"></span><span id="receipt-fixture" class="fixture" hidden>FIXTURE</span></h2>
   <p class="meta" id="receipt-meta"></p>
@@ -561,7 +564,6 @@
   <p class="foot">P play · [ ] step · T directed / plain · directed is off by default until it wins the comparison</p>
 </aside>
 <aside id="vision" class="island" hidden aria-label="vision check"></aside>
-<aside id="firstrun" class="island" hidden aria-label="first run checklist"></aside>
 <div id="gate" hidden>
   <form id="token-form">
     <div class="gate-row">

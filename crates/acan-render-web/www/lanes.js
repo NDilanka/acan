@@ -237,7 +237,8 @@ export function installLanes(kit) {
     empty.hidden = rows.length > 0;
     list.hidden = rows.length === 0;
     const workers = workerLines(answer, view.agents.length, location.origin);
-    status.textContent = workers.status;
+    // With no rows the empty state says it in full, so the head does not repeat it.
+    status.textContent = rows.length === 0 ? "" : workers.status;
     status.dataset.kind = workers.kind;
     waiting.hidden = !(workers.setKey && rows.length > 0);
     if (!waiting.hidden) waiting.replaceChildren(...workerWords(workers));

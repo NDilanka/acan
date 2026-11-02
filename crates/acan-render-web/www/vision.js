@@ -156,21 +156,23 @@ export function pinLabel(task, machine, summary) {
 // above the pin downward, flipped up to end at the pin's foot when there is no room below. It is
 // always kept inside the window, `edge` from each side. `pin` is `{ left, top, w, h }` in window
 // pixels, or null when the pin is off screen; then the viewer's last place is only kept inside.
-export function viewerPlacement({ pin, size, viewport, last = null, gap = 14, edge = 12, lift = 24 }) {
+// `from` is where the band the viewer may use starts across the window; it ends at the viewport's width.
+export function viewerPlacement({ pin, size, viewport, last = null, gap = 14, edge = 12, lift = 24, from = 0 }) {
   const [w, h] = size;
   const [width, height] = viewport;
-  const maxLeft = Math.max(edge, width - w - edge);
+  const minLeft = from + edge;
+  const maxLeft = Math.max(minLeft, width - w - edge);
   const maxTop = Math.max(edge, height - h - edge);
-  const clamp = (value, max) => Math.min(Math.max(value, edge), max);
+  const clamp = (value, max, min = edge) => Math.min(Math.max(value, min), max);
   if (pin === null) {
     if (last === null) return null;
-    return { left: clamp(last.left, maxLeft), top: clamp(last.top, maxTop) };
+    return { left: clamp(last.left, maxLeft, minLeft), top: clamp(last.top, maxTop) };
   }
   let left = pin.left + pin.w + gap;
   if (left + w > width - edge) left = pin.left - gap - w;
   let top = pin.top - lift;
   if (top + h > height - edge) top = pin.top + pin.h - h;
-  return { left: clamp(left, maxLeft), top: clamp(top, maxTop) };
+  return { left: clamp(left, maxLeft, minLeft), top: clamp(top, maxTop) };
 }
 
 // How one page's two screenshots are laid out. Swipe needs both; without both the layout is side by

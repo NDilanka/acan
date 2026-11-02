@@ -95,10 +95,16 @@ export function placeLabels() {
   placeQuestion();
 }
 
-// The page's fixed panels: the shell, the order card, the key bar, the clash card, the usage
-// panel, the notice, the scope note, the compose panel, the question card and the command bar. A
-// flag or a name never sits under one. A panel that is hidden has no box, so it blocks nothing.
-const HUD_SELECTORS = "#shell, #order, #hint, #card, #usage, #notice, #pov-chip, #slip, #compose, #question, #command, .flag.unplaced";
+// The page's fixed panels: the shell, the order line, the key bar, the usage panel, the notice,
+// the ride chip, each panel of the right rail (the first-run checklist, the clash card, the slip,
+// the inbox, the lanes, the history and the timeline), the receipt plate, the compose panel, the
+// question card, the command bar, the vision viewer and its pins, the alpha banner and the replay
+// bar. A flag or a name never sits under one. A panel that is hidden has no box, so it blocks
+// nothing.
+export const HUD_SELECTORS = [
+  "#shell", "#order", "#hint", "#usage", "#notice", "#pov-chip", "#watch > .island", "#receipt",
+  "#compose", "#question", "#command", "#vision", ".vpin", "#alpha", "#replay", ".flag.unplaced",
+].join(", ");
 
 // Each shown panel's box in canvas coordinates, as `{ left, right, top, bottom }`.
 function hudBoxes() {

@@ -149,15 +149,15 @@ export function centreMachine(machines, project, width, height) {
 }
 
 // Where a panel of size `w` by `h` sits beside the point `at`: to its right when it fits, else to
-// its left, centred on it, and always inside the canvas.
-export function composeSpot(at, w, h, width, height) {
+// its left, centred on it, and always inside the band from `from` to `width` across the canvas.
+export function composeSpot(at, w, h, width, height, from = 0) {
   let left = at.x + SPOT_GAP_PX;
   let side = "right";
   if (left + w > width - SPOT_MARGIN_PX) {
     left = at.x - SPOT_GAP_PX - w;
     side = "left";
   }
-  left = clamp(left, SPOT_MARGIN_PX, width - w - SPOT_MARGIN_PX);
+  left = clamp(left, from + SPOT_MARGIN_PX, width - w - SPOT_MARGIN_PX);
   const top = clamp(at.y - h / 2, SPOT_MARGIN_PX, height - h - SPOT_MARGIN_PX);
   return { left, top, side };
 }

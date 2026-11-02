@@ -19,10 +19,11 @@
 .vpin.tone-doubt { border-color: var(--amber); }
 .vpin.tone-none b { color: var(--muted); font-weight: 500; }
 
-/* The viewer opens beside its pin. With no pin on screen it docks at the top right. */
+/* The viewer opens beside its pin. With no pin on screen it docks at the top right, beside the
+   right rail (12px from the window, 300px wide, 12px gap). */
 #vision { position: fixed; width: min(440px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow-y: auto;
-  box-sizing: border-box; padding: 10px 14px; color: var(--ink); font: 12px/1.4 var(--sans); z-index: 2; }
-#vision.docked { left: auto !important; right: 16px; top: 16px !important; }
+  box-sizing: border-box; padding: 10px 12px; color: var(--ink); font: 12px/1.4 var(--sans); z-index: 2; }
+#vision.docked { left: auto !important; right: 324px; top: 56px !important; max-height: calc(100vh - 68px); }
 #vision .vhead { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 #vision h2 { margin: 0; font: 600 13px/1.3 var(--mono); display: flex; gap: 8px; align-items: center; outline: none; }
 #vision .fixture { font: 600 10px var(--mono); letter-spacing: 0.08em; color: var(--amber);
@@ -82,10 +83,9 @@
 #gate .gate-hint { margin: 0; font: 12px/1.45 var(--sans); color: var(--muted); }
 #gate code, #firstrun code { font: 11px var(--mono); color: var(--ink); }
 
-/* The first-run checklist: the top right, folded to its head line while the clash card or the slip
-   shows. Only the current step opens its words and its control. */
-#firstrun { right: 16px; top: 16px; width: 300px; box-sizing: border-box; padding: 8px 12px; color: var(--ink);
-  font: 12px/1.4 var(--sans); }
+/* The first-run checklist: the top of the right rail, folded to its head line while the clash card
+   or the slip shows. Only the current step opens its words and its control. */
+#firstrun { color: var(--ink); font: 12px/1.4 var(--sans); }
 #firstrun .fr-head { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
 #firstrun .fr-toggle { display: flex; gap: 8px; align-items: baseline; background: none; border: none; padding: 0;
   font: 12px var(--sans); color: var(--ink); cursor: pointer; text-align: left; }

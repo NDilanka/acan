@@ -29,6 +29,22 @@ export function setCanvas(next) {
   canvas = next;
 }
 
+// The band of the canvas, `{ left, right }` in CSS pixels, that a panel opened beside a machine may
+// use: right of the receipt plate and left of the right rail, when they show, so it never covers
+// either.
+export function freeBand() {
+  let left = 0;
+  let right = canvas.clientWidth;
+  const rail = document.getElementById("watch")?.getBoundingClientRect();
+  if (rail && rail.width > 0 && rail.height > 0) right = Math.min(right, rail.left);
+  const receipt = document.getElementById("receipt");
+  if (receipt && !receipt.hidden) {
+    const box = receipt.getBoundingClientRect();
+    if (box.width > 0) left = Math.max(left, box.right);
+  }
+  return right - left < 320 ? { left: 0, right } : { left, right };
+}
+
 export const labelsEl = $("labels");
 
 export const leadersEl = $("leaders");

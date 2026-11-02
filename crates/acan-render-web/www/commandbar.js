@@ -35,6 +35,8 @@ export function openCommand() {
   $("command-note").textContent = "";
   refresh();
   $("command-input").focus();
+  // The names under the bar move aside on the next frame.
+  requestRender();
 }
 
 export function closeCommand({ restore = true } = {}) {
@@ -43,6 +45,7 @@ export function closeCommand({ restore = true } = {}) {
   bar = null;
   $("command").hidden = true;
   $("command-input").setAttribute("aria-expanded", "false");
+  requestRender();
   if (!restore) return;
   const back = returnFocus instanceof HTMLElement && returnFocus.isConnected && returnFocus !== document.body
     ? returnFocus

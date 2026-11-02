@@ -13,7 +13,8 @@ import {
   orderRefusal,
   postedOrder,
 } from "./order.js";
-import { $, canvas, freeze, replay, state } from "./state.js";
+import { closeViewer } from "./vision-pins.js";
+import { $, canvas, freeBand, freeze, replay, state } from "./state.js";
 import { historyBlock } from "./guard.js";
 import { forgetToken, hold } from "./stream.js";
 
@@ -92,6 +93,8 @@ export function noteMachine(name) {
 export function openCompose(name) {
   if (state.view === null || !byName(name)) return;
   bind();
+  // One panel opens beside the map at a time, so the compose panel never lands on the viewer.
+  closeViewer();
   const returnFocus = compose?.returnFocus ?? document.activeElement;
   compose = { machine: name, sending: false, note: "", bad: false, returnFocus };
   lastMachine = name;
@@ -272,7 +275,8 @@ export function placeCompose() {
   target.hidden = false;
   placeRing(target, at);
   const panel = $("compose");
-  const spot = composeSpot(at, panel.offsetWidth, panel.offsetHeight, width, height);
+  const band = freeBand();
+  const spot = composeSpot(at, panel.offsetWidth, panel.offsetHeight, band.right, height, band.left);
   panel.style.left = `${spot.left}px`;
   panel.style.top = `${spot.top}px`;
   panel.dataset.side = spot.side;

@@ -3,8 +3,10 @@
 // vision.js. The records come from GET /api/tasks/{task}/vision and the screenshots from its PNG
 // routes, fetched with the token, since an <img> cannot send one. These calls do not use
 // stream.js's `get`, because a missing record (404) is the common answer, not a fault.
+import { closeQuestionCard } from "./cards.js";
+import { closeCompose } from "./compose.js";
 import { requestRender } from "./main.js";
-import { $, canvas, params, state } from "./state.js";
+import { $, canvas, freeBand, params, state } from "./state.js";
 import {
   ADVISORY,
   checkView,
@@ -231,10 +233,12 @@ export function placeVisionPins() {
 function placeViewer() {
   if (open === null) return;
   const at = pins.get(open.task)?.at ?? null;
+  const band = freeBand();
   const spot = viewerPlacement({
     pin: at,
     size: [viewer.offsetWidth, viewer.offsetHeight],
-    viewport: [canvas.clientWidth, canvas.clientHeight],
+    viewport: [band.right, canvas.clientHeight],
+    from: band.left,
     last: open.placed,
     gap: VIEWER_GAP_PX,
     edge: EDGE_PX,
@@ -251,6 +255,9 @@ function openViewer(task) {
     closeViewer();
     return;
   }
+  // One panel opens beside the map at a time.
+  closeCompose();
+  closeQuestionCard();
   releaseImages();
   open = { task, index: 0, mode: "side", swipe: 50, urls: new Map(), placed: null, opener: pins.get(task) ?? null };
   viewer.hidden = false;

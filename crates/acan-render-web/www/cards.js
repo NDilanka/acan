@@ -1,7 +1,8 @@
 // The clash card: its rows, the settlement options with their keys, and the fade after a
 // settlement. Settling sends the command, and a frozen page folds the settle's own events. The
 // question card below is its twin, for the questions an order asks.
-import { announce, composeOpen } from "./compose.js";
+import { announce, closeCompose, composeOpen } from "./compose.js";
+import { closeViewer } from "./vision-pins.js";
 import { requestRender } from "./main.js";
 import { composeSpot } from "./order.js";
 import {
@@ -13,7 +14,7 @@ import {
   openQuestion,
   questionTitle,
 } from "./question.js";
-import { $, canvas, card, freeze, replay, state } from "./state.js";
+import { $, canvas, card, freeBand, freeze, replay, state } from "./state.js";
 import { historyBlock } from "./guard.js";
 import { forgetToken, hold } from "./stream.js";
 
@@ -243,6 +244,10 @@ export function openQuestionCard(id, { focus = true } = {}) {
   const question = state.view === null ? undefined : openQuestion(state.view, id);
   if (question === undefined) return;
   if (state.markState.card) closeClashCard();
+  // One panel opens beside the map at a time. A question that opens by itself (no focus) waits for
+  // the compose panel instead, as syncQuestions already does.
+  closeViewer();
+  if (focus) closeCompose();
   cancelAskFade();
   const returnFocus = focus ? document.activeElement : null;
   asked = { question, sending: false, note: "", answered: null, returnFocus };
@@ -452,16 +457,17 @@ function cancelAskFade() {
 export function placeQuestion() {
   if (asked === null) return;
   const el = questionEl();
-  const width = canvas.clientWidth;
+  const band = freeBand();
   const height = canvas.clientHeight;
   const at = asked.question.at;
+  // A question with no pin sits at the top of the free band, beside the right rail.
   if (at === null) {
-    el.style.left = `${width - el.offsetWidth - 16}px`;
-    el.style.top = "16px";
+    el.style.left = `${Math.max(band.left + 12, band.right - el.offsetWidth - 12)}px`;
+    el.style.top = "56px";
     return;
   }
   const [x, y] = state.app.world_to_screen(at[0], at[1]);
-  const spot = composeSpot({ x, y }, el.offsetWidth, el.offsetHeight, width, height);
+  const spot = composeSpot({ x, y }, el.offsetWidth, el.offsetHeight, band.right, height, band.left);
   el.style.left = `${spot.left}px`;
   el.style.top = `${spot.top}px`;
 }
