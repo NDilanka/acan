@@ -1,26 +1,32 @@
-//! Runs Acan's three model jobs once each against the configured provider, in an in-memory
-//! world, and prints what each one returned.
+//! Runs Acan's split job once against the configured provider, in an in-memory world, and prints
+//! what it returned.
 //!
 //! Run with `cargo run -p acan-server --example live_jobs`. The routing file defaults to
 //! `crates/acan-llm/llm.toml`; `--config <path>` picks another. Keys come from the environment
 //! or `crates/acan-llm/.env`, and are never printed.
 //!
-//! Each job prints the provider and model that answered, the latency, the tokens, and the parsed
-//! reply. Every reply is then applied to the origin, so a reply the origin would refuse stops the
+//! The job prints the provider and model that answered, the latency, the tokens, and the parsed
+//! reply. The reply is then applied to the origin, so a reply the origin would refuse stops the
 //! run with the origin's reason. A job a failed live call answered offline shows `provider
 //! offline`, with a warning on stderr.
+//!
+//! The review and explain jobs are not run here. Review is retired. Explain needs a clash, and a
+//! legacy claim needs a readback verdict that only the retired review could give.
 
 #[path = "../tests/support/mod.rs"]
+#[expect(
+    dead_code,
+    reason = "the example opens a demo and posts one order; the rest of the support module is for the tests"
+)]
 mod support;
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use acan_core::{ClashId, Command, OrderId, ReadbackId, SystemCmd, TaskId};
+use acan_core::{Command, OrderId, SystemCmd};
 use acan_llm::{ApiKeys, CallRecord, LlmConfig, ModelClient, Role};
 use acan_server::Models;
-use acan_server::model::{self, ExplainReply, ReviewReply, SplitReply};
+use acan_server::model::{self, SplitReply};
 use support::Demo;
 
 const ORDER: &str = "make the greeting configurable from the settings file";
@@ -95,19 +101,7 @@ async fn run() -> Result<(), String> {
     let mut demo = Demo::open();
     let order = demo.post_order(ORDER);
     split(&models, &mut demo, order).await?;
-    let [first, second] = two_tasks(&demo, order)?;
-    let readbacks = support::read_back(&mut demo, [first, second]);
-    review(&models, &mut demo, order, &readbacks).await?;
-    if !cleared(&demo, order, &readbacks) {
-        return Err(
-            "the live review did not clear both readbacks, so the tasks cannot be claimed and \
-             no clash forms; the explain job did not run"
-                .to_owned(),
-        );
-    }
-    let clash = support::claim_and_declare(&mut demo, [first, second]);
-    explain(&models, &mut demo, clash).await?;
-    println!("all three jobs parsed, and the origin accepted each reply");
+    println!("the split job parsed, and the origin accepted its reply");
     Ok(())
 }
 
@@ -130,74 +124,5 @@ async fn split(models: &Models, demo: &mut Demo, order: OrderId) -> Result<(), S
         model::split_result(order, rev, &machines, reply.value).map_err(|err| err.to_string())?;
     apply(demo, cmd)?;
     println!("  the origin accepted the split");
-    Ok(())
-}
-
-/// The first two tasks of the split. The demo reads back and claims two tasks, since a clash
-/// needs two declarations.
-fn two_tasks(demo: &Demo, order: OrderId) -> Result<[TaskId; 2], String> {
-    match demo.tasks_of(order).as_slice() {
-        [first, second, ..] => Ok([*first, *second]),
-        other => Err(format!(
-            "the split made {} task(s), and the demo needs two, so the review and explain jobs \
-             did not run",
-            other.len()
-        )),
-    }
-}
-
-async fn review(
-    models: &Models,
-    demo: &mut Demo,
-    order: OrderId,
-    readbacks: &BTreeSet<ReadbackId>,
-) -> Result<(), String> {
-    let request = model::review_request(demo.world(), order, readbacks)
-        .ok_or("the order is missing from the world")?;
-    let reply = models
-        .chat_json::<ReviewReply>(Role::Foreman, request)
-        .await
-        .map_err(|err| describe(&err))?;
-    show("review", &reply.call);
-    println!("  parsed: {:#?}", reply.value);
-    let (machine, rev) = {
-        let found = demo
-            .world()
-            .order(order)
-            .ok_or("the order is missing from the world")?;
-        (found.machine.clone(), found.rev)
-    };
-    let cmd = model::review_result(order, &machine, rev, readbacks, reply.value)
-        .map_err(|err| err.to_string())?;
-    apply(demo, cmd)?;
-    println!("  the origin accepted the review");
-    Ok(())
-}
-
-/// Whether every readback of `readbacks` now carries a verdict that lets its task claim.
-fn cleared(demo: &Demo, order: OrderId, readbacks: &BTreeSet<ReadbackId>) -> bool {
-    let Some(found) = demo.world().order(order) else {
-        return false;
-    };
-    readbacks.iter().all(|id| {
-        demo.world()
-            .readback(*id)
-            .and_then(|readback| readback.verdict.as_ref())
-            .is_some_and(|verdict| verdict.matches(found))
-    })
-}
-
-async fn explain(models: &Models, demo: &mut Demo, clash: ClashId) -> Result<(), String> {
-    let request =
-        model::explain_request(demo.world(), clash).ok_or("the clash is missing from the world")?;
-    let reply = models
-        .chat_json::<ExplainReply>(Role::Fast, request)
-        .await
-        .map_err(|err| describe(&err))?;
-    show("explain", &reply.call);
-    println!("  parsed: {:#?}", reply.value);
-    let explanation = model::explanation(reply.value).map_err(|err| err.to_string())?;
-    apply(demo, SystemCmd::ClashExplained { clash, explanation })?;
-    println!("  the origin accepted the explanation");
     Ok(())
 }

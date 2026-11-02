@@ -20,9 +20,11 @@
 //!   not a difference.
 //! - Candidate against the bases, on canonical values. A value under a mask is not compared, but
 //!   its format must match the format of base A or base B, so a masked field keeps its format.
-//!   A captured identity keeps its type and alphabet too. Structure, presence and status are
-//!   never masked, and neither is an opaque body (a response that is not JSON), which compares
-//!   by its content hash.
+//!   A field the plan declares maskable masks the candidate even when the bases agree on it, as
+//!   long as the candidate's value keeps the base's format; absent in a base, or in another
+//!   format, it stays a difference. A captured identity keeps its type and alphabet too.
+//!   Structure, presence and status are never masked, and neither is an opaque body (a response
+//!   that is not JSON), which compares by its content hash.
 //!
 //! Canonical values replace a captured identity with `<capture:BINDING>` and a redacted secret
 //! with `<redacted:LENGTH:CLASS:DIGEST>`. Literal text escapes `\` and `<`, so application text
@@ -193,17 +195,20 @@ fn context<'a>(contrast: &Contrast<'a>, run: &'a ObservedRun) -> RunContext<'a> 
     }
 }
 
-/// Derives masks from base A and base B only. The candidate run is never read.
+/// Derives masks from the base runs, and from the candidate on the fields the plan declares
+/// maskable.
 ///
 /// A mask is a leaf value that differs between the two base runs and that the plan's maskable
-/// paths allow masking. Structure, presence and status never produce one. When the two base
-/// runs do not have the same sequence, or either did not complete, there are no masks: the
-/// comparison reports the contrast as unknown.
+/// paths allow masking. A declared maskable field on which the bases agree also masks the
+/// candidate when its value differs from the base in the base's own format: the value is the
+/// candidate's to choose, its shape is not. A field absent in a base run is never masked, and
+/// neither are structure, presence and status. When the two base runs do not have the same
+/// sequence, or either did not complete, there are no masks: the comparison reports the contrast
+/// as unknown.
 ///
 /// # Errors
 ///
-/// Returns [`CompareError`] when the contrast is not comparable, or a base run cannot be
-/// normalized.
+/// Returns [`CompareError`] when the contrast is not comparable, or a run cannot be normalized.
 pub fn derive_masks(contrast: &Contrast<'_>) -> Result<Vec<CoreDerived<Mask>>, CompareError> {
     check_contrast(contrast)?;
     let base_a = canonical_run(&context(contrast, contrast.base_a))?;
@@ -218,23 +223,61 @@ pub fn derive_masks(contrast: &Contrast<'_>) -> Result<Vec<CoreDerived<Mask>>, C
     let plan = &contrast.probe.normalization;
     let probe_hash = contrast.probe.spec.probe_hash()?;
     let plan_hash = plan.normalization_hash()?;
+    // The candidate sits on the bases' steps only: a run that did not complete, or a step the
+    // bases do not have, masks nothing.
+    let candidate = if matches!(contrast.candidate.run().outcome, RunOutcome::Completed {}) {
+        Some(canonical_run(&context(contrast, contrast.candidate))?)
+    } else {
+        None
+    };
     let mut masks = Vec::new();
     for (a, b) in base_a.observations.iter().zip(&base_b.observations) {
-        for found in step_differences(&a.channels, &b.channels) {
-            if found.kind != Kind::Leaf || !maskable(plan, &found.path) || !scalar_pair(&found) {
-                continue;
-            }
+        let mut mask = |path: &str| -> Result<(), CompareError> {
             masks.push(CoreDerived::derived(Mask {
                 probe_hash,
                 selector: MaskSelector {
                     step_id: a.step_id.clone(),
-                    path: parse_path(&found.path)?,
+                    path: parse_path(path)?,
                 },
                 base_a_observation_hash: a.observation_hash,
                 base_b_observation_hash: b.observation_hash,
                 normalization_version: plan.version.clone(),
                 normalization_hash: plan_hash,
             }));
+            Ok(())
+        };
+        // A field the bases disagree on masks from them alone; the candidate pass leaves it alone.
+        let mut base_masked = Vec::new();
+        for found in step_differences(&a.channels, &b.channels) {
+            if found.kind != Kind::Leaf || !maskable(plan, &found.path) || !scalar_pair(&found) {
+                continue;
+            }
+            base_masked.push(found.path.clone());
+            mask(&found.path)?;
+        }
+        let Some(candidate_step) = candidate.as_ref().and_then(|candidate| {
+            candidate
+                .observations
+                .iter()
+                .find(|observation| observation.step_id == a.step_id)
+        }) else {
+            continue;
+        };
+        for found in step_differences(&a.channels, &candidate_step.channels) {
+            if found.kind != Kind::Leaf
+                || base_masked.contains(&found.path)
+                || !maskable(plan, &found.path)
+                || !scalar_pair(&found)
+            {
+                continue;
+            }
+            let (Some(base), Some(changed)) = (&found.base, &found.candidate) else {
+                continue;
+            };
+            if format_of(base) != format_of(changed) {
+                continue;
+            }
+            mask(&found.path)?;
         }
     }
     Ok(masks)

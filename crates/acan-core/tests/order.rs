@@ -1,7 +1,5 @@
 mod common;
 
-use std::collections::BTreeSet;
-
 use acan_core::{
     AgentCmd, Check, Event, HumanCmd, Job, Judgement, LeaseEnd, OrderId, OrderPhase, OrderRev,
     OrderState, ReadbackVerdict, Rejection, ReplayError, Replica, SystemCmd, TaskSpec, TaskState,
@@ -45,23 +43,21 @@ fn a_posted_order_mints_locked_witnesses_and_derives_a_split_job() {
 }
 
 #[test]
-fn a_split_order_reads_back_and_derives_a_review_job_per_new_readback() {
+fn a_split_order_reads_back_and_derives_no_review_job() {
     let mut fx = Fx::new();
     assert_eq!(
         fx.origin.world().phase(fx.order),
         Some(OrderPhase::ReadingBack)
     );
     let a = fx.agent_a.clone();
-    let readback = fx.read_back(&a, fx.task1);
-    let want = Job::Review {
-        order: fx.order,
-        rev: OrderRev::new(0),
-        readbacks: BTreeSet::from([readback]),
-    };
-    assert!(
-        fx.origin.world().jobs().contains(&want),
-        "jobs: {:?}",
-        fx.origin.world().jobs()
+    fx.read_back(&a, fx.task1);
+    assert_eq!(
+        fx.origin.world().jobs(),
+        vec![Job::DraftScope {
+            order: fx.order,
+            rev: OrderRev::new(0)
+        }],
+        "the legacy review is retired: a readback derives no review job, only the scope draft"
     );
 }
 
@@ -384,23 +380,6 @@ fn a_review_naming_a_readback_twice_is_rejected() {
         question: None,
     });
     assert!(matches!(got, Err(Rejection::Invalid { .. })), "{got:?}");
-}
-
-#[test]
-fn a_standby_readback_on_a_claimed_task_derives_a_review_job() {
-    let mut fx = Fx::new();
-    let (a, b, t1) = (fx.agent_a.clone(), fx.agent_b.clone(), fx.task1);
-    fx.claim(&a, t1);
-    let standby = fx.read_back(&b, t1);
-    let jobs = fx.origin.world().jobs();
-    assert!(
-        jobs.iter().any(
-            |job| matches!(job, Job::Review { readbacks, .. } if readbacks.contains(&standby))
-        ),
-        "standby readback {standby} has no review job: {jobs:?}"
-    );
-    fx.review(standby, Judgement::Match)
-        .expect("standby review accepted");
 }
 
 #[test]

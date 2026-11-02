@@ -365,6 +365,102 @@ async fn schema_invalid_reply_is_a_validation_error_and_still_metered() {
 }
 
 #[tokio::test]
+async fn structured_reply_cut_at_the_output_cap_is_refused_and_names_the_cap() {
+    let meta = MockServer::start().await;
+    let baseten = MockServer::start().await;
+    // A cut reply can still parse as a prefix of valid JSON, so the finish reason must decide.
+    let cut = ResponseTemplate::new(200).set_body_json(json!({
+        "choices": [{
+            "index": 0,
+            "finish_reason": "length",
+            "message": {"role": "assistant", "content": r#"{"clash":true,"files":[]}"#}
+        }],
+        "usage": {"prompt_tokens": 120, "completion_tokens": 8000, "total_tokens": 8120}
+    }));
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_partial_json(json!({"max_tokens": 8000})))
+        .respond_with(cut)
+        .expect(1)
+        .mount(&meta)
+        .await;
+
+    let client = client(&meta, &baseten, "baseten");
+    let err = client
+        .chat_json::<Verdict>(
+            Role::Foreman,
+            ChatRequest {
+                messages: vec![Message::user("Do agents clash?")],
+                max_tokens: Some(8_000),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("a reply cut at the cap must not parse");
+
+    match &err {
+        LlmError::OutputCapped {
+            provider,
+            max_tokens,
+        } => {
+            assert_eq!(provider, "meta");
+            assert_eq!(*max_tokens, Some(8_000));
+        }
+        other => panic!("expected OutputCapped, got {other:?}"),
+    }
+    assert_eq!(
+        err.to_string(),
+        "meta stopped the reply at the 8000-token output cap before it finished"
+    );
+    assert_eq!(client.ledger().records().len(), 1, "tokens were billed");
+}
+
+#[tokio::test]
+async fn structured_reply_cut_without_a_request_cap_names_the_provider_default() {
+    let meta = MockServer::start().await;
+    let baseten = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "index": 0,
+                "finish_reason": "length",
+                "message": {"role": "assistant", "content": "{"}
+            }],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 4096, "total_tokens": 4216}
+        })))
+        .expect(1)
+        .mount(&meta)
+        .await;
+
+    let err = client(&meta, &baseten, "baseten")
+        .chat_json::<Verdict>(
+            Role::Foreman,
+            ChatRequest {
+                messages: vec![Message::user("Do agents clash?")],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("a reply cut at the cap must not parse");
+
+    assert!(
+        matches!(
+            err,
+            LlmError::OutputCapped {
+                max_tokens: None,
+                ..
+            }
+        ),
+        "expected OutputCapped without a cap, got {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "meta stopped the reply at the provider's default output cap before it finished"
+    );
+}
+
+#[tokio::test]
 async fn prompt_fallback_puts_schema_in_prompt_and_parses_fenced_json() {
     let meta = MockServer::start().await;
     let baseten = MockServer::start().await;

@@ -1,0 +1,16 @@
+{
+  "schema": "acan-demo-take-controls/1",
+  "label": "take-only control, not part of the X01 pre-registration",
+  "note": "Controls that exist only for the live take in demo/intent/take.ps1. demo/intent/mutants.json is the pre-registration and is not edited. Each control is a seeded bundle run by demo/intent/control.ps1 through the MCP tools with the control-seeded agent token; a control is never reported as a model.",
+  "controls": [
+    {
+      "id": "m-ruling-violation",
+      "kind": "implementation",
+      "applies_to": "o-8",
+      "bundle": "demo/intent/controls/m-ruling-violation.json",
+      "control_of": "the step 3 ruling on the harmless x-request-id difference (accepts only opaque UUID values)",
+      "expected_outcome": "Blocked as violates_ruling, naming the step 3 ruling id (take check 4).",
+      "take_only": true
+    }
+  ]
+}

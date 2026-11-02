@@ -7,12 +7,15 @@
 //!     selector and example hashes, one answer per open choice and one
 //!     acknowledgement per broad item--> confirmed                    [ScopeConfirmed]
 //! confirmed --ReviseScope: any newer revision--> unconfirmed         [ScopeRevised, LeaseEnded Superseded]
+//! confirmed --RecordConfirmedInputs: the confirmed revision at its base--> recorded
+//!                                                                    [ConfirmedInputsRecorded]
 //! PostScopedReadback at the confirmed revision and hash --> acknowledged [ScopedReadbackPosted]
 //! Claim --> needs the agent's acknowledged readback at the confirmed revision and hash
 //! ReportBuilt --> a run with no witnesses that waits for its receipt  [BuildReported]
 //! CandidatePrepared: same base, scope and ruling head --> prepared    [CandidatePrepared]
-//! RebindBase: protected head moved, every bound input the same --> re-bound, prepared runs
-//!     cleared, so each is prepared and receipted again                 [ScopeRebound]
+//! RebindBase: protected head moved, every protected input the same as a candidate prepared on
+//!     the confirmed base, or else as the confirmation's record --> re-bound, live prepared runs
+//!     cleared, so each is prepared and receipted again; any other move is refused  [ScopeRebound]
 //! ```
 //!
 //! The legacy model review never authorizes anything here. The lane reads only its own
@@ -23,17 +26,21 @@ use std::collections::BTreeMap;
 
 use acan_intent::{
     BroadGrantAck, CanonicalError, ChoiceAnswer, CommitSha, Contest, ContestId, ContestStatus,
-    EpisodeId, ExampleHash, GateContext, GateState, InvalidValue, ItemId, McpV1, OrderRef,
-    PostReadbackResponse, Prediction, PreparedCommit, RepairBudget, RepairRound, Scope,
-    ScopeConfirmation, ScopeHash, ScopeRev, ScopeRevision, SelectorHash,
+    EnvHash, EpisodeId, EvaluatorVersion, ExampleHash, FixtureSetHash, GateContext, GateState,
+    HumanRef, InvalidValue, ItemId, LedgerHead, McpV1, OrderRef, OverlayHash, PostReadbackResponse,
+    Prediction, PreparedCommit, ProbeSetHash, RepairBudget, RepairRound, RepairRounds, RunnerHash,
+    RuntimeId, SandboxPolicyHash, Scope, ScopeConfirmation, ScopeConfirmationV1, ScopeDraft,
+    ScopeHash, ScopeRev, ScopeRevision, SelectorHash, UnixMillis,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, Rejection};
-use crate::ids::{AgentId, CommitId, GateRunId, MemberId, OrderId, ReadbackId, TaskId};
+use crate::ids::{
+    AgentId, CommitId, GateRunId, MemberId, OrderId, OrderRev, ReadbackId, TaskId, Timestamp,
+};
 use crate::lease::LeaseEnd;
 use crate::member::Role;
-use crate::order::{self, Order, OrderPhase, TaskState};
+use crate::order::{self, Order, OrderPhase, OrderState, TaskState};
 use crate::repair::{Episode, LaneVerdict, ReceiptRecord};
 use crate::world::World;
 
@@ -125,6 +132,79 @@ impl ScopeBinding {
     }
 }
 
+/// The protected inputs a scope was confirmed under: the gate-context inputs that no candidate
+/// decides. The protected head, the merged commit, the scope hash and the candidate's artifacts
+/// are left out, because a re-bind changes them or derives them from the candidate. The overlay is
+/// kept: it hashes the protected files of the base, which no candidate decides.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtectedInputs {
+    /// The protected files of the base, as the overlay hash names them.
+    pub overlay_hash: OverlayHash,
+    /// The ruling log revision in force.
+    pub ledger_head: LedgerHead,
+    /// The effective probes with their normalization plans.
+    pub probe_set_hash: ProbeSetHash,
+    /// The fixtures.
+    pub fixture_set_hash: FixtureSetHash,
+    /// The runner build and the app contract.
+    pub runner_hash: RunnerHash,
+    /// The evaluator that classifies the runs.
+    pub evaluator_version: EvaluatorVersion,
+    /// The app runtime.
+    pub runtime: RuntimeId,
+    /// The controlled environment.
+    pub controlled_env_hash: EnvHash,
+    /// The container policy the runs use.
+    pub sandbox_policy_hash: SandboxPolicyHash,
+}
+
+impl ProtectedInputs {
+    /// The protected inputs of `context`. Every context field is either taken or named as left
+    /// out, so a new field must be classified here to compile.
+    #[must_use]
+    pub fn of(context: &GateContext) -> Self {
+        let GateContext {
+            protected_head: _,
+            merged_commit: _,
+            overlay_hash,
+            effective_artifact_hashes: _,
+            scope_hash: _,
+            ledger_head,
+            probe_set_hash,
+            fixture_set_hash,
+            runner_hash,
+            evaluator_version,
+            runtime,
+            controlled_env_hash,
+            sandbox_policy_hash,
+        } = context;
+        Self {
+            overlay_hash: *overlay_hash,
+            ledger_head: *ledger_head,
+            probe_set_hash: *probe_set_hash,
+            fixture_set_hash: *fixture_set_hash,
+            runner_hash: *runner_hash,
+            evaluator_version: evaluator_version.clone(),
+            runtime: runtime.clone(),
+            controlled_env_hash: *controlled_env_hash,
+            sandbox_policy_hash: *sandbox_policy_hash,
+        }
+    }
+}
+
+/// The protected inputs recorded when a human confirmed one scope revision. A re-bind with no
+/// candidate prepared on the confirmed base checks the moved head against this record. A re-bind
+/// keeps the record: it only moves the confirmation's base after the inputs match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedInputs {
+    /// The scope revision the confirmation covers.
+    pub revision: ScopeRev,
+    /// The base the confirmation named when the inputs were recorded.
+    pub base: CommitSha,
+    /// The protected inputs at that base.
+    pub inputs: ProtectedInputs,
+}
+
 /// One gate run of a scope-first task. Its verdict comes only from its receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneRun {
@@ -151,6 +231,12 @@ pub struct ScopeLane {
     pub lineage: Vec<ScopeRevision>,
     /// The human confirmation of the current revision. A newer revision clears it.
     pub confirmation: Option<ScopeConfirmation>,
+    /// The protected inputs the origin recorded when the current revision was confirmed, if any.
+    pub confirmed_inputs: Option<ConfirmedInputs>,
+    /// The ruling log head when the current revision was confirmed. The inputs recorded for the
+    /// revision must name this head, so a ruling recorded after the confirmation is never taken
+    /// as part of it.
+    pub confirmed_ledger_head: Option<LedgerHead>,
     /// The repair budget, fixed by the first confirmation and never replenished.
     pub budget: Option<RepairBudget>,
     /// Every gate run of the order's tasks.
@@ -176,6 +262,8 @@ impl ScopeLane {
             scope,
             scope_hash,
             confirmation: None,
+            confirmed_inputs: None,
+            confirmed_ledger_head: None,
             budget: None,
             runs: BTreeMap::new(),
             episodes: BTreeMap::new(),
@@ -226,6 +314,78 @@ impl ScopeLane {
             None => latest.prepared.as_ref().map(|_| GateState::Running),
         }
     }
+}
+
+/// What the scope-draft job reported for one order revision. A draft is a proposal: it does not
+/// open the lane, confirm anything, or authorize a claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ScopeDraftOutcome {
+    /// The foreman's draft. A human adopts it by sending `ReviseScope` and `ConfirmScope`.
+    Drafted {
+        /// The draft, with the model that proposed it.
+        draft: Box<ScopeDraft>,
+    },
+    /// The last attempt failed. Nothing was drafted and nothing falls back to another draft.
+    Failed {
+        /// Why the draft failed.
+        reason: String,
+    },
+}
+
+/// `ScopeDrafted`: stores a foreman's draft for an order revision that still has no scope.
+pub(crate) fn decide_drafted(
+    world: &World,
+    order: OrderId,
+    rev: OrderRev,
+    draft: ScopeDraft,
+) -> Result<Vec<Event>, Rejection> {
+    check_draft_target(world, order, rev)?;
+    if draft.order != order_ref(order)? {
+        return Err(Rejection::invalid("the draft names another order"));
+    }
+    Ok(vec![Event::ScopeDrafted {
+        order,
+        rev,
+        draft: Box::new(draft),
+    }])
+}
+
+/// `ScopeDraftFailed`: records that the draft for an order revision failed after its last
+/// attempt.
+pub(crate) fn decide_draft_failed(
+    world: &World,
+    order: OrderId,
+    rev: OrderRev,
+    reason: String,
+) -> Result<Vec<Event>, Rejection> {
+    check_draft_target(world, order, rev)?;
+    Ok(vec![Event::ScopeDraftFailed { order, rev, reason }])
+}
+
+/// A draft result is accepted only for an open order at its current revision, with no scope and
+/// no drafted scope yet at that revision.
+fn check_draft_target(world: &World, order: OrderId, rev: OrderRev) -> Result<(), Rejection> {
+    let o = world
+        .order(order)
+        .ok_or_else(|| Rejection::unknown("order", order))?;
+    if o.state == OrderState::Cancelled {
+        return Err(Rejection::wrong_state("order", "cancelled"));
+    }
+    check_open(world, order)?;
+    if world.lane(order).is_some() {
+        return Err(Rejection::wrong_state("order", "with a scope"));
+    }
+    if rev != o.rev {
+        return Err(Rejection::StaleRevision { current: o.rev });
+    }
+    if matches!(
+        world.scope_draft_at(order, rev),
+        Some(ScopeDraftOutcome::Drafted { .. })
+    ) {
+        return Err(Rejection::wrong_state("order", "drafted at this revision"));
+    }
+    Ok(())
 }
 
 pub(crate) fn order_ref(order: OrderId) -> Result<OrderRef, Rejection> {
@@ -352,6 +512,65 @@ pub(crate) fn decide_confirm(
         order,
         confirmation: Box::new(confirmation),
     }])
+}
+
+/// The body a human sends as `ConfirmScope` for the lane's current revision. Every field the
+/// origin checks is filled in from the lane, the ledger and the scope: the revision and hash, the
+/// base commit, the ruling versions in force, the selector and example hashes, and the repair
+/// budget the order already fixed or else the offered one. The body confirms nothing. The
+/// answers to open choices and the broad-item acknowledgements are the human's own decisions, so
+/// they come back empty, and the origin refuses the body until they are added.
+///
+/// # Errors
+///
+/// Returns a [`Rejection`] if the order has no scope, if `by` is not a human reference, or if a
+/// part of the scope cannot be hashed.
+pub fn confirmation_body(
+    world: &World,
+    order: OrderId,
+    by: &MemberId,
+    at: Timestamp,
+) -> Result<ScopeConfirmation, Rejection> {
+    let lane = world
+        .lane(order)
+        .ok_or_else(|| Rejection::wrong_state("order", "without a scope"))?;
+    let binding = ScopeBinding::of(&lane.scope).map_err(hash_failed)?;
+    let mut ruling_versions = world.ledger().ruling_versions();
+    ruling_versions.sort();
+    let by = HumanRef::try_from(by.as_str().to_owned())
+        .map_err(|_| Rejection::invalid("the member id is not a human reference"))?;
+    Ok(ScopeConfirmation {
+        version: ScopeConfirmationV1,
+        order: order_ref(order)?,
+        scope_rev: lane.scope.rev,
+        scope_hash: lane.scope_hash,
+        semantic_scope_hash: Some(lane.scope.semantic_scope_hash().map_err(hash_failed)?),
+        base_commit: lane.scope.base_commit.clone(),
+        ruling_versions,
+        selector_hashes: binding.selector_hashes,
+        example_hashes: binding.example_hashes,
+        answers: Vec::new(),
+        broad_grants: Vec::new(),
+        budget: lane.budget.unwrap_or_else(offered_budget),
+        by,
+        at: UnixMillis(at.as_millis()),
+    })
+}
+
+/// The repair rounds a body offers before the order's first confirmation fixes its own. This is
+/// the default, not the v1 cap, which is [`RepairRounds::MAX`].
+const OFFERED_REPAIR_ROUNDS: u32 = 2;
+
+/// The repair budget a body offers before the order's first confirmation fixes one: two repair
+/// rounds, ten minutes of wall time, a two-dollar model cost cap, and four new episodes.
+fn offered_budget() -> RepairBudget {
+    RepairBudget {
+        repair_rounds: RepairRounds::try_from(OFFERED_REPAIR_ROUNDS)
+            .expect("the offered repair round count is in range"),
+        wall_time_ms: 600_000,
+        model_cost_micros: 2_000_000,
+        max_episodes: 4,
+    }
 }
 
 fn mismatch(what: &str, lane: &ScopeLane) -> Rejection {
@@ -600,6 +819,8 @@ pub(crate) fn decide_prepared(
         return Err(Rejection::wrong_state("gate run", "closed"));
     }
     let confirmation = confirmed(lane)?;
+    // A moved protected head is re-bound first (`RebindBase`), and only then is the candidate
+    // prepared on it. A candidate is never prepared under a confirmation that names another base.
     if prepared.base_commit != confirmation.base_commit {
         return Err(Rejection::StaleEvidence {
             detail: format!(
@@ -631,11 +852,64 @@ pub(crate) fn decide_prepared(
     }])
 }
 
+/// `RecordConfirmedInputs`: the origin records the protected inputs a confirmed scope revision was
+/// confirmed under. Only the current revision's confirmation is recorded, and only at the base it
+/// names. A moved head or a newer revision is refused, so nothing is recorded for another base.
+/// The ruling log head must be the one in force at the confirmation. A repeat for the recorded
+/// revision is a no-op.
+pub(crate) fn decide_record_inputs(
+    world: &World,
+    order: OrderId,
+    revision: ScopeRev,
+    base: &CommitSha,
+    inputs: ProtectedInputs,
+) -> Result<Vec<Event>, Rejection> {
+    let lane = world
+        .lane(order)
+        .ok_or_else(|| Rejection::unknown("order", order))?;
+    if lane.scope.rev != revision {
+        return Err(stale(lane));
+    }
+    let confirmation = confirmed(lane)?;
+    if confirmation.base_commit != *base {
+        return Err(Rejection::StaleEvidence {
+            detail: format!(
+                "the scope was confirmed on {}, not {base}: nothing is recorded",
+                confirmation.base_commit
+            ),
+        });
+    }
+    // The inputs must be the ones in force at the confirmation. A ruling recorded after it is
+    // not part of the confirmation, so the record is refused rather than taking that ruling in.
+    if lane.confirmed_ledger_head != Some(inputs.ledger_head) {
+        return Err(Rejection::StaleEvidence {
+            detail: "a ruling was recorded after the scope was confirmed: nothing is recorded"
+                .to_owned(),
+        });
+    }
+    if lane
+        .confirmed_inputs
+        .as_ref()
+        .is_some_and(|record| record.revision == revision)
+    {
+        return Ok(Vec::new());
+    }
+    Ok(vec![Event::ConfirmedInputsRecorded {
+        order,
+        revision,
+        base: base.clone(),
+        inputs: Box::new(inputs),
+    }])
+}
+
 /// `RebindBase`: the protected head moved after the scope was confirmed. The confirmation moves
 /// to `base` only when the scope's executable content, the ruling log and every protected input
-/// that a prepared run was tested under are unchanged. Then each gating run that was prepared
-/// loses its prepared commit and receipt, so no old receipt is reused. Anything else needs the
-/// scope confirmed again by a human.
+/// are unchanged. The protected inputs are checked against each candidate prepared on the
+/// confirmed base: that candidate recorded what the scope was tested under, and a landed or
+/// dropped candidate is such a record too. Then each live gating run that was prepared loses its
+/// prepared commit and receipt, so no old receipt is reused. With no such candidate, the inputs
+/// are checked against the record the origin kept when this revision was confirmed. A move with
+/// neither cannot be checked, so the scope must be confirmed again by a human.
 pub(crate) fn decide_rebind(
     world: &World,
     order: OrderId,
@@ -660,12 +934,14 @@ pub(crate) fn decide_rebind(
         });
     }
     let mut runs = Vec::new();
+    let mut recorded = 0_usize;
     for (run, lane_run) in &lane.runs {
-        // A landed or dropped task keeps its record: only a live run is re-bound.
-        let live = world.task(lane_run.task).is_some_and(|task| {
-            !matches!(task.state, TaskState::Landed { .. } | TaskState::Dropped)
-        });
-        let Some(prepared) = lane_run.prepared.as_ref().filter(|_| live) else {
+        // Only a candidate prepared on the confirmed base records what the scope was tested under.
+        let Some(prepared) = lane_run
+            .prepared
+            .as_ref()
+            .filter(|prepared| prepared.base_commit == confirmation.base_commit)
+        else {
             continue;
         };
         if !same_inputs(&prepared.context, context) {
@@ -675,13 +951,35 @@ pub(crate) fn decide_rebind(
                 ),
             });
         }
-        runs.push(*run);
+        recorded += 1;
+        // A landed or dropped task keeps its record: only a live run is re-bound.
+        let live = world.task(lane_run.task).is_some_and(|task| {
+            !matches!(task.state, TaskState::Landed { .. } | TaskState::Dropped)
+        });
+        if live {
+            runs.push(*run);
+        }
     }
-    if runs.is_empty() {
-        return Err(Rejection::wrong_state(
-            "scope",
-            "has no prepared run to re-bind",
-        ));
+    // No candidate was prepared on the confirmed base, so the inputs the scope was confirmed under
+    // come from the record the origin kept at confirmation. The record must be for this revision,
+    // and every protected input must be the one it recorded.
+    if recorded == 0 {
+        let record = lane
+            .confirmed_inputs
+            .as_ref()
+            .filter(|record| record.revision == lane.scope.rev)
+            .ok_or_else(|| Rejection::StaleEvidence {
+                detail: "no candidate was prepared on the confirmed base and no protected inputs \
+                         were recorded for this revision: the scope must be confirmed again"
+                    .to_owned(),
+            })?;
+        if record.inputs != ProtectedInputs::of(context) {
+            return Err(Rejection::StaleEvidence {
+                detail: "a protected input moved since the scope was confirmed: the scope must be \
+                         confirmed again"
+                    .to_owned(),
+            });
+        }
     }
     let scope = Scope {
         base_commit: base.clone(),

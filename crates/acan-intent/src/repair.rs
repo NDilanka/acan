@@ -1,7 +1,7 @@
 //! Repair rounds: the order-wide repair budget and idempotent round results.
 //!
 //! Rules, binding on the conductor (C01) and the store (I01) that implement them:
-//! - An order has at most [`crate::RepairBudget::repair_rounds`] rounds, two in v1. The count is
+//! - An order has at most [`crate::RepairBudget::repair_rounds`] rounds, eight in v1. The count is
 //!   per order; a new episode, a new commit, a new worker or a retry never adds a round.
 //! - A round bounces every episode open at that moment in one batch, and is answered by one
 //!   candidate and one full-corpus run. Opening a round is the only increment.
@@ -20,8 +20,8 @@ use crate::types::{CommitSha, NonEmpty, OrderRef, UnixMillis, bounded};
 use crate::version::RepairRoundV1;
 
 bounded!(
-    /// A round of one order, from 1. Never more than the v1 cap of two.
-    RoundNumber(u32), 1 ..= 2, "repair round number"
+    /// A round of one order, from 1. Never more than the v1 cap of eight.
+    RoundNumber(u32), 1 ..= 8, "repair round number"
 );
 
 /// What identifies a round: the order and its number. Never a commit, worker, probe or run.
@@ -115,9 +115,16 @@ mod tests {
     }
 
     #[test]
-    fn a_third_round_does_not_decode() {
-        assert!(serde_json::from_value::<RoundKey>(json!({ "order": "o-3", "round": 3 })).is_err());
-        assert!(serde_json::from_value::<RoundKey>(json!({ "order": "o-3", "round": 0 })).is_err());
+    fn a_ninth_round_does_not_decode() {
+        let key = |round: u32| {
+            serde_json::from_value::<RoundKey>(json!({ "order": "o-3", "round": round }))
+        };
+        assert_eq!(RoundNumber::MAX, 8);
+        assert!(key(0).is_err());
+        assert!(key(1).is_ok());
+        assert!(key(4).is_ok());
+        assert!(key(8).is_ok());
+        assert!(key(9).is_err());
     }
 
     #[test]

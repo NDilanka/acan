@@ -8,6 +8,8 @@
 //! Gating --ClashFound on the task--> Declared             (run abandoned; late results rejected)
 //! Queued --LandResult Ok--> Landed                        [Landed]
 //! Queued --LandResult Err--> Open                         [LandFailed]
+//! Gating --CandidateConflicted--> Open                    [LeaseEnded Refused, LandFailed]
+//! Gating --RefuseRun--> Open                              [LeaseEnded Refused, LandFailed]
 //! ```
 //!
 //! A scope-first run freezes no witnesses and stays gating until its receipt closes it; see
@@ -18,6 +20,7 @@
 
 use std::collections::BTreeMap;
 
+use acan_intent::RepoPath;
 use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, Rejection};
@@ -210,6 +213,75 @@ pub(crate) fn close(
         }
     };
     [Event::GateClosed { run, verdict }, follow]
+}
+
+/// `CandidateConflicted`: the host could not merge the gating run's candidate onto the protected
+/// head. Only the task's current gating run can be refused, and the refusal must name the files
+/// that conflict. It ends the lease and reopens the task with those files in the reason, the way
+/// `LandFailed` does. It installs nothing, and the run stays in the log, inert.
+pub(crate) fn decide_conflicted(
+    world: &World,
+    run: GateRunId,
+    files: Vec<RepoPath>,
+) -> Result<Vec<Event>, Rejection> {
+    let gate = world
+        .gate(run)
+        .ok_or_else(|| Rejection::unknown("gate run", run))?;
+    // Only a scope-first run is refused here: a legacy run has no candidate to prepare.
+    lane::lane_run(world, run)?;
+    if files.is_empty() {
+        return Err(Rejection::invalid("a conflict names at least one file"));
+    }
+    let names: Vec<String> = files.iter().map(ToString::to_string).collect();
+    let reason = format!(
+        "candidate {} conflicts with the protected head: {}",
+        gate.head,
+        names.join(", ")
+    );
+    decide_refused(world, run, reason)
+}
+
+/// `RefuseRun`: the host could not carry a gating run forward, and the origin refuses it with
+/// `reason`. The rules are those of `CandidateConflicted`: only the task's current gating
+/// scope-first run can be refused. The lease ends and the task reopens with `reason`, and nothing
+/// is installed. The run stays in the log, inert.
+pub(crate) fn decide_refused(
+    world: &World,
+    run: GateRunId,
+    reason: String,
+) -> Result<Vec<Event>, Rejection> {
+    let gate = world
+        .gate(run)
+        .ok_or_else(|| Rejection::unknown("gate run", run))?;
+    // Only a scope-first run is refused here: a legacy run has no candidate to prepare.
+    lane::lane_run(world, run)?;
+    if reason.trim().is_empty() {
+        return Err(Rejection::invalid("a refusal names a reason"));
+    }
+    let task = world
+        .task(gate.task)
+        .ok_or_else(|| Rejection::unknown("task", gate.task))?;
+    let TaskState::Claimed {
+        claim,
+        stage: Stage::Gating { run: current, .. },
+    } = &task.state
+    else {
+        return Err(Rejection::wrong_state("gate run", "closed"));
+    };
+    if *current != run {
+        return Err(Rejection::wrong_state("gate run", "closed"));
+    }
+    Ok(vec![
+        Event::LeaseEnded {
+            task: task.id,
+            generation: claim.lease.generation,
+            why: LeaseEnd::Refused,
+        },
+        Event::LandFailed {
+            task: task.id,
+            reason,
+        },
+    ])
 }
 
 /// `LandResult`: rejected unless the task is `Queued` at `head` and at the front of the land queue.

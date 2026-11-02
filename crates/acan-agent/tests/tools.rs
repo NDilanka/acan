@@ -114,7 +114,7 @@ async fn paths_inside_the_worktree_are_read_listed_and_written() {
     );
     assert_eq!(
         tools
-            .read_file(DECLARED)
+            .read_file(DECLARED, 0)
             .await
             .expect("an inside file reads"),
         "original\n"
@@ -132,6 +132,85 @@ async fn paths_inside_the_worktree_are_read_listed_and_written() {
     );
 }
 
+/// The offset a cut page's marker names for the next page.
+fn next_offset(marker: &str) -> u64 {
+    let digits: String = marker
+        .split("with offset ")
+        .nth(1)
+        .expect("the marker names the next offset")
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().expect("the next offset is a whole number")
+}
+
+/// A file longer than one page comes back page by page: each cut page names the offset of the
+/// next, the pages join back into the whole file, and no character is split between two pages.
+#[tokio::test]
+async fn a_long_file_reads_on_page_by_page() {
+    let dir = repo();
+    // Multi-byte characters sit on and across the page boundary, so a cut must move to a
+    // character edge for the pages to join back into the file.
+    let text: String = "ab€cdé\u{1F600}".repeat(9_000);
+    fs::write(dir.path().join(DECLARED), &text).expect("the long file");
+    let tools = worktree(dir.path());
+
+    let mut joined = String::new();
+    let mut offset = 0;
+    let mut pages = 0;
+    loop {
+        let page = tools
+            .read_file(DECLARED, offset)
+            .await
+            .expect("a page reads");
+        pages += 1;
+        if let Some(at) = page.find("\n[truncated: ") {
+            assert!(
+                at <= 32 * 1024,
+                "a page is at most 32 KB of text, got {at} bytes"
+            );
+            joined.push_str(&page[..at]);
+            offset = next_offset(&page[at..]);
+        } else {
+            joined.push_str(&page);
+            break;
+        }
+    }
+    assert!(
+        pages >= 3,
+        "a {} byte file takes several pages, got {pages}",
+        text.len()
+    );
+    assert_eq!(joined, text, "the pages join back into the whole file");
+
+    let end = u64::try_from(text.len()).expect("the length fits");
+    assert_eq!(
+        tools
+            .read_file(DECLARED, end)
+            .await
+            .expect("an offset at the end reads nothing"),
+        "",
+        "the end of the file has no text"
+    );
+    assert!(
+        tools.read_file(DECLARED, end + 1).await.is_err(),
+        "an offset past the end is refused"
+    );
+}
+
+/// An offset inside a multi-byte character starts the page at the next character, so the
+/// text never begins with a broken character.
+#[tokio::test]
+async fn a_page_from_inside_a_character_starts_at_the_next_one() {
+    let dir = repo();
+    fs::write(dir.path().join(DECLARED), "€uro\n").expect("the fixture");
+    let tools = worktree(dir.path());
+    assert_eq!(
+        tools.read_file(DECLARED, 1).await.expect("the page reads"),
+        "uro\n"
+    );
+}
+
 #[tokio::test]
 async fn paths_outside_the_worktree_are_refused() {
     let dir = repo();
@@ -143,7 +222,7 @@ async fn paths_outside_the_worktree_are_refused() {
         ".git/config",
     ] {
         assert!(
-            tools.read_file(path).await.is_err(),
+            tools.read_file(path, 0).await.is_err(),
             "reading {path:?} is refused"
         );
         assert!(
@@ -188,7 +267,7 @@ async fn a_symlink_that_leaves_the_worktree_is_refused() {
     let tools = Worktree::new(dir.path().to_path_buf(), &[link_path.to_owned()], None);
 
     assert!(
-        tools.read_file(link_path).await.is_err(),
+        tools.read_file(link_path, 0).await.is_err(),
         "reading through the link is refused"
     );
     assert!(

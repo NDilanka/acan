@@ -1,0 +1,544 @@
+{
+  "schema": "acan-demo-intent-edits/2",
+  "order": "o-8",
+  "decided_by": "coordinator, delegated by the owner",
+  "note": "Written for the o-8 draft in run D:\\dev\\acan-takes\\d02m-fresh7-20261101-091941 (scope-draft-o-8.json, rev 1, base 4f9bccb), under the D02R decisions (coordinator, delegated by the owner). Nothing here is a verdict: the edits state the order rules and the gate checks them.",
+  "choice_rules": [
+    {
+      "id": "cr-retry-fallback",
+      "question_match": "(?i)reset time is unavailable",
+      "option_label_match": "(?i)^Send 1 second$",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R: rounded-up whole seconds are never 0, and the landed window limiter always knows its reset, so 1 second is only a floor."
+    },
+    {
+      "id": "cr-every-429",
+      "question_match": "(?i)429s not from rate limiting",
+      "option_label_match": "(?i)^Every 429 including non-ratelimit$",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R: the order says every 429. The corpus has only limiter 429s, so this adds no machine-checked items."
+    }
+  ],
+  "scope_edits": [
+    {
+      "op": "remove_may",
+      "id": "m-health",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R: no corpus step answers 429 on this route, so the item cannot be judged (standing rule 2). The kept items say every 429 sends Retry-After."
+    },
+    {
+      "op": "remove_may",
+      "id": "m-signup",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R: no corpus step answers 429 on this route, so the item cannot be judged (standing rule 2). The kept items say every 429 sends Retry-After."
+    },
+    {
+      "op": "remove_may",
+      "id": "m-login",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R: no corpus step answers 429 on this route, so the item cannot be judged (standing rule 2). The kept items say every 429 sends Retry-After."
+    },
+    {
+      "op": "remove_may",
+      "id": "m-logout",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R: no corpus step answers 429 on this route, so the item cannot be judged (standing rule 2). The kept items say every 429 sends Retry-After."
+    },
+    {
+      "op": "remove_may",
+      "id": "m-dashboard",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R: no corpus step answers 429 on this route, so the item cannot be judged (standing rule 2). The kept items say every 429 sends Retry-After."
+    },
+    {
+      "op": "remove_may",
+      "id": "m-redirect",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R: no corpus step answers 429 on this route, so the item cannot be judged (standing rule 2). The kept items say every 429 sends Retry-After."
+    },
+    {
+      "op": "remove_may",
+      "id": "m-links-delete",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R: no corpus step answers 429 on this route, so the item cannot be judged (standing rule 2). The kept items say every 429 sends Retry-After."
+    },
+    {
+      "op": "remove_may",
+      "id": "m-links-get",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R: drafted on step s-links-get-429, not a corpus step; replaced by the i-retry-after items on the corpus 429 steps s11, s13, s14, s15."
+    },
+    {
+      "op": "remove_may",
+      "id": "m-links-post",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R: drafted on step s-links-post-429, not a corpus step; replaced by the i-retry-after items on the corpus 429 steps s11, s13, s14, s15."
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R: re-anchored on corpus 429 step s11 (same anchor as the o-1 item on this step). Every 429 carries Retry-After.",
+      "item": {
+        "id": "i-retry-after-s11",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s11"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice_relogin"
+          },
+          "channel": "header",
+          "field_path": "retry-after"
+        },
+        "change": "add",
+        "acceptance": [
+          {
+            "obligation_id": "obl-retry-after-s11",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s11",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "present",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "header.retry-after"
+                  }
+                },
+                {
+                  "predicate": "matches_schema",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "header.retry-after"
+                  },
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "predicate": "compare",
+                  "left": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "header.retry-after"
+                  },
+                  "op": "ne",
+                  "right": {
+                    "operand": "literal",
+                    "value": "0"
+                  }
+                }
+              ]
+            },
+            "text": "The relogin session's over-limit POST /api/links is answered 429 with a Retry-After header in whole seconds rounded up, never 0. Every 429 sends it; digits-only is stated here, not machine-checked (the schema has no pattern)."
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s11",
+          "path": "header.retry-after",
+          "before": {
+            "state": "missing"
+          },
+          "after": {
+            "state": "present",
+            "value": "1"
+          }
+        },
+        "machine_ids": [
+          "ratelimit"
+        ]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R: re-anchored on corpus 429 step s13 (same anchor as the o-1 item on this step). Every 429 carries Retry-After.",
+      "item": {
+        "id": "i-retry-after-s13",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s13"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice"
+          },
+          "channel": "header",
+          "field_path": "retry-after"
+        },
+        "change": "add",
+        "acceptance": [
+          {
+            "obligation_id": "obl-retry-after-s13",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s13",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "present",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "header.retry-after"
+                  }
+                },
+                {
+                  "predicate": "matches_schema",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "header.retry-after"
+                  },
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "predicate": "compare",
+                  "left": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "header.retry-after"
+                  },
+                  "op": "ne",
+                  "right": {
+                    "operand": "literal",
+                    "value": "0"
+                  }
+                }
+              ]
+            },
+            "text": "alice's 11th POST /api/links is answered 429 with a Retry-After header in whole seconds rounded up, never 0. Every 429 sends it; digits-only is stated here, not machine-checked (the schema has no pattern)."
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s13",
+          "path": "header.retry-after",
+          "before": {
+            "state": "missing"
+          },
+          "after": {
+            "state": "present",
+            "value": "1"
+          }
+        },
+        "machine_ids": [
+          "ratelimit"
+        ]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R: re-anchored on corpus 429 step s14 (same anchor as the o-1 item on this step). Every 429 carries Retry-After.",
+      "item": {
+        "id": "i-retry-after-s14",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s14"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice_fresh"
+          },
+          "channel": "header",
+          "field_path": "retry-after"
+        },
+        "change": "add",
+        "acceptance": [
+          {
+            "obligation_id": "obl-retry-after-s14",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s14",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "present",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s14",
+                    "path": "header.retry-after"
+                  }
+                },
+                {
+                  "predicate": "matches_schema",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s14",
+                    "path": "header.retry-after"
+                  },
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "predicate": "compare",
+                  "left": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s14",
+                    "path": "header.retry-after"
+                  },
+                  "op": "ne",
+                  "right": {
+                    "operand": "literal",
+                    "value": "0"
+                  }
+                }
+              ]
+            },
+            "text": "The signed-in user's over-limit GET /api/links is answered 429 with a Retry-After header in whole seconds rounded up, never 0. Every 429 sends it; digits-only is stated here, not machine-checked (the schema has no pattern)."
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s14",
+          "path": "header.retry-after",
+          "before": {
+            "state": "missing"
+          },
+          "after": {
+            "state": "present",
+            "value": "1"
+          }
+        },
+        "machine_ids": [
+          "ratelimit"
+        ]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R: re-anchored on corpus 429 step s15 (same anchor as the o-1 item on this step). Every 429 carries Retry-After.",
+      "item": {
+        "id": "i-retry-after-s15",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s15"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice"
+          },
+          "channel": "header",
+          "field_path": "retry-after"
+        },
+        "change": "add",
+        "acceptance": [
+          {
+            "obligation_id": "obl-retry-after-s15",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s15",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "present",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "header.retry-after"
+                  }
+                },
+                {
+                  "predicate": "matches_schema",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "header.retry-after"
+                  },
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "predicate": "compare",
+                  "left": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "header.retry-after"
+                  },
+                  "op": "ne",
+                  "right": {
+                    "operand": "literal",
+                    "value": "0"
+                  }
+                }
+              ]
+            },
+            "text": "A POST /api/links 59999 ms into the window is answered 429 with a Retry-After header in whole seconds rounded up, never 0. Every 429 sends it; digits-only is stated here, not machine-checked (the schema has no pattern)."
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s15",
+          "path": "header.retry-after",
+          "before": {
+            "state": "missing"
+          },
+          "after": {
+            "state": "present",
+            "value": "1"
+          }
+        },
+        "machine_ids": [
+          "ratelimit"
+        ]
+      }
+    },
+    {
+      "op": "replace_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R standing rule 2: drafted on a non-corpus step; re-anchored on GET /api/links s14.",
+      "rule": {
+        "id": "keep-status-codes",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s14"
+          },
+          "principal": {
+            "kind": "any"
+          },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "o-keep-status",
+            "predicate": {
+              "predicate": "equals_base",
+              "step_id": "s14",
+              "path": "status",
+              "anchor": {
+                "kind": "fresh"
+              }
+            },
+            "text": "Status codes remain as before."
+          }
+        ],
+        "text": "Do not change status codes, only add Retry-After.",
+        "machine_ids": [
+          "ratelimit",
+          "links"
+        ]
+      }
+    },
+    {
+      "op": "replace_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "D02R standing rule 2: drafted on a non-corpus step; re-anchored on GET /api/links s1.",
+      "rule": {
+        "id": "keep-success-body",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s1"
+          },
+          "principal": {
+            "kind": "any"
+          },
+          "channel": "body"
+        },
+        "obligations": [
+          {
+            "obligation_id": "o-keep-body",
+            "predicate": {
+              "predicate": "equals_base",
+              "step_id": "s1",
+              "path": "body",
+              "anchor": {
+                "kind": "fresh"
+              }
+            },
+            "text": "Bodies remain as before."
+          }
+        ],
+        "text": "Success response bodies stay unchanged.",
+        "machine_ids": [
+          "ratelimit",
+          "links"
+        ]
+      }
+    }
+  ],
+  "draft_mapping": {
+    "run": "D:\\dev\\acan-takes\\d02m-fresh7-20261101-091941",
+    "draft_file": "D:\\dev\\acan-takes\\d02m-fresh7-20261101-091941\\scope-draft-o-8.json",
+    "draft_rev": 1,
+    "decided_by": "coordinator, delegated by the owner",
+    "notes": [
+      "s12 (bob) is not a 429 step: bob's first ten requests are allowed, so no Retry-After item there.",
+      "keep-success-body anchors on s1 GET /api/links, the first call of a signed-in probe, answered 200 in base.",
+      "q-retry-source answered by cr-retry-fallback, q-non-ratelimit-429 by cr-every-429."
+    ]
+  },
+  "answers": []
+}
