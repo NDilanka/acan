@@ -42,7 +42,7 @@
     },
     {
       "template_id": "violation.ruling",
-      "text": "Classified: violates a ruling. Candidate value here: {candidate}.",
+      "text": "Classified: ruling violation. Candidate value here: {candidate}.",
       "classes": ["violates_ruling"],
       "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {
@@ -55,7 +55,7 @@
     },
     {
       "template_id": "violation.bare",
-      "text": "Classified: violates a ruling. No value is quoted for this check.",
+      "text": "Classified: ruling violation. No value is quoted for this check.",
       "classes": ["violates_ruling"],
       "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {}
@@ -115,7 +115,7 @@
     },
     {
       "template_id": "out_of_scope.changed_value",
-      "text": "Classified: out of scope. Base value here: {base}. Candidate value here: {candidate}. No scope item covers this difference.",
+      "text": "Classified: out of scope. Base value here: {base}. Candidate value here: {candidate}.",
       "classes": ["out_of_scope"],
       "states": ["open", "bounced", "fixed", "residue"],
       "slots": {
@@ -133,7 +133,7 @@
     },
     {
       "template_id": "stopped.out_of_scope",
-      "text": "Classified: out of scope. Base value here: {base}. Candidate value here: {candidate}. Recorded state: stopped, the repair budget ran out.",
+      "text": "Classified: out of scope. Base value here: {base}. Candidate value here: {candidate}. Recorded state: stopped.",
       "classes": ["out_of_scope"],
       "states": ["stopped"],
       "slots": {
@@ -151,7 +151,7 @@
     },
     {
       "template_id": "out_of_scope.candidate",
-      "text": "Classified: out of scope. Candidate value here: {candidate}. No scope item covers this difference.",
+      "text": "Classified: out of scope. Candidate value here: {candidate}.",
       "classes": ["out_of_scope"],
       "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {

@@ -23,7 +23,7 @@ const ALL_STATES: [ItemState; 5] = [
 ];
 
 /// Phrases a caption must not use: each claims more than the recorded classification shows.
-const OVERCLAIMS: [&str; 12] = [
+const OVERCLAIMS: [&str; 17] = [
     "no obligation checks",
     "which the ruling forbids",
     "missed the target",
@@ -36,6 +36,11 @@ const OVERCLAIMS: [&str; 12] = [
     "is right",
     "is wrong",
     "causes",
+    "violates",
+    "budget",
+    "covers",
+    "wants",
+    "should",
 ];
 
 fn view(text: &str) -> PlantView {
@@ -273,8 +278,8 @@ fn an_authorized_item_is_captioned_as_unspecified_in_every_state() {
 #[test]
 fn an_out_of_scope_item_that_is_open_or_bounced_is_not_captioned_as_stopped() {
     assert!(
-        text_of("stopped.out_of_scope").contains("the repair budget ran out"),
-        "the stopped template says the budget ran out"
+        text_of("stopped.out_of_scope").ends_with("Recorded state: stopped."),
+        "the stopped template names the recorded state"
     );
     for state in [ItemState::Open, ItemState::Bounced] {
         let mut value = raw_view();
