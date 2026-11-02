@@ -310,6 +310,25 @@
   #watch li.moved { animation: watch-glow 1200ms ease-out; }
   @keyframes watch-glow { from { background: #fbf1d8; } to { background: transparent; } }
   @media (prefers-reduced-motion: reduce) { #watch li.moved { animation: none; } }
+  #watch .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  #inbox .badge { display: inline-block; min-width: 16px; margin-left: 4px; padding: 0 5px; box-sizing: border-box; border-radius: 8px;
+    font: 600 11px/16px var(--mono); text-align: center; letter-spacing: 0; color: var(--muted); background: var(--page); }
+  #inbox .badge.some { color: #ffffff; background: var(--amber); }
+  #inbox .badge.bump { animation: watch-bump 500ms ease-out; }
+  @keyframes watch-bump { 30% { transform: scale(1.25); } }
+  @media (prefers-reduced-motion: reduce) { #inbox .badge.bump { animation: none; } }
+  #inbox ol { max-height: 24vh; }
+  #inbox li + li { border-top: 1px solid var(--rule); }
+  #inbox button.item { display: flex; gap: 8px; align-items: baseline; width: 100%; padding: 4px 2px; background: none; border: none;
+    color: var(--ink); text-align: left; cursor: pointer; font: 12px/1.35 var(--sans); }
+  #inbox button.item:hover .text, #inbox button.item:focus-visible .text { text-decoration: underline; }
+  #inbox button.item:disabled { cursor: default; }
+  #inbox .kind { flex: none; width: 56px; font: 10px/1.6 var(--mono); color: #7a5a12; text-transform: uppercase; letter-spacing: 0.04em; }
+  #inbox .item.clash .kind, #inbox .item.stopped .kind { color: var(--red); }
+  #inbox .item.vision .kind { color: var(--muted); }
+  #inbox .opt-in { margin-top: 6px; font: 11px var(--mono); padding: 2px 8px; background: var(--face); color: var(--muted);
+    border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+  #inbox .opt-in:hover { color: var(--ink); border-color: var(--ink); }
   #lanes ol { max-height: 30vh; }
   #lanes li + li { border-top: 1px solid var(--rule); }
   #lanes button.lane { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 1px 8px; width: 100%;
@@ -383,6 +402,7 @@
 <div class="island" id="order" hidden><span id="order-line" class="muted"></span></div>
 <div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle</div>
 <div id="watch">
+  <aside id="inbox" class="island" aria-label="needs you" hidden></aside>
   <aside id="lanes" class="island" aria-label="agents" hidden></aside>
 </div>
 <aside id="card" class="island" hidden></aside>

@@ -26,9 +26,10 @@ import { playOf, syncPlantViews } from "./plant.js";
 import { bindPlate, paintPlate, stepBy, toggleMode, togglePlay } from "./plate.js";
 import { startReplay } from "./replay.js";
 import { bindShell, startShell } from "./shell.js";
-import { clock, feed, get, installFeed, setLink, start } from "./stream.js";
+import { clock, feed, get, installFeed, isLive, setLink, start } from "./stream.js";
 import { requestUsage } from "./usage.js";
 import { installLanes } from "./lanes.js";
+import { installInbox } from "./inbox.js";
 
 const PAN_KEY_PX = 80;
 
@@ -57,6 +58,7 @@ const kit = {
   state,
   feed,
   clock,
+  isLive,
   get,
   setLink,
   requestRender,
@@ -464,6 +466,7 @@ async function boot() {
   bindCanvas();
   bindKeys();
   installLanes(kit);
+  installInbox(kit);
   window.addEventListener("resize", sizeCanvas);
   state.app.set_still(freeze);
   // Reduced motion turns the hover bob off, and the page follows the setting as it changes.

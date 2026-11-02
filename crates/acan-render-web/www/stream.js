@@ -28,8 +28,13 @@ export function installFeed(app) {
 // The time the panels read "2m ago" against: now on a live page, and the newest event's time on
 // a frozen or replayed page, so a recorded run does not read as hours stale.
 export function clock() {
-  if (freeze || replay) return feed.lastAt() ?? Date.now();
+  if (!isLive()) return feed.lastAt() ?? Date.now();
   return Date.now();
+}
+
+// Whether the page shows the origin as it is now: not frozen and not a replay.
+export function isLive() {
+  return !freeze && !replay;
 }
 
 export function setLink(text) {
