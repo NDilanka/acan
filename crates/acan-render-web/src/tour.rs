@@ -15,7 +15,7 @@ use acan_intent::{
     ItemClass, ItemId, ItemState, MachineId, MarkRef, ModelRef, OrderRef, PlantCounts, PlantView,
     ReceiptHash, Tour, TourStep, TourView, ZoomLevel,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Milliseconds one step's camera move takes.
@@ -74,6 +74,15 @@ pub struct Stage {
     pub mark: MarkRef,
 }
 
+/// One machine a step's marks sit on, with the words of each mark on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spot {
+    /// The machine.
+    pub machine_id: MachineId,
+    /// What each mark on the machine is, in words, in the order the step stages them.
+    pub labels: Vec<String>,
+}
+
 /// One step of the walk, ready to play.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlayStep {
@@ -85,6 +94,8 @@ pub struct PlayStep {
     pub zoom: ZoomLevel,
     /// The marks the step stages.
     pub stage: Vec<Stage>,
+    /// The machines those marks sit on. The page dims every other machine while the step shows.
+    pub spots: Vec<Spot>,
     /// The caption, filled from the bound evidence only.
     pub caption: String,
 }
@@ -268,7 +279,7 @@ fn assemble(
         .steps
         .iter()
         .zip(&bindings)
-        .map(|(step, bound)| play_step(catalog, step, bound))
+        .map(|(step, bound)| play_step(view, catalog, step, bound))
         .collect::<Result<Vec<_>, _>>()?;
     let items = view
         .items
@@ -298,6 +309,7 @@ fn assemble(
 }
 
 fn play_step(
+    view: &PlantView,
     catalog: &CaptionCatalog,
     step: &TourStep,
     bound: &BoundItemView,
@@ -305,20 +317,92 @@ fn play_step(
     let template = catalog.template(&step.caption.template_id).ok_or_else(|| {
         PlayError::Catalog(format!("template {} is missing", step.caption.template_id))
     })?;
+    let stage: Vec<Stage> = step
+        .stage
+        .iter()
+        .map(|mark| Stage {
+            label: stage_label(mark),
+            mark: mark.clone(),
+        })
+        .collect();
     Ok(PlayStep {
         item_id: step.item_id.clone(),
         machine_id: step.camera.machine_id.clone(),
         zoom: step.camera.zoom,
-        stage: step
-            .stage
-            .iter()
-            .map(|mark| Stage {
-                label: stage_label(mark),
-                mark: mark.clone(),
-            })
-            .collect(),
+        spots: spots_of(view, &stage),
+        stage,
         caption: caption_text(template, bound)?,
     })
+}
+
+/// The machines the marks sit on, each with the labels of its marks, in stage order. A mark that
+/// sits on no machine, such as the order plate, has no spot.
+fn spots_of(view: &PlantView, stage: &[Stage]) -> Vec<Spot> {
+    let mut spots: Vec<Spot> = Vec::new();
+    for mark in stage {
+        for machine_id in mark_machines(view, &mark.mark) {
+            match spots.iter_mut().find(|spot| spot.machine_id == machine_id) {
+                Some(spot) => spot.labels.push(mark.label.clone()),
+                None => spots.push(Spot {
+                    machine_id,
+                    labels: vec![mark.label.clone()],
+                }),
+            }
+        }
+    }
+    spots
+}
+
+/// The machines a mark sits on in the view. A scope item or rule sits on every machine it names,
+/// and an item's marks sit on the machine its mark goes on. The order plate sits on none.
+fn mark_machines(view: &PlantView, mark: &MarkRef) -> Vec<MachineId> {
+    let item_machine = |item_id: &ItemId| {
+        view.items
+            .iter()
+            .find(|item| &item.item_id == item_id)
+            .map(|item| item.machine_id.clone())
+    };
+    match mark {
+        MarkRef::Footprint { item_id } => view
+            .scope
+            .items
+            .iter()
+            .find(|item| &item.item_id == item_id)
+            .map(|item| item.machine_ids.iter().cloned().collect())
+            .unwrap_or_default(),
+        MarkRef::MustKeepPin { must_keep_id } => view
+            .scope
+            .must_keep
+            .iter()
+            .find(|rule| &rule.id == must_keep_id)
+            .map(|rule| rule.machine_ids.iter().cloned().collect())
+            .unwrap_or_default(),
+        MarkRef::QuestionPin { choice_id } => view
+            .scope
+            .open
+            .iter()
+            .find(|choice| &choice.id == choice_id)
+            .map(|choice| vec![choice.machine_id.clone()])
+            .unwrap_or_default(),
+        MarkRef::NoProbes { machine_id } => vec![machine_id.clone()],
+        MarkRef::Ghost { item_id }
+        | MarkRef::Crates { item_id }
+        | MarkRef::BouncedChip { item_id }
+        | MarkRef::ResidueCard { item_id }
+        | MarkRef::Unknown { item_id } => item_machine(item_id).into_iter().collect(),
+        MarkRef::RulingTag { ruling_id } => view
+            .machines
+            .iter()
+            .filter(|machine| {
+                machine
+                    .rulings
+                    .iter()
+                    .any(|tag| &tag.ruling_id == ruling_id)
+            })
+            .map(|machine| machine.machine_id.clone())
+            .collect(),
+        MarkRef::OrderPlate {} => Vec::new(),
+    }
 }
 
 /// The caption text: the template with each slot filled from its bound value. A slot the template
@@ -512,6 +596,66 @@ mod tests {
             .map(|stage| stage.label.as_str())
             .collect();
         assert!(labels.contains(&"ruling: r-1"), "{labels:?}");
+    }
+
+    #[test]
+    fn a_step_spots_only_the_machine_its_marks_sit_on() {
+        let play = play(DIRECTED).expect("the fixture plays");
+        // i-retry-after is bounced on ratelimit: its chip and its crates sit there and nowhere else.
+        let retry = step(&play, "i-retry-after");
+        assert_eq!(retry.spots.len(), 1, "{:?}", retry.spots);
+        assert_eq!(retry.spots[0].machine_id.as_str(), "ratelimit");
+        assert_eq!(
+            retry.spots[0].labels,
+            ["bounced: i-retry-after", "route crates: i-retry-after"]
+        );
+    }
+
+    #[test]
+    fn every_spotted_label_is_a_staged_mark_of_its_step() {
+        let play = play(DIRECTED).expect("the fixture plays");
+        for step in &play.steps {
+            let staged: Vec<&str> = step.stage.iter().map(|mark| mark.label.as_str()).collect();
+            for spot in &step.spots {
+                for label in &spot.labels {
+                    assert!(
+                        staged.contains(&label.as_str()),
+                        "{}: {label}",
+                        step.item_id
+                    );
+                }
+            }
+            // A mark that sits on a machine shows on one, or on several when its scope spans them.
+            for mark in &step.stage {
+                if matches!(mark.mark, MarkRef::OrderPlate {}) {
+                    continue;
+                }
+                assert!(
+                    step.spots
+                        .iter()
+                        .any(|spot| spot.labels.contains(&mark.label)),
+                    "{}: {} sits on no spot",
+                    step.item_id,
+                    mark.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_deterministic_order_spots_its_residue_on_its_machine() {
+        let play = play(PLAIN).expect("the plain fixture plays");
+        let first = &play.steps[0];
+        assert_eq!(first.item_id.to_string(), "d-login-error-body");
+        assert_eq!(first.spots.len(), 1, "{:?}", first.spots);
+        assert_eq!(first.spots[0].machine_id.as_str(), "auth");
+        assert_eq!(
+            first.spots[0].labels,
+            [
+                "residue: d-login-error-body",
+                "route crates: d-login-error-body"
+            ]
+        );
     }
 
     #[test]

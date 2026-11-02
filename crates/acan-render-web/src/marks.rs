@@ -14,7 +14,8 @@ use acan_iso::{
     BEACON_RADIUS, BODY_RADIUS, BOT_HEIGHT, EYE_DISTANCE, PIN_HEIGHT, PLINTH_TOP, STALK_HEIGHT,
 };
 use acan_render::theme::{
-    self, AGENT_SLOTS, TINT_BODY0, TINT_FOOTPRINT0, TINT_LEN, TINT_SCOPE0, TINT_SHARED, TINT_SHELL0,
+    self, AGENT_SLOTS, TINT_BODY0, TINT_DIM0, TINT_FOOTPRINT0, TINT_LEN, TINT_SCOPE0, TINT_SHARED,
+    TINT_SHELL0,
 };
 use acan_render::{Beam, Instance};
 use serde::Serialize;
@@ -22,6 +23,7 @@ use serde::Serialize;
 use crate::mirror::{CheckView, ClashView, View};
 use crate::plan::Plan;
 use crate::slices::{ScopeTint, Slice, slice_layout};
+use crate::tour::Spot;
 
 /// The height of a drone's centre above its machine's top when it hovers beside the machine,
 /// in world units. The drone floats level with the machine's top rather than high above it. The
@@ -230,6 +232,8 @@ pub enum FlagKind {
     Landed,
     /// One scope lane's plots and keeps on one machine.
     Plot,
+    /// A mark a tour step stages, as a chip on the machine the mark sits on.
+    Stage,
 }
 
 /// A label the page draws over the plant, with its anchor in world units.
@@ -394,7 +398,143 @@ impl Marks {
             }
             table[TINT_SHARED as usize] = theme::footprint_mix(mix);
         }
+        theme::add_dim_slots(&mut table);
         table
+    }
+}
+
+/// The tint slot an instance takes while a tour step is staged. A machine the step stages keeps its
+/// slot, and any other takes its dimmed slot, so the step's marks stand out. With no stage, every
+/// machine keeps its slot.
+#[must_use]
+pub fn emphasised(tint: u8, staged: bool) -> u8 {
+    if staged {
+        tint
+    } else {
+        let dimmed = u32::from(tint) + TINT_DIM0;
+        u8::try_from(dimmed).expect("dimmed tint slots fit in a byte")
+    }
+}
+
+/// Which plan machines a tour step stages, in plan order, from the spots it names. `None` when no
+/// named machine is on the plant, so nothing is dimmed.
+#[must_use]
+pub fn staged_plan(machine_names: &[String], spots: &[Spot]) -> Option<Vec<bool>> {
+    let staged: Vec<bool> = machine_names
+        .iter()
+        .map(|name| spots.iter().any(|spot| spot.machine_id.as_str() == name))
+        .collect();
+    staged.iter().any(|&on| on).then_some(staged)
+}
+
+/// The chips a tour step stages: one per mark, stacked over the plan machine the mark sits on. A
+/// spot whose machine is not on the plant has no chip.
+#[must_use]
+pub fn stage_flags(spots: &[Spot], plan: &Plan, stands: &[Stand]) -> Vec<Flag> {
+    let mut flags = Vec::new();
+    for spot in spots {
+        let Some(machine) = plan
+            .machines
+            .iter()
+            .position(|plan_machine| plan_machine.name == spot.machine_id.as_str())
+        else {
+            continue;
+        };
+        let centre = plan.machines[machine].center();
+        let top = stands.get(machine).map_or(PLINTH_TOP, |stand| stand.top);
+        for label in &spot.labels {
+            flags.push(Flag {
+                kind: FlagKind::Stage,
+                text: label.clone(),
+                hue: None,
+                waiting: false,
+                clash: None,
+                check: None,
+                leaving: false,
+                detail: Vec::new(),
+                scope: None,
+                machine: Some(machine),
+                at: [centre[0], centre[1], top + ORDER_LIFT],
+                follow: Follow::Still,
+            });
+        }
+    }
+    flags
+}
+
+/// The tint slot a plan machine's instance takes now: its footprint slot, dimmed while a step is
+/// staged and the machine is not one of its marks. `staged` is by plan index, and `None` when no
+/// step is staged.
+#[must_use]
+pub fn machine_tint(marks: &Marks, plan_index: usize, staged: Option<&[bool]>) -> u8 {
+    let tint = marks.footprint_tint(plan_index);
+    match staged {
+        None => tint,
+        Some(staged) => emphasised(tint, staged.get(plan_index).copied().unwrap_or(true)),
+    }
+}
+
+#[cfg(test)]
+mod stage_tests {
+    use super::*;
+
+    fn spot(machine: &str) -> Spot {
+        Spot {
+            machine_id: serde_json::from_str(&format!("\"{machine}\"")).expect("a machine id"),
+            labels: vec![format!("bounced: {machine}")],
+        }
+    }
+
+    #[test]
+    fn a_staged_machine_keeps_its_slot_and_any_other_takes_the_dimmed_one() {
+        assert_eq!(emphasised(7, true), 7);
+        assert_eq!(emphasised(7, false), 7 + 24);
+        assert_eq!(emphasised(0, false), 24);
+    }
+
+    #[test]
+    fn a_step_stages_only_the_machines_it_names_and_none_when_none_is_on_the_plant() {
+        let names = [
+            "auth".to_owned(),
+            "links".to_owned(),
+            "ratelimit".to_owned(),
+        ];
+        assert_eq!(
+            staged_plan(&names, &[spot("ratelimit")]),
+            Some(vec![false, false, true])
+        );
+        assert_eq!(staged_plan(&names, &[spot("elsewhere")]), None);
+        assert_eq!(staged_plan(&names, &[]), None);
+    }
+
+    #[test]
+    fn a_step_dims_the_machines_it_does_not_stage_and_clearing_restores_them() {
+        let marks = Marks {
+            footprints: vec![vec![2], vec![]],
+            ..Marks::default()
+        };
+        let staged = [true, false];
+        assert_eq!(machine_tint(&marks, 0, Some(&staged)), 9);
+        assert_eq!(machine_tint(&marks, 1, Some(&staged)), 24);
+        // With no step staged, each machine keeps the slot its footprint gives it.
+        assert_eq!(machine_tint(&marks, 0, None), marks.footprint_tint(0));
+        assert_eq!(machine_tint(&marks, 1, None), marks.footprint_tint(1));
+    }
+
+    #[test]
+    fn each_dimmed_slot_is_its_plain_colour_at_the_dim_share() {
+        let table = Marks::default().tint_table();
+        for slot in 0..TINT_DIM0 as usize {
+            let plain = table[slot];
+            let dimmed = table[TINT_DIM0 as usize + slot];
+            for channel in 0..3 {
+                assert!(
+                    (dimmed[channel] - plain[channel] * theme::DIM_SHARE).abs() < 1e-6,
+                    "slot {slot} channel {channel}"
+                );
+            }
+            assert_eq!(dimmed[3], plain[3], "slot {slot} keeps its alpha");
+        }
     }
 }
 
@@ -1108,7 +1248,7 @@ pub fn flag_anchor(flag: &Flag, at: [f32; 3], project: impl Fn([f32; 3]) -> [f32
             let [x, y] = project(at);
             [x + FLAG_GAP_PX, y]
         }
-        FlagKind::Order | FlagKind::Question | FlagKind::Plot => project(at),
+        FlagKind::Order | FlagKind::Question | FlagKind::Plot | FlagKind::Stage => project(at),
     }
 }
 

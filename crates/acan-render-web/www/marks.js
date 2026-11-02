@@ -153,6 +153,9 @@ function flagElement(flag) {
   const el = document.createElement("div");
   el.className = `flag ${flag.kind}`;
   el.classList.toggle("leaving", flag.leaving);
+  // A tour step's chips say what the plate's stage list says in words, so a screen reader hears
+  // them once, from the list.
+  if (flag.kind === "stage") el.setAttribute("aria-hidden", "true");
   if (flag.hue) {
     const dot = document.createElement("span");
     dot.className = "dot";
