@@ -91,6 +91,22 @@ impl Redaction {
             .sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     }
 
+    /// Adds every secret and path root of `other` to this redaction. Nothing already here is
+    /// dropped, so a project added later does not stop another project's secrets or paths from
+    /// being removed.
+    pub fn merge(&mut self, other: Redaction) {
+        for secret in &other.secrets {
+            self.add_secret(secret);
+        }
+        for (form, replacement) in other.roots {
+            if !self.roots.iter().any(|(known, _)| *known == form) {
+                self.roots.push((form, replacement));
+            }
+        }
+        self.roots
+            .sort_by_key(|(form, _)| std::cmp::Reverse(form.len()));
+    }
+
     /// The text with every secret, token and private path removed. Terminal colour codes are
     /// removed too, so a line reads the same in the report as it did on the terminal.
     #[must_use]
@@ -302,6 +318,39 @@ mod tests {
             redaction.scrub("reading /home/example/proj/src/main.rs and /home/example/.cache/x"),
             "reading <repo>/src/main.rs and ~/.cache/x"
         );
+    }
+
+    #[test]
+    fn merging_keeps_every_projects_secrets_and_paths() {
+        let mut redaction = Redaction {
+            secrets: vec!["alpha-provider-secret-0001".to_owned()],
+            roots: vec![("/srv/alpha".to_owned(), REPO)],
+        };
+        redaction.merge(Redaction {
+            secrets: vec![
+                "beta-provider-secret-0002".to_owned(),
+                "alpha-provider-secret-0001".to_owned(),
+            ],
+            roots: vec![
+                ("/srv/beta".to_owned(), REPO),
+                ("/srv/alpha".to_owned(), REPO),
+            ],
+        });
+        assert_eq!(redaction.secrets.len(), 2, "a shared secret is kept once");
+        assert_eq!(redaction.roots.len(), 2, "a shared root is kept once");
+        assert_eq!(
+            redaction.scrub(
+                "alpha-provider-secret-0001 in /srv/alpha/a and beta-provider-secret-0002 in /srv/beta/b"
+            ),
+            "<redacted key> in <repo>/a and <redacted key> in <repo>/b"
+        );
+    }
+
+    #[test]
+    fn merging_an_empty_redaction_changes_nothing() {
+        let mut redaction = with_secret("meta-saved-key-0123456789");
+        redaction.merge(Redaction::EMPTY);
+        assert_eq!(redaction, with_secret("meta-saved-key-0123456789"));
     }
 
     #[test]

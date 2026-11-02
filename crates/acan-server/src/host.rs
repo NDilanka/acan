@@ -123,6 +123,18 @@ impl<C: ModelClient> Host<C> {
     /// Panics when called outside a Tokio runtime, or when `probe_concurrency` is zero.
     #[must_use]
     pub fn new(parts: HostParts<C>) -> Self {
+        let slots = Arc::new(Semaphore::new(parts.witness_concurrency));
+        Self::new_with_slots(parts, slots)
+    }
+
+    /// [`new`](Self::new), but the witness runs take their permits from `slots`. A server with
+    /// several projects passes one pool to all of them, so its witness runs stay within one limit.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a Tokio runtime, or when `probe_concurrency` is zero.
+    #[must_use]
+    pub fn new_with_slots(parts: HostParts<C>, slots: Arc<Semaphore>) -> Self {
         assert!(
             parts.probe_concurrency > 0,
             "probe_concurrency must allow at least one probe, got {}",
@@ -158,7 +170,7 @@ impl<C: ModelClient> Host<C> {
                 streams: Arc::new(Mutex::new(JoinSet::new())),
                 workspace: parts.git.map(|repo| Arc::new(Workspace::new(repo))),
                 witness_http_base_url: parts.witness_http_base_url,
-                witness_slots: Arc::new(Semaphore::new(parts.witness_concurrency)),
+                witness_slots: slots,
                 probe_concurrency: parts.probe_concurrency,
                 vision: parts.vision,
                 landing: tokio::sync::Mutex::new(()),

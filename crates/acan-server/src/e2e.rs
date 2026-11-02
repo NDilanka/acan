@@ -2843,7 +2843,7 @@ async fn claim(running: &Running, task: TaskId) -> Fence {
 /// A renewal the origin rejects means the claim is over, because the task landed, was released,
 /// or was claimed again. The test's own steps check that outcome, so the rejection is ignored.
 fn keep_lease(running: &Running, fence: Fence) {
-    let writer = running.writer.clone();
+    let writer = running.writer().clone();
     tokio::spawn(async move {
         loop {
             sleep(LEASE_RENEWAL).await;
@@ -2940,7 +2940,7 @@ async fn wait_building(running: &Running, task: TaskId) {
 
 async fn agent_command(running: &Running, cmd: AgentCmd) {
     running
-        .writer
+        .writer()
         .submit(Command::Agent {
             agent: agent(),
             cmd,
