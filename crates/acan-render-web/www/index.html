@@ -171,8 +171,10 @@
     font: 11px var(--mono); color: var(--muted); }
   /* The receipt plate: the view's facts for the receipt the order island shows, and the admitted
      tour over them. Every item is listed whatever the tour does. */
-  #receipt { top: 92px; left: 12px; width: 330px; max-height: calc(100vh - 420px); overflow-y: auto;
-    box-sizing: border-box; padding: 10px 14px; color: var(--ink); font: 12px/1.4 var(--sans); }
+  #receipt { top: 92px; left: 12px; width: 330px; max-height: calc(100vh - 320px); overflow-y: auto;
+    box-sizing: border-box; padding: 10px 14px; color: var(--ink); font: 12px/1.4 var(--sans);
+    display: flex; flex-direction: column; }
+  #receipt[hidden] { display: none; }
   #receipt h2 { margin: 0; font: 600 13px/1.3 var(--mono); display: flex; gap: 8px; align-items: center; }
   #receipt .meta { margin: 3px 0; font: 11px/1.4 var(--mono); color: var(--muted); }
   #receipt ul.meta { list-style: none; padding: 0; margin: 4px 0; }
@@ -196,7 +198,11 @@
     border-radius: 3px; padding: 1px 6px; }
   #receipt .note { font: 11px/1.4 var(--mono); color: var(--muted); margin: 4px 0; }
   #receipt .note.error { color: var(--red); }
-  #receipt ol.items { list-style: none; margin: 6px 0 0; padding: 0; border-top: 1px solid var(--rule); }
+  #receipt ol.items { list-style: none; margin: 6px 0 0; padding: 0; border-top: 1px solid var(--rule);
+    position: relative; flex: 1 1 auto; min-height: 6em; overflow-y: auto; }
+  #receipt ol.items.fade { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent); }
+  #receipt .more { font: 11px/1.4 var(--mono); color: var(--muted); margin: 4px 0 0; }
   #receipt ol.items li { display: grid; grid-template-columns: 1fr auto; gap: 0 8px; padding: 4px 0;
     border-bottom: 1px solid var(--rule); font: 11px/1.3 var(--mono); }
   #receipt ol.items li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -241,6 +247,7 @@
   <ul class="stage" id="tour-stage"></ul>
   <p class="note" id="receipt-note" hidden></p>
   <ol class="items" id="receipt-items"></ol>
+  <p class="more" id="receipt-more" hidden></p>
   <p class="foot">P play · [ ] step · T directed / plain · directed is off by default until it wins the comparison</p>
 </aside>
 <div id="gate" hidden>

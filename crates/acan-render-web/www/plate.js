@@ -197,6 +197,7 @@ export function paintPlate() {
       return row;
     }),
   );
+  paintMore();
   if (entry.error) {
     $("receipt-note").hidden = false;
     $("receipt-note").classList.add("error");
@@ -204,8 +205,21 @@ export function paintPlate() {
   }
 }
 
+// Counts the items below the list's visible rows, and says so with a fade and a line. The list
+// scrolls inside the plate, so a row is never cut off at the plate's edge without a sign.
+function paintMore() {
+  const list = $("receipt-items");
+  const bottom = list.scrollTop + list.clientHeight;
+  const below = [...list.children].filter((row) => row.offsetTop >= bottom - 2).length;
+  const more = $("receipt-more");
+  more.hidden = below === 0;
+  more.textContent = below === 0 ? "" : `+${below} more below, scroll the list`;
+  list.classList.toggle("fade", below > 0);
+}
+
 // Wires the plate's buttons and keys. Called once at boot.
 export function bindPlate() {
+  $("receipt-items").addEventListener("scroll", paintMore);
   $("tour-play").addEventListener("click", togglePlay);
   $("tour-prev").addEventListener("click", () => stepBy(-1));
   $("tour-next").addEventListener("click", () => stepBy(1));
