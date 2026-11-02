@@ -35,7 +35,9 @@
 //! slots, every resolved row fits its [`SlotSpec`] ([`SlotSpec::check`]: the declared column, a
 //! provenance that column admits, a value of the declared [`ValueType`], and a present value
 //! unless the slot is [`SlotPresence::Optional`]), and every mandatory item
-//! ([`PlantItem::is_mandatory`]) is reached ([`Tour::reaches`]). A cross-item, stale, swapped,
+//! ([`PlantItem::is_mandatory`]) is reached ([`Tour::reaches`]). A caption's template must also
+//! describe its item's class and state ([`CaptionTemplate::fits`]), so a caption never says of an
+//! item what the item is not. A cross-item, stale, swapped,
 //! mistyped or hypothetical binding rejects the whole tour, and the UI falls back to the
 //! deterministic tour and the plain card. Admitted slots become a [`BoundItemView`] whose values
 //! are copies of the resolved rows, never the model's text; the card writes each with
@@ -67,7 +69,7 @@ use crate::types::{
     ScopeRev, SlotName, StepId, TemplateId, UnixMillis,
 };
 use crate::verdict::{ItemClass, ItemState};
-use crate::version::{CaptionCatalogV1, CardV1, PlantViewV1};
+use crate::version::{CaptionCatalogV2, CardV1, PlantViewV1};
 
 /// The order on the plate.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
@@ -531,13 +533,15 @@ pub enum ValueType {
     Number,
     /// A boolean.
     Boolean,
+    /// A present value of any type, for a caption that names a value without reading it.
+    Any,
 }
 
 impl ValueType {
     /// Whether a present JSON value is of this type: a status is an integer from 100 to 599, a
     /// count or duration a non-negative integer, a commit a commit hash string, an identifier a
-    /// non-empty string, text any string, a number any number, a boolean a boolean. JSON
-    /// `null` is of no type.
+    /// non-empty string, text any string, a number any number, a boolean a boolean, and any
+    /// value but `null`. JSON `null` is of no type.
     #[must_use]
     pub fn admits(self, value: &Value) -> bool {
         match self {
@@ -552,6 +556,7 @@ impl ValueType {
             Self::Text => value.is_string(),
             Self::Number => value.is_number(),
             Self::Boolean => value.is_boolean(),
+            Self::Any => !value.is_null(),
         }
     }
 
@@ -564,9 +569,12 @@ impl ValueType {
             Self::Duration => unit == Some(ValueUnit::Ms),
             Self::Count => matches!(unit, None | Some(ValueUnit::Requests | ValueUnit::Bytes)),
             Self::Number => matches!(unit, None | Some(ValueUnit::Bytes)),
-            Self::Status | Self::Commit | Self::Identifier | Self::Text | Self::Boolean => {
-                unit.is_none()
-            }
+            Self::Status
+            | Self::Commit
+            | Self::Identifier
+            | Self::Text
+            | Self::Boolean
+            | Self::Any => unit.is_none(),
         }
     }
 }
@@ -711,23 +719,47 @@ pub struct CaptionTemplate {
     pub template_id: TemplateId,
     /// The text, with `{slot}` placeholders the trusted card fills.
     pub text: String,
+    /// The item classes the text describes. A caption on an item of another class is refused.
+    pub classes: Vec<ItemClass>,
+    /// The item states the text describes. A caption on an item in another state is refused.
+    pub states: Vec<ItemState>,
     /// Every slot, each of which a caption must bind.
     pub slots: BTreeMap<SlotName, SlotSpec>,
+}
+
+impl CaptionTemplate {
+    /// Whether the text describes `item`: its class and its state are both among the template's.
+    #[must_use]
+    pub fn fits(&self, item: &PlantItem) -> bool {
+        self.classes.contains(&item.class) && self.states.contains(&item.state)
+    }
 }
 
 /// The trusted caption catalog, shipped with the server and the UI.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CaptionCatalog {
-    /// Always `acan-caption-catalog/1`.
-    pub version: CaptionCatalogV1,
+    /// Always `acan-caption-catalog/2`.
+    pub version: CaptionCatalogV2,
     /// The catalog's version, which a plant view names.
     pub catalog_version: CatalogVersion,
     /// The templates.
     pub templates: Vec<CaptionTemplate>,
 }
 
+/// The catalog this build ships. The server and the page admit tours against this copy.
+const TRUSTED_CATALOG: &str = include_str!("../fixtures/caption-catalog.json");
+
 impl CaptionCatalog {
+    /// The trusted catalog, decoded from the copy this crate ships.
+    ///
+    /// # Errors
+    ///
+    /// Returns the decoder's error when the shipped copy does not parse.
+    pub fn trusted() -> Result<Self, serde_json::Error> {
+        serde_json::from_str(TRUSTED_CATALOG)
+    }
+
     /// The template `template_id` names.
     #[must_use]
     pub fn template(&self, template_id: &TemplateId) -> Option<&CaptionTemplate> {

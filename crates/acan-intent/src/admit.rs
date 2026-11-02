@@ -459,6 +459,12 @@ pub enum StepFault {
         /// The template.
         template_id: TemplateId,
     },
+    /// The template does not describe the item's class and state.
+    #[error("template {template_id} does not describe the item's class and state")]
+    TemplateDoesNotFit {
+        /// The template.
+        template_id: TemplateId,
+    },
     /// The caption binds other slots than its template declares.
     #[error("the caption does not bind exactly the slots of {template_id}")]
     SlotsDiffer {
@@ -600,6 +606,11 @@ fn bind_step(
         .ok_or_else(|| StepFault::UnknownTemplate {
             template_id: template_id.clone(),
         })?;
+    if !template.fits(item) {
+        return Err(StepFault::TemplateDoesNotFit {
+            template_id: template_id.clone(),
+        });
+    }
     if !step.caption.slots.keys().eq(template.slots.keys()) {
         return Err(StepFault::SlotsDiffer {
             template_id: template_id.clone(),

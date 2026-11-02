@@ -1,0 +1,323 @@
+{
+  "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+  "steps": [
+    {
+      "item_id": "d-login-error-body",
+      "camera": {
+        "machine_id": "auth",
+        "zoom": "machine"
+      },
+      "stage": [
+        {
+          "mark": "residue_card",
+          "item_id": "d-login-error-body"
+        },
+        {
+          "mark": "footprint",
+          "item_id": "i-login-body"
+        }
+      ],
+      "evidence_refs": [
+        {
+          "item_id": "d-login-error-body",
+          "slot": "base_a",
+          "step": "s6",
+          "field": "body.error"
+        },
+        {
+          "item_id": "d-login-error-body",
+          "slot": "candidate",
+          "step": "s6",
+          "field": "body.error"
+        }
+      ],
+      "caption": {
+        "template_id": "unspecified.authorized",
+        "slots": {
+          "base": {
+            "item_id": "d-login-error-body",
+            "slot": "base_a",
+            "step": "s6",
+            "field": "body.error"
+          },
+          "candidate": {
+            "item_id": "d-login-error-body",
+            "slot": "candidate",
+            "step": "s6",
+            "field": "body.error"
+          }
+        }
+      }
+    },
+    {
+      "item_id": "d-links-sort",
+      "camera": {
+        "machine_id": "links",
+        "zoom": "close"
+      },
+      "stage": [
+        {
+          "mark": "ruling_tag",
+          "ruling_id": "r-1"
+        },
+        {
+          "mark": "ghost",
+          "item_id": "d-links-sort"
+        }
+      ],
+      "evidence_refs": [
+        {
+          "item_id": "d-links-sort",
+          "slot": "candidate",
+          "step": "s4",
+          "field": "body.links[0].code"
+        }
+      ],
+      "caption": {
+        "template_id": "violation.ruling",
+        "slots": {
+          "candidate": {
+            "item_id": "d-links-sort",
+            "slot": "candidate",
+            "step": "s4",
+            "field": "body.links[0].code"
+          }
+        }
+      }
+    },
+    {
+      "item_id": "i-retry-after",
+      "camera": {
+        "machine_id": "ratelimit",
+        "zoom": "machine"
+      },
+      "stage": [
+        {
+          "mark": "bounced_chip",
+          "item_id": "i-retry-after"
+        },
+        {
+          "mark": "crates",
+          "item_id": "i-retry-after"
+        }
+      ],
+      "evidence_refs": [
+        {
+          "item_id": "i-retry-after",
+          "slot": "target",
+          "step": "s6",
+          "field": "header.retry-after"
+        }
+      ],
+      "caption": {
+        "template_id": "bounced.obligation_failed",
+        "slots": {
+          "target": {
+            "item_id": "i-retry-after",
+            "slot": "target",
+            "step": "s6",
+            "field": "header.retry-after"
+          }
+        }
+      }
+    },
+    {
+      "item_id": "chk-dashboard",
+      "camera": {
+        "machine_id": "dashboard",
+        "zoom": "machine"
+      },
+      "stage": [
+        {
+          "mark": "unknown",
+          "item_id": "chk-dashboard"
+        },
+        {
+          "mark": "no_probes",
+          "machine_id": "test"
+        }
+      ],
+      "evidence_refs": [
+        {
+          "item_id": "chk-dashboard",
+          "slot": "base_b",
+          "step": "s1",
+          "field": "status"
+        }
+      ],
+      "caption": {
+        "template_id": "unknown.unstable_base",
+        "slots": {
+          "base_b": {
+            "item_id": "chk-dashboard",
+            "slot": "base_b",
+            "step": "s1",
+            "field": "status"
+          }
+        }
+      }
+    },
+    {
+      "item_id": "d-links-clicks",
+      "camera": {
+        "machine_id": "links",
+        "zoom": "close"
+      },
+      "stage": [
+        {
+          "mark": "ghost",
+          "item_id": "d-links-clicks"
+        },
+        {
+          "mark": "crates",
+          "item_id": "d-links-clicks"
+        }
+      ],
+      "evidence_refs": [
+        {
+          "item_id": "d-links-clicks",
+          "slot": "base_a",
+          "step": "s4",
+          "field": "body.links[0].clicks"
+        },
+        {
+          "item_id": "d-links-clicks",
+          "slot": "candidate",
+          "step": "s4",
+          "field": "body.links[0].clicks"
+        }
+      ],
+      "caption": {
+        "template_id": "stopped.out_of_scope",
+        "slots": {
+          "base": {
+            "item_id": "d-links-clicks",
+            "slot": "base_a",
+            "step": "s4",
+            "field": "body.links[0].clicks"
+          },
+          "candidate": {
+            "item_id": "d-links-clicks",
+            "slot": "candidate",
+            "step": "s4",
+            "field": "body.links[0].clicks"
+          }
+        },
+        "text": "Base answered 0; the candidate answers no value. Out of scope, and the repair budget is spent."
+      }
+    },
+    {
+      "item_id": "chk-links-delete",
+      "camera": {
+        "machine_id": "links",
+        "zoom": "machine"
+      },
+      "stage": [
+        {
+          "mark": "unknown",
+          "item_id": "chk-links-delete"
+        }
+      ],
+      "evidence_refs": [
+        {
+          "item_id": "chk-links-delete",
+          "slot": "base_a",
+          "step": "s3",
+          "field": "status"
+        }
+      ],
+      "caption": {
+        "template_id": "unknown.incomparable",
+        "slots": {
+          "base_a": {
+            "item_id": "chk-links-delete",
+            "slot": "base_a",
+            "step": "s3",
+            "field": "status"
+          }
+        }
+      }
+    },
+    {
+      "item_id": "chk-signup-store",
+      "camera": {
+        "machine_id": "store",
+        "zoom": "machine"
+      },
+      "stage": [
+        {
+          "mark": "unknown",
+          "item_id": "chk-signup-store"
+        }
+      ],
+      "evidence_refs": [
+        {
+          "item_id": "chk-signup-store",
+          "slot": "base_a",
+          "step": "s1",
+          "field": "status"
+        }
+      ],
+      "caption": {
+        "template_id": "unknown.error",
+        "slots": {
+          "base_a": {
+            "item_id": "chk-signup-store",
+            "slot": "base_a",
+            "step": "s1",
+            "field": "status"
+          }
+        }
+      }
+    },
+    {
+      "item_id": "i-login-limit",
+      "camera": {
+        "machine_id": "ratelimit",
+        "zoom": "fit"
+      },
+      "stage": [
+        {
+          "mark": "crates",
+          "item_id": "i-login-limit"
+        },
+        {
+          "mark": "must_keep_pin",
+          "must_keep_id": "mk-login-ok"
+        },
+        {
+          "mark": "question_pin",
+          "choice_id": "c-window"
+        },
+        {
+          "mark": "order_plate"
+        }
+      ],
+      "evidence_refs": [
+        {
+          "item_id": "i-login-limit",
+          "slot": "candidate",
+          "step": "s6",
+          "field": "status"
+        },
+        {
+          "item_id": "i-login-limit",
+          "slot": "prediction",
+          "step": "s6",
+          "field": "status"
+        }
+      ],
+      "caption": {
+        "template_id": "fulfilled.obligations",
+        "slots": {
+          "candidate": {
+            "item_id": "i-login-limit",
+            "slot": "candidate",
+            "step": "s6",
+            "field": "status"
+          }
+        }
+      }
+    }
+  ]
+}

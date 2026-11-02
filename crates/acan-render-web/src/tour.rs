@@ -1,26 +1,21 @@
 //! The tour the page plays over one receipt snapshot: the walk the camera takes, the marks each step
 //! stages, and the captions it shows, all admitted from one `plant-view/1` view.
 //!
-//! The view may carry a tour: the director's proposal, or the origin's own deterministic order.
-//! This module admits it through [`admit::tour`], the one admission path. When the view has no
-//! tour, or the tour is not admitted, the page builds the deterministic order from the view and
-//! admits that the same way. Captions are catalog templates whose slots take copies of evidence
-//! rows, so no model prose is ever shown. Nothing here changes a class, count or denominator: the
-//! page draws those from the view, and a tour only orders the walk over them.
-
-use std::collections::BTreeMap;
+//! The view may carry a tour: the director's proposal. This module admits it through
+//! [`admit::tour`], the one admission path. When the view has no tour, or the proposal is not
+//! admitted, the page plays [`acan_intent::deterministic`], the same order the server builds from
+//! the same view. Captions are catalog templates whose slots take copies of evidence rows, so no
+//! model prose is ever shown. Nothing here changes a class, count or denominator: the page draws
+//! those from the view, and a tour only orders the walk over them.
 
 use acan_intent::admit::{self, TourRejection};
 use acan_intent::{
-    BoundItemView, Camera, Caption, CaptionCatalog, CaptionTemplate, CommitSha, EvidenceRef,
-    GateState, ItemClass, ItemId, ItemState, MachineId, MarkRef, ModelRef, NonEmpty, OrderRef,
-    PlantCounts, PlantItem, PlantView, ReceiptHash, Tour, TourStep, TourView, ZoomLevel,
+    BoundItemView, CaptionCatalog, CaptionTemplate, CommitSha, DeterministicError, GateState,
+    ItemClass, ItemId, ItemState, MachineId, MarkRef, ModelRef, OrderRef, PlantCounts, PlantView,
+    ReceiptHash, Tour, TourStep, TourView, ZoomLevel,
 };
 use serde::Serialize;
 use serde_json::Value;
-
-/// The caption catalog the page admits tours against. Each view names its version.
-const CATALOG: &str = include_str!("../../acan-intent/fixtures/caption-catalog.json");
 
 /// Milliseconds one step's camera move takes.
 pub const MOVE_MS: f32 = 600.0;
@@ -33,7 +28,8 @@ const MACHINE_RATIO: f32 = 2.5;
 /// The zoom of a close-up step, as a share of the fit zoom.
 const CLOSE_RATIO: f32 = 4.0;
 
-/// Why a view has no tour the page can play.
+/// Why a view has no tour the page can play. The plate shows these messages, so each says what
+/// happened in plain words and that every item is still listed.
 #[derive(Debug, thiserror::Error)]
 pub enum PlayError {
     /// The text is not a `plant-view/1` view.
@@ -42,9 +38,17 @@ pub enum PlayError {
     /// The counts the view states do not match its own items.
     #[error("the view's counts do not match its items: {0}")]
     Counts(String),
-    /// The page cannot build a deterministic order the trusted admission accepts.
-    #[error("no tour can be played for this view: {0}")]
+    /// No deterministic order is admitted for this view.
+    #[error("This receipt cannot be walked: {0}. Every item is listed below.")]
     NoTour(String),
+    /// A mandatory item has no caption its evidence fills, so the walk cannot visit it.
+    #[error(
+        "This receipt cannot be walked: item {item_id} has no caption its evidence fills. Every item is listed below."
+    )]
+    Unbindable {
+        /// The item.
+        item_id: ItemId,
+    },
     /// The caption catalog cannot bind a caption for this view.
     #[error("the caption catalog cannot bind this view: {0}")]
     Catalog(String),
@@ -172,7 +176,7 @@ pub fn play(json: &str) -> Result<Play, PlayError> {
             ),
         },
     };
-    let tour = built_tour(&view, &catalog)?;
+    let tour = deterministic_tour(&view)?;
     let bound = admit::tour(&view, &catalog, &tour)
         .map_err(|rejection| PlayError::NoTour(rejection.to_string()))?;
     assemble(
@@ -184,6 +188,16 @@ pub fn play(json: &str) -> Result<Play, PlayError> {
         &bound,
         note,
     )
+}
+
+/// The deterministic order of `view`, built and admitted by acan-intent. The server builds the same
+/// walk from the same view.
+fn deterministic_tour(view: &PlantView) -> Result<Tour, PlayError> {
+    acan_intent::deterministic(view).map_err(|err| match err {
+        DeterministicError::Unbindable { item_id, .. } => PlayError::Unbindable { item_id },
+        DeterministicError::Catalog(err) => PlayError::Catalog(err.to_string()),
+        other => PlayError::NoTour(other.to_string()),
+    })
 }
 
 /// The note the page shows when the view's tour is refused.
@@ -222,7 +236,7 @@ pub fn progress(from: Pose, to: Pose, elapsed_ms: f32) -> Pose {
 }
 
 fn catalog() -> Result<CaptionCatalog, PlayError> {
-    serde_json::from_str(CATALOG).map_err(|err| PlayError::Catalog(err.to_string()))
+    CaptionCatalog::trusted().map_err(|err| PlayError::Catalog(err.to_string()))
 }
 
 /// Builds the played result from an admitted tour and its bound captions.
@@ -335,153 +349,6 @@ fn stage_label(mark: &MarkRef) -> String {
     }
 }
 
-/// The deterministic order: residue items, then ruling violations, then bounced items, then the
-/// other items a tour must reach, then fulfilled items. Each item takes the template its class and
-/// state name. Items that are neither mandatory nor fulfilled are not walked.
-fn built_tour(view: &PlantView, catalog: &CaptionCatalog) -> Result<Tour, PlayError> {
-    let mut items: Vec<&PlantItem> = view
-        .items
-        .iter()
-        .filter(|item| item.is_mandatory() || item.class == ItemClass::ObligationFulfilled)
-        .collect();
-    items.sort_by_key(|item| order_group(item));
-    let steps = items
-        .into_iter()
-        .map(|item| built_step(view, catalog, item))
-        .collect::<Result<Vec<_>, _>>()?;
-    let steps = NonEmpty::try_from(steps)
-        .map_err(|_| PlayError::NoTour("the view has no item to walk".to_owned()))?;
-    Ok(Tour {
-        receipt_hash: view.receipt_hash,
-        steps,
-    })
-}
-
-fn order_group(item: &PlantItem) -> u8 {
-    if item.state == ItemState::Residue {
-        0
-    } else if item.class == ItemClass::ViolatesRuling {
-        1
-    } else if item.state == ItemState::Bounced {
-        2
-    } else if item.is_mandatory() {
-        3
-    } else {
-        4
-    }
-}
-
-fn built_step(
-    view: &PlantView,
-    catalog: &CaptionCatalog,
-    item: &PlantItem,
-) -> Result<TourStep, PlayError> {
-    let name = template_for(item).ok_or_else(|| {
-        PlayError::NoTour(format!("item {} has no caption template", item.item_id))
-    })?;
-    let template = catalog
-        .templates
-        .iter()
-        .find(|template| template.template_id.as_str() == name)
-        .ok_or_else(|| PlayError::Catalog(format!("template {name} is missing")))?;
-    let slots = template
-        .slots
-        .iter()
-        .map(|(slot, spec)| {
-            let row = item
-                .evidence
-                .iter()
-                .find(|row| spec.check(row).is_ok())
-                .ok_or_else(|| {
-                    PlayError::NoTour(format!("item {} has no row for slot {slot}", item.item_id))
-                })?;
-            let reference = EvidenceRef {
-                item_id: item.item_id.clone(),
-                slot: row.slot,
-                step: row.step.clone(),
-                field: row.field.clone(),
-            };
-            Ok((slot.clone(), reference))
-        })
-        .collect::<Result<BTreeMap<_, _>, PlayError>>()?;
-    Ok(TourStep {
-        item_id: item.item_id.clone(),
-        camera: Camera {
-            machine_id: item.machine_id.clone(),
-            zoom: zoom_for(item),
-        },
-        stage: stage_for(view, item),
-        evidence_refs: slots.values().cloned().collect(),
-        caption: Caption {
-            template_id: template.template_id.clone(),
-            slots,
-        },
-    })
-}
-
-/// The template of an item's caption, by class first, so an unknown class never takes a template
-/// of another state. Each template says only what its item is: an item the catalog has no fitting
-/// template for is `None`, and the built order is refused rather than captioned untruthfully.
-fn template_for(item: &PlantItem) -> Option<&'static str> {
-    match (item.state, item.class) {
-        (ItemState::Residue, _) => Some("residue.changed_value"),
-        (_, ItemClass::ViolatesRuling) => Some("violation.ruling"),
-        (_, ItemClass::UnstableBase) => Some("unknown.unstable_base"),
-        (_, ItemClass::Incomparable) => Some("unknown.incomparable"),
-        (_, ItemClass::Error) => Some("unknown.error"),
-        (ItemState::Stopped, ItemClass::OutOfScope) => Some("stopped.out_of_scope"),
-        (_, ItemClass::OutOfScope) => Some("residue.changed_value"),
-        (_, ItemClass::ObligationFailed) => Some("bounced.obligation_failed"),
-        (_, ItemClass::ObligationFulfilled) => Some("fulfilled.obligations"),
-        (ItemState::Bounced, _) => Some("bounced.obligation_failed"),
-        _ => None,
-    }
-}
-
-fn zoom_for(item: &PlantItem) -> ZoomLevel {
-    match (item.state, item.class) {
-        (ItemState::Residue | ItemState::Stopped, _) | (_, ItemClass::ViolatesRuling) => {
-            ZoomLevel::Close
-        }
-        _ => ZoomLevel::Machine,
-    }
-}
-
-/// The marks a step stages. Each is one the view draws for this item, so admission accepts it.
-fn stage_for(view: &PlantView, item: &PlantItem) -> Vec<MarkRef> {
-    let item_id = item.item_id.clone();
-    let mut marks = Vec::new();
-    match item.state {
-        ItemState::Residue => marks.push(MarkRef::ResidueCard {
-            item_id: item_id.clone(),
-        }),
-        ItemState::Bounced => marks.push(MarkRef::BouncedChip {
-            item_id: item_id.clone(),
-        }),
-        _ => {}
-    }
-    if let Some(ruling_id) = item.ruling_id.as_ref().filter(|ruling_id| {
-        view.machines
-            .iter()
-            .flat_map(|machine| &machine.rulings)
-            .any(|tag| &tag.ruling_id == *ruling_id)
-    }) {
-        marks.push(MarkRef::RulingTag {
-            ruling_id: ruling_id.clone(),
-        });
-    }
-    if matches!(
-        item.class,
-        ItemClass::UnstableBase | ItemClass::Incomparable | ItemClass::Error
-    ) {
-        marks.push(MarkRef::Unknown {
-            item_id: item_id.clone(),
-        });
-    }
-    marks.push(MarkRef::Crates { item_id });
-    marks
-}
-
 /// Keeps only the named fields of a JSON object. A tour's structs declare these fields; a field
 /// a later contract adds is dropped here, because admission never reads it.
 fn keep(value: &mut Value, fields: &[&str]) {
@@ -526,7 +393,10 @@ fn known_step(step: &mut Value) {
             keep(reference, REF_FIELDS);
         }
     }
-    if let Some(caption) = step.get_mut("caption") {
+    // A caption that carries its own text is a literal, and captions never carry literals. It is left
+    // whole, so it fails to decode and the page plays the deterministic order, as the server does.
+    let literal = step["caption"].get("text").is_some();
+    if let Some(caption) = step.get_mut("caption").filter(|_| !literal) {
         keep(caption, &["template_id", "slots"]);
         if let Some(slots) = caption.get_mut("slots").and_then(Value::as_object_mut) {
             for reference in slots.values_mut() {
@@ -752,18 +622,30 @@ mod tests {
     }
 
     #[test]
-    fn fields_a_later_contract_adds_are_ignored_and_a_literal_caption_field_is_never_shown() {
+    fn a_later_contracts_extra_step_fields_are_ignored() {
         let json = edited(|value| {
             let index = step_of(value, "i-login-limit");
             value["tour"]["tour"]["steps"][index]["confidence"] = 0.9.into();
-            value["tour"]["tour"]["steps"][index]["caption"]["text"] = "Literal words.".into();
             value["tour"]["tour"]["steps"][index]["camera"]["angle"] = 40.into();
         });
         let play = play(&json).expect("the directed tour plays");
         assert_eq!(play.mode, Mode::Directed);
-        let caption = &step(&play, "i-login-limit").caption;
-        assert_eq!(caption, "The candidate answers 429, as the scope asked.");
-        assert!(!caption.contains("Literal"));
+        assert_eq!(
+            step(&play, "i-login-limit").caption,
+            "The candidate answers 429, as the scope asked."
+        );
+    }
+
+    #[test]
+    fn a_caption_that_carries_its_own_text_is_refused_and_the_built_order_plays() {
+        let json = edited(|value| {
+            let index = step_of(value, "i-login-limit");
+            value["tour"]["tour"]["steps"][index]["caption"]["text"] = "Literal words.".into();
+        });
+        let play = play(&json).expect("the built order plays");
+        assert_eq!(play.mode, Mode::Deterministic);
+        assert!(play.note.contains("could not be read"), "{}", play.note);
+        assert!(!step(&play, "i-login-limit").caption.contains("Literal"));
     }
 
     #[test]
@@ -886,17 +768,18 @@ mod tests {
     }
 
     #[test]
-    fn an_open_out_of_scope_item_with_a_number_base_is_refused_not_captioned_as_stopped() {
+    fn an_open_out_of_scope_item_is_captioned_as_changed_not_as_stopped() {
         let json = plain_edited(|value| {
             plain_item(value, "d-links-clicks")["state"] = "open".into();
         });
-        let err = play(&json).expect_err("no text caption fits a number base");
-        assert!(matches!(err, PlayError::NoTour(_)), "{err}");
-        assert!(err.to_string().contains("no row for slot base"), "{err}");
+        let play = play(&json).expect("the changed-value caption fits an open item");
+        let caption = &step(&play, "d-links-clicks").caption;
+        assert!(caption.contains("No scope item covers it."), "{caption}");
+        assert!(!caption.contains("repair budget"), "{caption}");
     }
 
     #[test]
-    fn a_class_the_catalog_has_no_caption_for_refuses_the_built_order() {
+    fn an_authorized_item_with_no_check_is_captioned_as_unspecified() {
         let json = plain_edited(|value| {
             plain_item(value, "d-links-clicks")["class"] = "authorized_but_unspecified".into();
             let by_class = &mut value["counts"]["by_class"];
@@ -907,8 +790,81 @@ mod tests {
                 .expect("a count");
             by_class["authorized_but_unspecified"] = (authorized + 1).into();
         });
-        let err = play(&json).expect_err("no caption fits the item");
-        assert!(matches!(err, PlayError::NoTour(_)), "{err}");
-        assert!(err.to_string().contains("d-links-clicks"), "{err}");
+        let play = play(&json).expect("the unspecified caption fits the item");
+        let caption = &step(&play, "d-links-clicks").caption;
+        assert!(
+            caption.starts_with("The scope allows this change, and no obligation checks it."),
+            "{caption}"
+        );
+    }
+
+    #[test]
+    fn a_mandatory_item_with_no_caption_refuses_the_walk_plainly_and_names_it() {
+        let json = plain_edited(|value| {
+            plain_item(value, "chk-health")["state"] = "bounced".into();
+        });
+        let err = play(&json).expect_err("no caption covers a bounced preserved item");
+        assert!(
+            matches!(&err, PlayError::Unbindable { item_id } if item_id.to_string() == "chk-health"),
+            "{err}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.starts_with("This receipt cannot be walked: item chk-health"),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("Every item is listed below."),
+            "{message}"
+        );
+    }
+
+    /// The directed fixture with its tour replaced by `tour`, one of the spec's invalid tours.
+    fn with_tour(tour: &str) -> String {
+        let mut value: Value = serde_json::from_str(DIRECTED).expect("the fixture is JSON");
+        value["tour"]["tour"] = serde_json::from_str(tour).expect("the invalid tour is JSON");
+        value.to_string()
+    }
+
+    #[test]
+    fn the_four_invalid_tours_from_the_spec_are_refused_and_the_built_order_plays() {
+        let cases = [
+            (
+                include_str!("../../acan-intent/fixtures/invalid-tour-missing-mandatory.json"),
+                "is not reached",
+            ),
+            (
+                include_str!("../../acan-intent/fixtures/invalid-tour-unknown-ref.json"),
+                "names no evidence row",
+            ),
+            (
+                include_str!("../../acan-intent/fixtures/invalid-tour-literal-caption.json"),
+                "could not be read",
+            ),
+            (
+                include_str!("../../acan-intent/fixtures/invalid-tour-swapped-base-candidate.json"),
+                "another column",
+            ),
+        ];
+        for (tour, reason) in cases {
+            let play = play(&with_tour(tour)).expect("the built order plays");
+            assert_eq!(play.mode, Mode::Deterministic, "{reason}");
+            assert!(play.note.contains(reason), "{}", play.note);
+            for item in play.items.iter().filter(|item| item.mandatory) {
+                assert!(item.reached, "{} is mandatory and reached", item.item_id);
+            }
+        }
+    }
+
+    #[test]
+    fn a_caption_whose_template_does_not_describe_its_item_is_refused() {
+        let json = edited(|value| {
+            let index = step_of(value, "d-links-sort");
+            value["tour"]["tour"]["steps"][index]["caption"]["template_id"] =
+                "stopped.out_of_scope".into();
+        });
+        let play = play(&json).expect("the built order plays");
+        assert_eq!(play.mode, Mode::Deterministic);
+        assert!(play.note.contains("does not describe"), "{}", play.note);
     }
 }

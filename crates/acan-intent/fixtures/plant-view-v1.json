@@ -1150,7 +1150,7 @@
             }
           ],
           "caption": {
-            "template_id": "residue.changed_value",
+            "template_id": "unspecified.authorized",
             "slots": {
               "base": {
                 "item_id": "d-login-error-body",
@@ -1439,5 +1439,5 @@
       ]
     }
   },
-  "catalog_version": "captions-1"
+  "catalog_version": "captions-2"
 }

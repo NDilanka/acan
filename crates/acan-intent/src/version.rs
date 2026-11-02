@@ -123,6 +123,7 @@ literal_tag!(
     CardV1 = "acan-card/1", "version"
 );
 literal_tag!(
-    /// Version of [`crate::CaptionCatalog`].
-    CaptionCatalogV1 = "acan-caption-catalog/1", "version"
+    /// Version of [`crate::CaptionCatalog`]. Version 2 gives each template the classes and states
+    /// it describes.
+    CaptionCatalogV2 = "acan-caption-catalog/2", "version"
 );
