@@ -13,6 +13,7 @@ use acan_core::{
 };
 use serde::Serialize;
 
+use crate::feed::Entry;
 use crate::plan::Plan;
 
 /// Where the first agent's body sits inside its machine, in world units from the corner.
@@ -34,6 +35,9 @@ pub struct Mirror {
     runs: BTreeMap<TaskId, GateRunId>,
     /// The word a task's change shows: the first symbol its last declaration named.
     changes: BTreeMap<TaskId, String>,
+    /// Events passed over because this build cannot read them, or because the world refused one
+    /// after such an event. Above zero, the page is older than the origin.
+    not_shown: u32,
 }
 
 impl Mirror {
@@ -43,16 +47,32 @@ impl Mirror {
     ///
     /// Returns the replay error when the log does not replay.
     pub fn from_log(log: Vec<Stamped>) -> Result<Self, ReplayError> {
-        let replica = Replica::from_log(log.iter().cloned())?;
+        Self::from_entries(log.into_iter().map(Entry::Known))
+    }
+
+    /// Folds a log read one event at a time. An event this build cannot read is passed over and
+    /// counted in [`Mirror::not_shown`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the replay error when the log does not replay, or when its first event is not a
+    /// readable `WorldOpened`.
+    pub fn from_entries(entries: impl IntoIterator<Item = Entry>) -> Result<Self, ReplayError> {
+        let mut entries = entries.into_iter();
+        let Some(Entry::Known(first)) = entries.next() else {
+            return Err(ReplayError::NotOpened);
+        };
         let mut mirror = Self {
-            replica,
+            replica: Replica::from_log([first.clone()])?,
             agents: Vec::new(),
             holders: BTreeMap::new(),
             runs: BTreeMap::new(),
             changes: BTreeMap::new(),
+            not_shown: 0,
         };
-        for stamped in &log {
-            mirror.note(stamped);
+        mirror.note(&first);
+        for entry in entries {
+            mirror.ingest_entry(entry)?;
         }
         Ok(mirror)
     }
@@ -68,6 +88,42 @@ impl Mirror {
         self.replica.ingest(stamped)?;
         if fresh {
             self.note(stamped);
+        }
+        Ok(())
+    }
+
+    /// Applies one entry of the log or the stream. An event this build cannot read is passed over
+    /// and counted. Once one has been passed over, an event the world refuses is passed over too:
+    /// the event it depends on may be one this build cannot read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReplayError::SeqGap`] when events were missed. Returns the replica's error for an
+    /// event the world refuses when nothing has been passed over yet.
+    pub fn ingest_entry(&mut self, entry: Entry) -> Result<(), ReplayError> {
+        match entry {
+            Entry::Unknown(seq) => self.pass_over(seq),
+            Entry::Known(stamped) => match self.ingest(&stamped) {
+                Err(ReplayError::InvalidEvent { .. }) if self.not_shown > 0 => {
+                    self.pass_over(stamped.seq)
+                }
+                other => other,
+            },
+        }
+    }
+
+    /// The number of events this page passed over. Above zero, the page is older than the origin.
+    #[must_use]
+    pub fn not_shown(&self) -> u32 {
+        self.not_shown
+    }
+
+    /// Moves the replica past one position without applying its event.
+    fn pass_over(&mut self, seq: Seq) -> Result<(), ReplayError> {
+        let before = self.replica.next_seq();
+        self.replica.skip(seq)?;
+        if self.replica.next_seq() != before {
+            self.not_shown += 1;
         }
         Ok(())
     }
@@ -689,6 +745,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::feed;
     use crate::plant::from_scan_json;
     use crate::scenario::{self, Target};
 
@@ -913,6 +970,80 @@ mod tests {
             Err(ReplayError::SeqGap { .. })
         ));
         assert_eq!(mirror.next_seq(), next);
+    }
+
+    /// The event at `stamped`'s position, as this build does not know it.
+    fn unread_at(stamped: &Stamped) -> serde_json::Value {
+        let mut value = serde_json::to_value(stamped).expect("an event serializes");
+        value["event"] = json!({ "type": "vision_checked", "task": "t-1" });
+        value
+    }
+
+    #[test]
+    fn a_log_with_an_event_this_build_cannot_read_folds_past_it() {
+        let (_origin, log, _index) = scripted();
+        let count = log.len();
+        let mut values: Vec<serde_json::Value> = log
+            .iter()
+            .map(|stamped| serde_json::to_value(stamped).expect("an event serializes"))
+            .collect();
+        values[count - 2] = unread_at(&log[count - 2]);
+
+        let entries = feed::entries(&serde_json::Value::Array(values).to_string())
+            .expect("the log parses one event at a time");
+        let mirror = Mirror::from_entries(entries).expect("the log folds past the unread event");
+        assert_eq!(mirror.not_shown(), 1);
+        assert_eq!(
+            mirror.next_seq(),
+            Seq::new(u64::try_from(count).expect("a short log"))
+        );
+    }
+
+    #[test]
+    fn a_streamed_event_this_build_cannot_read_does_not_stop_the_next_one() {
+        let (_origin, log, _index) = scripted();
+        let count = log.len();
+        let mut mirror = Mirror::from_log(log[..count - 2].to_vec()).expect("the prefix replays");
+
+        let unread = feed::entry(&unread_at(&log[count - 2]).to_string()).expect("it parses");
+        let next = feed::entry(&serde_json::to_string(&log[count - 1]).expect("it serializes"))
+            .expect("it parses");
+        mirror
+            .ingest_entry(unread)
+            .expect("the unread event is passed over");
+        mirror.ingest_entry(next).expect("the event after it folds");
+        assert_eq!(mirror.not_shown(), 1);
+        assert_eq!(
+            mirror.next_seq(),
+            Seq::new(u64::try_from(count).expect("a short log"))
+        );
+    }
+
+    #[test]
+    fn a_refused_event_is_passed_over_only_after_one_this_build_cannot_read() {
+        let (_origin, log, _index) = scripted();
+        let next = Seq::new(u64::try_from(log.len()).expect("a short log"));
+        // A second `WorldOpened` is refused by the world wherever it sits.
+        let mut refused = log[0].clone();
+        refused.seq = next;
+        let mut mirror = Mirror::from_log(log).expect("the log replays");
+
+        assert!(matches!(
+            mirror.ingest_entry(Entry::Known(refused.clone())),
+            Err(ReplayError::InvalidEvent { .. })
+        ));
+        assert_eq!(mirror.next_seq(), next);
+        assert_eq!(mirror.not_shown(), 0);
+
+        mirror
+            .ingest_entry(Entry::Unknown(next))
+            .expect("the unread event is passed over");
+        refused.seq = Seq::new(next.get() + 1);
+        mirror
+            .ingest_entry(Entry::Known(refused))
+            .expect("the refused event is passed over once one was");
+        assert_eq!(mirror.not_shown(), 2);
+        assert_eq!(mirror.next_seq(), Seq::new(next.get() + 2));
     }
 
     /// Runs one command as `actor` at a fixed time, and returns the events it appended.

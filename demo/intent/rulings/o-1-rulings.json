@@ -1,7 +1,8 @@
 {
   "schema": "acan-demo-intent-rulings/1",
   "order": "o-1",
-  "note": "Human rulings on out-of-scope differences in a candidate's receipt. Each rule names the field it covers and the candidate state it applies to, and says what the human accepts. ruling.ps1 turns each rule into a standing predicate on one step of the candidate, and records one ruling per episode and step through the member HTTP API (record_ruling). Nothing here is a verdict: the gate evaluates each ruling on every probe its selector reaches, and a probe that fails it becomes violates_ruling.",
+  "decided_by": "coordinator, delegated by the owner",
+  "note": "Rulings on out-of-scope differences in an o-1 candidate's receipt. The owner delegated these decisions to the build coordinator (an AI agent); they are sent with the owner's member token and are labelled as delegated, not human. ruling.ps1 turns each rule into a standing predicate and records it through the member HTTP API (record_ruling). Nothing here is a verdict: the gate evaluates each ruling where its field differs, and a probe that fails it becomes violates_ruling. Generated ids, tokens, session cookies, codes and hashes are not ruled here: the protected probe manifest declares them maskable and the gate compares them by format against the base.",
   "rules": [
     {
       "id": "rl-request-id-opaque",
@@ -9,55 +10,24 @@
       "candidate": "present",
       "rule": "uuid",
       "label": "x-request-id is an opaque random id, not identity",
-      "reason": "The order does not mention a request id. A random UUID per response identifies the request and carries no user name, so it is accepted. A value that carries a user name is not accepted by this rule and would be reported as violating it."
+      "reason": "The order does not mention a request id. A random UUID per response identifies the request and carries no user name, so it is accepted. A value that carries a user name is not accepted by this rule and is reported as violating it."
     },
     {
-      "id": "rl-over-limit-status",
-      "field": "^status$",
-      "candidate": "any",
-      "rule": "status_429",
-      "label": "the over-limit answer is 429",
-      "reason": "The status differs only where the candidate answers 429 to a request over the limit. The order asks for 429 there, so the status step is accepted at that step."
+      "id": "rl-429-body-error",
+      "field": "^body\\.error$",
+      "candidate": "present",
+      "rule": "equals",
+      "value": "too many requests",
+      "label": "an over-limit answer's body carries only the error",
+      "reason": "The o-1 scope already allows the 429 body change through its may items; the bounced m-overfit candidate's difference is the same allowed change. (D02Q)"
     },
     {
-      "id": "rl-over-limit-body-absent",
-      "field": "^body\\.",
+      "id": "rl-429-body-fields-absent",
+      "field": "^body\\.(clicks|shortPath|createdAt|code|target)$",
       "candidate": "missing",
-      "rule": "status_429",
-      "label": "a 429 answer has no link body",
-      "reason": "The base answers the same request 201 with a link, and the over-limit answer has no link body. Accepted where the candidate answers 429."
-    },
-    {
-      "id": "rl-over-limit-body-present",
-      "field": "^body\\.",
-      "candidate": "present",
-      "rule": "present",
-      "label": "the over-limit body carries an error or a generated value",
-      "reason": "A rejected request creates no link, so later generated values (codes, paths, counts) can differ from the base. The field is accepted when the candidate has a value; the value itself is not compared."
-    },
-    {
-      "id": "rl-cookie-session-present",
-      "field": "^cookie\\.session$",
-      "candidate": "present",
-      "rule": "present",
-      "label": "the session cookie is a random token per login",
-      "reason": "The session cookie is issued per login and holds a random token, so its value differs between runs. The field is accepted when the candidate sets it; the value is not compared."
-    },
-    {
-      "id": "rl-stored-user-id-present",
-      "field": "^side_effect\\.store\\.users\\[\\d+\\]\\.id$",
-      "candidate": "present",
-      "rule": "present",
-      "label": "the stored user id is a generated identifier",
-      "reason": "The stored user's id is generated on signup, so its value differs between runs. The field is accepted when the candidate stores the user; the value is not compared."
-    },
-    {
-      "id": "rl-stored-password-hash-present",
-      "field": "^side_effect\\.store\\.users\\[\\d+\\]\\.passwordHash$",
-      "candidate": "present",
-      "rule": "present",
-      "label": "the stored password hash is salted per write",
-      "reason": "The stored password hash is salted when it is written, so its value differs between runs with the same password. The field is accepted when the candidate stores a hash; the value is not compared. This is a human relaxation of the comparison, recorded as such: the predicate checks presence, not that the value is a hash."
+      "rule": "absent",
+      "label": "an over-limit answer's body carries only the error",
+      "reason": "The o-1 scope already allows the 429 body change through its may items; the bounced m-overfit candidate's difference is the same allowed change, and its 429 body drops the link fields. (D02Q)"
     }
   ]
 }

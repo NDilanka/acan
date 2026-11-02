@@ -1,0 +1,352 @@
+{
+  "order": "o-3",
+  "episode": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "scope_hash": "sha256:ed58ef8d58d4e29959f80110656bbaeb9d82ad3e12eb5baa5f80ac6bf5ce2d3e",
+  "ledger_head": { "event_seq": 2, "hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" },
+  "selector": {"surface":"http","method":"POST","route_template":"/api/login","step_context":{"kind":"any"},"principal":{"kind":"anonymous"},"channel":"status"},
+  "probe_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "ruled_on": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "normalization_version": "acan-normalization/1",
+  "normalization_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "examples": [
+    {
+      "run": "r-1",
+      "hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "probe_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "normalization_version": "acan-normalization/1",
+      "normalization_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "example": {
+  "version": "acan-contrast-example/1",
+  "probe": {
+    "label": "links-create-delete",
+    "spec": {
+      "surface": "http",
+      "fixture": "f-alice",
+      "steps": [
+        {
+          "step": "http",
+          "id": "s1",
+          "actor": "alice",
+          "client": "client-a",
+          "request": {
+            "method": "POST",
+            "path": "/api/links",
+            "body": {
+              "url": "https://example.test/a"
+            }
+          },
+          "redirect": "manual",
+          "deadline_ms": 2000
+        },
+        {
+          "step": "capture",
+          "id": "s2",
+          "from": "s1",
+          "source": {
+            "part": "body",
+            "path": "code"
+          },
+          "binding": "link_code",
+          "kind": "identifier"
+        },
+        {
+          "step": "http",
+          "id": "s3",
+          "actor": "alice",
+          "client": "client-a",
+          "request": {
+            "method": "DELETE",
+            "path": "/api/links/${link_code}",
+            "headers": {
+              "x-request-id": "probe-${link_code}"
+            }
+          },
+          "redirect": "manual",
+          "deadline_ms": 2000
+        },
+        {
+          "step": "http",
+          "id": "s4",
+          "actor": "alice",
+          "client": "client-a",
+          "request": {
+            "method": "GET",
+            "path": "/api/links"
+          },
+          "redirect": "manual",
+          "deadline_ms": 2000
+        }
+      ]
+    },
+    "origin": "ruling",
+    "route_path": {
+      "machines": [
+        "server",
+        "middleware",
+        "ratelimit",
+        "auth",
+        "links",
+        "store"
+      ],
+      "source": "static"
+    },
+    "normalization": {
+      "version": "norm/1",
+      "typed_captures": [
+        {
+          "binding": "alice_session",
+          "kind": "session"
+        },
+        {
+          "binding": "link_code",
+          "kind": "identifier"
+        }
+      ],
+      "projections": [
+        {
+          "path": "cookie.session",
+          "kind": {
+            "kind": "canonical_identity",
+            "binding": "alice_session"
+          }
+        },
+        {
+          "path": "body.token",
+          "kind": {
+            "kind": "redact_secret"
+          }
+        }
+      ],
+      "relations": [
+        {
+          "kind": "equal",
+          "paths": [
+            {
+              "step_id": "f2",
+              "path": "cookie.session"
+            }
+          ]
+        },
+        {
+          "kind": "unique",
+          "paths": [
+            {
+              "step_id": "s4",
+              "path": "body.links[*].code"
+            }
+          ]
+        },
+        {
+          "kind": "references",
+          "from": {
+            "step_id": "s1",
+            "path": "body.code"
+          },
+          "to": {
+            "step_id": "s4",
+            "path": "body.links[*].code"
+          }
+        }
+      ],
+      "maskable_paths": [
+        "cookie.session",
+        "body.links[*].code",
+        "side_effect.store.users[*].created_at"
+      ]
+    }
+  },
+  "fixture": {
+    "id": "f-alice",
+    "recipe": [
+      {
+        "step": "http",
+        "id": "f1",
+        "client": "client-a",
+        "request": {
+          "method": "POST",
+          "path": "/api/signup",
+          "body": {
+            "email": "alice@example.test",
+            "password": "alice-pass-1"
+          }
+        },
+        "redirect": "manual",
+        "deadline_ms": 2000
+      },
+      {
+        "step": "http",
+        "id": "f2",
+        "client": "client-a",
+        "request": {
+          "method": "POST",
+          "path": "/api/login",
+          "body": {
+            "email": "alice@example.test",
+            "password": "alice-pass-1"
+          }
+        },
+        "redirect": "manual",
+        "deadline_ms": 2000
+      },
+      {
+        "step": "capture",
+        "id": "f3",
+        "from": "f2",
+        "source": {
+          "part": "cookie",
+          "name": "session"
+        },
+        "binding": "alice_session",
+        "kind": "session",
+        "actor": "alice"
+      }
+    ],
+    "isolation": "fresh_instance",
+    "runner_contract": "acan-runner/1"
+  },
+  "context": {
+    "protected_head": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+    "merged_commit": "6f1c2a9e4b7d3058c1e2f9a0b4d6c8e1f3a5b7c9",
+    "effective_artifact_hashes": {
+      "bun.lock": "sha256:5dd3909fd7cc889f9d3635f02a8b1eb462eaf95a85f550fad2aae6ef409f7b54"
+    },
+    "ledger_head": {
+      "event_seq": 0
+    },
+    "scope_hash": "sha256:ab2d2883c994bc3d9c7555b4eeba14752aa8af8fd473544361960cfea13a03ba",
+    "probe_set_hash": "sha256:08cbc55fe91e0a7d35d66a97b619a7931d518dccb0a3268d75ab7b9eac74af03",
+    "runner_hash": "sha256:02b428f772fbef62ede2b5c9d022c4e49f7e17dbed2e7a396f402aad28a24b47",
+    "evaluator_version": "acan-intent/0.1.0",
+    "runtime": "bun-1.4.4",
+    "controlled_env_hash": "sha256:96f3b648e7620cf579630eeb0f7234347766890e6ea45f8d4fe429c791493989",
+    "sandbox_policy_hash": "sha256:7e6e773e14a0d8f78f181356e5097fa59cd92791d95eca91851525c00f6fda2f",
+    "overlay_hash": "sha256:c27af44102a1dd3819def6db27bb5e79c2ff5023379faf9e8feddba8a780fd64",
+    "fixture_set_hash": "sha256:29007a22a25a34d8c43c2e3aba058bc33e54d60e6db3aae1c2ae84eb5459cf94"
+  },
+  "base_a": {
+    "run": {
+      "version": "acan-run/1",
+      "id": "run-basea-links",
+      "probe": "sha256:df9a3ba0fdfbb74fd01b2fdab14f4ab0df0824efbe6bf228f0c0eb65f78ec89c",
+      "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+      "role": "base_a",
+      "env": {
+        "lockfile_hash": "sha256:5dd3909fd7cc889f9d3635f02a8b1eb462eaf95a85f550fad2aae6ef409f7b54",
+        "fixture_hash": "sha256:a32e44af54d64701f8173369d7ba2d302324dd128c7f59be739da635a5afd636",
+        "runtime": "bun-1.4.4"
+      },
+      "runner": "sha256:02b428f772fbef62ede2b5c9d022c4e49f7e17dbed2e7a396f402aad28a24b47",
+      "outcome": {
+        "outcome": "completed"
+      },
+      "captures": [
+        {
+          "outcome": "captured",
+          "binding": "alice_session",
+          "step_id": "f3",
+          "value_hash": "sha256:efffbbffc7e0e9ce485e7d5e9368b1753351fbdae64796d44ad2f34a682a540d"
+        },
+        {
+          "outcome": "captured",
+          "binding": "link_code",
+          "step_id": "s2",
+          "value_hash": "sha256:b43ec1b3a3bc8c94ba440294d1a66b6aa9d1fca0f79f182d1e7774e1ec9edc78"
+        }
+      ],
+      "started_at": 1793259600000,
+      "finished_at": 1793259603000
+    },
+    "observations": [
+      "sha256:90fe60ae4d8fdd6a4ada6054ba76e8982276f31951d1b0e34b25ff2f6b47563d",
+      "sha256:f411408b01a068928b5163927ba908845c8f13fadc3d577c2eeb2fa34b80fb3d",
+      "sha256:c51afef29c53db0e15ddd52799ddd69787629a4bb6e281cb5f2a91868f711692",
+      "sha256:ddfbe49987f112c9ba687b88dcd085ec6c17a1660e99e502d9abed0a5855bc7f",
+      "sha256:f9f82156bead5da4cab94a71f9d61bb8bdce1486bde10e487d66d82123224d52"
+    ]
+  },
+  "base_b": {
+    "run": {
+      "version": "acan-run/1",
+      "id": "run-baseb-links",
+      "probe": "sha256:df9a3ba0fdfbb74fd01b2fdab14f4ab0df0824efbe6bf228f0c0eb65f78ec89c",
+      "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+      "role": "base_b",
+      "env": {
+        "lockfile_hash": "sha256:5dd3909fd7cc889f9d3635f02a8b1eb462eaf95a85f550fad2aae6ef409f7b54",
+        "fixture_hash": "sha256:a32e44af54d64701f8173369d7ba2d302324dd128c7f59be739da635a5afd636",
+        "runtime": "bun-1.4.4"
+      },
+      "runner": "sha256:02b428f772fbef62ede2b5c9d022c4e49f7e17dbed2e7a396f402aad28a24b47",
+      "outcome": {
+        "outcome": "completed"
+      },
+      "captures": [
+        {
+          "outcome": "captured",
+          "binding": "alice_session",
+          "step_id": "f3",
+          "value_hash": "sha256:d30992484c3c84470e1ebb30b8f43efcda08a9fb2ef5f5e7a4b9bfc19d92f8da"
+        },
+        {
+          "outcome": "captured",
+          "binding": "link_code",
+          "step_id": "s2",
+          "value_hash": "sha256:b43ec1b3a3bc8c94ba440294d1a66b6aa9d1fca0f79f182d1e7774e1ec9edc78"
+        }
+      ],
+      "started_at": 1793259610000,
+      "finished_at": 1793259613000
+    },
+    "observations": [
+      "sha256:db0bf0de376734c9f7d2fb89c5717f6496086488807b3a205a3f62dad887a52c",
+      "sha256:3b89bf69b5987d83c8633531060a5c176c73e44f40f28c4e36d0aa305097d257",
+      "sha256:565df4e5803261e2ff78d0fe881f931b99ba4df2542794231f5b68f020dfabf3",
+      "sha256:b1a0d7e72b489c9692ad2cf44ad7f2478898b41ab3f9fa648d5fad15250b661f",
+      "sha256:05743d0e18a73cf004f23bfdb11ff0de18798395a4e57075e9fbb5283cd21749"
+    ]
+  },
+  "candidate": {
+    "run": {
+      "version": "acan-run/1",
+      "id": "run-candidate-links",
+      "probe": "sha256:df9a3ba0fdfbb74fd01b2fdab14f4ab0df0824efbe6bf228f0c0eb65f78ec89c",
+      "commit": "6f1c2a9e4b7d3058c1e2f9a0b4d6c8e1f3a5b7c9",
+      "role": "candidate",
+      "env": {
+        "lockfile_hash": "sha256:5dd3909fd7cc889f9d3635f02a8b1eb462eaf95a85f550fad2aae6ef409f7b54",
+        "fixture_hash": "sha256:a32e44af54d64701f8173369d7ba2d302324dd128c7f59be739da635a5afd636",
+        "runtime": "bun-1.4.4"
+      },
+      "runner": "sha256:02b428f772fbef62ede2b5c9d022c4e49f7e17dbed2e7a396f402aad28a24b47",
+      "outcome": {
+        "outcome": "completed"
+      },
+      "captures": [
+        {
+          "outcome": "captured",
+          "binding": "alice_session",
+          "step_id": "f3",
+          "value_hash": "sha256:5cd06639e50ac5f4e6f75f8e9bfc9ca87039a1611e64b640ff71422abcac7f45"
+        },
+        {
+          "outcome": "captured",
+          "binding": "link_code",
+          "step_id": "s2",
+          "value_hash": "sha256:e4973d8f15475ab9be4cd6b122a940299335dd27de97038665f1cfa176dc2e88"
+        }
+      ],
+      "started_at": 1793259620000,
+      "finished_at": 1793259623000
+    },
+    "observations": [
+      "sha256:ad9c4f0f8a248dbe2da982f1f390092cd8e458901d1c05b865e05d6708316060",
+      "sha256:91566adb31c31a6c69057afdfad14be4d1485ea3e3a8c55b7d538e561aae0ae8",
+      "sha256:307fbdde9cc2ae89036834bc0723f6de0fcd660389045d884e40902b52c55b85",
+      "sha256:1dde26efcbdc65673df0f84301000682600a60139359e72637584076ee5ba086",
+      "sha256:c6fbaf3983bd31bf4cd5c03981c44688dfa2b36344d8b89b7ea9b1e79a0814ea"
+    ]
+  }
+}
+    }
+  ]
+}

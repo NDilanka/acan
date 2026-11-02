@@ -8,7 +8,7 @@ use std::fmt;
 
 use acan_intent::{
     CommitSha, Contest, ContestId, ContestKind, ContestStatus, EpisodeId, GateContext, LedgerEvent,
-    Prediction, PreparedCommit, ProbeHash, Receipt, Scope, ScopeConfirmation, ScopeDraft,
+    Prediction, PreparedCommit, ProbeHash, Receipt, RepoPath, Scope, ScopeConfirmation, ScopeDraft,
     ScopeHash, ScopeRev,
 };
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ use crate::ids::{
     OrderRev, QuestionId, ReadbackId, Seq, TaskId, Timestamp, WitnessId,
 };
 use crate::index::Locus;
-use crate::lane::ScopedReadback;
+use crate::lane::{ProtectedInputs, ScopedReadback};
 use crate::lease::{Fence, Lease, LeaseEnd};
 use crate::member::{AgentPrincipal, Member, Role};
 use crate::order::{
@@ -286,6 +286,37 @@ pub enum SystemCmd {
         /// The gate context computed on `base` with the current scope and rulings.
         context: Box<GateContext>,
     },
+    /// The host records the protected inputs of a scope revision the human just confirmed, at the
+    /// base the confirmation names. The origin refuses it when the revision or base is no longer
+    /// current.
+    RecordConfirmedInputs {
+        /// The order.
+        order: OrderId,
+        /// The scope revision the confirmation covers.
+        revision: ScopeRev,
+        /// The base the confirmation names.
+        base: CommitSha,
+        /// The protected inputs at that base.
+        inputs: Box<ProtectedInputs>,
+    },
+    /// The host could not merge a gating run's candidate onto the protected head. The run is
+    /// refused: the task reopens with the conflicting files named, and nothing is installed.
+    CandidateConflicted {
+        /// The gating run.
+        run: GateRunId,
+        /// The conflicting repo-relative paths, in the order git reported them. Never empty.
+        files: Vec<RepoPath>,
+    },
+    /// The host could not carry a gating run forward, and the origin refused the run with
+    /// `reason`. The lease ends and the task reopens with the reason, the way a conflict does.
+    /// Nothing is installed. Used when the origin refuses a re-bind of the scope to a moved
+    /// protected head, so the task does not wait for its lease to expire.
+    RefuseRun {
+        /// The gating run.
+        run: GateRunId,
+        /// Why the run is refused, in the words the task records. Never empty.
+        reason: String,
+    },
     /// The foreman drafted the scope of an order revision.
     ScopeDrafted {
         /// The order.
@@ -487,6 +518,19 @@ pub enum Event {
         scope_hash: ScopeHash,
         confirmation: Box<ScopeConfirmation>,
         runs: Vec<GateRunId>,
+    },
+    /// The protected inputs a confirmed scope revision was confirmed under, at the base it names.
+    /// The host records them when the human confirms, so a re-bind of that revision can check a
+    /// moved head against them when no candidate was prepared on the base.
+    ConfirmedInputsRecorded {
+        /// The order.
+        order: OrderId,
+        /// The confirmed scope revision.
+        revision: ScopeRev,
+        /// The base the confirmation names.
+        base: CommitSha,
+        /// The protected inputs at that base.
+        inputs: Box<ProtectedInputs>,
     },
     /// An agent read back a scope-first task; the acknowledgement is derived from it.
     ScopedReadbackPosted {

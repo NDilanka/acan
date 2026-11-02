@@ -3,7 +3,9 @@
 //! state (the origin's log folded into a view) is here too. `App` is the wasm surface that the
 //! page drives.
 
+pub mod api;
 pub mod bends;
+pub mod feed;
 pub mod kind;
 pub mod labels;
 pub mod layout;
@@ -11,6 +13,7 @@ pub mod marks;
 pub mod mirror;
 pub mod plan;
 pub mod plant;
+pub mod plant_view;
 pub mod pov;
 pub mod scenario;
 pub mod scene;

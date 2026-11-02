@@ -19,7 +19,9 @@ use crate::ids::{
 };
 use crate::index::CodeIndex;
 use crate::job::Job;
-use crate::lane::{self, LaneRun, PendingContrast, ScopeDraftOutcome, ScopeLane, ScopedReadback};
+use crate::lane::{
+    self, ConfirmedInputs, LaneRun, PendingContrast, ScopeDraftOutcome, ScopeLane, ScopedReadback,
+};
 use crate::lease::{self, Claim, DECLARE_BARRIER_MS};
 use crate::member::{self, AgentPrincipal, Member, Role, SettleRight};
 use crate::order::{
@@ -850,6 +852,24 @@ impl World {
                 }
                 Ok(())
             }
+            Event::ConfirmedInputsRecorded {
+                order,
+                revision,
+                base,
+                ..
+            } => {
+                let lane = self
+                    .lanes
+                    .get(order)
+                    .ok_or_else(|| format!("order {order} has no scope"))?;
+                let confirmed_base = lane.confirmation.as_ref().map(|found| &found.base_commit);
+                if *revision != lane.scope.rev || confirmed_base != Some(base) {
+                    return Err(format!(
+                        "order {order} records inputs its confirmation does not name"
+                    ));
+                }
+                Ok(())
+            }
             Event::ScopeRebound {
                 order,
                 scope,
@@ -1273,9 +1293,11 @@ impl World {
                 order,
                 confirmation,
             } => {
+                let ledger_head = self.ledger().head();
                 if let Some(lane) = self.lanes.get_mut(order) {
                     lane.budget.get_or_insert(confirmation.budget);
                     lane.confirmation = Some((**confirmation).clone());
+                    lane.confirmed_ledger_head = Some(ledger_head);
                 }
             }
             Event::ScopeRebound {
@@ -1299,6 +1321,20 @@ impl World {
                             lane_run.receipt = None;
                         }
                     }
+                }
+            }
+            Event::ConfirmedInputsRecorded {
+                order,
+                revision,
+                base,
+                inputs,
+            } => {
+                if let Some(lane) = self.lanes.get_mut(order) {
+                    lane.confirmed_inputs = Some(ConfirmedInputs {
+                        revision: *revision,
+                        base: base.clone(),
+                        inputs: (**inputs).clone(),
+                    });
                 }
             }
             Event::ScopedReadbackPosted { readback } => {
@@ -1610,6 +1646,24 @@ impl Replica {
         Ok(())
     }
 
+    /// Passes over an event the reader cannot apply, so the events after it can fold. The state
+    /// does not include what the passed event did; the caller must say so. A position already
+    /// passed (seq below `next_seq`) is ignored.
+    ///
+    /// # Errors
+    /// Returns [`ReplayError::SeqGap`] if `seq` is past the next event.
+    pub fn skip(&mut self, seq: Seq) -> Result<(), ReplayError> {
+        let expected = self.world.next_seq;
+        if seq < expected {
+            return Ok(());
+        }
+        if seq > expected {
+            return Err(ReplayError::SeqGap { expected, got: seq });
+        }
+        self.world.next_seq = seq.next();
+        Ok(())
+    }
+
     /// The seq to resume the stream from.
     #[must_use]
     pub fn next_seq(&self) -> Seq {
@@ -1754,6 +1808,8 @@ fn decide_system(world: &World, ctx: &Ctx<'_>, cmd: SystemCmd) -> Result<Vec<Eve
         SystemCmd::LandResult { task, head, result } => {
             gate::decide_land_result(world, task, &head, result)
         }
+        SystemCmd::CandidateConflicted { run, files } => gate::decide_conflicted(world, run, files),
+        SystemCmd::RefuseRun { run, reason } => gate::decide_refused(world, run, reason),
         SystemCmd::ModelUsed {
             model,
             step,
@@ -1777,6 +1833,12 @@ fn decide_system(world: &World, ctx: &Ctx<'_>, cmd: SystemCmd) -> Result<Vec<Eve
             base,
             context,
         } => lane::decide_rebind(world, order, &base, &context),
+        SystemCmd::RecordConfirmedInputs {
+            order,
+            revision,
+            base,
+            inputs,
+        } => lane::decide_record_inputs(world, order, revision, &base, *inputs),
         SystemCmd::ScopeDrafted { order, rev, draft } => {
             lane::decide_drafted(world, order, rev, *draft)
         }

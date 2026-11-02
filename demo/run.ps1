@@ -1,8 +1,9 @@
 # Stages one take of the hackathon demo on a fresh copy of the demo repository.
 #
-# Each take gets its own run folder, D:\dev\acan-run\take-<stamp>, and current.txt names it. A take
-# never reuses a folder, so an earlier take's logs are never overwritten, and a stale process from an
-# earlier take writes only into that take's folder.
+# Each take gets its own run folder, <run root>\take-<stamp>, and current.txt names it. The run root is
+# target\acan-run in this checkout, or ACAN_RUN_ROOT when that is set. A take never reuses a folder, so an
+# earlier take's logs are never overwritten, and a stale process from an earlier take writes only into
+# that take's folder.
 #
 # It clones the demo repo into the run folder, copies the live routing and provider key file in, starts
 # `acan serve` with the UI and the demo app, mints tokens for the owner and one agent per worker,
@@ -14,11 +15,15 @@
 
 [CmdletBinding()]
 param(
-    # Empty means a new take folder under D:\dev\acan-run.
+    # Empty means a new take folder under the run root (target\acan-run, or ACAN_RUN_ROOT).
     [string]$RunDir = '',
-    [string]$DemoRepo = 'D:\dev\acan-demo',
+    # The demo repo to clone. Empty means ACAN_DEMO_REPO, then the public repo. A local path works too.
+    [string]$DemoRepo = $env:ACAN_DEMO_REPO,
+    # The port of acan serve (the UI and API).
     [int]$Port = 7311,
-    [int]$DemoPort = 3000,
+    # The port of the demo app. 3000 is taken on many machines, so the default is 7312. Pass another free
+    # port here if the take stops with "already in use".
+    [int]$DemoPort = 7312,
     # The scanner gives each file of the demo's src folder its own machine, named by file stem, so the
     # machine of src/middleware.ts is "middleware". run.ps1 stops if the plant does not list it.
     [string]$Machine = 'middleware',
@@ -47,9 +52,10 @@ if ($null -ne $previous) { & (Join-Path $PSScriptRoot 'stop.ps1') -RunDir $previ
 
 if (-not $RunDir) { $RunDir = Join-Path $script:RunRoot ('take-' + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 if (Test-Path -LiteralPath $RunDir) { throw "$RunDir already exists; a take never reuses a folder" }
-foreach ($busy in @($Port, $DemoPort)) {
-    if (Test-PortBusy -Port $busy) { throw "port $busy is already listening; stop the process that holds it before a new take" }
-}
+# Both ports are checked before the clone and the build, so a busy port costs nothing.
+Assert-PortFree -Name 'Port' -Port $Port
+Assert-PortFree -Name 'DemoPort' -Port $DemoPort
+if (-not $DemoRepo) { $DemoRepo = 'https://github.com/NDilanka/acan-demo.git' }
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $RunDir) | Out-Null
 git clone --quiet $DemoRepo $RunDir

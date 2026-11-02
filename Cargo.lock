@@ -93,6 +93,7 @@ name = "acan-render-web"
 version = "0.1.0"
 dependencies = [
  "acan-core",
+ "acan-intent",
  "acan-iso",
  "acan-render",
  "acan-server",

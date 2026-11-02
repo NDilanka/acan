@@ -247,7 +247,7 @@ mod tests {
     const FIXTURE: &str = include_str!("../www/fixtures/demo-plant.json");
 
     const LIVE: &str = r#"{
-        "root": "D:\\dev\\acan-demo",
+        "root": "acan-demo",
         "revision": "0123456789abcdef",
         "machines": [
             {"id": 0, "name": "src", "dir": "src", "files": [0, 1], "lang_mix": {"typescript": 2}},
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn folder_names_split_on_both_separators() {
-        assert_eq!(folder_name("D:\\dev\\acan-demo"), "acan-demo");
+        assert_eq!(folder_name("work\\acan-demo"), "acan-demo");
         assert_eq!(folder_name("/home/me/repo/"), "repo");
         assert_eq!(folder_name(""), "");
     }

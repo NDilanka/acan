@@ -61,6 +61,21 @@ pub enum LlmError {
         raw: String,
     },
 
+    /// The reply stopped at its output cap before it finished, so its text is incomplete.
+    /// `max_tokens` is the cap the request set, or `None` when the provider's default applied.
+    #[error("{provider} stopped the reply at {} before it finished", cap_text(.max_tokens))]
+    OutputCapped {
+        provider: String,
+        max_tokens: Option<u32>,
+    },
+
     #[error("no scripted reply for role {role}")]
     NoScriptedReply { role: Role },
+}
+
+fn cap_text(max_tokens: &Option<u32>) -> String {
+    match max_tokens {
+        Some(cap) => format!("the {cap}-token output cap"),
+        None => "the provider's default output cap".to_owned(),
+    }
 }

@@ -4,7 +4,9 @@ This folder stages one live take of the Acan demo. Each take clones the demo rep
 
 ## Run a take
 
-Requires PowerShell 7, Bun, and a built worktree. The keys in `crates/acan-llm/.env` and the routing in `crates/acan-llm/llm.toml` must exist. Both files are git-ignored.
+Requires Windows 10 or 11 with PowerShell 7 (the scripts use `Get-NetTCPConnection` and kernel32), Git, Bun 1.4 or newer, and the Rust toolchain from `rust-toolchain.toml`. A live take also needs the `wasm32-unknown-unknown` target and the `wasm-bindgen` CLI, because the UI bundle is built in step 1.
+
+A live take needs provider keys. Copy `crates/acan-llm/.env.example` to `crates/acan-llm/.env` and fill in `META_API_KEY`, `BASETEN_API_KEY` and `FIREWORKS_API_KEY`. Copy `crates/acan-llm/llm.example.toml` to `crates/acan-llm/llm.toml`. Both copies are git-ignored. Without keys, the recorded artifacts in `receipts/` replay the take instead (see the top-level README).
 
 1. Build the UI bundle once per worktree. Run `crates/acan-render-web/build.ps1`.
 2. Start the take. Run `pwsh demo/run.ps1 -Watch -Settle 3` as one background job. It starts the server, the demo app, and the three worker slots, then follows the take in the same process until it ends. The process exits when the watch ends, and the stack keeps running until `stop.ps1`. Before it starts the stack, it clears the inherited output handles, so the background job ends with the watch and does not wait for the stack's pipes. It stops if a port is already listening. Settle 3 serializes each clash the way the menu's third row does. Use `-Settle 0` to settle in the UI instead.
@@ -12,7 +14,18 @@ Requires PowerShell 7, Bun, and a built worktree. The keys in `crates/acan-llm/.
 4. Open the UI. Open the URL in `<run folder>\logs\ui-url.txt`. The URL holds the owner token in its fragment, so do not share it.
 5. Stop the take. Run `pwsh demo/stop.ps1`. It stops only the processes the take started. With no `-RunDir`, both scripts use the latest take.
 
-Each take gets its own run folder, `D:\dev\acan-run\take-<yyyyMMdd-HHmmss>`. `D:\dev\acan-run\current.txt` names the latest one. `run.ps1` never reuses a folder, and it stops the previous take's processes without touching that folder. So an earlier take keeps its logs, and a stale process writes only into its own take.
+Each take gets its own run folder, `<run root>\take-<yyyyMMdd-HHmmss>`. `<run root>\current.txt` names the latest one. `run.ps1` never reuses a folder, and it stops the previous take's processes without touching that folder. So an earlier take keeps its logs, and a stale process writes only into its own take.
+
+## Ports, paths and overrides
+
+| Setting | Default | Override |
+| --- | --- | --- |
+| UI and API (`acan serve`) | port 7311 | `-Port` |
+| Demo app (the URL shortener) | port 7312 | `-DemoPort` |
+| Run root (holds `take-*` folders) | `target\acan-run` in this checkout | `ACAN_RUN_ROOT` |
+| Demo repo to clone | `https://github.com/NDilanka/acan-demo.git` | `ACAN_DEMO_REPO` or `-DemoRepo` (a local path works) |
+
+Port 3000 is not the take's default, because many machines already use it. Before it clones or builds anything, `run.ps1` checks both ports. If one is taken, it stops and names the process that holds it and the parameter to change, for example `-DemoPort 7413`. The demo app still listens on 3000 when you run it by hand with `bun start`.
 
 The machine of `src/middleware.ts` is `middleware`. The scanner gives each file in a small repo's `src` folder its own machine, named by its stem. `run.ps1` reads the plant from `/api/plant` and stops if the `-Machine` name is missing. The plant list is printed at the start of the run.
 

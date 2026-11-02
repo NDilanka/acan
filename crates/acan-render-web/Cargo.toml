@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 acan-core = { path = "../acan-core" }
+acan-intent = { path = "../acan-intent" }
 acan-iso = { path = "../acan-iso" }
 acan-render = { path = "../acan-render" }
 serde.workspace = true

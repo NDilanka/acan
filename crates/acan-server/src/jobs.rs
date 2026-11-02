@@ -53,8 +53,8 @@ use acan_core::{
 use acan_git::{Preparation, PrepareOutcome, Repo};
 use acan_intent::{
     AppContract, CommitSha, ContainerPolicy, DiscrepancyEpisode, GateContext, MachineId, ModelRef,
-    OrderRef, PreparedCommit, ProbeCorpus, Scope, ScopeConfirmation, ScopeDraft, ScopeDraftV1,
-    ScopeRev, UnixMillis,
+    OrderRef, PreparedCommit, ProbeCorpus, RepoPath, Scope, ScopeConfirmation, ScopeDraft,
+    ScopeDraftV1, ScopeRev, UnixMillis,
 };
 use acan_llm::{CallRecord, LlmError, ModelClient, Role};
 use acan_witness::RunnerConfig;
@@ -633,7 +633,9 @@ async fn draft_scope<C: ModelClient>(
         fixtures: &corpus.fixtures,
         limits: app.limits,
     };
-    let request = model::scope_request(order_ref.as_str(), &bounds);
+    // The foreman drafts from the order's sentence, what the human asked for. The order ref is
+    // only the draft's key, so it never stands in for the request.
+    let request = model::scope_request(&sentence, &bounds);
     let reply = host
         .client()
         .chat_json::<model::DraftReply>(Role::Foreman, request)
@@ -951,18 +953,19 @@ struct Pass {
 }
 
 impl Pass {
-    /// Starts a pass for `run` on the protected head as it is now.
+    /// Starts a pass on the protected head as it is now. `label` names the pass directory, so a
+    /// gate run and a scope confirmation each get their own.
     async fn new<C: ModelClient>(
         host: &Host<C>,
         repo: &Repo,
-        run: GateRunId,
+        label: impl std::fmt::Display,
     ) -> Result<Self, JobError> {
         let policy = observe::runner_policy();
         let base = protected_base(repo, &policy).await?;
         let state = host.repo().join(STATE_DIR);
         let dir = state
             .join(CONTRAST_DIR)
-            .join(format!("{run}-{}", unique_suffix()));
+            .join(format!("{label}-{}", unique_suffix()));
         let snapshot = dir.join("snapshot");
         observe::snapshot(repo, &base, &snapshot).await?;
         let (app, corpus) = observe::read_protected(&snapshot)?;
@@ -1038,7 +1041,20 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
     tracing::debug!(%run, prepared = contrast.prepared.is_some(), "a scope-first run starts");
     let repo = workspace.repo();
     let pass = Pass::new(host, repo, run).await?;
-    let candidate = prepare_candidate(repo, &pass, &contrast.head).await?;
+    let candidate = match prepare_candidate(repo, &pass, &contrast.head).await? {
+        Ok(candidate) => candidate,
+        Err(files) => {
+            // The candidate cannot be tested on the protected head. The origin refuses the run,
+            // names the files, and reopens the task. Nothing is installed.
+            tracing::info!(%run, files = files.len(), "the candidate conflicts with the protected head");
+            host.submit(Command::System(SystemCmd::CandidateConflicted {
+                run,
+                files,
+            }))
+            .await?;
+            return Ok(());
+        }
+    };
     tracing::debug!(%run, "the candidate is prepared on the protected head");
     let ledger = host.folded_rulings().map_err(JobError::Rulings)?;
     let episodes = judged_episodes(host, contrast.order, run)?;
@@ -1048,6 +1064,38 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
         ledger: &ledger,
         episodes: &episodes,
     };
+    // The protected head moved after the scope was confirmed. The run is not prepared on the new
+    // head under the old confirmation. The scope is re-bound to the new head first, and the next
+    // pass prepares the run under the re-bound confirmation. The core refuses the re-bind when
+    // a protected input moved, so a human must confirm again.
+    if pass.base.protected_head() != &contrast.confirmation.base_commit {
+        let scratch = pass.scratch.join("context");
+        let plan = pass.plan(repo, &candidate, &scratch);
+        let context = observe::current(&plan, &order).await?;
+        let rebind = SystemCmd::RebindBase {
+            order: contrast.order,
+            base: pass.base.protected_head().clone(),
+            context: Box::new(context),
+        };
+        match host.submit(Command::System(rebind)).await {
+            Ok(_) => tracing::info!(%run, "the scope is re-bound to the moved protected head"),
+            Err(SubmitError::Rejected(rejection)) => {
+                // The origin will not re-bind the scope, so the run cannot be tested on the moved
+                // head. It is refused now: the lease ends and the task reopens with the reason.
+                // Waiting for the lease to expire would hold the task for nothing.
+                tracing::info!(%run, "the origin refused the re-bind to the moved protected head");
+                host.submit(Command::System(SystemCmd::RefuseRun {
+                    run,
+                    reason: format!(
+                        "the protected head moved and the scope could not be re-bound to it: {rejection}"
+                    ),
+                }))
+                .await?;
+            }
+            Err(err) => return Err(err.into()),
+        }
+        return Ok(());
+    }
     let recorded = match contrast.prepared {
         Some(prepared) => {
             if candidate.merged_commit() != &prepared.context.merged_commit
@@ -1119,6 +1167,76 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
     Ok(())
 }
 
+/// The command that records the protected inputs of the scope `order` was just confirmed under, at
+/// the base the confirmation names. `None` when nothing is recorded: there is no repository, or
+/// the protected head is no longer that base, so the inputs would describe another commit.
+///
+/// # Errors
+///
+/// Returns an error when git or the ruling log cannot be read.
+pub(crate) async fn confirmed_inputs_command<C: ModelClient>(
+    host: &Host<C>,
+    order: OrderId,
+    confirmation: &ScopeConfirmation,
+) -> anyhow::Result<Option<SystemCmd>> {
+    let Some(workspace) = host.workspace() else {
+        return Ok(None);
+    };
+    let repo = workspace.repo();
+    let pass = Pass::new(host, repo, format!("confirm-{order}")).await?;
+    let command = confirmed_inputs(host, &pass, repo, order, confirmation);
+    // The pass is only read for its inputs, so its directory goes once the record is built.
+    discard_pass(&pass);
+    command
+}
+
+/// The record of the protected inputs `confirmation` was confirmed under, read from `pass` on the
+/// protected head as it is now.
+fn confirmed_inputs<C: ModelClient>(
+    host: &Host<C>,
+    pass: &Pass,
+    repo: &Repo,
+    order: OrderId,
+    confirmation: &ScopeConfirmation,
+) -> anyhow::Result<Option<SystemCmd>> {
+    if pass.base.protected_head() != &confirmation.base_commit {
+        tracing::info!(
+            %order,
+            "the protected head moved after the scope was confirmed: nothing is recorded"
+        );
+        return Ok(None);
+    }
+    let Some(scope) = host.read(|world| world.lane(order).map(|lane| lane.scope.clone())) else {
+        return Ok(None);
+    };
+    let ledger = host.folded_rulings().map_err(JobError::Rulings)?;
+    let plan = pass.plan(repo, &pass.base, &pass.scratch);
+    let view = Order {
+        scope: &scope,
+        confirmation,
+        ledger: &ledger,
+        episodes: &[],
+    };
+    let inputs = observe::protected_inputs(&plan, &view)?;
+    Ok(Some(SystemCmd::RecordConfirmedInputs {
+        order,
+        revision: confirmation.scope_rev,
+        base: confirmation.base_commit.clone(),
+        inputs: Box::new(inputs),
+    }))
+}
+
+/// Removes the directory of a pass that is finished with. The pass is only read, so nothing is
+/// lost. A failed removal is logged and not returned, as a partial snapshot's is.
+fn discard_pass(pass: &Pass) {
+    let Some(dir) = pass.snapshot.parent() else {
+        return;
+    };
+    if let Err(err) = fs::remove_dir_all(dir) {
+        tracing::warn!(path = %dir.display(), error = %err, "a finished pass directory stays behind");
+    }
+}
+
 /// Lands a scope-first task. The delivery is checked again under the landing fence before any
 /// git work, so a revision or cancel that landed after the queue was read refuses it. The final
 /// gate then reads the receipt its run passed with and the context computed now, and the tested
@@ -1162,7 +1280,15 @@ async fn gated_land<C: ModelClient>(
         return Ok(Some(Ok(landed)));
     }
     let pass = Pass::new(host, repo, delivery.run).await?;
-    let candidate = prepare_candidate(repo, &pass, head).await?;
+    let candidate = match prepare_candidate(repo, &pass, head).await? {
+        Ok(candidate) => candidate,
+        // A conflict refuses the land, so the origin reopens the task with the files named.
+        Err(files) => {
+            drop(writes);
+            drop(fence);
+            return Ok(Some(Err(conflict_reason(head, &files))));
+        }
+    };
     let ledger = host.folded_rulings().map_err(JobError::Rulings)?;
     let episodes = judged_episodes(host, delivery.order, delivery.run)?;
     let order = Order {
@@ -1227,24 +1353,39 @@ async fn rebind<C: ModelClient>(
     }
 }
 
-/// Prepares `head` on the pass's protected head. A conflict is an error: the candidate has no
-/// merged commit to test.
+/// Prepares `head` on the pass's protected head. The inner `Err` is a conflict: the files that
+/// clash with the protected head. The candidate then has no merged commit to test, and the
+/// caller refuses it. The outer error is a git failure or a head that is not a commit, which the
+/// job retries.
 async fn prepare_candidate(
     repo: &Repo,
     pass: &Pass,
     head: &CommitId,
-) -> Result<Preparation, JobError> {
+) -> Result<Result<Preparation, Vec<RepoPath>>, JobError> {
     let commit = CommitSha::from_str(&head.to_string())
         .map_err(|err| JobError::Unavailable(format!("the candidate is not a commit: {err}")))?;
     match repo
         .prepare(&commit, &observe::protected_paths(&pass.policy))
         .await?
     {
-        PrepareOutcome::Prepared(candidate) => Ok(candidate),
+        PrepareOutcome::Prepared(candidate) => Ok(Ok(candidate)),
+        PrepareOutcome::Conflict { files, .. } => Ok(Err(files)),
+        // The outcome enum is non-exhaustive: an outcome this build does not know is not a
+        // candidate to test, so it fails closed and is retried.
         _ => Err(JobError::Unavailable(format!(
-            "candidate {head} conflicts with the protected head"
+            "candidate {head} has no prepared outcome on the protected head"
         ))),
     }
+}
+
+/// Why a candidate that conflicts with the protected head was refused, in the words the origin
+/// records. It names the commit and the conflicting files.
+fn conflict_reason(head: &CommitId, files: &[RepoPath]) -> String {
+    let names: Vec<String> = files.iter().map(ToString::to_string).collect();
+    format!(
+        "candidate {head} conflicts with the protected head: {}",
+        names.join(", ")
+    )
 }
 
 /// The protected head as a commit sha.

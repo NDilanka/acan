@@ -30,8 +30,9 @@ pub trait ModelClient: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns every error from [`ModelClient::chat`], plus [`LlmError::SchemaValidation`]
-    /// when the reply does not parse as `T`.
+    /// Returns every error from [`ModelClient::chat`], plus [`LlmError::OutputCapped`] when the
+    /// reply stopped at the output cap, and [`LlmError::SchemaValidation`] when the reply does
+    /// not parse as `T`.
     fn chat_json<T>(
         &self,
         role: Role,
@@ -41,8 +42,9 @@ pub trait ModelClient: Send + Sync {
         T: DeserializeOwned + JsonSchema,
     {
         async move {
+            let cap = request.max_tokens;
             let response = self.chat(role, with_schema::<T>(request)).await?;
-            parse_structured(response, str::to_owned)
+            parse_structured(response, cap, str::to_owned)
         }
     }
 }
@@ -60,12 +62,23 @@ pub(crate) fn with_schema<T: JsonSchema>(mut request: ChatRequest) -> ChatReques
     request
 }
 
-/// Parses a reply as `T`. `scrub` removes credentials from provider text before the text is
-/// kept in an error.
+/// The finish reason a provider sends when a reply stops at its output cap.
+const FINISH_LENGTH: &str = "length";
+
+/// Parses a reply as `T`. `cap` is the output cap the request set. A reply that stopped at that
+/// cap is refused before it is parsed, because its text is cut short. `scrub` removes credentials
+/// from provider text before the text is kept in an error.
 pub(crate) fn parse_structured<T: DeserializeOwned>(
     response: ChatResponse,
+    cap: Option<u32>,
     scrub: impl Fn(&str) -> String,
 ) -> Result<Structured<T>, LlmError> {
+    if response.finish_reason.as_deref() == Some(FINISH_LENGTH) {
+        return Err(LlmError::OutputCapped {
+            provider: response.call.provider.clone(),
+            max_tokens: cap,
+        });
+    }
     let raw = response.content.as_deref().unwrap_or_default();
     let parsed: Result<T, serde_json::Error> = serde_json::from_str(strip_code_fence(raw.trim()));
     match parsed {

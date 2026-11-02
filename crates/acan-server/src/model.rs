@@ -39,8 +39,9 @@ pub const SCOPE_PROMPT: &str = "You draft the scope of one order for a code chan
 pub const PROBE_PROMPT: &str = "You propose input only probe steps for one order. Reply with one JSON object that has four keys, fixture, steps, route_template and rationale, that matches the JSON schema under schema in the context. fixture is one id copied from the fixtures in the context. steps is a non empty list of steps. An http step sends one request, and its path, headers and body may use ${name} for a value that an earlier capture step bound. A capture step reads a value from an earlier http step. An advance_time step moves the controlled clock. route_template is one route copied exactly from the routes in the context, and the probe sends no more http requests than max_requests. Propose inputs only. Never write an expected value, a count, a mask, a class, an observed value or a verdict. rationale is one sentence.";
 
 /// Output budget for a draft. Muse Spark spends hidden reasoning tokens from this cap, and a cap
-/// of 64 returned an empty reply (receipt P00F), so drafts get a generous cap.
-pub const DRAFT_MAX_TOKENS: u32 = 8_000;
+/// of 64 returned an empty reply (receipt P00F). A live scope draft spent 5687 reasoning tokens
+/// and stopped at an 8000 cap mid-reply (finish_reason `length`), so drafts get 16000.
+pub const DRAFT_MAX_TOKENS: u32 = 16_000;
 
 /// Which job a model request was built for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,14 +419,14 @@ fn schema_value<T: JsonSchema>() -> Value {
     serde_json::to_value(schemars::schema_for!(T)).expect("a schema serializes to JSON")
 }
 
-/// The scope draft prompt for `order`, with the plant's machines, the routes a scope may name,
-/// and the schema of the scope body.
+/// The scope draft prompt for an order's `sentence`, the order as the human wrote it, with the
+/// plant's machines, the routes a scope may name, and the schema of the scope body.
 #[must_use]
-pub fn scope_request(order: &str, bounds: &DraftBounds<'_>) -> ChatRequest {
+pub fn scope_request(sentence: &str, bounds: &DraftBounds<'_>) -> ChatRequest {
     draft_request(
         SCOPE_PROMPT,
         &json!({
-            "order": order,
+            "order": sentence,
             "machines": bounds.machines,
             "routes": bounds.routes,
             "schema": schema_value::<ScopeBody>(),

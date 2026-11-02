@@ -1,0 +1,345 @@
+{
+  "order": "o-3",
+  "rev": 2,
+  "state": "drafted",
+  "draft": {
+  "version": "acan-scope-draft/1",
+  "order": "o-3",
+  "rev": 2,
+  "base_commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+  "sentence": "Rate-limit failed logins: after five failures from one client within a minute, answer 429",
+  "machine_id": "ratelimit",
+  "draft": {
+    "provenance": "model_proposal",
+    "model": "muse-spark",
+    "proposal": {
+      "may": [
+        {
+          "id": "i-login-limit",
+          "selector": {
+            "surface": "http",
+            "method": "POST",
+            "route_template": "/api/login",
+            "step_context": {
+              "kind": "any"
+            },
+            "principal": {
+              "kind": "anonymous"
+            },
+            "channel": "status"
+          },
+          "change": "add",
+          "acceptance": [
+            {
+              "obligation_id": "obl-login-window",
+              "predicate": {
+                "predicate": "window",
+                "policy": {
+                  "event_filter": {
+                    "run": "candidate",
+                    "method": "POST",
+                    "route_template": "/api/login",
+                    "status_in": [
+                      401,
+                      429
+                    ],
+                    "principal": {
+                      "kind": "anonymous"
+                    },
+                    "client": "client-a"
+                  },
+                  "group_by": "client",
+                  "anchor": {
+                    "kind": "first_match"
+                  },
+                  "duration_ms": 60000,
+                  "allowed_count": 5,
+                  "boundary": "inclusive",
+                  "rejected_attempts": {
+                    "status_in": [
+                      429
+                    ],
+                    "counted": "counted"
+                  }
+                }
+              },
+              "text": "At most 5 failed logins per client in 60 s; later attempts get 429"
+            },
+            {
+              "obligation_id": "obl-login-429",
+              "predicate": {
+                "predicate": "count",
+                "filter": {
+                  "run": "candidate",
+                  "method": "POST",
+                  "route_template": "/api/login",
+                  "status_in": [
+                    429
+                  ],
+                  "principal": {
+                    "kind": "anonymous"
+                  }
+                },
+                "op": "ge",
+                "value": 1
+              },
+              "text": "The sixth failed login is answered 429"
+            }
+          ],
+          "provenance": "user",
+          "example": {
+            "kind": "target",
+            "step_id": "s6",
+            "path": "status",
+            "before": {
+              "state": "present",
+              "value": 401
+            },
+            "after": {
+              "state": "present",
+              "value": 429
+            }
+          },
+          "machine_ids": [
+            "ratelimit",
+            "auth"
+          ]
+        },
+        {
+          "id": "i-retry-after",
+          "selector": {
+            "surface": "http",
+            "method": "POST",
+            "route_template": "/api/login",
+            "step_context": {
+              "kind": "any"
+            },
+            "principal": {
+              "kind": "anonymous"
+            },
+            "channel": "header",
+            "field_path": "retry-after"
+          },
+          "change": "add",
+          "acceptance": [
+            {
+              "obligation_id": "obl-retry-after",
+              "predicate": {
+                "predicate": "present",
+                "at": {
+                  "ref": "field",
+                  "run": "candidate",
+                  "step_id": "s6",
+                  "path": "header.retry-after"
+                }
+              },
+              "text": "A 429 carries Retry-After"
+            }
+          ],
+          "provenance": "model",
+          "example": {
+            "kind": "target",
+            "step_id": "s6",
+            "path": "header.retry-after",
+            "after": {
+              "state": "present",
+              "value": "60"
+            }
+          },
+          "machine_ids": [
+            "ratelimit"
+          ]
+        },
+        {
+          "id": "i-login-body",
+          "selector": {
+            "surface": "http",
+            "method": "POST",
+            "route_template": "/api/login",
+            "step_context": {
+              "kind": "any"
+            },
+            "principal": {
+              "kind": "anonymous"
+            },
+            "channel": "body",
+            "field_path": "error"
+          },
+          "change": "modify",
+          "acceptance": [
+            {
+              "obligation_id": "obl-login-body-string",
+              "predicate": {
+                "predicate": "matches_schema",
+                "at": {
+                  "ref": "field",
+                  "run": "candidate",
+                  "step_id": "s6",
+                  "path": "body.error"
+                },
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text": "The error stays a string"
+            }
+          ],
+          "provenance": "open",
+          "example": {
+            "kind": "target",
+            "step_id": "s6",
+            "path": "body.error",
+            "before": {
+              "state": "present",
+              "value": "invalid credentials"
+            },
+            "after": {
+              "state": "present",
+              "value": "too many attempts"
+            }
+          },
+          "machine_ids": [
+            "auth",
+            "errors"
+          ]
+        }
+      ],
+      "must_keep": [
+        {
+          "id": "mk-login-ok",
+          "selector": {
+            "surface": "http",
+            "method": "POST",
+            "route_template": "/api/login",
+            "step_context": {
+              "kind": "step",
+              "step_id": "s8"
+            },
+            "principal": {
+              "kind": "actor",
+              "name": "alice"
+            },
+            "channel": "status"
+          },
+          "obligations": [
+            {
+              "obligation_id": "obl-login-ok",
+              "predicate": {
+                "predicate": "all",
+                "of": [
+                  {
+                    "predicate": "status_in",
+                    "step_id": "s8",
+                    "statuses": [
+                      200
+                    ]
+                  },
+                  {
+                    "predicate": "compare",
+                    "left": {
+                      "ref": "capture",
+                      "run": "candidate",
+                      "binding": "alice_session"
+                    },
+                    "op": "ne",
+                    "right": {
+                      "operand": "ref",
+                      "value_ref": {
+                        "ref": "capture",
+                        "run": "base_a",
+                        "binding": "alice_session"
+                      }
+                    }
+                  },
+                  {
+                    "predicate": "equals",
+                    "at": {
+                      "ref": "field",
+                      "run": "candidate",
+                      "step_id": "s8",
+                      "path": "body.ok"
+                    },
+                    "value": true
+                  },
+                  {
+                    "predicate": "after_n_within",
+                    "n": 5,
+                    "window_ms": 60000,
+                    "then": {
+                      "predicate": "absent",
+                      "at": {
+                        "ref": "field",
+                        "run": "candidate",
+                        "step_id": "s8",
+                        "path": "header.retry-after"
+                      }
+                    }
+                  }
+                ]
+              },
+              "text": "A correct login after the window still succeeds with a fresh session"
+            }
+          ],
+          "text": "A correct password still logs in after the window",
+          "machine_ids": [
+            "auth"
+          ]
+        },
+        {
+          "id": "mk-links-order",
+          "selector": {
+            "surface": "http",
+            "method": "GET",
+            "route_template": "/api/links",
+            "step_context": {
+              "kind": "any"
+            },
+            "principal": {
+              "kind": "authenticated"
+            },
+            "channel": "body",
+            "field_path": "links[*].code"
+          },
+          "obligations": [
+            {
+              "obligation_id": "ruling-r-1",
+              "predicate": {
+                "predicate": "equals_base",
+                "step_id": "s4",
+                "path": "body.links[*].code",
+                "anchor": {
+                  "kind": "fresh"
+                }
+              },
+              "text": "The links list keeps its order"
+            }
+          ],
+          "text": "The links list stays newest first",
+          "ruling_id": "r-1",
+          "machine_ids": [
+            "links"
+          ]
+        }
+      ],
+      "open": [
+        {
+          "id": "c-window",
+          "machine_id": "ratelimit",
+          "question": "Count failed logins per client address or per account?",
+          "options": [
+            {
+              "key": "client",
+              "label": "Per client address"
+            },
+            {
+              "key": "account",
+              "label": "Per account"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "drafted_at": 1793259000000
+}
+}

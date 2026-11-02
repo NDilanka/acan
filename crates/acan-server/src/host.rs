@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use acan_core::{Command, HumanCmd, Origin, Rejection, Stamped, Timestamp, World};
+use acan_core::{Command, Event, HumanCmd, Origin, Rejection, Stamped, Timestamp, World};
 use acan_intent::{CoreDerived, FoldedLedger, fold};
 use acan_llm::{ModelClient, UsageLedger};
 use anyhow::Context as _;
@@ -16,6 +16,7 @@ use tokio::task::JoinSet;
 use crate::auth::Tokens;
 use crate::git::Workspace;
 use crate::index::Scan;
+use crate::jobs;
 use crate::store::EventStore;
 use crate::writer::{Snapshot, Writer};
 
@@ -261,7 +262,33 @@ impl<C: ModelClient> Host<C> {
         } else {
             None
         };
-        self.inner.writer.submit(command).await
+        let events = self.inner.writer.submit(command).await?;
+        // A confirmation records the protected inputs it was confirmed under, at its base. When
+        // recording fails the confirmation stands with no record, so a re-bind of its scope refuses.
+        for stamped in &events {
+            let Event::ScopeConfirmed {
+                order,
+                confirmation,
+            } = &stamped.event
+            else {
+                continue;
+            };
+            let outcome = match jobs::confirmed_inputs_command(self, *order, confirmation).await {
+                Ok(Some(record)) => self
+                    .inner
+                    .writer
+                    .submit(Command::System(record))
+                    .await
+                    .err()
+                    .map(|err| err.to_string()),
+                Ok(None) => None,
+                Err(err) => Some(err.to_string()),
+            };
+            if let Some(reason) = outcome {
+                tracing::warn!(%order, %reason, "recording the protected inputs of a confirmed scope failed");
+            }
+        }
+        Ok(events)
     }
 
     /// Holds the landing fence until the guard drops. A land takes it before it checks the

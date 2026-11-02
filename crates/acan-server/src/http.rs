@@ -28,7 +28,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::auth::Principal;
 use crate::examples;
@@ -37,7 +37,7 @@ use crate::intent_api::{self, IntentError};
 use crate::jobs;
 use crate::mcp;
 use crate::public::{self, PublicRoot};
-use crate::{STATE_DIR, stream};
+use crate::{STATE_DIR, redact, stream};
 
 /// Builds the router. The public files are served for every path the API does not claim.
 pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<PublicRoot>) -> Router {
@@ -212,14 +212,20 @@ struct EventsQuery {
     from: u64,
 }
 
+/// The log from `from`, as the caller's principal may read it. A member gets each event as stored;
+/// an agent gets the member-only fields redacted, with the same seq, time and actor.
 async fn get_events<C: ModelClient + 'static>(
     State(host): State<Host<C>>,
     headers: HeaderMap,
     Query(query): Query<EventsQuery>,
-) -> Result<Json<Vec<Stamped>>, ApiError> {
-    authenticate(&host, bearer(&headers))?;
+) -> Result<Json<Vec<Value>>, ApiError> {
+    let principal = authenticate(&host, bearer(&headers))?;
     let events = host.store().load_from(Seq::new(query.from)).await?;
-    Ok(Json(events))
+    let views = events
+        .iter()
+        .map(|stamped| redact::view(&principal, stamped))
+        .collect::<anyhow::Result<Vec<Value>>>()?;
+    Ok(Json(views))
 }
 
 async fn get_plant<C: ModelClient + 'static>(
@@ -505,12 +511,7 @@ async fn get_ruling_draft<C: ModelClient + 'static>(
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
-    let ruled = examples
-        .iter()
-        .find(|kept| kept.run == run && kept.probe_hash == probe_hash)
-        .ok_or(ApiError::NotFound(
-            "retained example for the episode's latest run",
-        ))?;
+    let ruled = ruled_example(&examples, &run, probe_hash)?;
     Ok(Json(RulingDraftView {
         order: order.to_string(),
         episode,
@@ -523,6 +524,38 @@ async fn get_ruling_draft<C: ModelClient + 'static>(
         normalization_hash: ruled.normalization_hash,
         examples,
     }))
+}
+
+/// The example a ruling is on: the one kept for the episode's latest run and probe. A run that
+/// crashed before its receipt was recorded is run again under the same id, and the store then holds
+/// an example from each attempt. The receipt does not say which attempt it rests on, so when more
+/// than one example matches, the draft refuses rather than pick one.
+fn ruled_example<'a>(
+    examples: &'a [DraftExample],
+    run: &str,
+    probe_hash: ProbeHash,
+) -> Result<&'a DraftExample, ApiError> {
+    let mut matching = examples
+        .iter()
+        .filter(|kept| kept.run == run && kept.probe_hash == probe_hash);
+    match (matching.next(), matching.next()) {
+        (None, _) => Err(ApiError::NotFound(
+            "retained example for the episode's latest run",
+        )),
+        (Some(kept), None) => Ok(kept),
+        (Some(_), Some(_)) => {
+            let message = format!(
+                "two retained examples match run {run}: the receipt does not say which \
+                 attempt it rests on, so the ruling draft refuses"
+            );
+            Err(ApiError::Refused(McpError::new(
+                McpErrorCode::StaleEvidence {
+                    detail: message.clone(),
+                },
+                message,
+            )))
+        }
+    }
 }
 
 /// The latest receipt of a task's gate runs.
@@ -552,4 +585,64 @@ fn invalid_request(detail: &str) -> ApiError {
         },
         detail,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A kept example of the fixture's probe, filed under `run`. `digit` names its hash.
+    fn kept(run: &str, digit: &str) -> DraftExample {
+        let example: ContrastExample = serde_json::from_str(include_str!(
+            "../../acan-intent/fixtures/contrast-example.json"
+        ))
+        .expect("the fixture decodes");
+        DraftExample {
+            run: run.to_owned(),
+            hash: ContrastExampleHash::from_str(&format!("sha256:{}", digit.repeat(64)))
+                .expect("a hash"),
+            probe_hash: example.probe.spec.probe_hash().expect("hashing"),
+            normalization_version: example.probe.normalization.version.clone(),
+            normalization_hash: example
+                .probe
+                .normalization
+                .normalization_hash()
+                .expect("hashing"),
+            example,
+        }
+    }
+
+    #[test]
+    fn the_one_example_of_the_latest_run_and_probe_is_the_ruled_one() {
+        let examples = [kept("run-1", "a"), kept("run-2", "b")];
+        let probe = examples[0].probe_hash;
+        let ruled = ruled_example(&examples, "run-1", probe).expect("one example matches");
+        assert_eq!(ruled.hash, examples[0].hash);
+    }
+
+    #[test]
+    fn two_examples_of_the_latest_run_refuse_rather_than_pick_one() {
+        // A run that crashed before its receipt was recorded runs again under the same id, and
+        // the store then keeps an example from each attempt.
+        let examples = [kept("run-1", "a"), kept("run-1", "b")];
+        let probe = examples[0].probe_hash;
+        match ruled_example(&examples, "run-1", probe).err() {
+            Some(ApiError::Refused(err)) => assert!(
+                matches!(err.error, McpErrorCode::StaleEvidence { .. }),
+                "two matches are stale evidence: {:?}",
+                err.error
+            ),
+            other => panic!("two matching examples must refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_example_of_the_latest_run_is_not_found() {
+        let examples = [kept("run-1", "a")];
+        let probe = examples[0].probe_hash;
+        assert!(matches!(
+            ruled_example(&examples, "run-2", probe).err(),
+            Some(ApiError::NotFound(_))
+        ));
+    }
 }

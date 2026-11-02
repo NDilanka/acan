@@ -28,6 +28,9 @@ param(
     [int]$RulingWaitSec = 1200,
     # A file the take writes once the rulings are recorded; the control then asks for a fresh receipt.
     [string]$RulingsDone = '',
+    # The first control on an order. When its claim ends before the build is cleared, it claims and
+    # declares again once (see the wait for build clearance below).
+    [switch]$RedeclareOnce,
     [string]$Pin = 'f91962156841332d5753d869554839f7c4cdea79'
 )
 
@@ -36,6 +39,7 @@ $mcpUrl = "$($Server.TrimEnd('/'))/mcp"
 $authHeaders = @{ Authorization = "Bearer $Token" }
 $script:RpcId = 0
 $steps = [System.Collections.Generic.List[object]]::new()
+$script:LastReply = $null
 $result = [ordered]@{
     schema     = 'acan-control-run/1'
     actor      = 'control identity (control-seeded agent token), not a model'
@@ -53,6 +57,8 @@ function Add-Step {
             evidence = $Evidence
         })
     Write-Output "[$(if ($Ok) { 'pass' } else { 'fail' })] $Name"
+    # Saved after every step, so a run that is killed at its wait still leaves its evidence.
+    Save-Result
 }
 
 function Post-Mcp {
@@ -62,6 +68,14 @@ function Post-Mcp {
 }
 
 function Call-Tool {
+    param([string]$Name, [hashtable]$Arguments)
+    $reply = Invoke-Tool -Name $Name -Arguments $Arguments
+    $text = [string]$reply.text
+    $script:LastReply = [ordered]@{ tool = $Name; ok = [bool]$reply.ok; text = $text.Substring(0, [Math]::Min(400, $text.Length)); at = (Get-Date).ToString('o') }
+    $reply
+}
+
+function Invoke-Tool {
     param([string]$Name, [hashtable]$Arguments)
     $script:RpcId++
     try {
@@ -99,10 +113,41 @@ function Apply-Edits {
     $Text
 }
 
+function Save-Result {
+    $result['steps'] = $steps
+    $result['last_reply'] = $script:LastReply
+    $result | ConvertTo-Json -Depth 60 | Set-Content -LiteralPath $Out -Encoding utf8
+}
+
 function Write-Result {
     $result['finished'] = (Get-Date).ToString('o')
-    $result['steps'] = $steps
-    $result | ConvertTo-Json -Depth 60 | Set-Content -LiteralPath $Out -Encoding utf8
+    Save-Result
+}
+
+# One control pass: read back at the confirmed scope, claim the task, declare the bundle's files.
+# It sets the claim and its generation for the rest of the run, and every step is a step of the
+# result file. $sc, $preds and $readSummary are set before the first call.
+function Invoke-ReadbackClaimDeclare {
+    param([string]$Suffix = '')
+    $rb = Call-Tool -Name 'post_scoped_readback' -Arguments @{
+        version     = 'acan-mcp/1'
+        task        = $Task
+        scope_rev   = $sc.value.scope.rev
+        scope_hash  = $sc.value.scope_hash
+        summary     = $readSummary
+        predictions = @($preds)
+    }
+    Add-Step -Name "control reads back the task at the confirmed scope$Suffix" -Ok $rb.ok -Evidence @{ refused = $(if ($rb.ok) { $null } else { $rb.text }) }
+    if (-not $rb.ok) { throw "readback refused$Suffix" }
+    $cl = Call-Tool -Name 'claim_task' -Arguments @{ task = $Task }
+    Add-Step -Name "control claims the task$Suffix" -Ok $cl.ok -Evidence @{ refused = $(if ($cl.ok) { $null } else { $cl.text }); generation = $cl.value.generation }
+    if (-not $cl.ok) { throw "claim refused$Suffix" }
+    $script:claimed = $true
+    $script:generation = [uint64]$cl.value.generation
+    $result['generation'] = $script:generation
+    $dc = Call-Tool -Name 'declare_changes' -Arguments @{ task = $Task; generation = $script:generation; files = @($bundleObj.declared_files) }
+    Add-Step -Name "control declares the files of its bundle$Suffix" -Ok $dc.ok -Evidence @{ files = @($bundleObj.declared_files); refused = $(if ($dc.ok) { $null } else { $dc.text }) }
+    if (-not $dc.ok) { throw "declare refused$Suffix" }
 }
 
 $bundleObj = Get-Content -LiteralPath $Bundle -Raw | ConvertFrom-Json
@@ -126,30 +171,18 @@ try {
     foreach ($rule in @($body.must_keep)) { $preds += @{ selector = $rule.selector; predicted = @{ kind = 'unchanged' } } }
     Add-Step -Name 'get the confirmed scope' -Ok $true -Evidence @{ scope_rev = $sc.value.scope.rev; scope_hash = [string]$sc.value.scope_hash; predictions = $preds.Count }
     $readSummary = if ($Summary) { $Summary } else { "control $($bundleObj.id): seeded bundle, not a model plan" }
-    $rb = Call-Tool -Name 'post_scoped_readback' -Arguments @{
-        version    = 'acan-mcp/1'
-        task       = $Task
-        scope_rev  = $sc.value.scope.rev
-        scope_hash = $sc.value.scope_hash
-        summary    = $readSummary
-        predictions = @($preds)
-    }
-    Add-Step -Name 'control reads back the task at the confirmed scope' -Ok $rb.ok -Evidence @{ refused = $(if ($rb.ok) { $null } else { $rb.text }) }
-    if (-not $rb.ok) { throw 'readback refused' }
 
-    # ---- claim and declare ----------------------------------------------------------------------
-    $cl = Call-Tool -Name 'claim_task' -Arguments @{ task = $Task }
-    Add-Step -Name 'control claims the task' -Ok $cl.ok -Evidence @{ refused = $(if ($cl.ok) { $null } else { $cl.text }); generation = $cl.value.generation }
-    if (-not $cl.ok) { throw 'claim refused' }
-    $claimed = $true
-    $generation = [uint64]$cl.value.generation
-    $result['generation'] = $generation
-    $dc = Call-Tool -Name 'declare_changes' -Arguments @{ task = $Task; generation = $generation; files = @($bundleObj.declared_files) }
-    Add-Step -Name 'control declares the files of its bundle' -Ok $dc.ok -Evidence @{ files = @($bundleObj.declared_files); refused = $(if ($dc.ok) { $null } else { $dc.text }) }
-    if (-not $dc.ok) { throw 'declare refused' }
+    # ---- read back, claim and declare -----------------------------------------------------------
+    Invoke-ReadbackClaimDeclare
 
     # ---- wait for build clearance ----------------------------------------------------------------
+    # A declared task waits for its order's declare barrier. The barrier holds while the order's
+    # siblings have not declared, and the task's lease runs out meanwhile; the barrier then lapses
+    # for the whole order. With -RedeclareOnce, a claim that ends before the build is cleared is
+    # claimed and declared again, once: the lapsed barrier clears it at its next declaration. A
+    # second loss, or a loss without the switch, ends the run.
     $cleared = $false
+    $redeclared = $false
     $stageEnd = (Get-Date).AddSeconds($StageWaitSec)
     $lastStage = ''
     while ($true) {
@@ -159,12 +192,22 @@ try {
         $state = [string]$tk.value.state
         $holds = ($tk.value.you_hold -eq $true) -and ([uint64]$tk.value.generation -eq $generation)
         if ($stage -ne $lastStage) { $lastStage = $stage; Write-Output "task stage: $stage" }
-        if ($state -ne 'claimed' -or -not $holds) { throw "task is $state at generation $($tk.value.generation); the control holds $generation" }
+        if ($state -ne 'claimed' -or -not $holds) {
+            if ($RedeclareOnce -and -not $redeclared -and $state -eq 'open') {
+                $redeclared = $true
+                Write-Output "the claim ended before the build was cleared; claiming and declaring again, once"
+                Invoke-ReadbackClaimDeclare -Suffix ' (again: the first claim ended before the build was cleared)'
+                $stageEnd = (Get-Date).AddSeconds($StageWaitSec)
+                $lastStage = ''
+                continue
+            }
+            throw "task is $state at generation $($tk.value.generation); the control holds $generation"
+        }
         if ($stage -eq 'building') { $cleared = $true; break }
         if ((Get-Date) -gt $stageEnd) { break }
         Start-Sleep -Seconds 2
     }
-    Add-Step -Name 'origin clears the task to build' -Ok $cleared -Evidence @{ stage = $lastStage }
+    Add-Step -Name 'origin clears the task to build' -Ok $cleared -Evidence @{ stage = $lastStage; redeclared = $redeclared }
     if (-not $cleared) { throw "build clearance did not arrive within $StageWaitSec s" }
 
     # ---- write the bundle into the worktree and commit ---------------------------------------
@@ -189,8 +232,10 @@ try {
 
     # ---- report and wait for the receipt -----------------------------------------------------
     # Without -AwaitRuling the control stops at its first new receipt. With it, the control keeps
-    # its claim while a human rules: each new receipt is saved, and the control waits until the gate
-    # lands the candidate, the claim ends, or -RulingWaitSec passes with no new receipt.
+    # its claim while a human rules: each new receipt is saved, and the control waits while the
+    # receipt is blocked. A receipt that is not blocked, the receipt that answers the re-report, a
+    # refused report, a claim that ends, or -RulingWaitSec with no new receipt ends the wait; the
+    # claim is then released without a land.
     $before = Call-Tool -Name 'get_receipt' -Arguments @{ version = 'acan-mcp/1'; task = $Task }
     $lastHash = if ($before.ok) { [string]$before.value.receipt_hash } else { '' }
     $rep = Call-Tool -Name 'report_built' -Arguments @{ task = $Task; generation = $generation; head = $head }
@@ -200,6 +245,7 @@ try {
     $latest = $null
     $receiptsSaved = 0
     $reReported = $false
+    $regateReceived = $false
     while ($true) {
         $gr = Call-Tool -Name 'get_receipt' -Arguments @{ version = 'acan-mcp/1'; task = $Task }
         if ($gr.ok -and [string]$gr.value.receipt_hash -ne $lastHash) {
@@ -209,7 +255,12 @@ try {
             $gr.value | ConvertTo-Json -Depth 80 | Set-Content -LiteralPath "$Out.receipt.json" -Encoding utf8
             $gate = [string]$gr.value.receipt.gate_state
             Write-Output "receipt $lastHash gate_state $gate"
-            if ($gate -eq 'landed' -or -not $AwaitRuling) { break }
+            # A blocked receipt waits for the rulings. Any other receipt is the answer to them (a
+            # passing gate records prepared, a land records landed). The first receipt after the
+            # re-report is the re-gate's answer: the control stops and releases even if it is blocked,
+            # so the wait never outlives the take's wait for this control.
+            if ($reReported) { $regateReceived = $true }
+            if ($reReported -or $gate -ne 'blocked' -or -not $AwaitRuling) { break }
             $deadline = (Get-Date).AddSeconds($RulingWaitSec)
         }
         if ($null -ne $latest -and $AwaitRuling) {
@@ -221,11 +272,16 @@ try {
                 $reReported = $true
                 $again = Call-Tool -Name 'report_built' -Arguments @{ task = $Task; generation = $generation; head = $head }
                 Add-Step -Name 'control reports the same build again after the rulings' -Ok $again.ok -Evidence @{ refused = $(if ($again.ok) { $null } else { $again.text }) }
+                # A refused report gives no new receipt, so waiting for one only runs out the clock.
+                if (-not $again.ok) { break }
                 $deadline = (Get-Date).AddSeconds($ReceiptWaitSec)
             }
         }
         if ((Get-Date) -gt $deadline) { break }
         Start-Sleep -Seconds 3
+    }
+    if ($reReported -and -not $regateReceived) {
+        Add-Step -Name 'the re-gate after the rulings answers with a receipt' -Ok $false -Evidence @{ waited_sec = $ReceiptWaitSec }
     }
     if ($null -eq $latest) {
         Add-Step -Name 'the gate answers the build with a receipt' -Ok $false -Evidence @{ waited_sec = $ReceiptWaitSec }
@@ -250,7 +306,15 @@ try {
 } finally {
     if ($claimed) {
         $rel = Call-Tool -Name 'release_task' -Arguments @{ task = $Task; generation = $generation }
-        Add-Step -Name 'control releases the claim after its receipt' -Ok $rel.ok -Evidence @{ refused = $(if ($rel.ok) { $null } else { $rel.text }) }
+        # A blocked receipt makes the server release the claim itself. A later release of the same
+        # generation is then refused as stale with no current holder: that exact refusal means released.
+        $alreadyReleased = (-not $rel.ok) -and ($rel.text -eq 'stale generation; current is None')
+        if ($alreadyReleased) {
+            $result['release'] = 'already released by the server (stale generation; current is None)'
+            Add-Step -Name 'control releases the claim after its receipt' -Ok $true -Evidence @{ released = 'already released by the server'; refused = $rel.text }
+        } else {
+            Add-Step -Name 'control releases the claim after its receipt' -Ok $rel.ok -Evidence @{ refused = $(if ($rel.ok) { $null } else { $rel.text }) }
+        }
     }
     Write-Result
     Write-Output "result: $Out"

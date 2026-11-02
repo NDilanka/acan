@@ -24,6 +24,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 
+use acan_core::ProtectedInputs;
 use acan_git::{Preparation, ProtectedPaths, Repo};
 use acan_intent::admit::AdmitError;
 use acan_intent::compare::{self, CompareError, Contrast};
@@ -829,6 +830,32 @@ pub(crate) async fn current(
 ) -> Result<GateContext, ObserveError> {
     let facts = Facts::of(plan, order, artifacts(plan).await?)?;
     Ok(order.context(&facts, plan.candidate))
+}
+
+/// The protected inputs of the scope `order` is confirmed under, from `plan`'s base preparation,
+/// its protected snapshot and the ruling log. No candidate is needed: the candidate's artifacts are
+/// left out, and the overlay is the base's own, so the result matches the protected part of any
+/// context judged under the same inputs.
+///
+/// # Errors
+///
+/// Returns [`ObserveError`] when a manifest cannot be hashed or a built-in name is invalid.
+pub(crate) fn protected_inputs(
+    plan: &Plan<'_>,
+    order: &Order<'_>,
+) -> Result<ProtectedInputs, ObserveError> {
+    let facts = Facts::of(plan, order, BTreeMap::new())?;
+    Ok(ProtectedInputs {
+        overlay_hash: plan.base.overlay_hash(),
+        ledger_head: order.ledger.value().head,
+        probe_set_hash: facts.probe_set,
+        fixture_set_hash: facts.fixture_set,
+        runner_hash: facts.runner,
+        evaluator_version: facts.evaluator,
+        runtime: facts.runtime,
+        controlled_env_hash: facts.env,
+        sandbox_policy_hash: facts.policy,
+    })
 }
 
 /// The receipt of `results` under `context`, in `state`.

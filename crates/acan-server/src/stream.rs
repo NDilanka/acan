@@ -17,8 +17,10 @@ use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::watch;
 
+use crate::auth::Principal;
 use crate::host::Host;
 use crate::http::{ApiError, authenticate, bearer};
+use crate::redact;
 
 /// How long a connection without an `Authorization` header has to send its token frame.
 const AUTH_FRAME_TIMEOUT: Duration = Duration::from_secs(3);
@@ -46,8 +48,8 @@ struct AuthFrame {
 
 /// How a stream proves its token.
 enum Access {
-    /// The upgrade's `Authorization` header carried a valid token.
-    Granted,
+    /// The upgrade's `Authorization` header carried a valid token, of this principal.
+    Granted(Principal),
     /// The token must arrive in the first frame.
     FirstFrame,
 }
@@ -66,10 +68,7 @@ pub async fn upgrade<C: ModelClient + 'static>(
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
     let access = match bearer(&headers) {
-        Some(token) => {
-            authenticate(&host, Some(token))?;
-            Access::Granted
-        }
+        Some(token) => Access::Granted(authenticate(&host, Some(token))?),
         None => Access::FirstFrame,
     };
     let from = Seq::new(query.from);
@@ -91,9 +90,12 @@ async fn shutting_down(shutdown: &mut watch::Receiver<bool>) {
     let _ = shutdown.wait_for(|off| *off).await;
 }
 
-/// Waits for a valid token frame. `false` means the client sent anything else, sent nothing in
-/// time, or left.
-async fn first_frame_authenticates<C: ModelClient>(host: &Host<C>, socket: &mut WebSocket) -> bool {
+/// Waits for a valid token frame and returns the principal it names. `None` means the client sent
+/// anything else, sent nothing in time, or left.
+async fn first_frame_authenticates<C: ModelClient>(
+    host: &Host<C>,
+    socket: &mut WebSocket,
+) -> Option<Principal> {
     let first_text = async {
         loop {
             match socket.recv().await {
@@ -104,28 +106,31 @@ async fn first_frame_authenticates<C: ModelClient>(host: &Host<C>, socket: &mut 
         }
     };
     let Ok(Some(text)) = tokio::time::timeout(AUTH_FRAME_TIMEOUT, first_text).await else {
-        return false;
+        return None;
     };
-    serde_json::from_str::<AuthFrame>(&text)
-        .ok()
-        .is_some_and(|frame| authenticate(host, Some(&frame.token)).is_ok())
+    let frame = serde_json::from_str::<AuthFrame>(&text).ok()?;
+    authenticate(host, Some(&frame.token)).ok()
 }
 
 async fn pump<C: ModelClient>(host: Host<C>, mut socket: WebSocket, from: Seq, access: Access) {
     let mut shutdown = host.shutdown_signal();
-    if let Access::FirstFrame = access {
-        let authenticated = tokio::select! {
-            () = shutting_down(&mut shutdown) => {
-                close(&mut socket, CLOSE_SHUTDOWN, "server shutting down".to_owned()).await;
+    let principal = match access {
+        Access::Granted(principal) => principal,
+        Access::FirstFrame => {
+            let authenticated = tokio::select! {
+                () = shutting_down(&mut shutdown) => {
+                    close(&mut socket, CLOSE_SHUTDOWN, "server shutting down".to_owned()).await;
+                    return;
+                }
+                authenticated = first_frame_authenticates(&host, &mut socket) => authenticated,
+            };
+            let Some(principal) = authenticated else {
+                close(&mut socket, CLOSE_UNAUTHORIZED, "unauthorized".to_owned()).await;
                 return;
-            }
-            authenticated = first_frame_authenticates(&host, &mut socket) => authenticated,
-        };
-        if !authenticated {
-            close(&mut socket, CLOSE_UNAUTHORIZED, "unauthorized".to_owned()).await;
-            return;
+            };
+            principal
         }
-    }
+    };
 
     // Subscribe before reading the backlog. An event committed in between is then both in the
     // backlog and in the subscription, and `Resume` drops the copy that arrives second.
@@ -148,7 +153,7 @@ async fn pump<C: ModelClient>(host: Host<C>, mut socket: WebSocket, from: Seq, a
     for event in &backlog {
         match resume.offer(event) {
             Offer::Send => {
-                if !send(&mut socket, event).await {
+                if !send(&mut socket, &principal, event).await {
                     return;
                 }
             }
@@ -169,10 +174,11 @@ async fn pump<C: ModelClient>(host: Host<C>, mut socket: WebSocket, from: Seq, a
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Close(_)) | Err(_)) | None => return,
                 Some(Ok(_)) => {}
-            },            event = live.recv() => match event {
+            },
+            event = live.recv() => match event {
                 Ok(event) => match resume.offer(&event) {
                     Offer::Send => {
-                        if !send(&mut socket, &event).await {
+                        if !send(&mut socket, &principal, &event).await {
                             return;
                         }
                     }
@@ -200,8 +206,10 @@ async fn close_for_gap(socket: &mut WebSocket, resume: &Resume) {
     close(socket, CLOSE_RESUME, reason).await;
 }
 
-async fn send(socket: &mut WebSocket, event: &Stamped) -> bool {
-    let json = match serde_json::to_string(event) {
+async fn send(socket: &mut WebSocket, principal: &Principal, event: &Stamped) -> bool {
+    let encoded = redact::view(principal, event)
+        .and_then(|view| serde_json::to_string(&view).map_err(anyhow::Error::from));
+    let json = match encoded {
         Ok(json) => json,
         Err(err) => {
             tracing::error!(error = %err, "encoding an event for the stream failed");

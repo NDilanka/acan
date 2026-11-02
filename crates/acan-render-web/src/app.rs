@@ -7,12 +7,12 @@
 
 use std::collections::HashMap;
 
-use acan_core::Stamped;
 use acan_render::camera::{DEFAULT_AZIMUTH, DEFAULT_ELEVATION, FitRoom};
 use acan_render::{Aabb, Camera, Lod, Model, Renderer, Scene, wgpu};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
+use crate::feed;
 use crate::kind::{self, ALL, PlanFootprint};
 use crate::labels::{self, LabelSpot};
 use crate::layout::{Layout, layout};
@@ -20,6 +20,7 @@ use crate::marks::{self, AgentSlots, Marks, Motion, Stand};
 use crate::mirror::{Mirror, View};
 use crate::plan::Plan;
 use crate::plant::{Plant, PlantMachine, from_scan_json, rest_labels, stress};
+use crate::plant_view;
 use crate::pov::{self, Ride};
 use crate::scene;
 use crate::stand;
@@ -204,6 +205,19 @@ impl App {
         Ok(self.load(plant))
     }
 
+    /// Checks one `plant-view/1` view, as `GET /api/orders/{order}/plant-view` answers it, and
+    /// returns its summary as JSON. The page takes its numbers from the summary only after this
+    /// passes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON is not a `plant-view/1` view, or when its counts do not match
+    /// its items.
+    pub fn plant_view_summary(&self, json: &str) -> Result<String, JsError> {
+        let view = plant_view::decode(json).map_err(js_err)?;
+        Ok(plant_view::summarize(&view).to_string())
+    }
+
     /// Holds the marks still, as `?freeze=1` asks. Call it before the plant loads: every ease then
     /// lands at once, a leaving bot is gone, no flag fades, and a landed dot keeps its word.
     pub fn set_still(&mut self, still: bool) {
@@ -224,33 +238,41 @@ impl App {
         self.load(stress(machines as usize))
     }
 
-    /// Folds the log: a JSON array of stamped events from seq 0.
+    /// Folds the log: a JSON array of stamped events from seq 0. An event this build cannot read
+    /// is passed over and counted, see [`App::not_shown`].
     ///
     /// # Errors
     ///
     /// Returns an error when the JSON does not parse or the log does not replay.
     pub fn load_log(&mut self, json: &str) -> Result<(), JsError> {
-        let log: Vec<Stamped> = serde_json::from_str(json).map_err(js_err)?;
-        self.mirror = Some(Mirror::from_log(log).map_err(js_err)?);
+        let entries = feed::entries(json).map_err(js_err)?;
+        self.mirror = Some(Mirror::from_entries(entries).map_err(js_err)?);
         self.dirty = true;
         Ok(())
     }
 
-    /// Applies one streamed event, given as its JSON.
+    /// Applies one streamed event, given as its JSON. An event this build cannot read is passed
+    /// over and counted.
     ///
     /// # Errors
     ///
-    /// Returns an error when no log is loaded, the JSON does not parse, an event was skipped,
-    /// or the event refers to something the log never created.
+    /// Returns an error when no log is loaded, the JSON does not parse, events were missed, or
+    /// the event refers to something the log never created.
     pub fn ingest(&mut self, json: &str) -> Result<(), JsError> {
-        let event: Stamped = serde_json::from_str(json).map_err(js_err)?;
+        let entry = feed::entry(json).map_err(js_err)?;
         let mirror = self
             .mirror
             .as_mut()
             .ok_or_else(|| js_err("no log is loaded"))?;
-        mirror.ingest(&event).map_err(js_err)?;
+        mirror.ingest_entry(entry).map_err(js_err)?;
         self.dirty = true;
         Ok(())
+    }
+
+    /// How many events this page passed over because it cannot read them. Above zero, the page
+    /// is older than the origin and says so.
+    pub fn not_shown(&self) -> u32 {
+        self.mirror.as_ref().map_or(0, Mirror::not_shown)
     }
 
     /// The seq the next event will carry. The stream resumes from here.
