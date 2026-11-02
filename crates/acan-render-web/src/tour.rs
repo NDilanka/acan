@@ -962,28 +962,38 @@ mod tests {
     }
 
     #[test]
-    fn a_preserved_item_in_a_bounced_state_takes_the_held_caption() {
+    fn a_preserved_item_in_a_bounced_state_records_the_bounced_state() {
         let json = plain_edited(|value| {
             plain_item(value, "chk-health")["state"] = "bounced".into();
         });
-        let play = play(&json).expect("the held caption fits a preserved item");
+        let play = play(&json).expect("the recorded-state caption fits a preserved item");
         assert_eq!(
             step(&play, "chk-health").caption,
-            "Classified: preserved. Must-keep check: held. Another item on the same route is bounced."
+            "Classified: preserved. Recorded state: bounced."
         );
     }
 
     #[test]
-    fn a_mandatory_item_with_no_caption_refuses_the_walk_plainly_and_names_it() {
-        // A fixed obligation failure is the one mandatory state the catalog leaves without a caption.
+    fn a_fixed_obligation_failure_is_captioned_as_a_failure_and_plays() {
+        // A failed check can be fixed and then regress, so the caption still names the failure.
         let json = plain_edited(|value| {
             plain_item(value, "i-retry-after")["state"] = "fixed".into();
         });
-        let err = play(&json).expect_err("no caption covers a fixed obligation failure");
+        let play = play(&json).expect("the failure caption fits a fixed obligation failure");
+        let caption = &step(&play, "i-retry-after").caption;
         assert!(
-            matches!(&err, PlayError::Unbindable { item_id } if item_id.to_string() == "i-retry-after"),
-            "{err}"
+            caption.starts_with("Classified: obligation failed."),
+            "{caption}"
         );
+    }
+
+    #[test]
+    fn a_walk_that_cannot_be_captioned_is_refused_in_one_plain_sentence() {
+        // The trusted catalog captions every mandatory class and state, so no fixture reaches this
+        // refusal. The sentence the plate shows for it is still checked here.
+        let err = PlayError::Unbindable {
+            item_id: "i-retry-after".parse().expect("an item id"),
+        };
         let message = err.to_string();
         assert!(
             message.starts_with("This receipt cannot be walked: item i-retry-after"),

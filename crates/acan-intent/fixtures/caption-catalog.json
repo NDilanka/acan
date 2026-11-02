@@ -1,6 +1,6 @@
 {
   "version": "acan-caption-catalog/2",
-  "catalog_version": "captions-3",
+  "catalog_version": "captions-4",
   "templates": [
     {
       "template_id": "unspecified.authorized",
@@ -77,7 +77,7 @@
       "template_id": "failed.obligation",
       "text": "Classified: obligation failed. Candidate value here: {candidate}.",
       "classes": ["obligation_failed"],
-      "states": ["open", "bounced", "residue", "stopped"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {
         "candidate": {
           "column": "candidate",
@@ -90,7 +90,7 @@
       "template_id": "failed.obligation.bare",
       "text": "Classified: obligation failed. No value is quoted for this check.",
       "classes": ["obligation_failed"],
-      "states": ["open", "bounced", "residue", "stopped"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {}
     },
     {
@@ -230,22 +230,22 @@
       "slots": {}
     },
     {
-      "template_id": "preserved.held_nearby.bounced",
-      "text": "Classified: preserved. Must-keep check: held. Another item on the same route is bounced.",
+      "template_id": "preserved.bounced",
+      "text": "Classified: preserved. Recorded state: bounced.",
       "classes": ["preserved"],
       "states": ["bounced"],
       "slots": {}
     },
     {
-      "template_id": "preserved.held_nearby.residue",
-      "text": "Classified: preserved. Must-keep check: held. Another item on the same route is in residue.",
+      "template_id": "preserved.residue",
+      "text": "Classified: preserved. Recorded state: residue.",
       "classes": ["preserved"],
       "states": ["residue"],
       "slots": {}
     },
     {
-      "template_id": "preserved.held_nearby.stopped",
-      "text": "Classified: preserved. Must-keep check: held. Another item on the same route is stopped.",
+      "template_id": "preserved.stopped",
+      "text": "Classified: preserved. Recorded state: stopped.",
       "classes": ["preserved"],
       "states": ["stopped"],
       "slots": {}
