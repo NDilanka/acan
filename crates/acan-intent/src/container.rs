@@ -458,7 +458,12 @@ impl ContainerPolicy {
         policy.tmp_bytes = nonzero64(1 << 30);
         policy.environment = BTreeMap::from([
             ("HOME".to_owned(), "/tmp".to_owned()),
-            ("NPM_CONFIG_GLOBALCONFIG".to_owned(), "/dev/null".to_owned()),
+            // npm refuses to load one file as both the user and the global config, so the global
+            // config is a path that does not exist and the user config is /dev/null.
+            (
+                "NPM_CONFIG_GLOBALCONFIG".to_owned(),
+                "/tmp/acan-no-global-npmrc".to_owned(),
+            ),
             ("NPM_CONFIG_REGISTRY".to_owned(), NPM_REGISTRY.to_owned()),
             ("NPM_CONFIG_USERCONFIG".to_owned(), "/dev/null".to_owned()),
             ("PATH".to_owned(), NODE_PATH.to_owned()),
@@ -584,6 +589,23 @@ mod tests {
     fn fixture() -> ContainerPolicy {
         serde_json::from_str(include_str!("../fixtures/container-policy.json"))
             .expect("the policy fixture")
+    }
+
+    #[test]
+    fn the_install_names_its_registry_and_two_different_npm_configs() {
+        let environment = ContainerPolicy::node_install().environment;
+        assert_eq!(
+            environment.get("NPM_CONFIG_REGISTRY").map(String::as_str),
+            Some(NPM_REGISTRY),
+            "the registry is named"
+        );
+        let user = environment.get("NPM_CONFIG_USERCONFIG");
+        let global = environment.get("NPM_CONFIG_GLOBALCONFIG");
+        assert!(user.is_some() && global.is_some(), "both configs are named");
+        assert_ne!(
+            user, global,
+            "npm refuses one file loaded as both the user and the global config"
+        );
     }
 
     fn with(edit: impl FnOnce(&mut Value)) -> bool {
