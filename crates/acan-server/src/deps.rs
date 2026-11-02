@@ -39,8 +39,24 @@ const KEY_VERSION: &str = "acan-deps/1";
 const NETWORK: &str = "egress";
 /// Install scripts never run, so the envelope says so.
 const INSTALL_SCRIPTS: &str = "ignored";
-/// The user an install runs as when the host is root, which no container may be.
-const FALLBACK_USER: &str = "1000:1000";
+/// The uid and gid an install runs as when the host is root, or is in group 0. No container may
+/// run as root, and a host user in group 0 is treated the same way.
+const FALLBACK_ID: u32 = 1000;
+
+/// The user a check runs as: the uid and gid of a file it creates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Identity {
+    uid: u32,
+    gid: u32,
+}
+
+impl Identity {
+    /// The owners a cache entry, or anything under one, may have: this user, and the user an
+    /// install runs as, which is the fallback when this user is root or in group 0.
+    fn trusted_owners(self) -> [u32; 2] {
+        [self.uid, install_ids(self.uid, self.gid).0]
+    }
+}
 
 /// Which side of the contrast an install serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -206,6 +222,23 @@ impl Installer<'_> {
         role: Role,
         app: &AppContract,
     ) -> Result<Option<Installed>, DepsError> {
+        if app.install.is_none() {
+            return Ok(None);
+        }
+        self.install_as(preparation, role, app, process_identity()?)
+            .await
+    }
+
+    /// As [`Self::install`], for the user `me`. The cache root is checked for `me` before any
+    /// entry under it is looked up, so a root another user can write is never read, not even for
+    /// a hit.
+    async fn install_as(
+        &self,
+        preparation: &Preparation,
+        role: Role,
+        app: &AppContract,
+        me: Identity,
+    ) -> Result<Option<Installed>, DepsError> {
         let Some(argv) = app.install.as_ref() else {
             return Ok(None);
         };
@@ -253,20 +286,20 @@ impl Installer<'_> {
             network: NETWORK,
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         };
-        if read_entry(&entry)? == Entry::Complete {
+        prepare_root(self.cache)?;
+        check_root(self.cache, me)?;
+        if read_entry(&entry, me)? == Entry::Complete {
             return Ok(Some(Installed {
                 modules: entry.join(MODULES),
                 record: record(Cache::Hit),
             }));
         }
 
-        prepare_root(self.cache)?;
         // The partial directory is removed when it drops, unless the entry was stored from it.
         let partial = tempfile::Builder::new()
             .prefix("partial-")
             .tempdir_in(self.cache)
             .map_err(|source| io_error(self.cache, source))?;
-        check_root(self.cache, partial.path())?;
         let work = partial.path().join("work");
         fs::create_dir(&work).map_err(|source| io_error(&work, source))?;
         open_to_install(&work).map_err(|source| io_error(&work, source))?;
@@ -292,7 +325,7 @@ impl Installer<'_> {
         match fs::rename(&work, &entry) {
             Ok(()) => {}
             // Another install of the same key stored the entry first. Its entry is the same tree.
-            Err(_) if matches!(read_entry(&entry), Ok(Entry::Complete)) => {}
+            Err(_) if matches!(read_entry(&entry, me), Ok(Entry::Complete)) => {}
             Err(source) => {
                 return Err(DepsError::Store {
                     path: entry,
@@ -384,10 +417,11 @@ enum Entry {
     Complete,
 }
 
-/// Reads what the cache holds under `entry`. A link where the entry, its `node_modules` or its
-/// marker should be, or an entry another user can write, is refused: a run would mount or trust
-/// whatever it reaches.
-fn read_entry(entry: &Path) -> Result<Entry, DepsError> {
+/// Reads what the cache holds under `entry`, for the user `me`. A link where the entry, its
+/// `node_modules` or its marker should be is refused. So is an entry, or anything under it, that
+/// another user owns or the group or others can write: a run would mount or trust whatever it
+/// reaches.
+fn read_entry(entry: &Path, me: Identity) -> Result<Entry, DepsError> {
     let marker = entry.join(COMPLETE);
     match fs::symlink_metadata(&marker) {
         Ok(meta) if meta.is_file() => {}
@@ -399,12 +433,7 @@ fn read_entry(entry: &Path) -> Result<Entry, DepsError> {
     if !meta.is_dir() {
         return Err(tampered(entry, "the entry is not a directory"));
     }
-    if writable_by_others(&meta) {
-        return Err(tampered(
-            entry,
-            "the entry is writable by its group or others; remove it and install again",
-        ));
-    }
+    check_tree(entry, me)?;
     let modules = entry.join(MODULES);
     let modules_meta =
         fs::symlink_metadata(&modules).map_err(|source| io_error(&modules, source))?;
@@ -412,6 +441,34 @@ fn read_entry(entry: &Path) -> Result<Entry, DepsError> {
         return Err(tampered(&modules, "node_modules is not a plain directory"));
     }
     Ok(Entry::Complete)
+}
+
+/// Refuses `path`, and everything under it, when another user owns it or the group or others can
+/// write it. A link is not followed, and nothing is changed.
+fn check_tree(path: &Path, me: Identity) -> Result<(), DepsError> {
+    let meta = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
+    if !me.trusted_owners().contains(&owner(&meta)) {
+        return Err(tampered(
+            path,
+            "another user owns it; remove the entry and install again",
+        ));
+    }
+    if writable_by_others(&meta) {
+        return Err(tampered(
+            path,
+            "the group or others can write it; remove the entry and install again",
+        ));
+    }
+    if meta.is_dir() {
+        for child in fs::read_dir(path).map_err(|source| io_error(path, source))? {
+            let child = child.map_err(|source| io_error(path, source))?;
+            check_tree(&child.path(), me)?;
+        }
+    }
+    Ok(())
 }
 
 /// Creates the cache root when it is missing, private to its owner. Its parents are created as
@@ -433,10 +490,9 @@ fn prepare_root(cache: &Path) -> Result<(), DepsError> {
     }
 }
 
-/// Checks the cache root before anything is stored in it: a real directory, not open to its
-/// group or others, and owned by the user this process runs as. `owner` is a directory this
-/// process created inside the root, so its owner is that user.
-fn check_root(cache: &Path, owner: &Path) -> Result<(), DepsError> {
+/// Checks the cache root before anything is looked up or stored in it: a real directory, not open
+/// to its group or others, and owned by the user `me`.
+fn check_root(cache: &Path, me: Identity) -> Result<(), DepsError> {
     let root = fs::symlink_metadata(cache).map_err(|source| io_error(cache, source))?;
     if !root.is_dir() {
         return Err(tampered(cache, "the cache root is not a plain directory"));
@@ -447,11 +503,32 @@ fn check_root(cache: &Path, owner: &Path) -> Result<(), DepsError> {
             "the cache root is writable by its group or others; make it private to this user",
         ));
     }
-    let ours = fs::metadata(owner).map_err(|source| io_error(owner, source))?;
-    if !same_owner(&root, &ours) {
+    if owner(&root) != me.uid {
         return Err(tampered(cache, "the cache root belongs to another user"));
     }
     Ok(())
+}
+
+/// Who this process runs as. A file it creates in the system temporary directory is owned by it,
+/// so the cache is never written to learn the answer.
+#[cfg(unix)]
+fn process_identity() -> Result<Identity, DepsError> {
+    use std::os::unix::fs::MetadataExt;
+    let dir = std::env::temp_dir();
+    let probe = tempfile::NamedTempFile::new_in(&dir).map_err(|source| io_error(&dir, source))?;
+    let meta = probe
+        .as_file()
+        .metadata()
+        .map_err(|source| io_error(probe.path(), source))?;
+    Ok(Identity {
+        uid: meta.uid(),
+        gid: meta.gid(),
+    })
+}
+
+#[cfg(not(unix))]
+fn process_identity() -> Result<Identity, DepsError> {
+    Ok(Identity { uid: 0, gid: 0 })
 }
 
 fn tampered(path: &Path, detail: &str) -> DepsError {
@@ -473,15 +550,26 @@ fn writable_by_others(_meta: &fs::Metadata) -> bool {
     false
 }
 
+/// The uid that owns `meta`. Windows has no such owner, so every path has the same one.
 #[cfg(unix)]
-fn same_owner(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+fn owner(meta: &fs::Metadata) -> u32 {
     use std::os::unix::fs::MetadataExt;
-    left.uid() == right.uid()
+    meta.uid()
 }
 
 #[cfg(not(unix))]
-fn same_owner(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
-    true
+fn owner(_meta: &fs::Metadata) -> u32 {
+    0
+}
+
+/// The uid and gid an install runs as, for a tree its host user owns. A root host, or a host in
+/// group 0, runs it as the fallback, which no container may run as root.
+fn install_ids(uid: u32, gid: u32) -> (u32, u32) {
+    if uid == 0 || gid == 0 {
+        (FALLBACK_ID, FALLBACK_ID)
+    } else {
+        (uid, gid)
+    }
 }
 
 /// Clears the group and other write bits of every directory and file under `root`, and of `root`
@@ -595,18 +683,18 @@ fn stage(work: &Path, lock: &[u8], manifests: &[(String, Vec<u8>)]) -> io::Resul
 fn install_user(work: &Path) -> io::Result<ContainerUser> {
     use std::os::unix::fs::MetadataExt;
     let meta = fs::metadata(work)?;
-    let text = if meta.uid() == 0 || meta.gid() == 0 {
-        FALLBACK_USER.to_owned()
-    } else {
-        format!("{}:{}", meta.uid(), meta.gid())
-    };
-    text.parse()
-        .map_err(|err: acan_intent::InvalidValue| io::Error::other(err.to_string()))
+    let (uid, gid) = install_ids(meta.uid(), meta.gid());
+    container_user(uid, gid)
 }
 
 #[cfg(not(unix))]
 fn install_user(_work: &Path) -> io::Result<ContainerUser> {
-    FALLBACK_USER
+    let (uid, gid) = install_ids(0, 0);
+    container_user(uid, gid)
+}
+
+fn container_user(uid: u32, gid: u32) -> io::Result<ContainerUser> {
+    format!("{uid}:{gid}")
         .parse()
         .map_err(|err: acan_intent::InvalidValue| io::Error::other(err.to_string()))
 }
@@ -642,6 +730,11 @@ fn io_error(path: &Path, source: io::Error) -> DepsError {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
+    use acan_git::{PrepareOutcome, ProtectedPaths};
+    use acan_intent::CommitSha;
+
     use super::*;
 
     const IMAGE: &str = "node:24@sha256:a";
@@ -864,12 +957,34 @@ mod tests {
             0o700,
             "a new root is private"
         );
-        let partial = tempfile::tempdir_in(&cache).expect("a partial directory");
-        check_root(&cache, partial.path()).expect("a private root of this user is accepted");
+        let me = process_identity().expect("this process's identity");
+        check_root(&cache, me).expect("a private root of this user is accepted");
 
         fs::set_permissions(&cache, fs::Permissions::from_mode(0o777)).expect("open root");
-        let refused = check_root(&cache, partial.path()).expect_err("an open root is refused");
+        let refused = check_root(&cache, me).expect_err("an open root is refused");
         assert!(matches!(refused, DepsError::Tampered { .. }), "{refused}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_another_user_owns_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let cache = dir.path().join("deps");
+        prepare_root(&cache).expect("a new root is created");
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o700)).expect("private root");
+        let me = process_identity().expect("this process's identity");
+        let foreign = Identity {
+            uid: me.uid + 1,
+            ..me
+        };
+
+        let refused = check_root(&cache, foreign).expect_err("a root of another user is refused");
+
+        assert!(
+            matches!(&refused, DepsError::Tampered { detail, .. } if detail.contains("another user")),
+            "{refused}"
+        );
     }
 
     #[cfg(unix)]
@@ -885,15 +1000,16 @@ mod tests {
         fs::create_dir_all(good.join(MODULES)).expect("a complete entry");
         fs::write(good.join(COMPLETE), "").expect("its marker");
         fs::set_permissions(&good, fs::Permissions::from_mode(0o755)).expect("its mode");
-        assert_eq!(read_entry(&good).expect("a read"), Entry::Complete);
+        let me = process_identity().expect("this process's identity");
+        assert_eq!(read_entry(&good, me).expect("a read"), Entry::Complete);
         assert_eq!(
-            read_entry(&dir.path().join("missing")).expect("a read"),
+            read_entry(&dir.path().join("missing"), me).expect("a read"),
             Entry::Absent
         );
 
         let linked = dir.path().join("linked");
         std::os::unix::fs::symlink(&elsewhere, &linked).expect("an entry link");
-        let refused = read_entry(&linked).expect_err("a linked entry is refused");
+        let refused = read_entry(&linked, me).expect_err("a linked entry is refused");
         assert!(matches!(refused, DepsError::Tampered { .. }), "{refused}");
 
         let linked_modules = dir.path().join("linked-modules");
@@ -902,15 +1018,201 @@ mod tests {
         fs::set_permissions(&linked_modules, fs::Permissions::from_mode(0o755)).expect("mode");
         std::os::unix::fs::symlink(elsewhere.join(MODULES), linked_modules.join(MODULES))
             .expect("a modules link");
-        let refused = read_entry(&linked_modules).expect_err("a linked node_modules is refused");
+        let refused =
+            read_entry(&linked_modules, me).expect_err("a linked node_modules is refused");
         assert!(matches!(refused, DepsError::Tampered { .. }), "{refused}");
 
         let open = dir.path().join("open");
         fs::create_dir_all(open.join(MODULES)).expect("an entry");
         fs::write(open.join(COMPLETE), "").expect("its marker");
         fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).expect("open entry");
-        let refused = read_entry(&open).expect_err("an open entry is refused");
+        let refused = read_entry(&open, me).expect_err("an open entry is refused");
         assert!(matches!(refused, DepsError::Tampered { .. }), "{refused}");
+    }
+
+    /// A complete entry at `entry` with one file in its `node_modules`, every directory private.
+    #[cfg(unix)]
+    fn complete_entry(entry: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let modules = entry.join(MODULES);
+        fs::create_dir_all(&modules).expect("an entry");
+        let file = modules.join("index.js");
+        fs::write(&file, "module.exports = 1;").expect("a file under the entry");
+        fs::write(entry.join(COMPLETE), "").expect("its marker");
+        for path in [entry, modules.as_path(), file.as_path()] {
+            let mode = if path == file { 0o644 } else { 0o755 };
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("a private mode");
+        }
+        file
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_a_writable_file_or_a_foreign_owner_under_it_is_refused_on_a_hit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let entry = dir.path().join("entry");
+        let file = complete_entry(&entry);
+        let me = process_identity().expect("this process's identity");
+        assert_eq!(read_entry(&entry, me).expect("a read"), Entry::Complete);
+
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o666)).expect("open file");
+        let refused = read_entry(&entry, me).expect_err("a file others can write is refused");
+        assert!(
+            matches!(&refused, DepsError::Tampered { detail, .. } if detail.contains("group or others")),
+            "{refused}"
+        );
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("private file");
+
+        let foreign = Identity {
+            uid: me.uid + 1,
+            ..me
+        };
+        let refused = read_entry(&entry, foreign).expect_err("an entry of another user is refused");
+        assert!(
+            matches!(&refused, DepsError::Tampered { detail, .. } if detail.contains("another user")),
+            "{refused}"
+        );
+    }
+
+    const PACKAGE: &str =
+        r#"{"name": "app", "version": "1.0.0", "dependencies": {"left-pad": "1.3.0"}}"#;
+    const LOCK: &str = r#"{
+        "name": "app",
+        "lockfileVersion": 3,
+        "packages": {
+            "": {"name": "app", "version": "1.0.0", "dependencies": {"left-pad": "1.3.0"}},
+            "node_modules/left-pad": {
+                "version": "1.3.0",
+                "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz",
+                "integrity": "sha512-x"
+            }
+        }
+    }"#;
+    const NODE_APP: &str = r#"{
+        "version": "acan-app/2",
+        "runner_contract": "acan-runner/1",
+        "runtime": "node-24",
+        "install": ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+        "boot": ["npm", "run", "start"],
+        "port_env": "PORT",
+        "ready": {"path": "/health", "status": 200, "timeout_ms": 10000},
+        "store": "fresh_per_sequence",
+        "clock": {"kind": "none"},
+        "sinks": [],
+        "env": {},
+        "limits": {"max_requests": 64, "max_output_bytes": 65536, "sequence_timeout_ms": 30000}
+    }"#;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=Tester",
+                "-c",
+                "user.email=tester@localhost",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// A clone on `main` whose only commit holds `files`, and that commit.
+    fn clone_with(files: &[(&str, &str)]) -> (tempfile::TempDir, CommitSha) {
+        let dir = tempfile::tempdir().expect("temporary clone");
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        for (path, text) in files {
+            let full = dir.path().join(path);
+            fs::create_dir_all(full.parent().expect("a file has a parent")).expect("a directory");
+            fs::write(&full, text).expect("a file");
+        }
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-q", "-m", "base"]);
+        let head = CommitSha::from_str(&git(dir.path(), &["rev-parse", "HEAD"])).expect("a commit");
+        (dir, head)
+    }
+
+    /// The cache key of the node fixture's install, as `install` computes it.
+    fn fixture_key(app: &AppContract) -> String {
+        let image = ContainerPolicy::node_install()
+            .image
+            .digest
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let argv = app.install.as_ref().expect("an install").as_slice();
+        let manifests = manifests_of(&[("package.json", PACKAGE)]);
+        key_of(&image, argv, LOCK.as_bytes(), &manifests)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hit_is_refused_under_an_open_root_or_a_root_another_user_owns() {
+        use std::os::unix::fs::PermissionsExt;
+        let (clone, head) = clone_with(&[("package.json", PACKAGE), ("package-lock.json", LOCK)]);
+        let repo = Repo::open(clone.path()).await.expect("the clone opens");
+        let PrepareOutcome::Prepared(prepared) = repo
+            .prepare(&head, &ProtectedPaths::default())
+            .await
+            .expect("the commit prepares")
+        else {
+            panic!("the commit merges without conflict");
+        };
+        let app: AppContract = serde_json::from_str(NODE_APP).expect("the app contract decodes");
+        let cache_parent = tempfile::tempdir().expect("a cache parent");
+        let cache = cache_parent.path().join("deps");
+        prepare_root(&cache).expect("the cache root");
+        let entry = cache.join(fixture_key(&app).replace(':', "-"));
+        complete_entry(&entry);
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let config = RunnerConfig::new("acan-no-such-docker", 3000);
+        let slots = Semaphore::new(1);
+        let installer = Installer {
+            repo: &repo,
+            config: &config,
+            slots: &slots,
+            cache: &cache,
+            scratch: scratch.path(),
+        };
+        let me = process_identity().expect("this process's identity");
+
+        let hit = installer
+            .install_as(&prepared, Role::Base, &app, me)
+            .await
+            .expect("a private root of this user hits")
+            .expect("the app has an install");
+        assert_eq!(hit.record.cache, Cache::Hit);
+
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o777)).expect("an open root");
+        let refused = installer
+            .install_as(&prepared, Role::Base, &app, me)
+            .await
+            .expect_err("an open root is refused before its entry is read");
+        assert!(matches!(refused, DepsError::Tampered { .. }), "{refused}");
+
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o700)).expect("a private root");
+        let foreign = Identity {
+            uid: me.uid + 1,
+            ..me
+        };
+        let refused = installer
+            .install_as(&prepared, Role::Base, &app, foreign)
+            .await
+            .expect_err("a root another user owns is refused before its entry is read");
+        assert!(
+            matches!(&refused, DepsError::Tampered { detail, .. } if detail.contains("another user")),
+            "{refused}"
+        );
     }
 
     #[test]
