@@ -445,6 +445,7 @@
   #replay button { font: 12px var(--mono); padding: 2px 8px; background: var(--face); color: var(--ink); border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
   #replay button:hover { border-color: var(--ink); }
 </style>
+<link rel="stylesheet" href="review.css">
 </head>
 <body>
 <canvas id="plant" tabindex="0"></canvas>
@@ -553,11 +554,16 @@
   <p class="more" id="receipt-more" hidden></p>
   <p class="foot">P play · [ ] step · T directed / plain · directed is off by default until it wins the comparison</p>
 </aside>
+<aside id="vision" class="island" hidden aria-label="vision check"></aside>
+<aside id="firstrun" class="island" hidden aria-label="first run checklist"></aside>
 <div id="gate" hidden>
   <form id="token-form">
-    <label for="token" class="muted">owner token</label>
-    <input id="token" type="password" autocomplete="off" spellcheck="false">
-    <button type="submit">open</button>
+    <div class="gate-row">
+      <label for="token" class="muted">owner token</label>
+      <input id="token" type="password" autocomplete="off" spellcheck="false" aria-describedby="token-hint">
+      <button type="submit">open</button>
+    </div>
+    <p id="token-hint" class="gate-hint">The first <code>acan serve</code> in a repo prints this token with a sign-in link, and keeps it in that repo's <code>.acan/tokens.json</code>.</p>
   </form>
 </div>
 <div class="island" id="usage" hidden>

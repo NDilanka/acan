@@ -56,6 +56,8 @@ import { installLanes } from "./lanes.js";
 import { installInbox } from "./inbox.js";
 import { installHistory } from "./history.js";
 import { installScrub } from "./scrub.js";
+import { installFirstRun, paintFirstRun } from "./firstrun-panel.js";
+import { installVision, placeVisionPins, syncVision } from "./vision-pins.js";
 
 const PAN_KEY_PX = 80;
 
@@ -120,6 +122,7 @@ function drawFrame(now = performance.now()) {
     syncView();
     paintRide();
     placeLabels();
+    placeVisionPins();
     if (turning) {
       requestRender();
     } else {
@@ -154,6 +157,8 @@ function paint() {
   syncSeals(state, get, paintSlip);
   paintSlip();
   requestUsage(state, get, paintUsage);
+  syncVision();
+  paintFirstRun();
   for (const hook of paintHooks) hook();
 }
 
@@ -533,10 +538,12 @@ async function boot() {
   reducedMotion.addEventListener("change", followReducedMotion);
   await loadPlant();
   bindPlate();
+  await installVision();
   // The replay page makes no API call, so the shell (version, update, bug report, setup) stays off.
   if (!replay) {
     bindShell();
     startShell();
+    installFirstRun();
   }
   // `?plate=fixture` or `?plate=plain` shows the receipt plate over a fixture plant view, without
   // the origin. The plate is watermarked FIXTURE.
