@@ -428,6 +428,8 @@
   #scrub.held .where { color: #7a5a12; font-weight: 600; }
   #scrub .live { font: 11px var(--mono); padding: 1px 8px; background: var(--ink); color: #ffffff; border: 1px solid var(--ink);
     border-radius: 4px; cursor: pointer; }
+  /* The one-sentence reason a control is off, such as "Go live to send." on a rewound map. */
+  .reason { margin: 4px 0 0; padding-left: 6px; border-left: 2px solid var(--amber); font: 11px/1.4 var(--sans); color: var(--ink); }
   body.history canvas { filter: saturate(0.3) brightness(1.03); transition: filter 200ms ease-out; }
   @media (prefers-reduced-motion: reduce) { body.history canvas { transition: none; } }
   #lanes li + li { border-top: 1px solid var(--rule); }

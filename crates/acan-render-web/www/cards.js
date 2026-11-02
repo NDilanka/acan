@@ -14,7 +14,8 @@ import {
   questionTitle,
 } from "./question.js";
 import { $, canvas, card, freeze, replay, state } from "./state.js";
-import { forgetToken } from "./stream.js";
+import { historyBlock } from "./guard.js";
+import { forgetToken, hold } from "./stream.js";
 
 // A settled card shows its one line this long, then fades out over FADE_MS.
 const FADE_HOLD_MS = 1500;
@@ -75,6 +76,8 @@ export function paintCard() {
     }
     const suggested = data.rows.find((row) => row.kind === "settle" && row.suggested);
     children.push(optionList(clash, suggested ? suggested.key : null));
+    const blocked = historyBlock("settle", hold.on);
+    if (blocked !== null) children.push(reasonLine(blocked));
   } else if (data.resolved) {
     const settled = document.createElement("p");
     settled.className = "resolved";
@@ -116,7 +119,9 @@ function optionList(clash, suggestedKey) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "option";
-    button.disabled = state.settling;
+    const blocked = historyBlock("settle", hold.on);
+    button.disabled = state.settling || blocked !== null;
+    if (blocked !== null) button.title = blocked;
     const chip = document.createElement("kbd");
     chip.textContent = String(option.key);
     const label = document.createElement("span");
@@ -169,7 +174,19 @@ export function settleByKey(key) {
   if (option) settle(clash, option);
 }
 
+// The one-sentence reason a control is off, shown under it.
+function reasonLine(text) {
+  const line = document.createElement("p");
+  line.className = "reason";
+  line.textContent = text;
+  return line;
+}
+
 async function settle(clash, option) {
+  if (historyBlock("settle", hold.on) !== null) {
+    paintCard();
+    return;
+  }
   // The replay holds no token and sends nothing. It says so rather than fail silently.
   if (replay) {
     state.note = "the replay is read-only";
@@ -323,6 +340,8 @@ function paintQuestion() {
     effect.className = "sub";
     effect.textContent = answerEffect(question);
     children.push(effect);
+    const blocked = historyBlock("answer", hold.on);
+    if (blocked !== null) children.push(reasonLine(blocked));
   } else {
     const done = document.createElement("p");
     done.className = "resolved";
@@ -350,7 +369,9 @@ function answerList(question) {
     button.type = "button";
     button.className = "option";
     button.dataset.key = String(option + 1);
-    button.disabled = asked.sending;
+    const blocked = historyBlock("answer", hold.on);
+    button.disabled = asked.sending || blocked !== null;
+    if (blocked !== null) button.title = blocked;
     const chip = document.createElement("kbd");
     chip.textContent = String(option + 1);
     const label = document.createElement("span");
@@ -365,6 +386,10 @@ function answerList(question) {
 
 async function answer(key) {
   if (asked === null || asked.sending || asked.answered !== null) return;
+  if (historyBlock("answer", hold.on) !== null) {
+    paintQuestion();
+    return;
+  }
   const command = answerCommand(asked.question, key);
   if (command === null) return;
   if (replay || !state.token) {

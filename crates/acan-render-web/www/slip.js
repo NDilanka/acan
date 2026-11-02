@@ -21,7 +21,8 @@ import {
   strikeWords,
 } from "./seal.js";
 import { freeze, slipEl, state } from "./state.js";
-import { forgetToken, get } from "./stream.js";
+import { historyBlock } from "./guard.js";
+import { forgetToken, get, hold } from "./stream.js";
 
 export function paintSlip() {
   const lane = slipLane();
@@ -84,7 +85,9 @@ function sealBlock(lane, picks) {
   const send = el("button", null, state.slipPending ? "sending…" : `Seal rev ${lane.rev}`);
   send.type = "button";
   send.dataset.focusKey = "seal";
-  send.disabled = state.slipPending || !panel.canSend;
+  const blocked = historyBlock("seal", hold.on);
+  send.disabled = state.slipPending || !panel.canSend || blocked !== null;
+  if (blocked !== null) send.title = blocked;
   send.addEventListener("click", () => seal(lane));
   if (panel.accepted) children.push(el("p", "sub", SENT_LINE));
   else if (panel.sent) children.push(el("p", "sub", UNSENT_LINE));
@@ -92,6 +95,7 @@ function sealBlock(lane, picks) {
     children.push(el("p", "sub", `Needs ${panel.missing.map((missing) => missingWords(missing, lane)).join("; ")}.`));
   }
   children.push(send);
+  if (blocked !== null) children.push(el("p", "reason", blocked));
   return children;
 }
 
@@ -139,7 +143,9 @@ function plotsBlock(lane) {
     const strike = el("button", "danger", "Strike");
     strike.type = "button";
     strike.dataset.focusKey = `strike-${item.id}`;
-    strike.disabled = state.slipPending;
+    const blocked = historyBlock("strike", hold.on);
+    strike.disabled = state.slipPending || blocked !== null;
+    if (blocked !== null) strike.title = blocked;
     strike.setAttribute("aria-label", `Strike plot ${item.id}`);
     strike.addEventListener("click", () => {
       state.strikeArmed = item.id;
@@ -147,6 +153,7 @@ function plotsBlock(lane) {
       paintSlip();
     });
     row.append(strike);
+    if (blocked !== null) row.append(el("p", "reason", blocked));
     if (state.strikeArmed === item.id) row.append(strikeWarning(lane, item));
     list.append(row);
   }
@@ -169,7 +176,7 @@ function strikeWarning(lane, item) {
   const confirm = el("button", "danger", state.slipPending ? "sending…" : "Strike");
   confirm.type = "button";
   confirm.dataset.focusKey = "strike-confirm";
-  confirm.disabled = state.slipPending;
+  confirm.disabled = state.slipPending || historyBlock("strike", hold.on) !== null;
   confirm.addEventListener("click", () => strike(lane, item));
   const keep = el("button", null, "Keep");
   keep.type = "button";
@@ -251,7 +258,7 @@ function broadBlock(lane, picks) {
 // built from a fresh route answer and the human's answers. Nothing is sent for a stopped order, for
 // a route that names another scope, or while an answer or acknowledgement is missing.
 async function seal(lane) {
-  if (!state.token || state.slipPending || lane.stopped) return;
+  if (!state.token || state.slipPending || lane.stopped || historyBlock("seal", hold.on) !== null) return;
   state.slipPending = true;
   state.slipNote = "";
   paintSlip();
@@ -278,7 +285,7 @@ async function seal(lane) {
 
 // Sends the Strike: the lane's scope one revision on, with the plot removed.
 async function strike(lane, item) {
-  if (!state.token || state.slipPending) return;
+  if (!state.token || state.slipPending || historyBlock("strike", hold.on) !== null) return;
   state.slipPending = true;
   state.slipNote = "";
   paintSlip();

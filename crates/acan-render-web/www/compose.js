@@ -14,7 +14,8 @@ import {
   postedOrder,
 } from "./order.js";
 import { $, canvas, freeze, replay, state } from "./state.js";
-import { forgetToken } from "./stream.js";
+import { historyBlock } from "./guard.js";
+import { forgetToken, hold } from "./stream.js";
 
 // An accepted order's panel shows its line this long, then closes.
 const SENT_HOLD_MS = 900;
@@ -138,14 +139,20 @@ function paintCompose() {
   $("compose-title").textContent = `Order on ${compose.machine}`;
   $("compose-context").textContent = machineContext(state.view, compose.machine);
   $("compose-send").textContent = compose.sending ? "Sending…" : "Send";
-  $("compose-send").disabled = compose.sending;
+  const blocked = historyBlock("send", hold.on);
+  $("compose-send").disabled = compose.sending || blocked !== null;
+  $("compose-send").title = blocked ?? "";
   $("compose-sentence").readOnly = compose.sending;
-  $("compose-note").textContent = compose.note;
-  $("compose-note").classList.toggle("bad", compose.bad);
+  $("compose-note").textContent = blocked ?? compose.note;
+  $("compose-note").classList.toggle("bad", blocked === null && compose.bad);
 }
 
 async function send() {
   if (compose === null || compose.sending) return;
+  if (historyBlock("send", hold.on) !== null) {
+    paintCompose();
+    return;
+  }
   const input = $("compose-sentence");
   const built = orderCommand(compose.machine, input.value);
   if (!built.ok) {

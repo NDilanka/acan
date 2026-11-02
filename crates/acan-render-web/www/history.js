@@ -3,6 +3,7 @@
 // closes or a receipt is recorded, and it ends landed with a commit, failed with the reason, or
 // cancelled. A live order has a Cancel that sends `cancel_order`. The ribbon logic has no DOM,
 // so Node can test it. `installHistory` binds it to the page.
+import { historyBlock } from "./guard.js";
 import { flyTo, goKeys } from "./lanes.js";
 
 // The ribbon shows this many orders at rest, newest first. Alt shows every one.
@@ -206,7 +207,8 @@ export function installHistory(kit) {
     const shown = kit.state.altDown ? rows : rows.slice(0, REST_ORDERS);
     more.hidden = shown.length === rows.length;
     more.textContent = `+${rows.length - shown.length} earlier · Alt shows all`;
-    note.textContent = ui.note;
+    const blocked = rows.some((row) => row.cancellable) ? historyBlock("cancel", kit.hold.on) : null;
+    note.textContent = blocked ?? ui.note;
     const focused = list.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
     list.replaceChildren(...shown.map((row) => rowItem(row)));
     if (focused) list.querySelector(`[data-focus="${CSS.escape(focused)}"]`)?.focus();
@@ -240,7 +242,9 @@ export function installHistory(kit) {
     const button = element("button", armed ? "cancel armed" : "cancel", sending ? "Cancelling" : armed ? `Cancel ${row.label}?` : "Cancel");
     button.type = "button";
     button.dataset.focus = `cancel-${row.id}`;
-    button.disabled = sending || !kit.isLive();
+    const blocked = historyBlock("cancel", kit.hold.on);
+    button.disabled = sending || blocked !== null || !kit.isLive();
+    if (blocked !== null) button.title = blocked;
     button.setAttribute("aria-label", armed ? `Confirm: cancel ${row.label}` : `Cancel ${row.label}`);
     button.addEventListener("click", () => (armed ? sendCancel(row) : arm(row)));
     return button;
@@ -258,6 +262,7 @@ export function installHistory(kit) {
   };
 
   const sendCancel = async (row) => {
+    if (historyBlock("cancel", kit.hold.on) !== null) return;
     clearTimeout(ui.armTimer);
     ui.armed = null;
     ui.sending = row.id;
