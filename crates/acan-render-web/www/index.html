@@ -330,6 +330,27 @@
     border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
   #inbox .opt-in:hover { color: var(--ink); border-color: var(--ink); }
   #lanes ol { max-height: 30vh; }
+  #history ol { max-height: 26vh; }
+  #history li { display: flex; gap: 6px; align-items: flex-start; padding: 4px 0; }
+  #history li + li { border-top: 1px solid var(--rule); }
+  #history button.go { flex: 1; min-width: 0; padding: 0 2px; background: none; border: none; color: var(--ink);
+    text-align: left; cursor: pointer; font: 11px/1.4 var(--mono); }
+  #history button.go:hover .sentence, #history button.go:focus-visible .sentence { text-decoration: underline; }
+  #history .line { display: flex; flex-wrap: wrap; gap: 0 4px; }
+  #history .sep { color: var(--rule); }
+  #history .step { color: var(--muted); }
+  #history .step.landed { color: var(--ink); font-weight: 600; }
+  #history .step.failed { color: var(--red); overflow-wrap: anywhere; }
+  #history .step.live { color: #7a5a12; }
+  #history .sentence { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #3c3c3a; font: 12px/1.35 var(--sans); }
+  #history li.cancelled .sentence { color: var(--muted); text-decoration: line-through; }
+  #history button.cancel { flex: none; font: 11px var(--mono); padding: 1px 6px; background: var(--face); color: var(--muted);
+    border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+  #history button.cancel:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
+  #history button.cancel.armed { color: #ffffff; background: var(--red); border-color: var(--red); }
+  #history button.cancel:disabled { cursor: default; opacity: 0.6; }
+  #history .more, #history .note { margin: 4px 0 0; font: 11px/1.4 var(--sans); color: var(--muted); }
+  #history .note:not(:empty) { color: var(--ink); }
   #lanes li + li { border-top: 1px solid var(--rule); }
   #lanes button.lane { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 1px 8px; width: 100%;
     padding: 4px 2px; background: none; border: none; color: var(--ink); text-align: left; cursor: pointer; font: 12px/1.3 var(--mono); }
@@ -404,6 +425,7 @@
 <div id="watch">
   <aside id="inbox" class="island" aria-label="needs you" hidden></aside>
   <aside id="lanes" class="island" aria-label="agents" hidden></aside>
+  <aside id="history" class="island" aria-label="orders" hidden></aside>
 </div>
 <aside id="card" class="island" hidden></aside>
 <aside id="slip" class="island" hidden></aside>
