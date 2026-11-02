@@ -183,7 +183,6 @@ export function installLanes(kit) {
   head.lastChild.innerHTML = "<kbd>G</kbd> <kbd>1</kbd>-<kbd>9</kbd> ride";
   panel.append(head, list, empty);
   const shown = new Map();
-  let armed = null;
   let last = { version: -1, feed: -1, tick: -1 };
 
   const paint = () => {
@@ -223,17 +222,9 @@ export function installLanes(kit) {
 
   kit.onPaint(paint);
   setInterval(paint, TICK_MS);
-  kit.onKey((event) => {
-    if (event.repeat) return false;
-    const step = goStep(armed, event.key, performance.now());
-    armed = step.armed;
-    if (step.action?.kind === "agent") {
-      const row = kit.lanes?.[step.action.index];
-      if (row) visit(kit, row);
-    } else if (step.action?.kind === "go") {
-      goKeys.get(step.action.key)();
-    }
-    if (step.taken) event.preventDefault();
-    return step.taken;
-  });
+  // G and a digit ride that lane's agent; keys.js owns the chord and calls this.
+  kit.rideLane = (index) => {
+    const row = kit.lanes?.[index];
+    if (row) visit(kit, row);
+  };
 }

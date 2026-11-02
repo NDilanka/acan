@@ -290,7 +290,7 @@ export function syncQuestions() {
   if (asked !== null) paintQuestion();
 }
 
-function closeClashCard() {
+export function closeClashCard() {
   cancelFade();
   state.app.close_card();
   state.markState = JSON.parse(state.app.marks_json());

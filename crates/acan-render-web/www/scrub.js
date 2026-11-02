@@ -249,10 +249,7 @@ export function installScrub(kit) {
     if (!hold.on) paintLive();
   });
   kit.onHoldEvent(() => paintLive());
-  kit.onKey((event) => {
-    if (event.key !== "Escape" || !hold.on) return false;
-    resume();
-    return true;
-  });
+  // Esc goes live once no panel is left to close; keys.js owns the order and calls this.
+  kit.goLive = resume;
   goKeys.set("t", () => range.focus());
 }

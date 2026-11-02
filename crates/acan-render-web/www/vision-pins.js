@@ -46,12 +46,10 @@ function authed(path) {
   return fetch(path, { headers: { Authorization: `Bearer ${state.token}` } });
 }
 
-// Starts the pins: the layer, the viewer's keys, and the fixture when the page asks for one. It
+// Starts the pins: the layer and the fixture when the page asks for one. It
 // never throws, so a broken fixture cannot stop the rest of the page from starting.
 export async function installVision() {
   document.body.insertBefore(layer, viewer);
-  // Capture, so the open viewer takes Escape before the map's own Escape leaves a ride.
-  window.addEventListener("keydown", onEscape, true);
   // An image arriving or a page turning changes the viewer's height, so it is placed again.
   new ResizeObserver(() => placeViewer()).observe(viewer);
   if (params.get("vision") !== "fixture") return;
@@ -62,20 +60,21 @@ export async function installVision() {
   }
 }
 
-function onEscape(event) {
-  if (event.key !== "Escape") return;
+export function viewerOpen() {
+  return open !== null;
+}
+
+// Whether a window Esc closes the open viewer. main.js asks, since its key table owns Esc and
+// closes the topmost panel first.
+export function viewerTakesEscape(event) {
   const target = event.target instanceof Element ? event.target : null;
   const typing = target !== null && (target.matches("input, textarea, select") || target.isContentEditable);
-  const closes = escapeClosesViewer({
+  return escapeClosesViewer({
     open: open !== null,
     dialogOpen: document.querySelector("dialog[open]") !== null,
     typing,
     insideViewer: target !== null && viewer.contains(target),
   });
-  if (!closes) return;
-  event.stopPropagation();
-  event.preventDefault();
-  closeViewer();
 }
 
 async function loadFixture() {

@@ -6,6 +6,7 @@
 import init, { App } from "./pkg/acan_render_web.js";
 import { backendPlan, createOnFirst, replaceCanvas } from "./backend.js";
 import {
+  closeClashCard,
   closeQuestionCard,
   openCard,
   pressDigit,
@@ -13,8 +14,9 @@ import {
   toggleCard,
   toggleQuestionCard,
 } from "./cards.js";
-import { openCommand } from "./commandbar.js";
+import { closeCommand, commandOpen, openCommand } from "./commandbar.js";
 import { clickMachine, closeCompose, composeOpen, orderHere } from "./compose.js";
+import { keyAction } from "./keys.js";
 import { paintMarks, pinAt, placeLabels } from "./marks.js";
 import { paintOrderLine, paintRide, paintStale, paintUsage } from "./panels.js";
 import { syncSeals } from "./seal.js";
@@ -52,14 +54,12 @@ import {
   start,
 } from "./stream.js";
 import { requestUsage } from "./usage.js";
-import { installLanes } from "./lanes.js";
+import { goKeys, installLanes } from "./lanes.js";
 import { installInbox } from "./inbox.js";
 import { installHistory } from "./history.js";
 import { installScrub } from "./scrub.js";
 import { installFirstRun, paintFirstRun } from "./firstrun-panel.js";
-import { installVision, placeVisionPins, syncVision } from "./vision-pins.js";
-
-const PAN_KEY_PX = 80;
+import { closeViewer, installVision, placeVisionPins, syncVision, viewerOpen, viewerTakesEscape } from "./vision-pins.js";
 
 const ZOOM_KEY = 1.25;
 
@@ -78,8 +78,10 @@ const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const timing = { started: performance.now() };
 
 // The registration point for the watch panels (lanes, inbox, history, scrubber). Each paint
-// hook runs when the view changes. A key hook runs before the page's own keys, and returning
-// true takes the key.
+// hook runs when the view changes. The keys are all in keys.js, so they have one order; a key hook
+// is asked only about a key the table does not use, and returning true takes it. A panel that
+// answers a key the table names sets its action on the kit instead: `rideLane(index)` for G and
+// a digit, `goLive()` for Esc on a rewound map.
 const paintHooks = [];
 const keyHooks = [];
 const kit = {
@@ -284,13 +286,6 @@ function bindCanvas() {
   );
 }
 
-const ARROW_PAN = {
-  ArrowLeft: [PAN_KEY_PX, 0],
-  ArrowRight: [-PAN_KEY_PX, 0],
-  ArrowUp: [0, PAN_KEY_PX],
-  ArrowDown: [0, -PAN_KEY_PX],
-};
-
 function setAlt(down) {
   if (state.altDown === down) return;
   state.altDown = down;
@@ -301,112 +296,136 @@ function setAlt(down) {
   requestRender();
 }
 
+// Whether the key went to a text field, which keeps its keys.
+function typingIn(target) {
+  return target instanceof Element && (target.matches("input, textarea, select") || target.isContentEditable);
+}
+
+// Runs the action keys.js named for a key.
+function runKey(action, event) {
+  switch (action.kind) {
+    case "arm-go":
+      break;
+    case "ride-lane":
+      kit.rideLane?.(action.index);
+      break;
+    case "go":
+      goKeys.get(action.letter)?.();
+      break;
+    case "close":
+      CLOSERS[action.panel]();
+      break;
+    case "go-live":
+      kit.goLive?.();
+      break;
+    case "leave-ride":
+      state.app.leave();
+      requestRender();
+      break;
+    case "open-command":
+      openCommand();
+      break;
+    case "toggle-question":
+      toggleQuestionCard();
+      break;
+    case "order-here":
+      orderHere();
+      break;
+    case "toggle-card":
+      toggleCard();
+      break;
+    case "digit":
+      pressDigit(action.n);
+      break;
+    case "pan":
+      state.app.pan(action.dx, action.dy);
+      requestRender();
+      break;
+    case "projection":
+      state.app.toggle_projection();
+      requestRender();
+      break;
+    case "zoom":
+      zoomAtCentre(action.dir > 0 ? ZOOM_KEY : 1 / ZOOM_KEY);
+      break;
+    case "fit":
+      state.app.fit();
+      requestRender();
+      break;
+    case "ride-centre": {
+      const rect = canvas.getBoundingClientRect();
+      state.app.ride_nearest(rect.width / 2, rect.height / 2);
+      requestRender();
+      break;
+    }
+    case "ride-step":
+      state.app.ride_step(action.dir);
+      requestRender();
+      break;
+    case "turn":
+      turn(action.dir * TURN_DEG);
+      break;
+    case "play":
+      togglePlay();
+      break;
+    case "mode":
+      toggleMode();
+      break;
+    case "step":
+      stepBy(action.delta);
+      break;
+    default:
+      console.warn("no handler for key action", action.kind, event.key);
+  }
+}
+
+const CLOSERS = {
+  command: () => closeCommand(),
+  compose: closeCompose,
+  viewer: closeViewer,
+  question: closeQuestionCard,
+  clash: closeClashCard,
+};
+
+// When G was pressed, while the chord waits for its digit or letter.
+let goArmed = null;
+
 function bindKeys() {
   window.addEventListener("keydown", (event) => {
-    if (event.target instanceof HTMLInputElement) return;
+    // A text field keeps its keys, except that Esc in a field of the vision viewer closes it.
+    if (typingIn(event.target) && !(event.key === "Escape" && viewerTakesEscape(event))) return;
     if (event.key === "Alt") {
       event.preventDefault();
       setAlt(true);
       return;
     }
+    // A modal dialog, such as the key setup, keeps its own keys and its own Esc.
+    if (document.querySelector("dialog[open]") !== null) return;
     if (state.app === null || event.ctrlKey || event.metaKey) return;
-    if (keyHooks.some((hook) => hook(event))) return;
-    if (ARROW_PAN[event.key]) {
-      event.preventDefault();
-      state.app.pan(...ARROW_PAN[event.key]);
-      requestRender();
+    const step = keyAction(
+      { key: event.key, code: event.code, repeat: event.repeat, shift: event.shiftKey },
+      {
+        armed: goArmed,
+        now: performance.now(),
+        letters: goKeys,
+        held: hold.on,
+        riding: state.ridden !== "",
+        open: {
+          command: commandOpen(),
+          compose: composeOpen(),
+          viewer: viewerOpen(),
+          question: questionOpen(),
+          clash: Boolean(state.markState.card),
+        },
+      },
+    );
+    goArmed = step.armed;
+    if (step.prevent) event.preventDefault();
+    if (step.action !== null) {
+      runKey(step.action, event);
       return;
     }
-    if (event.key === "5" || event.code === "Numpad5") {
-      if (!event.repeat) {
-        state.app.toggle_projection();
-        requestRender();
-      }
-      return;
-    }
-    if (/^[1-3]$/.test(event.key)) {
-      pressDigit(Number(event.key));
-      return;
-    }
-    switch (event.key) {
-      case "c":
-      case "C":
-        if (!event.repeat) toggleCard();
-        break;
-      case "/":
-        // The key is not typed into the bar's field, which takes the focus.
-        event.preventDefault();
-        if (!event.repeat) openCommand();
-        break;
-      case "a":
-      case "A":
-        if (!event.repeat) toggleQuestionCard();
-        break;
-      case "o":
-      case "O":
-        // The key is not typed into the panel's field, which takes the focus.
-        event.preventDefault();
-        if (!event.repeat) orderHere();
-        break;
-      case "+":
-      case "=":
-        zoomAtCentre(ZOOM_KEY);
-        break;
-      case "-":
-      case "_":
-        zoomAtCentre(1 / ZOOM_KEY);
-        break;
-      case "0":
-        state.app.fit();
-        requestRender();
-        break;
-      case "f":
-      case "F":
-        if (!event.repeat) {
-          const rect = canvas.getBoundingClientRect();
-          state.app.ride_nearest(rect.width / 2, rect.height / 2);
-          requestRender();
-        }
-        break;
-      case "Tab":
-        event.preventDefault();
-        state.app.ride_step(event.shiftKey ? -1 : 1);
-        requestRender();
-        break;
-      case "Escape":
-        if (composeOpen()) {
-          closeCompose();
-        } else if (questionOpen()) {
-          closeQuestionCard();
-        } else if (state.ridden !== "") {
-          state.app.leave();
-          requestRender();
-        }
-        break;
-      case "q":
-      case "Q":
-        if (!event.repeat) turn(-TURN_DEG);
-        break;
-      case "e":
-      case "E":
-        if (!event.repeat) turn(TURN_DEG);
-        break;
-      case "p":
-      case "P":
-        if (!event.repeat) togglePlay();
-        break;
-      case "t":
-      case "T":
-        if (!event.repeat) toggleMode();
-        break;
-      case "[":
-        if (!event.repeat) stepBy(-1);
-        break;
-      case "]":
-        if (!event.repeat) stepBy(1);
-        break;
-      default:
-    }
+    keyHooks.some((hook) => hook(event));
   });
 
   window.addEventListener("keyup", (event) => {
