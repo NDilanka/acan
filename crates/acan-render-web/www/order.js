@@ -113,22 +113,71 @@ function quadArea(quad) {
   return Math.abs(sum) / 2;
 }
 
-// The name of the machine under the CSS point, or null. A footprint that holds the point wins,
-// the smallest first, so a machine drawn inside a larger one is still picked. Else a shown name
-// within LABEL_PICK_PX picks its machine. `labels` are `{ name, x, y }`, the centre of each name.
-export function machineAt(machines, project, x, y, labels = []) {
-  let found = null;
-  let smallest = Infinity;
-  for (const machine of machines) {
-    const quad = machineQuad(machine, project);
-    if (!insideQuad(quad, x, y)) continue;
-    const area = quadArea(quad);
-    if (area < smallest) {
-      smallest = area;
-      found = machine.name;
+// How many CSS pixels one world unit of height spans over the ground point (x, y). The camera
+// never rolls, so a vertical edge stays vertical on screen. The ground's screen x changes at the
+// full scale and its screen y at the scale shortened by the tilt, and the height takes the rest.
+export function riseScale(project, x, y) {
+  const o = project(x, y);
+  const a = project(x + 1, y);
+  const b = project(x, y + 1);
+  const full = Math.hypot(a[0] - o[0], b[0] - o[0]);
+  const tilted = Math.hypot(a[1] - o[1], b[1] - o[1]);
+  return Math.sqrt(Math.max(0, full * full - tilted * tilted));
+}
+
+// Without the model heights from the wasm side, a machine is taken to rise this share of its
+// footprint's shorter side, which the demo plant's models come close to.
+const RISE_PER_SIDE = 0.8;
+
+export function guessTop(machine) {
+  return Math.min(machine.size[0], machine.size[1]) * RISE_PER_SIDE;
+}
+
+// The machine's outline on screen as a box `top` world units tall: the hull of its footprint and
+// the footprint raised to its top.
+export function raisedOutline(machine, project, top) {
+  const quad = machineQuad(machine, project);
+  const rise = top * riseScale(project, machine.min[0] + machine.size[0] / 2, machine.min[1] + machine.size[1] / 2);
+  if (!(rise > 0)) return quad;
+  return hull([...quad, ...quad.map(([px, py]) => [px, py - rise])]);
+}
+
+// The convex hull of the points, counter-clockwise on screen, by the monotone chain.
+export function hull(points) {
+  const sorted = [...points].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if (sorted.length < 3) return sorted;
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const half = (list) => {
+    const out = [];
+    for (const p of list) {
+      while (out.length >= 2 && cross(out.at(-2), out.at(-1), p) <= 0) out.pop();
+      out.push(p);
     }
+    out.pop();
+    return out;
+  };
+  return [...half(sorted), ...half([...sorted].reverse())];
+}
+
+// The name of the machine under the CSS point, or null. Each machine is judged by its raised
+// outline, so a click on a tall face picks it. `topOf(machine)` gives a machine's height in world
+// units, else `guessTop` does. When outlines overlap, a machine that stands on another's
+// footprint wins over that one, and otherwise the frontmost wins: the one whose footprint reaches
+// lowest on screen, as the nearer of two machines does. Else a shown name within LABEL_PICK_PX
+// picks its machine. `labels` are `{ name, x, y }`, the centre of each name.
+export function machineAt(machines, project, x, y, labels = [], topOf = guessTop) {
+  const hits = [];
+  for (const machine of machines) {
+    const outline = raisedOutline(machine, project, topOf(machine));
+    if (!insideQuad(outline, x, y)) continue;
+    const quad = machineQuad(machine, project);
+    hits.push({ name: machine.name, quad, front: Math.max(...quad.map((p) => p[1])), area: quadArea(quad) });
   }
-  if (found !== null) return found;
+  const onTop = hits.filter((hit) => !hits.some((other) => other !== hit
+    && other.area < hit.area && other.quad.every(([px, py]) => insideQuad(hit.quad, px, py))));
+  onTop.sort((a, b) => b.front - a.front || a.area - b.area);
+  if (onTop.length > 0) return onTop[0].name;
+  let found = null;
   let best = LABEL_PICK_PX;
   for (const label of labels) {
     const distance = Math.hypot(label.x - x, label.y - y);

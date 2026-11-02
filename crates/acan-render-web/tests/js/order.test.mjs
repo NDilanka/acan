@@ -118,6 +118,27 @@ test("a click near a shown name picks its machine when no footprint holds it", (
   assert.equal(machineAt(MACHINES, flat, 150, 130, labels), null, "too far from the name");
 });
 
+// A tilted projection: x runs right and down, y left and down, so a unit of height rises
+// sqrt(150), about 12.2 CSS pixels.
+const tilted = (x, y) => [(x - y) * 10, (x + y) * 5];
+
+test("a click on a tall machine's face, above its footprint, picks it", () => {
+  const tall = [{ name: "tall", min: [0, 0], size: [4, 4], abnormal: false }];
+  // The footprint's back corner is at (0, 0); its guessed top rises 3.2 units, about 39 px.
+  assert.equal(machineAt(tall, tilted, 0, -20), "tall");
+  assert.equal(machineAt(tall, tilted, 0, -20, [], () => 0), null, "a flat machine has no face");
+  assert.equal(machineAt(tall, tilted, 0, -60), null, "above its top picks nothing");
+});
+
+test("where two raised outlines overlap, the nearer machine wins", () => {
+  const pair = [
+    { name: "back", min: [0, 0], size: [4, 4], abnormal: false },
+    { name: "front", min: [4, 4], size: [4, 4], abnormal: false },
+  ];
+  // (0, 30) is on the back machine's ground, behind the front machine's face.
+  assert.equal(machineAt(pair, tilted, 0, 30), "front");
+  assert.equal(machineAt(pair, tilted, 0, 30, [], () => 0), "back", "with no faces, the ground decides");
+});
 test("the even-odd test holds for a turned footprint", () => {
   const diamond = [[50, 0], [100, 50], [50, 100], [0, 50]];
   assert.equal(insideQuad(diamond, 50, 50), true);
