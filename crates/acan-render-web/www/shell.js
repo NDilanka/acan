@@ -7,6 +7,7 @@ import { $, state } from "./state.js";
 import { bugReportOutcome, stillChecking, updateNotice, versionLabel, versionLine } from "./release.js";
 import {
   bannerText,
+  focusAfterRemove,
   keyRows,
   providerChoices,
   providerLabel,
@@ -41,7 +42,13 @@ export function bindShell() {
   $("setup-form").addEventListener("submit", saveKey);
   $("setup-roles").addEventListener("change", (event) => {
     const select = event.target;
-    if (select instanceof HTMLSelectElement) pickRole(select.dataset.role, select.value);
+    if (!(select instanceof HTMLSelectElement)) return;
+    // While a pick or remove is in flight the picker is only aria-disabled, so a change is undone.
+    if (setupBusy) {
+      select.value = select.dataset.value ?? "";
+      return;
+    }
+    pickRole(select.dataset.role, select.value);
   });
   $("setup-keys").addEventListener("click", (event) => {
     const button = event.target;
@@ -259,7 +266,7 @@ function focusKey() {
 function refocus(key) {
   if (key === null) return;
   const again = [...$("setup-dialog").querySelectorAll("[data-focus]")].find((el) => el.dataset.focus === key);
-  if (again && !again.disabled) again.focus();
+  if (again) again.focus();
 }
 
 // A role's row: its name, what serves it now, and a picker when this page may change it. The ids
@@ -278,6 +285,7 @@ function roleItem(row, index, canSave) {
   item.append(name, now);
   if (!canSave) return item;
   if (!row.picker) {
+    if (row.note === null) return item;
     const note = document.createElement("span");
     note.className = "setup-note";
     note.textContent = row.note;
@@ -289,8 +297,9 @@ function roleItem(row, index, canSave) {
   select.id = id;
   select.dataset.role = row.role;
   select.dataset.focus = `role:${row.role}`;
+  select.dataset.value = row.value;
   select.setAttribute("aria-describedby", now.id);
-  select.disabled = setupBusy;
+  markBusy(select);
   for (const { value, label } of row.options) {
     const option = document.createElement("option");
     option.value = value;
@@ -320,7 +329,7 @@ function keyItem(row) {
     remove.dataset.provider = row.provider;
     remove.dataset.focus = `key:${row.provider}`;
     remove.setAttribute("aria-label", `Remove the ${row.label} key`);
-    remove.disabled = setupBusy;
+    markBusy(remove);
     item.append(remove);
   }
   return item;
@@ -342,10 +351,17 @@ function setChanges(text, tone) {
   changes.className = tone || "";
 }
 
+// Busy controls are aria-disabled, not disabled: a disabled control drops focus to the page body.
+// The handlers refuse a second request while setupBusy is set.
+function markBusy(control) {
+  if (setupBusy) control.setAttribute("aria-disabled", "true");
+  else control.removeAttribute("aria-disabled");
+}
+
 function setBusy(busy) {
   setupBusy = busy;
   for (const control of $("setup-dialog").querySelectorAll("#setup-roles select, #setup-keys button")) {
-    control.disabled = busy;
+    markBusy(control);
   }
 }
 
@@ -419,6 +435,7 @@ async function removeKey(provider) {
   setBusy(true);
   setChanges(`Removing the ${providerLabel(provider)} key...`, "");
   let outcome;
+  let target = null;
   try {
     const res = await fetch(`/api/setup/keys/${encodeURIComponent(provider)}`, {
       method: "DELETE",
@@ -426,11 +443,14 @@ async function removeKey(provider) {
     });
     const body = await res.json().catch(() => ({}));
     outcome = removeOutcome(res.status, body, provider);
+    target = focusAfterRemove(res.status);
   } catch {
     outcome = { tone: "bad", text: "Cannot reach acan. Nothing was removed." };
   }
   setChanges(outcome.text, outcome.tone);
   await loadSetup();
   setBusy(false);
-  refocus(focused);
+  // A removed key's button is gone, so focus moves to the sentence that says what happened.
+  if (target !== null) $(target).focus();
+  else refocus(focused);
 }

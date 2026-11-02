@@ -115,6 +115,8 @@
   dialog .choice { display: flex; gap: 8px; align-items: center; padding: 6px 10px; margin-bottom: 6px;
     border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; font: 12px var(--sans); }
   dialog .choice:has(input:checked) { border-color: var(--ink); }
+  #setup-choices { display: flex; flex-wrap: wrap; gap: 6px; }
+  #setup-choices .choice { margin-bottom: 0; padding: 4px 10px; }
   dialog .field { display: block; margin-top: 10px; font: 600 12px var(--sans); }
   dialog input[type=password] { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 6px 8px;
     font: 12px var(--mono); color: var(--ink); background: var(--face); border: 1px solid var(--rule); border-radius: 4px; }
@@ -123,7 +125,7 @@
   dialog h3 { margin: 12px 0 4px; font: 600 12px/1.3 var(--sans); }
   dialog .setup-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
   dialog .setup-row { display: grid; grid-template-columns: 7em minmax(0, 1fr) auto; gap: 8px; align-items: center;
-    padding: 5px 0; border-bottom: 1px solid var(--rule); font: 12px/1.4 var(--sans); }
+    padding: 3px 0; border-bottom: 1px solid var(--rule); font: 12px/1.4 var(--sans); }
   dialog .setup-name { font: 12px var(--mono); overflow-wrap: anywhere; }
   dialog .setup-now { color: var(--ink); overflow-wrap: anywhere; }
   dialog .setup-now.off { color: var(--muted); }
@@ -131,8 +133,13 @@
   dialog .setup-row select, dialog .setup-row button { font: 12px var(--mono); padding: 2px 6px; color: var(--ink);
     background: var(--face); border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; max-width: 12em; }
   dialog .setup-row select:hover, dialog .setup-row button:hover { border-color: var(--ink); }
-  dialog .setup-row select:disabled, dialog .setup-row button:disabled { cursor: default; opacity: 0.6; }
-  #setup-changes { min-height: 1.4em; font: 12px/1.4 var(--sans); }
+  dialog .setup-row select[aria-disabled=true], dialog .setup-row button[aria-disabled=true] { cursor: default; opacity: 0.6; }
+  /* The form's buttons stay at the dialog's foot when the dialog scrolls. They are the form's last
+     box, so scrolling to the end shows everything above them. */
+  #setup-form .dialog-actions { position: sticky; bottom: -16px; margin-bottom: -16px; padding: 8px 0 16px;
+    background: var(--face); }
+  #setup-changes { min-height: 1.4em; margin: 4px 0 0; font: 12px/1.4 var(--sans); }
+  #setup-changes:focus { outline: none; }
   #setup-changes.ok { color: #1f7a3d; }
   #setup-changes.warn { color: var(--amber); }
   #setup-changes.bad { color: var(--red); }
@@ -320,18 +327,17 @@
 </dialog>
 <dialog id="setup-dialog" aria-labelledby="setup-heading">
   <h2 id="setup-heading">Model keys and roles</h2>
-  <p class="muted">acan calls your model provider with a key you give it. The key is checked with that provider only, and saved in acan's config folder for your user account. It is never shown again.</p>
+  <p class="muted">A key is checked with its provider only, saved in acan's config folder for your account, and never shown again.</p>
   <p id="setup-status" class="setup-status" role="status"></p>
   <section id="setup-roles-section" aria-labelledby="setup-roles-heading" hidden>
     <h3 id="setup-roles-heading">Roles</h3>
-    <p class="muted">Each role uses its default provider unless you pick one. Only a provider with a key can be picked.</p>
     <ul id="setup-roles" class="setup-list"></ul>
   </section>
   <section id="setup-keys-section" aria-labelledby="setup-keys-heading" hidden>
     <h3 id="setup-keys-heading">Keys</h3>
     <ul id="setup-keys" class="setup-list"></ul>
   </section>
-  <p id="setup-changes" role="status"></p>
+  <p id="setup-changes" role="status" tabindex="-1"></p>
   <form id="setup-form" autocomplete="off" hidden>
     <fieldset>
       <legend>Add or replace a key</legend>
