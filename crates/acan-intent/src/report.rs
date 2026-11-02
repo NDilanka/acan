@@ -371,7 +371,8 @@ pub struct BehaviorCounts {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RulingStatus {
-    /// Executed, and every probe that reached its selector satisfied it.
+    /// Executed, and every checked probe satisfied it. A standing ruling whose covered fields
+    /// never differed between base and candidate holds unchecked.
     Held {},
     /// Executed, and the candidate violated it.
     Violated {

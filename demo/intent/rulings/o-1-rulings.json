@@ -1,0 +1,33 @@
+{
+  "schema": "acan-demo-intent-rulings/1",
+  "order": "o-1",
+  "decided_by": "coordinator, delegated by the owner",
+  "note": "Rulings on out-of-scope differences in an o-1 candidate's receipt. The owner delegated these decisions to the build coordinator (an AI agent); they are sent with the owner's member token and are labelled as delegated, not human. ruling.ps1 turns each rule into a standing predicate and records it through the member HTTP API (record_ruling). Nothing here is a verdict: the gate evaluates each ruling where its field differs, and a probe that fails it becomes violates_ruling. Generated ids, tokens, session cookies, codes and hashes are not ruled here: the protected probe manifest declares them maskable and the gate compares them by format against the base.",
+  "rules": [
+    {
+      "id": "rl-request-id-opaque",
+      "field": "^header\\.x-request-id$",
+      "candidate": "present",
+      "rule": "uuid",
+      "label": "x-request-id is an opaque random id, not identity",
+      "reason": "The order does not mention a request id. A random UUID per response identifies the request and carries no user name, so it is accepted. A value that carries a user name is not accepted by this rule and is reported as violating it."
+    },
+    {
+      "id": "rl-429-body-error",
+      "field": "^body\\.error$",
+      "candidate": "present",
+      "rule": "equals",
+      "value": "too many requests",
+      "label": "an over-limit answer's body carries only the error",
+      "reason": "The o-1 scope already allows the 429 body change through its may items; the bounced m-overfit candidate's difference is the same allowed change. (D02Q)"
+    },
+    {
+      "id": "rl-429-body-fields-absent",
+      "field": "^body\\.(clicks|shortPath|createdAt|code|target)$",
+      "candidate": "missing",
+      "rule": "absent",
+      "label": "an over-limit answer's body carries only the error",
+      "reason": "The o-1 scope already allows the 429 body change through its may items; the bounced m-overfit candidate's difference is the same allowed change, and its 429 body drops the link fields. (D02Q)"
+    }
+  ]
+}

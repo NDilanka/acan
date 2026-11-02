@@ -71,8 +71,8 @@ fn order_rev(demo: &Demo, order: OrderId) -> OrderRev {
     demo.world().order(order).expect("the order exists").rev
 }
 
-/// Stands in for the foreman's review: every readback matches every witness at the current
-/// revision.
+/// Gives every readback a matching verdict at the current revision, the verdict a legacy claim
+/// reads. Test fixture only: no model judges here, since review is retired.
 fn approve(demo: &mut Demo, order: OrderId, readbacks: &BTreeSet<ReadbackId>) {
     let (rev, witnesses) = {
         let found = demo.world().order(order).expect("the order exists");
@@ -139,35 +139,6 @@ fn a_split_that_names_a_machine_off_the_plant_is_refused() {
         matches!(&err, ReplyError::UnknownMachine(name) if name == "db"),
         "got {err:?}"
     );
-}
-
-#[test]
-fn the_review_prompt_carries_the_witnesses_and_each_readback() {
-    let mut demo = Demo::open();
-    let order = demo.post_order(ORDER_SENTENCE);
-    let [first, second] = split_in_two(&mut demo, order);
-    let readbacks = support::read_back(&mut demo, [first, second]);
-
-    let request = model::review_request(demo.world(), order, &readbacks).expect("the order exists");
-    let context = user_json(&request);
-
-    assert_eq!(
-        context["witnesses"][0]["reason"], "the greeting keeps its default",
-        "each judgement is made against a witness"
-    );
-    let judged: BTreeSet<String> = context["readbacks"]
-        .as_array()
-        .expect("readbacks is a list")
-        .iter()
-        .map(|readback| {
-            readback["readback"]
-                .as_str()
-                .expect("each readback has an id")
-                .to_owned()
-        })
-        .collect();
-    let expected: BTreeSet<String> = readbacks.iter().map(ToString::to_string).collect();
-    assert_eq!(judged, expected, "every readback is in the prompt");
 }
 
 #[test]
@@ -248,12 +219,13 @@ async fn drain_request(socket: &mut TcpStream) -> Vec<u8> {
     }
 }
 
-/// Serves every connection with one chat-completions reply whose text is `content`, and reports
-/// 120 prompt and 30 completion tokens. When `record` is set, each request body is sent to it
-/// as JSON before the reply goes out. Returns the base URL for the provider.
-async fn serve(content: &str, record: Option<Sender<Value>>) -> String {
+/// Serves every connection with one chat-completions reply whose text is `content` and whose
+/// finish reason is `finish_reason`, and reports 120 prompt and 30 completion tokens. When
+/// `record` is set, each request body is sent to it as JSON before the reply goes out. Returns
+/// the base URL for the provider.
+async fn serve(content: &str, finish_reason: &str, record: Option<Sender<Value>>) -> String {
     let reply = json!({
-        "choices": [{ "message": { "role": "assistant", "content": content }, "finish_reason": "stop" }],
+        "choices": [{ "message": { "role": "assistant", "content": content }, "finish_reason": finish_reason }],
         "usage": { "prompt_tokens": 120, "completion_tokens": 30 },
     })
     .to_string();
@@ -284,13 +256,18 @@ async fn serve(content: &str, record: Option<Sender<Value>>) -> String {
 }
 
 async fn serve_reply(content: &str) -> String {
-    serve(content, None).await
+    serve(content, "stop", None).await
 }
 
 /// Like [`serve_reply`], and also returns the receiver of each request body the provider gets.
 async fn serve_reply_recording(content: &str) -> (String, Receiver<Value>) {
     let (sender, received) = std::sync::mpsc::channel();
-    (serve(content, Some(sender)).await, received)
+    (serve(content, "stop", Some(sender)).await, received)
+}
+
+/// Like [`serve_reply`], but the reply stops at the output cap, with finish reason `length`.
+async fn serve_reply_capped(content: &str) -> String {
+    serve(content, "length", None).await
 }
 
 /// A routing file where every role uses one `baseten` provider at `base_url`.
@@ -771,6 +748,39 @@ async fn an_empty_scope_reply_is_a_provider_error_and_not_an_empty_scope() {
     );
 }
 
+/// A scope reply cut at the output cap is refused before it is parsed, and the error names the
+/// cap, so a cut draft is never read as a shorter one.
+#[tokio::test]
+async fn a_scope_draft_cut_at_the_output_cap_fails_the_foreman_call_and_names_the_cap() {
+    let url = serve_reply_capped(r#"{"may": [{"id": "limit-get-links""#).await;
+    let models = Models::live(config(&url), keys(true)).expect("the client builds");
+    let plant = plant_with(fixed_machines());
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5));
+
+    let err = models
+        .chat_json::<DraftReply>(Role::Foreman, request)
+        .await
+        .expect_err("a reply cut at the cap is not a scope");
+
+    assert!(
+        matches!(
+            err,
+            LlmError::OutputCapped { max_tokens: Some(cap), .. } if cap == model::DRAFT_MAX_TOKENS
+        ),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains(&format!("{}-token output cap", model::DRAFT_MAX_TOKENS)),
+        "the error names the cap: {err}"
+    );
+    assert_eq!(
+        models.ledger().records().len(),
+        1,
+        "the call that was cut is metered"
+    );
+}
+
 /// The draft's output cap reaches the provider. Muse Spark spends hidden reasoning tokens from
 /// the cap, and a cap of 64 returned no text in receipt P00F, so the draft asks for a generous one.
 #[tokio::test]
@@ -924,7 +934,7 @@ async fn a_review_is_refused_by_the_live_and_the_offline_client() {
     let live = Models::live(config(&url), keys(true)).expect("the client builds");
 
     let err = live
-        .chat_json::<model::ReviewReply>(Role::Foreman, review.clone())
+        .chat_json::<Value>(Role::Foreman, review.clone())
         .await
         .expect_err("the live server sends no review");
 
@@ -936,7 +946,7 @@ async fn a_review_is_refused_by_the_live_and_the_offline_client() {
 
     let offline = Models::load(Path::new("no-such-routing-file.toml")).expect("the offline client");
     let err = offline
-        .chat_json::<model::ReviewReply>(Role::Foreman, review)
+        .chat_json::<Value>(Role::Foreman, review)
         .await
         .expect_err("the offline client sends no review either");
 

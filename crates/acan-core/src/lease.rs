@@ -9,6 +9,8 @@
 //! Claimed --now >= expires_at (Tick or any command)--> Open  [LeaseEnded Expired]
 //! Claimed --AnswerQuestion on the order--> Open              [LeaseEnded Superseded]
 //! Claimed{Gating} --gate passed--> Queued                    [LeaseEnded Delivered]
+//! Claimed{Gating} --candidate conflicts with protected head--> Open
+//!                                                            [LeaseEnded Refused, LandFailed]
 //! Claimed --CancelOrder--> Dropped                           [LeaseEnded Cancelled]
 //! Any fenced write whose generation is not current: Rejection::StaleGeneration, no event.
 //! ```
@@ -83,6 +85,8 @@ pub enum LeaseEnd {
     Delivered,
     /// The order was cancelled.
     Cancelled,
+    /// The candidate could not be merged onto the protected head, so the gate refused it.
+    Refused,
 }
 
 impl Claim {

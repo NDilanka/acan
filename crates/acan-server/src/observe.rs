@@ -24,18 +24,20 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 
+use acan_core::ProtectedInputs;
 use acan_git::{Preparation, ProtectedPaths, Repo};
 use acan_intent::admit::AdmitError;
 use acan_intent::compare::{self, CompareError, Contrast};
 use acan_intent::receipt::{self, ProbeResult, ReceiptError, ReceiptInputs};
 use acan_intent::{
     AppContract, ArtifactHash, CanonicalError, CheckResult, Comparison, ContainerPolicy,
-    ContentHash, CoreDerived, CorpusProbe, DiscrepancyEpisode, EnvHash, EnvManifest, EpisodeKey,
-    EpisodeState, EpisodeV1, EvaluatorVersion, Fixture, FixtureId, FixtureSetHash,
-    FixtureSetManifest, FoldedLedger, GateContext, GateState, InvalidValue, Mask, ObservationHash,
-    ObservedRun, PreparedCommit, ProbeCorpus, ProbeHash, ProbeSetHash, ProbeSetManifest, Receipt,
-    RepoPath, RunOutcome, RunRole, RunnerBuild, RunnerHash, RunnerManifest, RuntimeId,
-    SandboxPolicyHash, Scope, ScopeConfirmation, ScopeRevision, UnixMillis,
+    ContentHash, ContrastExample, ContrastExampleHash, ContrastExampleV1, CoreDerived, CorpusProbe,
+    DiscrepancyEpisode, EnvHash, EnvManifest, EpisodeKey, EpisodeState, EpisodeV1,
+    EvaluatorVersion, Fixture, FixtureId, FixtureSetHash, FixtureSetManifest, FoldedLedger,
+    GateContext, GateState, InvalidValue, Mask, ObservationHash, ObservedRun, PreparedCommit,
+    ProbeCorpus, ProbeHash, ProbeSetHash, ProbeSetManifest, Receipt, RepoPath, RunManifest,
+    RunOutcome, RunRole, RunnerBuild, RunnerHash, RunnerManifest, RuntimeId, SandboxPolicyHash,
+    Scope, ScopeConfirmation, ScopeRevision, UnixMillis,
 };
 use acan_witness::{RunnerConfig, SequenceInput, run_sequence};
 use serde::de::DeserializeOwned;
@@ -239,13 +241,31 @@ pub(crate) struct Facts {
     evaluator: EvaluatorVersion,
 }
 
-/// A judged candidate: the context it was tested under and the receipt the core built from it.
+/// A judged candidate: the context it was tested under, the receipt the core built from it, and
+/// the contrast of each probe as a retained ruling example.
 #[derive(Debug, Clone)]
 pub(crate) struct Judged {
     /// The tested context. The receipt is void for any other.
     pub(crate) context: GateContext,
     /// The receipt, whose gate state is `Blocked` when it does not pass.
     pub(crate) receipt: Receipt,
+    /// One retained example per probe of the corpus, built from the observed runs of that probe.
+    /// The receipt's episodes name their probe, so the persisted examples are the ones a human
+    /// rules on.
+    pub(crate) retained: Vec<Retained>,
+}
+
+/// One probe's contrast as a retained ruling example: the example a decision is checked against,
+/// and its identity.
+#[derive(Debug, Clone)]
+pub(crate) struct Retained {
+    /// The probe the example is of, by the hash the receipt's items carry.
+    pub(crate) probe: ProbeHash,
+    /// The example's identity, which decisions list.
+    pub(crate) hash: ContrastExampleHash,
+    /// The example, rebuilt from the three runs of the probe and the context they were judged
+    /// under. Nothing in it comes from a model.
+    pub(crate) example: ContrastExample,
 }
 
 /// The container policy every run applies: the contract default, which the witness and the
@@ -661,6 +681,7 @@ pub(crate) async fn judge(plan: &Plan<'_>, order: &Order<'_>) -> Result<Judged, 
     let judgements = compare_runs(&runs, plan.corpus)?;
     let results = results(&judgements);
     let context = order.context(&facts, plan.candidate);
+    let retained = retained_examples(&runs, plan.corpus, &context)?;
     let mut episodes = order.episodes.to_vec();
     let first = build(
         order,
@@ -696,7 +717,50 @@ pub(crate) async fn judge(plan: &Plan<'_>, order: &Order<'_>) -> Result<Judged, 
             GateState::Blocked,
         )?;
     }
-    Ok(Judged { context, receipt })
+    Ok(Judged {
+        context,
+        receipt,
+        retained,
+    })
+}
+
+/// Builds each probe's contrast as a retained ruling example, from the runs it was judged on and
+/// the context they were judged under. Only observed runs go in.
+///
+/// # Errors
+///
+/// Returns [`ObserveError`] when a probe's fixture is missing or an example has no canonical form.
+fn retained_examples(
+    runs: &[ProbeRuns],
+    corpus: &ProbeCorpus,
+    context: &GateContext,
+) -> Result<Vec<Retained>, ObserveError> {
+    runs.iter()
+        .map(|probe_runs| {
+            let example = ContrastExample {
+                version: ContrastExampleV1,
+                probe: probe_runs.probe.clone(),
+                fixture: fixture_of(corpus, &probe_runs.probe)?.clone(),
+                context: context.clone(),
+                base_a: manifest(&probe_runs.base_a),
+                base_b: manifest(&probe_runs.base_b),
+                candidate: manifest(&probe_runs.candidate),
+            };
+            Ok(Retained {
+                probe: probe_runs.probe.spec.probe_hash()?,
+                hash: example.contrast_example_hash()?,
+                example,
+            })
+        })
+        .collect()
+}
+
+/// The run record and stored observation hashes of one run, as an example keeps them.
+fn manifest(run: &RecordedRun) -> RunManifest {
+    RunManifest {
+        run: run.observed.run().clone(),
+        observations: run.observations.clone(),
+    }
 }
 
 /// The open episodes the failing scope items of `receipt` need. The receipt builder attaches an
@@ -766,6 +830,32 @@ pub(crate) async fn current(
 ) -> Result<GateContext, ObserveError> {
     let facts = Facts::of(plan, order, artifacts(plan).await?)?;
     Ok(order.context(&facts, plan.candidate))
+}
+
+/// The protected inputs of the scope `order` is confirmed under, from `plan`'s base preparation,
+/// its protected snapshot and the ruling log. No candidate is needed: the candidate's artifacts are
+/// left out, and the overlay is the base's own, so the result matches the protected part of any
+/// context judged under the same inputs.
+///
+/// # Errors
+///
+/// Returns [`ObserveError`] when a manifest cannot be hashed or a built-in name is invalid.
+pub(crate) fn protected_inputs(
+    plan: &Plan<'_>,
+    order: &Order<'_>,
+) -> Result<ProtectedInputs, ObserveError> {
+    let facts = Facts::of(plan, order, BTreeMap::new())?;
+    Ok(ProtectedInputs {
+        overlay_hash: plan.base.overlay_hash(),
+        ledger_head: order.ledger.value().head,
+        probe_set_hash: facts.probe_set,
+        fixture_set_hash: facts.fixture_set,
+        runner_hash: facts.runner,
+        evaluator_version: facts.evaluator,
+        runtime: facts.runtime,
+        controlled_env_hash: facts.env,
+        sandbox_policy_hash: facts.policy,
+    })
 }
 
 /// The receipt of `results` under `context`, in `state`.

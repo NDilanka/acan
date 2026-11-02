@@ -10,11 +10,12 @@ use acan_intent::compare::{self, Contrast};
 use acan_intent::predicate::RetainedExample;
 use acan_intent::receipt::{self, ProbeResult, ReceiptError, ReceiptInputs};
 use acan_intent::{
-    CaptureOutcome, Channels, Comparison, Completeness, ContentHash, Contest, ContrastExample,
-    CoreDerived, CorpusProbe, Fixture, FixtureSetManifest, FoldedLedger, GateState, HttpMethod,
-    ItemClass, LedgerEvent, Mask, MaskablePath, Observation, ObservationHash, ObservedRun, Outcome,
-    PreparedCommit, ProbeCorpus, ProbeHash, ProbeSetManifest, Receipt, ReceiptItem, RequestRecord,
-    RulingStatus, Run, RunOutcome, RunRole, Scope, ScopeConfirmation,
+    Authorization, CaptureOutcome, Channels, Comparison, Completeness, ContentHash, Contest,
+    ContrastExample, CoreDerived, CorpusProbe, DiscrepancyEpisode, EpisodeKey, Fixture,
+    FixtureSetManifest, FoldedLedger, GateState, HttpMethod, ItemClass, LedgerEvent, Mask,
+    MaskablePath, Observation, ObservationHash, ObservedRun, Outcome, PreparedCommit, ProbeCorpus,
+    ProbeHash, ProbeSetManifest, Receipt, ReceiptItem, RequestRecord, RulingStatus, Run,
+    RunOutcome, RunRole, Scope, ScopeConfirmation, Selector, canonical_episode_selector,
 };
 use acan_intent::{admit, fold};
 use serde::Serialize;
@@ -29,6 +30,7 @@ const CONFIRMATION: &str = include_str!("../fixtures/scope-confirmation.json");
 const RECEIPT: &str = include_str!("../fixtures/receipt.json");
 const LEDGER_DECISION: &str = include_str!("../fixtures/ledger-decision.json");
 const CONTEST: &str = include_str!("../fixtures/contest.json");
+const EPISODE: &str = include_str!("../fixtures/episode.json");
 
 /// The base commit scope.json confirms against.
 const BASE: &str = "178c1b07097a9f510882d139061ed50b4b44b1d4";
@@ -76,6 +78,7 @@ struct Hit {
     status: u16,
     body: Value,
     cookies: Vec<(&'static str, String)>,
+    headers: Vec<(&'static str, String)>,
 }
 
 impl Hit {
@@ -90,6 +93,7 @@ impl Hit {
             status,
             body: body_for(status),
             cookies: Vec::new(),
+            headers: Vec::new(),
         }
     }
 
@@ -108,13 +112,17 @@ impl Hit {
             sent_at_ms: self.sent_at_ms,
         });
         observation.completeness = Completeness::Complete {};
+        let mut headers: BTreeMap<String, String> = self
+            .headers
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), value.clone()))
+            .collect();
+        if self.status == 429 {
+            headers.insert("retry-after".to_owned(), "60".to_owned());
+        }
         observation.channels = Channels {
             status: Some(self.status),
-            headers: if self.status == 429 {
-                BTreeMap::from([("retry-after".to_owned(), "60".to_owned())])
-            } else {
-                BTreeMap::new()
-            },
+            headers,
             cookies: self
                 .cookies
                 .iter()
@@ -336,6 +344,56 @@ fn login_on(
     Measured::new(probe, fixture, run_a, run_b, run_c)
 }
 
+/// The login probe's twin: the same fixture, steps and route, with one step's deadline changed so
+/// its spec hashes apart, and a normalization plan of its own. Both reach the login route.
+fn login_twin() -> CorpusProbe {
+    let (login, _) = load("login-rate-limit");
+    let mut spec = to_value(&login.spec);
+    spec["steps"][0]["deadline_ms"] = json!(2001);
+    let mut plan = to_value(&login.normalization);
+    plan["maskable_paths"]
+        .as_array_mut()
+        .expect("the plan lists its maskable paths")
+        .push(json!("body.error"));
+    CorpusProbe {
+        label: "login-rate-limit-twin".to_owned(),
+        spec: serde_json::from_value(spec).expect("the twin's spec decodes"),
+        normalization: serde_json::from_value(plan).expect("the twin's plan decodes"),
+        ..login
+    }
+}
+
+/// The probe corpus with the login twin added.
+fn corpus_with_login_twin() -> ProbeCorpus {
+    let mut corpus: ProbeCorpus = parse(PROBE_CORPUS);
+    corpus.probes.push(login_twin());
+    corpus
+}
+
+/// As [`build`], for the probe corpus `corpus`, with no exact-approval anchors or contests.
+fn build_on(
+    corpus: &ProbeCorpus,
+    scope: &Scope,
+    confirmation: &ScopeConfirmation,
+    prepared: &PreparedCommit,
+    ledger: &CoreDerived<FoldedLedger>,
+    results: &[ProbeResult<'_>],
+) -> Result<Receipt, ReceiptError> {
+    let inputs = ReceiptInputs {
+        scope,
+        confirmation,
+        prepared,
+        ledger,
+        corpus,
+        results,
+        anchors: &[],
+        episodes: &[],
+        contests: &[],
+        gate_state: GateState::Blocked,
+    };
+    receipt::build_receipt(&inputs).map(|receipt| receipt.value().clone())
+}
+
 /// One health step: GET /health from client-a, answered `status` with `body`.
 fn health_hit(status: u16, body: Value) -> Hit {
     Hit {
@@ -386,12 +444,20 @@ fn prepared_context(
     confirmation: &ScopeConfirmation,
     ledger: &CoreDerived<FoldedLedger>,
 ) -> PreparedCommit {
-    let corpus: ProbeCorpus = parse(PROBE_CORPUS);
+    prepared_context_on(&parse(PROBE_CORPUS), confirmation, ledger)
+}
+
+/// As [`prepared_context`], for the probe corpus `corpus`.
+fn prepared_context_on(
+    corpus: &ProbeCorpus,
+    confirmation: &ScopeConfirmation,
+    ledger: &CoreDerived<FoldedLedger>,
+) -> PreparedCommit {
     let folded = ledger.value();
-    let probe_set = ProbeSetManifest::of(&corpus, &folded.retired_probes)
+    let probe_set = ProbeSetManifest::of(corpus, &folded.retired_probes)
         .and_then(|manifest| manifest.probe_set_hash())
         .expect("the probe set hashes");
-    let fixture_set = FixtureSetManifest::of(&corpus)
+    let fixture_set = FixtureSetManifest::of(corpus)
         .and_then(|manifest| manifest.fixture_set_hash())
         .expect("the fixture set hashes");
     let run: Value = parse(RUN);
@@ -987,6 +1053,382 @@ fn a_standing_approval_runs_on_new_evidence() {
 }
 
 #[test]
+fn a_violated_standing_ruling_names_the_episode_its_selector_keys() {
+    let scope = scope();
+    let confirmation = confirmation_for(&scope);
+    let ledger = fold::fold(&[login_ruling(
+        login_plan(),
+        "standing_predicate_approval",
+        json!([]),
+    )])
+    .expect("the ruling folds");
+    let context = prepared_context(&confirmation, &ledger);
+    let limited = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        sequence(FIVE_THEN_LIMITED),
+    );
+    let episodes = [open_episode(&scope, &login_selector())];
+    let results = [limited.result()];
+    let corpus: ProbeCorpus = parse(PROBE_CORPUS);
+    let inputs = ReceiptInputs {
+        scope: &scope,
+        confirmation: &confirmation,
+        prepared: &context,
+        ledger: &ledger,
+        corpus: &corpus,
+        results: &results,
+        anchors: &[],
+        episodes: &episodes,
+        contests: &[],
+        gate_state: GateState::Blocked,
+    };
+    let receipt = receipt::build_receipt(&inputs)
+        .expect("the receipt builds")
+        .value()
+        .clone();
+    let violation = receipt
+        .items
+        .iter()
+        .find(|item| item.class == ItemClass::ViolatesRuling)
+        .expect("the violation is a receipt item");
+    assert_eq!(
+        violation.episode_id.as_ref(),
+        Some(&episodes[0].id),
+        "a violated ruling names no episode, so the origin refuses the failing item"
+    );
+}
+
+/// The selector of the login ruling: the sixth login's status, on any login request.
+fn login_selector() -> Selector {
+    serde_json::from_value(json!({
+        "surface": "http",
+        "method": "POST",
+        "route_template": "/api/login",
+        "step_context": { "kind": "any" },
+        "principal": { "kind": "anonymous" },
+        "channel": "status"
+    }))
+    .expect("the selector decodes")
+}
+
+/// The open episode the order holds for `selector`, keyed as a violation of a ruling on it is: no
+/// obligation, and the canonical selector.
+fn open_episode(scope: &Scope, selector: &Selector) -> DiscrepancyEpisode {
+    let canonical = canonical_episode_selector(selector);
+    let id = EpisodeKey {
+        order: scope.order.clone(),
+        selector: canonical.clone(),
+        obligation_id: None,
+    }
+    .episode_id()
+    .expect("the key hashes");
+    let mut value: Value = parse(EPISODE);
+    value["id"] = to_value(&id);
+    value["order"] = to_value(&scope.order);
+    value["selector"] = to_value(&canonical);
+    value["state"] = json!("open");
+    value["bounce_count"] = json!(0);
+    value
+        .as_object_mut()
+        .expect("the episode is an object")
+        .remove("obligation_id");
+    serde_json::from_value(value).expect("the episode decodes")
+}
+
+/// A standing ruling on the login route: the request id a login is answered with is an opaque
+/// uuid. Its field is a header the standard runs never send, so a test decides who sends it.
+fn request_id_ruling() -> LedgerEvent {
+    let mut value: Value = parse(LEDGER_DECISION);
+    value["ruling_id"] = json!("r-request-id");
+    value["selector"] = json!({
+        "surface": "http",
+        "method": "POST",
+        "route_template": "/api/login",
+        "step_context": { "kind": "any" },
+        "principal": { "kind": "anonymous" },
+        "channel": "header",
+        "field_path": "x-request-id"
+    });
+    value["predicate_ast"] = json!({
+        "predicate": "matches_schema",
+        "at": { "ref": "field", "run": "candidate", "step_id": "s1", "path": "header.x-request-id" },
+        "schema": { "type": "string", "format": "uuid" }
+    });
+    value["label"] = json!("The request id is an opaque uuid");
+    value["machine_ids"] = json!(["auth"]);
+    value["normalization_version"] = json!("norm/1");
+    value["normalization_hash"] = login_plan();
+    value["applicability"] = json!("standing_predicate_approval");
+    value["accepts"] = json!([]);
+    serde_json::from_value(value).expect("the ruling decodes")
+}
+
+#[test]
+fn a_standing_ruling_is_held_where_base_and_candidate_agree_on_its_field() {
+    let scope = scope();
+    let confirmation = confirmation_for(&scope);
+    let ledger = fold::fold(&[request_id_ruling()]).expect("the ruling folds");
+    let context = prepared_context(&confirmation, &ledger);
+    // No run sends x-request-id: the candidate agrees with the base on the ruling's field, so the
+    // ruling has nothing to check and holds.
+    let agreeing = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+    );
+    let receipt = build(
+        &scope,
+        &confirmation,
+        &context,
+        &ledger,
+        &[agreeing.result()],
+    )
+    .expect("the receipt builds");
+    assert!(
+        matches!(
+            ruling_status(&receipt, "r-request-id"),
+            RulingStatus::Held {}
+        ),
+        "a ruling whose field never differs was not held: {:?}",
+        ruling_status(&receipt, "r-request-id")
+    );
+    assert!(
+        receipt
+            .items
+            .iter()
+            .all(|item| item.class != ItemClass::ViolatesRuling),
+        "a field the candidate did not change violated the ruling"
+    );
+}
+
+#[test]
+fn a_standing_ruling_is_violated_where_its_field_differs_and_breaks_it() {
+    let scope = scope();
+    let confirmation = confirmation_for(&scope);
+    let ledger = fold::fold(&[request_id_ruling()]).expect("the ruling folds");
+    let context = prepared_context(&confirmation, &ledger);
+    // The candidate answers the first login with the username as its request id: the field
+    // differs from the base, and the value is no uuid.
+    let mut candidate = sequence(SIX_FAILURES);
+    hit_mut(&mut candidate, "s1")
+        .headers
+        .push(("x-request-id", "alice".to_owned()));
+    let broken = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        candidate,
+    );
+    let receipt = build(&scope, &confirmation, &context, &ledger, &[broken.result()])
+        .expect("the receipt builds");
+    assert!(
+        matches!(
+            ruling_status(&receipt, "r-request-id"),
+            RulingStatus::Violated { .. }
+        ),
+        "a wrong request id where the field differs did not violate: {:?}",
+        ruling_status(&receipt, "r-request-id")
+    );
+    assert!(
+        receipt
+            .items
+            .iter()
+            .any(|item| item.class == ItemClass::ViolatesRuling
+                && item.ruling_id.as_ref().map(|id| id.as_str()) == Some("r-request-id")),
+        "the violation does not name the ruling"
+    );
+}
+
+/// An opaque request id of the form the request-id ruling accepts.
+const REQUEST_ID: &str = "3f2b9c1e-8a7d-4e2b-9c3d-1a2b3c4d5e6f";
+
+/// The candidate's sixth-login sequence with its first login answered with `request_id`. The
+/// base never sends the header, so the candidate's field is added and differs from the base.
+fn with_request_id(request_id: &str) -> Vec<Hit> {
+    let mut candidate = sequence(SIX_FAILURES);
+    hit_mut(&mut candidate, "s1")
+        .headers
+        .push(("x-request-id", request_id.to_owned()));
+    candidate
+}
+
+#[test]
+fn a_held_standing_ruling_takes_its_difference_as_one_fulfilled_item() {
+    let scope = scope();
+    let confirmation = confirmation_for(&scope);
+    let ledger = fold::fold(&[request_id_ruling()]).expect("the ruling folds");
+    let context = prepared_context(&confirmation, &ledger);
+    let held = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        with_request_id(REQUEST_ID),
+    );
+    let receipt = build(&scope, &confirmation, &context, &ledger, &[held.result()])
+        .expect("the receipt builds");
+    assert!(
+        matches!(
+            ruling_status(&receipt, "r-request-id"),
+            RulingStatus::Held {}
+        ),
+        "a uuid where the field differs was not held: {:?}",
+        ruling_status(&receipt, "r-request-id")
+    );
+    assert_eq!(
+        receipt.counts.get(ItemClass::OutOfScope),
+        0,
+        "a held ruling left its difference out of scope"
+    );
+    let rows: Vec<&ReceiptItem> = receipt
+        .items
+        .iter()
+        .filter(|item| item.ruling_id.as_ref().map(|id| id.as_str()) == Some("r-request-id"))
+        .collect();
+    let [row] = rows.as_slice() else {
+        panic!(
+            "one probe holds the ruling, so one ruling item: found {}",
+            rows.len()
+        );
+    };
+    assert_eq!(row.class, ItemClass::ObligationFulfilled);
+    assert!(row.class.counts_toward_pass());
+    assert!(
+        matches!(row.evaluation.authorization, Authorization::Ruling { .. }),
+        "the fulfilled row is not authorized by the ruling"
+    );
+    assert!(
+        row.evidence
+            .iter()
+            .any(|evidence| evidence.field.as_str() == "header.x-request-id"),
+        "the fulfilled row carries no evidence of the difference it takes"
+    );
+}
+
+#[test]
+fn a_held_standing_ruling_leaves_a_difference_a_may_item_owns_to_that_item() {
+    // A may-change item that names the request id owns the difference, so the ruling finds it
+    // already owned and takes nothing: the ruling still holds, but no ruling item is made.
+    let scope = edited_scope(|value| {
+        value["body"]["may"]
+            .as_array_mut()
+            .expect("the scope has may items")
+            .push(json!({
+                "id": "i-request-id",
+                "selector": {
+                    "surface": "http",
+                    "method": "POST",
+                    "route_template": "/api/login",
+                    "step_context": { "kind": "any" },
+                    "principal": { "kind": "anonymous" },
+                    "channel": "header",
+                    "field_path": "x-request-id"
+                },
+                "change": "add",
+                "acceptance": [{
+                    "obligation_id": "obl-request-id",
+                    "predicate": {
+                        "predicate": "present",
+                        "at": {
+                            "ref": "field",
+                            "run": "candidate",
+                            "step_id": "s1",
+                            "path": "header.x-request-id"
+                        }
+                    },
+                    "text": "A login carries a request id"
+                }],
+                "provenance": "model",
+                "example": {
+                    "kind": "target",
+                    "step_id": "s1",
+                    "path": "header.x-request-id",
+                    "after": { "state": "present", "value": REQUEST_ID }
+                },
+                "machine_ids": ["auth"]
+            }));
+    });
+    let confirmation = confirmation_for(&scope);
+    let ledger = fold::fold(&[request_id_ruling()]).expect("the ruling folds");
+    let context = prepared_context(&confirmation, &ledger);
+    let candidate = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        with_request_id(REQUEST_ID),
+    );
+    let receipt = build(
+        &scope,
+        &confirmation,
+        &context,
+        &ledger,
+        &[candidate.result()],
+    )
+    .expect("the receipt builds");
+    assert!(
+        matches!(
+            ruling_status(&receipt, "r-request-id"),
+            RulingStatus::Held {}
+        ),
+        "the ruling was not held: {:?}",
+        ruling_status(&receipt, "r-request-id")
+    );
+    assert!(
+        receipt
+            .items
+            .iter()
+            .all(|item| item.ruling_id.as_ref().map(|id| id.as_str()) != Some("r-request-id")),
+        "the ruling took a difference the may item owns"
+    );
+    let owned = item(&receipt, "i-request-id");
+    assert!(
+        matches!(
+            owned.evaluation.authorization,
+            Authorization::MayChange { .. }
+        ),
+        "the may item does not own its difference: {:?}",
+        owned.evaluation.authorization
+    );
+    assert_eq!(receipt.counts.get(ItemClass::OutOfScope), 0);
+}
+
+#[test]
+fn a_violated_standing_ruling_takes_its_difference_so_it_is_not_also_out_of_scope() {
+    let scope = scope();
+    let confirmation = confirmation_for(&scope);
+    let ledger = fold::fold(&[request_id_ruling()]).expect("the ruling folds");
+    let context = prepared_context(&confirmation, &ledger);
+    let broken = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        with_request_id("alice"),
+    );
+    let receipt = build(&scope, &confirmation, &context, &ledger, &[broken.result()])
+        .expect("the receipt builds");
+    assert!(
+        matches!(
+            ruling_status(&receipt, "r-request-id"),
+            RulingStatus::Violated { .. }
+        ),
+        "a name where the field differs did not violate: {:?}",
+        ruling_status(&receipt, "r-request-id")
+    );
+    assert_eq!(
+        receipt.counts.get(ItemClass::ViolatesRuling),
+        1,
+        "the violation has one row"
+    );
+    assert_eq!(
+        receipt.counts.get(ItemClass::OutOfScope),
+        0,
+        "the violated difference was also counted out of scope"
+    );
+}
+
+#[test]
 fn a_ruling_with_the_same_version_and_another_plan_hash_is_stale_never_held() {
     let scope = scope();
     let confirmation = confirmation_for(&scope);
@@ -1016,6 +1458,120 @@ fn a_ruling_with_the_same_version_and_another_plan_hash_is_stale_never_held() {
     assert!(
         matches!(ruling_status(&receipt, "r-login"), RulingStatus::Stale {}),
         "a ruling with another plan hash was not stale: {:?}",
+        ruling_status(&receipt, "r-login")
+    );
+}
+
+#[test]
+fn a_ruling_holds_on_its_own_plan_and_leaves_another_plans_probe_outside_it() {
+    let scope = scope();
+    let confirmation = confirmation_for(&scope);
+    let corpus = corpus_with_login_twin();
+    let ledger = fold::fold(&[login_ruling(
+        login_plan(),
+        "standing_predicate_approval",
+        json!([]),
+    )])
+    .expect("the ruling folds");
+    let prepared = prepared_context_on(&corpus, &confirmation, &ledger);
+    let on_its_plan = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+    );
+    // The twin's sixth login is answered 429, which the ruling's predicate does not allow. A
+    // header that no scope item names appears on the candidate only.
+    let mut limited = sequence(FIVE_THEN_LIMITED);
+    hit_mut(&mut limited, "s6")
+        .headers
+        .push(("x-trace", "one".to_owned()));
+    let (_, fixture) = load("login-rate-limit");
+    let other_plan = login_on(
+        login_twin(),
+        fixture,
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        limited,
+    );
+    let twin_hash = login_twin().spec.probe_hash().expect("the twin hashes");
+    let receipt = build_on(
+        &corpus,
+        &scope,
+        &confirmation,
+        &prepared,
+        &ledger,
+        &[on_its_plan.result(), other_plan.result()],
+    )
+    .expect("the receipt builds");
+    assert!(
+        matches!(ruling_status(&receipt, "r-login"), RulingStatus::Held {}),
+        "a ruling on its own plan did not hold: {:?}",
+        ruling_status(&receipt, "r-login")
+    );
+    assert_eq!(
+        receipt.counts.get(ItemClass::ViolatesRuling),
+        0,
+        "the probe on another plan was checked against the ruling"
+    );
+    assert!(
+        !receipt
+            .items
+            .iter()
+            .any(|item| item.ruling_id.is_some() && item.probe_hash == twin_hash),
+        "the ruling took rows from the probe on another plan"
+    );
+    assert!(
+        receipt
+            .items
+            .iter()
+            .any(|item| item.class == ItemClass::OutOfScope && item.probe_hash == twin_hash),
+        "the other plan's header row is not out of scope"
+    );
+}
+
+#[test]
+fn a_ruling_is_stale_only_when_no_reached_probe_has_its_plan() {
+    let scope = scope();
+    let confirmation = confirmation_for(&scope);
+    let corpus = corpus_with_login_twin();
+    // The links probe's plan hash: neither login probe has it.
+    let other_plan = parse::<Value>(LEDGER_DECISION)["normalization_hash"].clone();
+    let ledger = fold::fold(&[login_ruling(
+        other_plan,
+        "standing_predicate_approval",
+        json!([]),
+    )])
+    .expect("the ruling folds");
+    let prepared = prepared_context_on(&corpus, &confirmation, &ledger);
+    let on_login = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+    );
+    let (_, fixture) = load("login-rate-limit");
+    let twin = login_on(
+        login_twin(),
+        fixture,
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+    );
+    let receipt = build_on(
+        &corpus,
+        &scope,
+        &confirmation,
+        &prepared,
+        &ledger,
+        &[on_login.result(), twin.result()],
+    )
+    .expect("the receipt builds");
+    assert!(
+        matches!(ruling_status(&receipt, "r-login"), RulingStatus::Stale {}),
+        "a ruling with no reached probe on its plan was not stale: {:?}",
         ruling_status(&receipt, "r-login")
     );
 }
@@ -1194,6 +1750,75 @@ fn a_grant_on_one_field_does_not_own_the_replacement_of_its_ancestor() {
                 && matches!(&item.evaluation.outcome, Outcome::Changed { differences }
                 if differences.iter().any(|d| d.path.as_str() == "body.user"))),
         "the ancestor's replacement was not reported out of scope"
+    );
+}
+
+#[test]
+fn a_whole_body_item_covers_every_body_field_at_its_step_and_nothing_at_another() {
+    let scope = edited_scope(|value| {
+        let mut whole = value["body"]["may"][2].clone();
+        whole["id"] = json!("i-login-whole-body");
+        whole["selector"]["step_context"] = json!({ "kind": "step", "step_id": "s6" });
+        whole["selector"]
+            .as_object_mut()
+            .expect("a selector is an object")
+            .remove("field_path");
+        whole["acceptance"] = body_error_item_accepting_status();
+        value["body"]["may"] = json!([whole]);
+    });
+    let confirmation = confirmation_for(&scope);
+    let ledger = empty_ledger();
+    let context = prepared_context(&confirmation, &ledger);
+    let mut base = sequence(SIX_FAILURES);
+    let mut candidate = sequence(SIX_FAILURES);
+    for step in ["s5", "s6"] {
+        hit_mut(&mut base, step).body = json!({ "error": "invalid credentials", "links": ["a"] });
+        hit_mut(&mut candidate, step).body =
+            json!({ "error": "too many attempts", "links": ["b"] });
+    }
+    let measured = login(STANDARD, base.clone(), base, candidate);
+    let receipt = build(
+        &scope,
+        &confirmation,
+        &context,
+        &ledger,
+        &[measured.result()],
+    )
+    .expect("the receipt builds");
+    let Outcome::Changed { differences } = &item(&receipt, "i-login-whole-body").evaluation.outcome
+    else {
+        panic!("the whole-body item claims no difference");
+    };
+    let at_s6: Vec<&str> = differences
+        .iter()
+        .filter(|difference| difference.step_id.as_str() == "s6")
+        .map(|difference| difference.path.as_str())
+        .collect();
+    assert!(
+        at_s6.iter().any(|path| path.starts_with("body.error")),
+        "the whole-body item misses body.error at s6: {at_s6:?}"
+    );
+    assert!(
+        at_s6.iter().any(|path| path.starts_with("body.links")),
+        "the whole-body item misses body.links at s6: {at_s6:?}"
+    );
+    assert!(
+        differences
+            .iter()
+            .all(|difference| difference.step_id.as_str() == "s6"),
+        "the whole-body item claims a difference at another step: {differences:?}"
+    );
+    assert!(
+        receipt
+            .items
+            .iter()
+            .any(|entry| entry.class == ItemClass::OutOfScope
+                && matches!(
+                    &entry.evaluation.outcome,
+                    Outcome::Changed { differences }
+                        if differences.iter().any(|difference| difference.step_id.as_str() == "s5")
+                )),
+        "the body difference at s5 is not out of scope"
     );
 }
 

@@ -5,7 +5,8 @@ $ErrorActionPreference = 'Stop'
 
 $script:WorktreeRoot = Split-Path -Parent $PSScriptRoot
 # Every take gets its own folder under this root, so a stale process can only write into its own take.
-$script:RunRoot = 'D:\dev\acan-run'
+# The default is under target\, which git ignores. ACAN_RUN_ROOT moves it.
+$script:RunRoot = if ($env:ACAN_RUN_ROOT) { $env:ACAN_RUN_ROOT } else { Join-Path $script:WorktreeRoot 'target\acan-run' }
 
 # The folder of the latest take, or $null before the first take.
 function Get-CurrentRunDir {
@@ -111,6 +112,16 @@ function Get-HttpStatus($ErrorRecord) {
 # True when something already listens on the port. A start on a busy port would reach the wrong server.
 function Test-PortBusy([int]$Port) {
     $null -ne (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+}
+
+# Stops a take before anything starts when a port is taken, and names the process and the parameter to change.
+function Assert-PortFree {
+    param([string]$Name, [int]$Port)
+    if (-not (Test-PortBusy -Port $Port)) { return }
+    $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    $proc = if ($conn) { Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue }
+    $holder = if ($proc) { "$($proc.ProcessName) (pid $($proc.Id))" } else { 'another process' }
+    throw "port $Port is already in use by $holder. Stop it, or start the take on a free port with -$Name <port>, for example -$Name $($Port + 101)."
 }
 
 function Wait-Http200 {

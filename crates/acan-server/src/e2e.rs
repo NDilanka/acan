@@ -1,10 +1,13 @@
-//! The loop end to end on a real git repository. An order posted over HTTP is split, read back,
-//! reviewed, claimed, built in its task worktree, gated, and landed. The offline models stand in
-//! for the foreman. A scripted agent drives the worker side.
+//! The loop end to end on a real git repository, on the scope-first lane. An order is posted over
+//! HTTP, the owner revises and confirms its scope, the agent reads the scope back, claims, builds
+//! in its task worktree, and the final gate judges the build against the acan-demo app in Docker
+//! before anything lands. The offline split stands in for the foreman. A scripted agent drives
+//! the worker side.
 //!
 //! The agent sends its commands through the writer, because agents cannot send commands over
 //! HTTP yet. Everything else goes through the public surface: member commands over HTTP, the
-//! agent's worktree route over HTTP, and the stored log.
+//! agent's worktree route over HTTP, and the stored log. The gate runs the demo app in Docker, so
+//! the tests need a checkout of acan-demo at its pinned commit in `ACAN_DEMO_DIR`. They only read it.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -15,13 +18,22 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use acan_core::{
-    AgentCmd, AgentId, Check, Command, CommitId, DeclarationInput, Event, Fence, FilePath,
-    GateVerdict, Generation, HumanCmd, LEASE_TTL_MS, Locus, MachineKey, Origin, Settlement, Stage,
-    Stamped, TaskId, TaskState, WitnessOutcome, WitnessSpec, World,
+    AgentCmd, AgentId, Command, CommitId, DeclarationInput, Event, Fence, FilePath, Generation,
+    HumanCmd, LEASE_TTL_MS, LaneVerdict, MachineKey, OrderId, Origin, ScopeBinding, Stage, Stamped,
+    TaskId, TaskState, World,
 };
-use acan_llm::{ChatRequest, ChatResponse, LlmError, ModelClient, Role, UsageLedger};
+use acan_intent::{ContrastExample, ItemClass, LedgerEvent, Scope, ScopeConfirmation};
+use acan_llm::{
+    CallRecord, ChatRequest, ChatResponse, LlmError, ModelClient, Role, Usage, UsageLedger,
+};
+use futures_util::StreamExt;
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
 use crate::model::{self, Ask};
 use crate::offline::Offline;
@@ -30,29 +42,44 @@ use crate::{DEFAULT_WITNESS_CONCURRENCY, Running, ServerConfig, start};
 const OWNER_TOKEN: &str = "acan_owner_e2e";
 const AGENT_TOKEN: &str = "acan_agent_e2e";
 const AGENT: &str = "agent-1";
-const MACHINE: &str = "model";
+/// The machine the order is pinned on. The demo's signup rule reaches the auth and store machines.
+const MACHINE: &str = "auth";
 const LANDED: &str = "landed.txt";
 const AGENT_CONTENT: &str = "written by the agent\n";
-/// Passes when the built commit carries the file, so it checks the commit rather than the disk.
-const WITNESS_COMMAND: &str = "git cat-file -e HEAD:landed.txt";
-/// The longest one step of a chain may take. Idle, claim to land takes 4.4 to 6.8 seconds. While
-/// another workspace build runs, one witness starts pwsh and git in 2 to 5 seconds, and a chain
-/// has many such steps, so the budget is generous. It stays finite, so a real stall still fails.
-const WAIT: Duration = Duration::from_secs(120);
+/// The environment variable that names the acan-demo checkout. The tests only read it.
+const DEMO_DIR_VAR: &str = "ACAN_DEMO_DIR";
+/// The acan-demo commit the protected branch is pinned to.
+const DEMO_COMMIT: &str = "f91962156841332d5753d869554839f7c4cdea79";
+const PROTECTED_BRANCH: &str = "main";
+/// The must-keep rule of the scope: the signup answer keeps its body.
+const SIGNUP_RULE: &str = "k-signup-body";
+const SIGNUP_OBLIGATION: &str = "obl-signup-body";
+/// The signup handler's answer, as the pinned demo has it.
+const SIGNUP_RESPONSE: &str = "return { id: user.id, username: user.username };";
+/// The seeded regression: the answer upper-cases the username, so the answer differs from base.
+const REGRESSED_SIGNUP_RESPONSE: &str =
+    "return { id: user.id, username: user.username.toUpperCase() };";
+/// A gate run builds and runs the demo app in Docker, about a minute per candidate, and a chain
+/// may judge two candidates. The budget is generous, and it stays finite so a real stall fails.
+const WAIT: Duration = Duration::from_secs(300);
 const POLL: Duration = Duration::from_millis(20);
 /// A sixth of the lease, so the test agent renews well before a lapse and can miss a few.
 const LEASE_RENEWAL: Duration = Duration::from_millis(LEASE_TTL_MS / 6);
+/// Serializes the tests that run the demo app in Docker, so their containers do not compete for
+/// the same CPU budget and their gates stay inside their budgets.
+static DOCKER: Mutex<()> = Mutex::const_new(());
 
 #[tokio::test]
 async fn an_order_is_gated_in_its_worktree_and_lands_on_the_protected_branch() {
-    let repo = user_repo();
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
     let root = repo.path();
     let running = start_plant(root).await;
     let status_before = git(root, &["status", "--porcelain"]);
     let task = TaskId::from_str("t-0").expect("valid task id");
 
     post_order(&running).await;
-    read_back(&running, task).await;
+    let scope = scope_first(&running, root, task).await;
 
     let before_claim = worktree_route(&running, AGENT_TOKEN, task).await;
     assert_eq!(
@@ -66,7 +93,7 @@ async fn an_order_is_gated_in_its_worktree_and_lands_on_the_protected_branch() {
 
     let response = worktree_route(&running, AGENT_TOKEN, task).await;
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    let body: serde_json::Value = response.json().await.expect("the route answers JSON");
+    let body: Value = response.json().await.expect("the route answers JSON");
     let told = PathBuf::from(body["path"].as_str().expect("the route names the path"));
     assert_eq!(
         canonical(&told),
@@ -79,6 +106,10 @@ async fn an_order_is_gated_in_its_worktree_and_lands_on_the_protected_branch() {
         owner_view.status(),
         reqwest::StatusCode::FORBIDDEN,
         "a member token does not read a worktree"
+    );
+    assert_eq!(
+        scope.rev.0, 1,
+        "the agent read the confirmed first revision"
     );
 
     let built = build(&running, root, task, fence, LANDED, AGENT_CONTENT).await;
@@ -94,12 +125,9 @@ async fn an_order_is_gated_in_its_worktree_and_lands_on_the_protected_branch() {
     assert!(
         log.iter().any(|stamped| matches!(
             &stamped.event,
-            Event::WitnessReported {
-                outcome: WitnessOutcome::Pass,
-                ..
-            }
+            Event::ReceiptRecorded { record, .. } if record.verdict == LaneVerdict::Passed
         )),
-        "the witness passed on the built commit"
+        "the final gate passed the built commit"
     );
     assert_eq!(
         git(root, &["show", "main:landed.txt"]),
@@ -128,13 +156,13 @@ async fn an_order_is_gated_in_its_worktree_and_lands_on_the_protected_branch() {
 /// HTTP or over MCP, and a move of the protected head names a new snapshot.
 #[tokio::test]
 async fn a_worktree_names_a_snapshot_of_the_protected_head_that_a_candidate_cannot_change() {
-    const PROTECTED_APP: &str = ".acan/app.json";
-    const PROTECTED_CORPUS: &str = ".acan/probes/core.json";
+    const PROTECTED_APP: &str = ".acan/snapshot-check/app.json";
+    const PROTECTED_CORPUS: &str = ".acan/snapshot-check/core.json";
     const APP_BASE: &str = "{\"app\": \"base\"}\n";
     const CORPUS_BASE: &str = "{\"probes\": [\"base\"]}\n";
     const APP_CANDIDATE: &str = "{\"app\": \"candidate\"}\n";
     const APP_MOVED: &str = "{\"app\": \"moved\"}\n";
-    let repo = user_repo();
+    let repo = demo_repo();
     let root = repo.path();
     commit_on_protected(root, PROTECTED_APP, APP_BASE);
     commit_on_protected(root, PROTECTED_CORPUS, CORPUS_BASE);
@@ -142,7 +170,7 @@ async fn a_worktree_names_a_snapshot_of_the_protected_head_that_a_candidate_cann
     let task = TaskId::from_str("t-0").expect("valid task id");
 
     post_order(&running).await;
-    read_back(&running, task).await;
+    scope_first(&running, root, task).await;
     let fence = claim(&running, task).await;
     wait_for_worktree(root, task, fence.generation).await;
     let worktree = worktree_dir(root, task);
@@ -215,58 +243,78 @@ async fn a_worktree_names_a_snapshot_of_the_protected_head_that_a_candidate_cann
 }
 
 #[tokio::test]
-async fn a_failing_witness_sends_the_task_back_to_building_and_lands_nothing() {
-    let repo = user_repo();
+async fn a_failing_gate_sends_the_task_back_to_building_and_lands_nothing() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
     let root = repo.path();
     let running = start_plant(root).await;
     let task = TaskId::from_str("t-0").expect("valid task id");
     post_order(&running).await;
-    read_back(&running, task).await;
+    scope_first(&running, root, task).await;
     let fence = claim(&running, task).await;
     wait_for_worktree(root, task, fence.generation).await;
     let protected_before = git(root, &["rev-parse", "main"]);
 
-    build(
+    build_with(
         &running,
         root,
         task,
         fence,
-        "other.txt",
-        "not the file the witness checks\n",
+        &["src/auth.ts"],
+        seed_regression,
     )
     .await;
-    let failing = settle(&running, "the gate to close on a failure", |log, _| {
+    let record = settle(&running, "the gate to block the regression", |log, _| {
         log.iter().find_map(|stamped| match &stamped.event {
-            Event::GateClosed {
-                verdict: GateVerdict::Failed { failing },
-                ..
-            } => Some(failing.clone()),
+            Event::ReceiptRecorded { record, .. }
+                if matches!(record.verdict, LaneVerdict::Blocked { .. }) =>
+            {
+                Some(record.clone())
+            }
             _ => None,
         })
     })
     .await;
-    assert_eq!(failing.len(), 1, "the one witness is named as failing");
+    let LaneVerdict::Blocked { blockers } = &record.verdict else {
+        panic!("the regression is blocked: {:?}", record.verdict);
+    };
+    assert!(
+        serde_json::to_string(blockers)
+            .expect("the blockers serialize")
+            .contains(SIGNUP_RULE),
+        "the receipt names the signup rule the regression breaks: {blockers:?}"
+    );
+    assert!(
+        record.receipt.items.iter().any(|item| {
+            item.item_id.as_str() == SIGNUP_RULE && item.class == ItemClass::ObligationFailed
+        }),
+        "the receipt marks the signup rule's obligation as failed: {:?}",
+        record.receipt.items
+    );
+    settle(&running, "the task to return to building", |_, world| {
+        in_state(world, task, |state| {
+            matches!(
+                state,
+                TaskState::Claimed {
+                    stage: Stage::Declared { .. } | Stage::Building { .. },
+                    ..
+                }
+            )
+        })
+        .then_some(())
+    })
+    .await;
 
-    let (log, origin) = snapshot(&running).await;
+    let (log, _) = snapshot(&running).await;
     assert!(
         log.iter().any(|stamped| matches!(
             &stamped.event,
-            Event::WitnessReported {
-                outcome: WitnessOutcome::Fail { .. },
+            Event::GateClosed {
+                verdict: acan_core::GateVerdict::Failed { .. },
                 ..
             }
         )),
-        "the check ran and failed; it did not error"
-    );
-    assert!(
-        in_state(origin.world(), task, |state| matches!(
-            state,
-            TaskState::Claimed {
-                stage: Stage::Declared { .. } | Stage::Building { .. },
-                ..
-            }
-        )),
-        "a failed gate returns the task to declared or building"
+        "the gate closed on a failure"
     );
     assert!(
         !log.iter().any(|stamped| matches!(
@@ -285,12 +333,13 @@ async fn a_failing_witness_sends_the_task_back_to_building_and_lands_nothing() {
 
 #[tokio::test]
 async fn a_conflicting_land_reports_the_files_and_reopens_the_task() {
-    let repo = user_repo();
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
     let root = repo.path();
     let running = start_plant(root).await;
     let task = TaskId::from_str("t-0").expect("valid task id");
     post_order(&running).await;
-    read_back(&running, task).await;
+    scope_first(&running, root, task).await;
     let fence = claim(&running, task).await;
     wait_for_worktree(root, task, fence.generation).await;
 
@@ -308,9 +357,9 @@ async fn a_conflicting_land_reports_the_files_and_reopens_the_task() {
         })
     })
     .await;
-    assert_eq!(
-        reason, "merge conflict in landed.txt",
-        "the conflict names the file"
+    assert!(
+        reason.contains(LANDED),
+        "the conflict names the file: {reason}"
     );
     settle(&running, "the task to reopen", |_, world| {
         in_state(world, task, |state| matches!(state, TaskState::Open)).then_some(())
@@ -326,12 +375,13 @@ async fn a_conflicting_land_reports_the_files_and_reopens_the_task() {
 
 #[tokio::test]
 async fn a_land_onto_a_protected_branch_that_moved_merges_only_the_gated_commit() {
-    let repo = user_repo();
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
     let root = repo.path();
     let running = start_plant(root).await;
     let task = TaskId::from_str("t-0").expect("valid task id");
     post_order(&running).await;
-    read_back(&running, task).await;
+    scope_first(&running, root, task).await;
     let fence = claim(&running, task).await;
     wait_for_worktree(root, task, fence.generation).await;
 
@@ -367,12 +417,13 @@ async fn a_land_onto_a_protected_branch_that_moved_merges_only_the_gated_commit(
 
 #[tokio::test]
 async fn a_reclaim_after_a_refused_land_starts_from_the_protected_head_the_user_moved_to() {
-    let repo = user_repo();
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
     let root = repo.path();
     let running = start_plant(root).await;
     let task = TaskId::from_str("t-0").expect("valid task id");
     post_order(&running).await;
-    read_back(&running, task).await;
+    scope_first(&running, root, task).await;
     let fence = claim(&running, task).await;
     wait_for_worktree(root, task, fence.generation).await;
 
@@ -428,12 +479,13 @@ async fn a_reclaim_after_a_refused_land_starts_from_the_protected_head_the_user_
 
 #[tokio::test]
 async fn a_reclaim_without_waiting_for_cleanup_starts_at_the_protected_head() {
-    let repo = user_repo();
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
     let root = repo.path();
     let running = start_plant(root).await;
     let task = TaskId::from_str("t-0").expect("valid task id");
     post_order(&running).await;
-    read_back(&running, task).await;
+    scope_first(&running, root, task).await;
     let fence = claim(&running, task).await;
     let worktree = worktree_dir(root, task);
     wait_for_worktree(root, task, fence.generation).await;
@@ -494,12 +546,13 @@ async fn a_reclaim_without_waiting_for_cleanup_starts_at_the_protected_head() {
 
 #[tokio::test]
 async fn a_queued_task_keeps_its_branch_until_it_lands() {
-    let repo = user_repo();
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
     let root = repo.path();
     let running = start_plant(root).await;
     let task = TaskId::from_str("t-0").expect("valid task id");
     post_order(&running).await;
-    read_back(&running, task).await;
+    scope_first(&running, root, task).await;
     let fence = claim(&running, task).await;
     wait_for_worktree(root, task, fence.generation).await;
     let built = build(&running, root, task, fence, LANDED, AGENT_CONTENT).await;
@@ -544,22 +597,24 @@ async fn a_queued_task_keeps_its_branch_until_it_lands() {
 
 #[tokio::test]
 async fn a_serialized_waiter_builds_on_its_landed_predecessor_and_lands_cleanly() {
-    let repo = user_repo();
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
     let root = repo.path();
     let running = start_with(root, TwoTasks::default(), UsageLedger::default()).await;
     let first = TaskId::from_str("t-0").expect("valid task id");
     let second = TaskId::from_str("t-1").expect("valid task id");
     post_order(&running).await;
-    read_back(&running, first).await;
-    review(&running, second).await;
+    let (_, scope) = order_ready(&running, root, first).await;
+    read_back(&running, first, &scope).await;
+    read_back(&running, second, &scope).await;
     let first_fence = claim(&running, first).await;
     let second_fence = claim(&running, second).await;
     wait_for_worktree(root, first, first_fence.generation).await;
     wait_for_worktree(root, second, second_fence.generation).await;
     let cut_at = git(root, &["rev-parse", "main"]);
 
-    declare(&running, first_fence, LANDED).await;
-    declare(&running, second_fence, LANDED).await;
+    declare(&running, first_fence, &[LANDED]).await;
+    declare(&running, second_fence, &[LANDED]).await;
     let clash = settle(&running, "the two declarations to clash", |_, world| {
         world.clashes().find(|c| c.blocking()).map(|c| c.id)
     })
@@ -569,7 +624,7 @@ async fn a_serialized_waiter_builds_on_its_landed_predecessor_and_lands_cleanly(
         .bearer_auth(OWNER_TOKEN)
         .json(&HumanCmd::SettleClash {
             clash,
-            choice: Settlement::Serialize {
+            choice: acan_core::Settlement::Serialize {
                 first,
                 then: second,
             },
@@ -642,20 +697,640 @@ async fn a_serialized_waiter_builds_on_its_landed_predecessor_and_lands_cleanly(
         .filter(|stamped| {
             matches!(
                 &stamped.event,
-                Event::WitnessReported {
-                    outcome: WitnessOutcome::Pass,
-                    ..
-                }
+                Event::ReceiptRecorded { record, .. } if record.verdict == LaneVerdict::Passed
             )
         })
         .count();
-    assert_eq!(passes, 2, "each task's witness passed on its built commit");
+    assert_eq!(passes, 2, "each task's gate passed on its built commit");
     assert_eq!(
         git(root, &["rev-parse", "main"]).trim(),
         second_head.to_string(),
         "the waiter fast-forwarded the protected branch"
     );
     assert_eq!(git(root, &["show", "main:landed.txt"]), second_content);
+    running.stop().await.expect("the server stops");
+}
+
+/// The scope the scripted foreman drafts for the signup order: one may-change item on the signup
+/// route, in the shape the live foreman returns.
+fn drafted_scope_body() -> Value {
+    json!({
+        "may": [{
+            "id": "i-signup",
+            "selector": {
+                "surface": "http",
+                "method": "POST",
+                "route_template": "/api/signup",
+                "step_context": { "kind": "step", "step_id": "s1" },
+                "principal": { "kind": "anonymous" },
+                "channel": "body"
+            },
+            "change": "add",
+            "acceptance": [{
+                "obligation_id": "obl-signup-may",
+                "predicate": {
+                    "predicate": "equals_base",
+                    "step_id": "s1",
+                    "path": "body",
+                    "anchor": { "kind": "fresh" }
+                },
+                "text": "The signup answer's body matches the base run"
+            }],
+            "provenance": "model",
+            "example": {
+                "kind": "target",
+                "step_id": "s1",
+                "path": "status",
+                "after": { "state": "present", "value": 201 }
+            },
+            "machine_ids": ["auth"]
+        }],
+        "must_keep": [],
+        "open": []
+    })
+}
+
+/// The offline models, except that a split makes two tasks and a scope request is answered with
+/// `draft`. A stand-in for the live foreman in this test only: the job checks the reply the same
+/// way it checks a live one.
+struct Drafting {
+    inner: TwoTasks,
+    draft: Value,
+    /// The user message of every scope request, as the foreman received it.
+    asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ModelClient for Drafting {
+    async fn chat(&self, role: Role, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        if model::ask_of(&request) != Some(Ask::Scope) {
+            return self.inner.chat(role, request).await;
+        }
+        self.asked
+            .lock()
+            .expect("the asked lock is not poisoned")
+            .extend(request.messages.iter().filter_map(|message| match message {
+                acan_llm::Message::User { content } => Some(content.clone()),
+                _ => None,
+            }));
+        Ok(ChatResponse {
+            content: Some(self.draft.to_string()),
+            tool_calls: Vec::new(),
+            finish_reason: None,
+            call: CallRecord {
+                role,
+                provider: "scripted".to_owned(),
+                model: "scripted-foreman".to_owned(),
+                usage: Usage::default(),
+                latency: Duration::ZERO,
+            },
+        })
+    }
+}
+
+/// Polls the latest scope draft of `order` until the draft job stores its outcome, and returns
+/// the view. A failed draft is a stored outcome too, so the caller checks the state.
+async fn scope_draft_of(running: &Running, order: OrderId) -> Value {
+    timeout(WAIT, async {
+        loop {
+            let response = client()
+                .get(url(running, &format!("/api/orders/{order}/scope-draft")))
+                .bearer_auth(OWNER_TOKEN)
+                .send()
+                .await
+                .expect("the draft request is sent");
+            if response.status() == reqwest::StatusCode::OK {
+                return response.json::<Value>().await.expect("the draft is JSON");
+            }
+            sleep(POLL).await;
+        }
+    })
+    .await
+    .expect("the scope draft is stored in time")
+}
+
+/// The scope the owner adopts from a stored draft: the proposal the model wrote, at the draft's
+/// revision and base commit.
+fn adopted_scope(draft: &Value) -> Scope {
+    serde_json::from_value(json!({
+        "version": "acan-scope/1",
+        "order": draft["order"],
+        "rev": draft["rev"],
+        "base_commit": draft["base_commit"],
+        "body": draft["draft"]["proposal"],
+    }))
+    .expect("the adopted scope decodes")
+}
+
+/// A scope draft is stored without authority. The owner sees it, and a confirmation before
+/// adoption is refused. Adopting it (revising and confirming the scope) opens the lane, and only
+/// then does the agent's readback and claim rest on it.
+#[tokio::test]
+async fn a_scope_draft_is_stored_without_authority_until_the_owner_adopts_it() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let foreman = Drafting {
+        inner: TwoTasks::default(),
+        draft: drafted_scope_body(),
+        asked: std::sync::Arc::default(),
+    };
+    let running = start_with(root, foreman, UsageLedger::default()).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+    post_order(&running).await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let view = scope_draft_of(&running, order).await;
+    assert_eq!(view["state"], "drafted", "the draft is stored: {view}");
+    assert_eq!(
+        view["rev"], 0,
+        "the draft is for the order's first revision"
+    );
+    let draft = &view["draft"];
+    assert_eq!(draft["draft"]["model"], "scripted-foreman");
+    assert_eq!(draft["draft"]["provenance"], "model_proposal");
+    let (_, origin) = snapshot(&running).await;
+    assert!(
+        origin.world().lane(order).is_none(),
+        "a draft opens no lane"
+    );
+    let scope = adopted_scope(draft);
+    let refused = client()
+        .post(url(&running, "/api/commands"))
+        .bearer_auth(OWNER_TOKEN)
+        .json(&HumanCmd::ConfirmScope {
+            order,
+            confirmation: Box::new(confirmation_for(&scope)),
+        })
+        .send()
+        .await
+        .expect("the confirmation is sent");
+    assert_eq!(
+        refused.status(),
+        reqwest::StatusCode::CONFLICT,
+        "a draft cannot be confirmed before the owner adopts it"
+    );
+    settle(&running, "the split", |_, world| world.task(task).map(drop)).await;
+    member(&running, &HumanCmd::RegisterAgent { agent: agent() }).await;
+    member(
+        &running,
+        &HumanCmd::ReviseScope {
+            order,
+            scope: Box::new(scope.clone()),
+        },
+    )
+    .await;
+    member(
+        &running,
+        &HumanCmd::ConfirmScope {
+            order,
+            confirmation: Box::new(confirmation_for(&scope)),
+        },
+    )
+    .await;
+    read_back(&running, task, &scope).await;
+    let _fence = claim(&running, task).await;
+    let (log, _) = snapshot(&running).await;
+    let drafted_at = log
+        .iter()
+        .position(|stamped| matches!(stamped.event, Event::ScopeDrafted { .. }));
+    let revised_at = log
+        .iter()
+        .position(|stamped| matches!(stamped.event, Event::ScopeRevised { .. }));
+    assert!(
+        drafted_at.is_some() && drafted_at < revised_at,
+        "the draft is stored before the owner adopts it"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A draft that never checks is recorded as a failure the owner can see. Nothing stands in for it,
+/// so the lane stays closed.
+#[tokio::test]
+async fn a_scope_draft_that_never_checks_is_recorded_as_a_failure() {
+    let repo = demo_repo();
+    let root = repo.path();
+    let asked = std::sync::Arc::<std::sync::Mutex<Vec<String>>>::default();
+    let foreman = Drafting {
+        inner: TwoTasks::default(),
+        draft: json!({ "may": [], "must_keep": [], "open": [] }),
+        asked: std::sync::Arc::clone(&asked),
+    };
+    let running = start_with(root, foreman, UsageLedger::default()).await;
+    post_order(&running).await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let view = scope_draft_of(&running, order).await;
+    assert_eq!(view["state"], "failed", "the failure is stored: {view}");
+    assert!(
+        view["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("no may-change items")),
+        "the reason names the check: {view}"
+    );
+    // The request the job sent carries the order's sentence, which is what the human asked for.
+    // The order ref is only the draft's key, so it is not what the foreman drafts from.
+    let sent = asked
+        .lock()
+        .expect("the asked lock is not poisoned")
+        .clone();
+    assert!(!sent.is_empty(), "the foreman was asked for a scope");
+    for message in &sent {
+        let context: Value = serde_json::from_str(message).expect("the request is JSON");
+        assert_eq!(
+            context["order"], "land the agent's file",
+            "the scope request names the order's sentence: {message}"
+        );
+    }
+    let (_, origin) = snapshot(&running).await;
+    assert!(origin.world().lane(order).is_none(), "no scope is opened");
+    running.stop().await.expect("the server stops");
+}
+
+/// Text only the stored scope draft carries. It is the obligation id of the draft's one check, so
+/// the agent's views never contain it.
+const DRAFT_MARKER: &str = "obl-signup-may";
+
+/// The events route as `token` reads it from `from`: the status, and the body as text.
+async fn events_as(running: &Running, token: &str, from: u64) -> (reqwest::StatusCode, String) {
+    let response = client()
+        .get(url(running, &format!("/api/events?from={from}")))
+        .bearer_auth(token)
+        .send()
+        .await
+        .expect("the events request is sent");
+    let status = response.status();
+    (
+        status,
+        response.text().await.expect("the events body is text"),
+    )
+}
+
+/// The stream as `token` reads it from `from`, until an event of type `kind` arrives. Returns each
+/// frame as text, in the order the stream sent them.
+async fn stream_until(running: &Running, token: &str, from: u64, kind: &str) -> Vec<String> {
+    let mut request = format!("ws://{}/api/stream?from={from}", running.local_addr)
+        .into_client_request()
+        .expect("the stream URL");
+    let header = HeaderValue::from_str(&format!("Bearer {token}")).expect("the token header");
+    request.headers_mut().insert(AUTHORIZATION, header);
+    let (mut socket, _response) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("the stream connects");
+    let mut frames = Vec::new();
+    timeout(WAIT, async {
+        loop {
+            let message = socket
+                .next()
+                .await
+                .expect("the stream stays open")
+                .expect("the stream reads");
+            let WsMessage::Text(text) = message else {
+                continue;
+            };
+            let frame: &str = &text;
+            let event: Value = serde_json::from_str(frame).expect("a stream event");
+            let found = event["event"]["type"] == kind;
+            frames.push(frame.to_owned());
+            if found {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("the stream sends the event in time");
+    frames
+}
+
+/// The event of type `kind` in a view of the log, if the view has one.
+fn event_of_type<'a>(log: &'a [Value], kind: &str) -> Option<&'a Value> {
+    log.iter().find(|stamped| stamped["event"]["type"] == kind)
+}
+
+/// The agent's view of each event is the member's view with a scope draft's payload set to null.
+/// Every other field, the seq, time and actor included, is the same, so a cursor holds.
+fn assert_redacted(agent: &[Value], member: &[Value]) {
+    assert_eq!(agent.len(), member.len(), "the agent reads every event");
+    for (seen, stored) in agent.iter().zip(member) {
+        let mut expected = stored.clone();
+        if stored["event"]["type"] == "scope_drafted" {
+            expected["event"]["draft"] = Value::Null;
+        }
+        assert_eq!(seen, &expected, "the agent's view of an event");
+    }
+}
+
+/// An agent token never reads a scope draft. The events route and the stream both carry the
+/// member's events with the draft set to null, so the agent sees the same log and the same cursor.
+/// The member reads the draft through both routes.
+#[tokio::test]
+async fn an_agent_never_reads_a_scope_draft_through_the_events_or_the_stream() {
+    let repo = demo_repo();
+    let root = repo.path();
+    let foreman = Drafting {
+        inner: TwoTasks::default(),
+        draft: drafted_scope_body(),
+        asked: std::sync::Arc::default(),
+    };
+    let running = start_with(root, foreman, UsageLedger::default()).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+    post_order(&running).await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let view = scope_draft_of(&running, order).await;
+    assert_eq!(view["state"], "drafted", "the draft is stored: {view}");
+    // The split adds events after the draft, so wait for it. Once the task exists the log is
+    // quiet until a human adopts the draft, and the views below are taken from the same log.
+    settle(&running, "the split", |_, world| world.task(task).map(drop)).await;
+
+    let (status, body) = events_as(&running, OWNER_TOKEN, 0).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "the owner reads the log");
+    assert!(body.contains(DRAFT_MARKER), "the member reads the draft");
+    let member_log: Vec<Value> = serde_json::from_str(&body).expect("the log is JSON");
+    let member_drafted = event_of_type(&member_log, "scope_drafted").expect("the draft is logged");
+    assert_eq!(
+        member_drafted["event"]["draft"], view["draft"],
+        "the member's event holds the draft the route serves"
+    );
+
+    let (status, body) = events_as(&running, AGENT_TOKEN, 0).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "an agent reads the log");
+    assert!(
+        !body.contains(DRAFT_MARKER),
+        "the agent reads no draft: {body}"
+    );
+    let agent_log: Vec<Value> = serde_json::from_str(&body).expect("the log is JSON");
+    assert_redacted(&agent_log, &member_log);
+
+    // A cursor taken at the draft holds for the agent too: the tail is the member's tail, redacted.
+    let index = member_log
+        .iter()
+        .position(|stamped| stamped["event"]["type"] == "scope_drafted")
+        .expect("the draft is logged");
+    let from = member_log[index]["seq"]
+        .as_u64()
+        .expect("the seq is a number");
+    let (_, body) = events_as(&running, AGENT_TOKEN, from).await;
+    let agent_tail: Vec<Value> = serde_json::from_str(&body).expect("the tail is JSON");
+    assert_eq!(
+        agent_tail[0]["seq"], from,
+        "the agent's tail starts at the cursor"
+    );
+    let (_, body) = events_as(&running, OWNER_TOKEN, from).await;
+    let member_tail: Vec<Value> = serde_json::from_str(&body).expect("the tail is JSON");
+    assert_redacted(&agent_tail, &member_tail);
+
+    // The stream sends the same frames the events route does.
+    let frames = stream_until(&running, AGENT_TOKEN, 0, "scope_drafted").await;
+    assert!(
+        frames.iter().all(|frame| !frame.contains(DRAFT_MARKER)),
+        "the agent's stream carries no draft: {frames:?}"
+    );
+    let streamed: Vec<Value> = frames
+        .iter()
+        .map(|frame| serde_json::from_str(frame).expect("a stream event"))
+        .collect();
+    assert_eq!(
+        streamed.as_slice(),
+        &agent_log[..streamed.len()],
+        "the agent's stream matches the agent's events route"
+    );
+    let frames = stream_until(&running, OWNER_TOKEN, 0, "scope_drafted").await;
+    let last = frames.last().expect("the member's stream sent the draft");
+    let streamed: Value = serde_json::from_str(last).expect("a stream event");
+    assert_eq!(
+        streamed["event"]["draft"], view["draft"],
+        "the member's stream carries the draft"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// The confirmation body is the one a member sends as `ConfirmScope`. It is absent until the order
+/// has a scope, an agent token never reads it, and posting the body as the owner confirms the
+/// revision it was read for.
+#[tokio::test]
+async fn a_member_reads_the_confirmation_body_and_sending_it_confirms_the_scope() {
+    let repo = demo_repo();
+    let root = repo.path();
+    let running = start_with(root, TwoTasks::default(), UsageLedger::default()).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+    post_order(&running).await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    settle(&running, "the split", |_, world| world.task(task).map(drop)).await;
+    let path = format!("/api/orders/{order}/scope/confirmation");
+    let unscoped = client()
+        .get(url(&running, &path))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .expect("the body request is sent");
+    assert_eq!(
+        unscoped.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "an order with no scope has no body"
+    );
+    let base = git(root, &["rev-parse", PROTECTED_BRANCH])
+        .trim()
+        .to_owned();
+    let scope = scope_for(order, &base);
+    member(
+        &running,
+        &HumanCmd::ReviseScope {
+            order,
+            scope: Box::new(scope.clone()),
+        },
+    )
+    .await;
+    let refused = client()
+        .get(url(&running, &path))
+        .bearer_auth(AGENT_TOKEN)
+        .send()
+        .await
+        .expect("the agent's body request is sent");
+    assert_eq!(
+        refused.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "an agent token never reads the body"
+    );
+    let response = client()
+        .get(url(&running, &path))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .expect("the body request is sent");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.expect("the body is JSON");
+    let binding = ScopeBinding::of(&scope).expect("the scope binds");
+    assert_eq!(body["scope_rev"], 1, "the body is for the current revision");
+    assert_eq!(body["by"], "owner", "the body is signed by the reader");
+    assert_eq!(body["selector_hashes"], json!(binding.selector_hashes));
+    assert_eq!(body["example_hashes"], json!(binding.example_hashes));
+    let confirmation: ScopeConfirmation =
+        serde_json::from_value(body).expect("the body is a confirmation");
+    member(
+        &running,
+        &HumanCmd::ConfirmScope {
+            order,
+            confirmation: Box::new(confirmation),
+        },
+    )
+    .await;
+    let (_, origin) = snapshot(&running).await;
+    let lane = origin.world().lane(order).expect("the lane is open");
+    assert!(
+        lane.confirmation.is_some(),
+        "posting the body confirms the scope"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A failing gate opens an episode, and the observed runs it was judged on are kept for it. A
+/// member reads them through the ruling draft, and a ruling built from the draft is recorded. An
+/// agent token never reads the draft.
+#[tokio::test]
+async fn a_member_rules_on_a_kept_example_from_the_ruling_draft() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let running = start_plant(root).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+    post_order(&running).await;
+    scope_first(&running, root, task).await;
+    let fence = claim(&running, task).await;
+    wait_for_worktree(root, task, fence.generation).await;
+    build_with(
+        &running,
+        root,
+        task,
+        fence,
+        &["src/auth.ts"],
+        seed_regression,
+    )
+    .await;
+    settle(&running, "the gate to block the regression", |log, _| {
+        log.iter().find_map(|stamped| match &stamped.event {
+            Event::ReceiptRecorded { record, .. }
+                if matches!(record.verdict, LaneVerdict::Blocked { .. }) =>
+            {
+                Some(())
+            }
+            _ => None,
+        })
+    })
+    .await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let episode = settle(&running, "the episode the regression opened", |_, world| {
+        world
+            .lane(order)
+            .and_then(|lane| lane.episodes.keys().next().copied())
+    })
+    .await;
+
+    let path = format!("/api/orders/{order}/episodes/{episode}/ruling-draft");
+    let refused = client()
+        .get(url(&running, &path))
+        .bearer_auth(AGENT_TOKEN)
+        .send()
+        .await
+        .expect("the agent's draft request is sent");
+    assert_eq!(
+        refused.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "an agent token never reads a ruling draft"
+    );
+    let response = client()
+        .get(url(&running, &path))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .expect("the draft request is sent");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "the member reads the draft"
+    );
+    let draft: Value = response.json().await.expect("the draft is JSON");
+    let ruled_on = draft["ruled_on"]
+        .as_str()
+        .expect("the draft names the example it is on")
+        .to_owned();
+    let kept = draft["examples"]
+        .as_array()
+        .expect("the draft lists the kept examples");
+    assert!(
+        kept.iter()
+            .any(|example| example["hash"] == json!(ruled_on)),
+        "the ruled-on example is one of the kept examples: {draft}"
+    );
+    for kept_example in kept {
+        let example: ContrastExample = serde_json::from_value(kept_example["example"].clone())
+            .expect("a kept example decodes");
+        let hash = example.contrast_example_hash().expect("the example hashes");
+        assert_eq!(
+            kept_example["hash"],
+            json!(hash.to_string()),
+            "a kept example hashes to its name"
+        );
+    }
+
+    // The decision is built from the draft: the ledger head it chains to, the scope in force, the
+    // episode, and the example it is on. RecordRuling checks the chain and the actor.
+    let head = &draft["ledger_head"];
+    let mut decision = json!({
+        "event": "decision_confirmed",
+        "schema_version": "acan-ledger/1",
+        "event_seq": head["event_seq"].as_u64().expect("the head has a sequence") + 1,
+        "actor": "owner",
+        "at": 1_800_000_000_000u64,
+        "ruling_id": "r-signup-body",
+        "order": order.to_string(),
+        "scope_hash": draft["scope_hash"],
+        "episode_id": draft["episode"],
+        "evidence_hashes": [],
+        "selector": draft["selector"],
+        "predicate_ast": {
+            "predicate": "equals_base",
+            "step_id": "s1",
+            "path": "body",
+            "anchor": { "kind": "fresh" }
+        },
+        "accepts": [ruled_on],
+        "rejects": [],
+        "ruled_on": ruled_on,
+        "normalization_version": draft["normalization_version"],
+        "normalization_hash": draft["normalization_hash"],
+        "applicability": "exact_observation_approval",
+        "label": "the signup body",
+        "machine_ids": [MACHINE]
+    });
+    if !head["hash"].is_null() {
+        decision["prev_hash"] = head["hash"].clone();
+    }
+    let event: LedgerEvent = serde_json::from_value(decision).expect("the decision decodes");
+    member(
+        &running,
+        &HumanCmd::RecordRuling {
+            event: Box::new(event),
+        },
+    )
+    .await;
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        1,
+        "the ruling built from the draft is the ledger's first event"
+    );
     running.stop().await.expect("the server stops");
 }
 
@@ -685,24 +1360,44 @@ impl ModelClient for TwoTasks {
     }
 }
 
-/// A repository with `main` as the protected branch and the user's checkout on `user-work`. The
-/// server must never touch that checkout.
-fn user_repo() -> tempfile::TempDir {
+/// A clone of acan-demo at its pinned commit, with `main` as the protected branch and the user's
+/// checkout on `user-work`. The server must never touch that checkout. The clone is the only
+/// thing the tests write.
+struct DemoRepo {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+}
+
+impl DemoRepo {
+    fn path(&self) -> &Path {
+        &self.root
+    }
+}
+
+fn demo_repo() -> DemoRepo {
+    let source = std::env::var_os(DEMO_DIR_VAR).unwrap_or_else(|| {
+        panic!("set {DEMO_DIR_VAR} to a checkout of acan-demo at {DEMO_COMMIT}")
+    });
     let dir = tempfile::tempdir().expect("temporary repository");
-    let root = dir.path();
-    git(root, &["init", "-q", "-b", "main"]);
-    git(root, &["config", "user.name", "Test User"]);
-    git(root, &["config", "user.email", "test@example.test"]);
-    fs::create_dir_all(root.join(MACHINE)).expect("machine directory");
-    fs::write(
-        root.join(MACHINE).join("store.ts"),
-        "export function load() { return 1; }\n",
-    )
-    .expect("fixture");
-    git(root, &["add", "-A"]);
-    git(root, &["commit", "-q", "-m", "initial"]);
-    git(root, &["switch", "-q", "-c", "user-work"]);
-    dir
+    let root = dir.path().join("demo");
+    git(
+        dir.path(),
+        &[
+            "clone",
+            "-q",
+            "--no-hardlinks",
+            &source.to_string_lossy(),
+            &root.to_string_lossy(),
+        ],
+    );
+    git(
+        &root,
+        &["checkout", "-q", "-B", PROTECTED_BRANCH, DEMO_COMMIT],
+    );
+    git(&root, &["config", "user.name", "Test User"]);
+    git(&root, &["config", "user.email", "test@example.test"]);
+    git(&root, &["switch", "-q", "-c", "user-work"]);
+    DemoRepo { _dir: dir, root }
 }
 
 /// Runs git in `dir` and returns its stdout. Panics with the exit status, stdout and stderr when
@@ -832,70 +1527,160 @@ fn machine() -> MachineKey {
     MachineKey::from_str(MACHINE).expect("valid machine key")
 }
 
-async fn post_order(running: &Running) {
+/// Sends one member command over HTTP as the owner, and fails the test unless it is accepted.
+async fn member(running: &Running, cmd: &HumanCmd) {
     let response = client()
         .post(url(running, "/api/commands"))
         .bearer_auth(OWNER_TOKEN)
-        .json(&HumanCmd::PostOrder {
+        .json(cmd)
+        .send()
+        .await
+        .expect("the member command is sent");
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the member command is accepted: {body}"
+    );
+}
+
+async fn post_order(running: &Running) {
+    member(
+        running,
+        &HumanCmd::PostOrder {
             machine: machine(),
             sentence: "land the agent's file".to_owned(),
-            witnesses: vec![WitnessSpec {
-                check: Check::Test {
-                    command: WITNESS_COMMAND.to_owned(),
-                },
-                reason: "the built commit carries the file".to_owned(),
-            }],
-        })
-        .send()
-        .await
-        .expect("the order request is sent");
-    assert_eq!(
-        response.status(),
-        reqwest::StatusCode::OK,
-        "the order is posted"
-    );
-}
-
-/// Waits for the offline split, registers the agent, and reads the task back. Returns once the
-/// review has matched the readback, so the task can be claimed.
-async fn read_back(running: &Running, task: TaskId) {
-    settle(running, "the offline split", |_, world| {
-        world.task(task).map(drop)
-    })
-    .await;
-    let response = client()
-        .post(url(running, "/api/commands"))
-        .bearer_auth(OWNER_TOKEN)
-        .json(&HumanCmd::RegisterAgent { agent: agent() })
-        .send()
-        .await
-        .expect("the registration is sent");
-    assert_eq!(
-        response.status(),
-        reqwest::StatusCode::OK,
-        "the agent is registered"
-    );
-    review(running, task).await;
-}
-
-/// Reads `task` back as the registered agent and waits until the review has judged it.
-async fn review(running: &Running, task: TaskId) {
-    agent_command(
-        running,
-        AgentCmd::PostReadback {
-            task,
-            summary: "write the file".to_owned(),
-            touches: vec![Locus::Machine { machine: machine() }],
+            witnesses: Vec::new(),
         },
     )
     .await;
-    settle(running, "the offline review", |_, world| {
-        world
-            .readbacks_of(task)
-            .any(|readback| readback.verdict.is_some())
-            .then_some(())
+}
+
+/// The scope of `order` at revision 1, with one must-keep rule over the signup answer's body. The
+/// rule reaches the signup probes at their first step and holds when the answer matches base.
+fn scope_for(order: OrderId, base: &str) -> Scope {
+    serde_json::from_value(json!({
+        "version": "acan-scope/1",
+        "order": order.to_string(),
+        "rev": 1,
+        "base_commit": base,
+        "body": {
+            "may": [],
+            "must_keep": [{
+                "id": SIGNUP_RULE,
+                "selector": {
+                    "surface": "http",
+                    "method": "POST",
+                    "route_template": "/api/signup",
+                    "step_context": { "kind": "step", "step_id": "s1" },
+                    "principal": { "kind": "anonymous" },
+                    "channel": "body"
+                },
+                "obligations": [{
+                    "obligation_id": SIGNUP_OBLIGATION,
+                    "predicate": {
+                        "predicate": "equals_base",
+                        "step_id": "s1",
+                        "path": "body",
+                        "anchor": { "kind": "fresh" }
+                    },
+                    "text": "The signup answer's body matches the base run"
+                }],
+                "text": "Signup answers with the same body as before the change",
+                "machine_ids": ["auth", "store"]
+            }],
+            "open": []
+        }
+    }))
+    .expect("the demo scope decodes")
+}
+
+/// The human confirmation of `scope`, binding its hashes, selectors and examples.
+fn confirmation_for(scope: &Scope) -> ScopeConfirmation {
+    let binding = ScopeBinding::of(scope).expect("the scope binds");
+    let order = serde_json::to_value(scope).expect("the scope serializes")["order"].clone();
+    serde_json::from_value(json!({
+        "version": "acan-scope-confirmation/1",
+        "order": order,
+        "scope_rev": scope.rev,
+        "scope_hash": binding.scope_hash,
+        "semantic_scope_hash": scope.semantic_scope_hash().expect("the scope hashes"),
+        "base_commit": scope.base_commit,
+        "ruling_versions": [],
+        "selector_hashes": binding.selector_hashes,
+        "example_hashes": binding.example_hashes,
+        "answers": [],
+        "broad_grants": [],
+        "budget": {
+            "repair_rounds": 2,
+            "wall_time_ms": 600_000,
+            "model_cost_micros": 0,
+            "max_episodes": 4
+        },
+        "by": "owner",
+        "at": 1_700_000_000_000_u64
+    }))
+    .expect("the demo confirmation decodes")
+}
+
+/// Waits for the offline split, registers the agent, and has the owner revise and confirm the
+/// order's scope against the protected head. Returns the order and its confirmed scope.
+async fn order_ready(running: &Running, root: &Path, task: TaskId) -> (OrderId, Scope) {
+    let order = settle(running, "the offline split", |_, world| {
+        world.task(task).map(|found| found.order)
     })
     .await;
+    member(running, &HumanCmd::RegisterAgent { agent: agent() }).await;
+    let base = git(root, &["rev-parse", PROTECTED_BRANCH])
+        .trim()
+        .to_owned();
+    let scope = scope_for(order, &base);
+    member(
+        running,
+        &HumanCmd::ReviseScope {
+            order,
+            scope: Box::new(scope.clone()),
+        },
+    )
+    .await;
+    member(
+        running,
+        &HumanCmd::ConfirmScope {
+            order,
+            confirmation: Box::new(confirmation_for(&scope)),
+        },
+    )
+    .await;
+    (order, scope)
+}
+
+/// The agent reads `task` back at the confirmed revision and hash, and waits until the readback is
+/// stored. The claim needs this readback.
+async fn read_back(running: &Running, task: TaskId, scope: &Scope) {
+    let scope_hash = scope.scope_hash().expect("the scope hashes");
+    agent_command(
+        running,
+        AgentCmd::PostScopedReadback {
+            task,
+            scope_rev: scope.rev,
+            scope_hash,
+            summary: "write the file".to_owned(),
+            predictions: Vec::new(),
+        },
+    )
+    .await;
+    settle(running, "the scoped readback", |_, world| {
+        world.scoped_readbacks_of(task).next().map(drop)
+    })
+    .await;
+}
+
+/// Confirms the scope of the task's order and reads the task back. Returns the confirmed scope.
+async fn scope_first(running: &Running, root: &Path, task: TaskId) -> Scope {
+    let (_, scope) = order_ready(running, root, task).await;
+    read_back(running, task, &scope).await;
+    scope
 }
 
 /// Claims the task and returns the fence the agent must present. The lease grant creates the
@@ -943,9 +1728,32 @@ async fn build(
     file: &str,
     content: &str,
 ) -> CommitId {
-    declare(running, fence, file).await;
+    build_with(running, root, task, fence, &[file], |worktree| {
+        write_file(worktree, file, content);
+    })
+    .await
+}
+
+/// The scripted agent's build with an arbitrary edit: declare `files`, wait for the build to
+/// start, apply `edit` in the task worktree, commit everything, and report the commit.
+async fn build_with(
+    running: &Running,
+    root: &Path,
+    task: TaskId,
+    fence: Fence,
+    files: &[&str],
+    edit: impl FnOnce(&Path),
+) -> CommitId {
+    declare(running, fence, files).await;
     wait_building(running, task).await;
-    let head = commit_file(&worktree_dir(root, task), file, content);
+    let dir = worktree_dir(root, task);
+    edit(&dir);
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "the agent's build"]);
+    let head: CommitId = git(&dir, &["rev-parse", "HEAD"])
+        .trim()
+        .parse()
+        .expect("git prints a commit id");
     agent_command(
         running,
         AgentCmd::ReportBuilt {
@@ -957,14 +1765,17 @@ async fn build(
     head
 }
 
-/// Declares a whole-file write of `file`.
-async fn declare(running: &Running, fence: Fence, file: &str) {
+/// Declares a whole-file write of each of `files`.
+async fn declare(running: &Running, fence: Fence, files: &[&str]) {
     agent_command(
         running,
         AgentCmd::Declare {
             fence,
             footprint: DeclarationInput {
-                files: vec![FilePath::from_str(file).expect("valid file path")],
+                files: files
+                    .iter()
+                    .map(|file| FilePath::from_str(file).expect("valid file path"))
+                    .collect(),
                 ..DeclarationInput::default()
             },
         },
@@ -999,13 +1810,18 @@ async fn agent_command(running: &Running, cmd: AgentCmd) {
         .expect("the origin accepts the agent's command");
 }
 
-/// Writes `file` in `dir`, commits it, and returns the new commit.
-fn commit_file(dir: &Path, file: &str, content: &str) -> CommitId {
+/// Writes `content` to `file` in `dir`, creating its directory.
+fn write_file(dir: &Path, file: &str, content: &str) {
     let path = dir.join(file);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("the file's directory exists");
     }
     fs::write(&path, content).expect("the file is written");
+}
+
+/// Writes `file` in `dir`, commits it, and returns the new commit.
+fn commit_file(dir: &Path, file: &str, content: &str) -> CommitId {
+    write_file(dir, file, content);
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-q", "-m", &format!("write {file}")]);
     git(dir, &["rev-parse", "HEAD"])
@@ -1024,6 +1840,22 @@ fn commit_on_protected(root: &Path, file: &str, content: &str) -> CommitId {
     let commit = commit_file(&checkout, file, content);
     git(root, &["worktree", "remove", "--force", checkout_arg]);
     commit
+}
+
+/// Seeds the signup regression in the demo's auth handler: the answer upper-cases the username.
+fn seed_regression(worktree: &Path) {
+    let file = worktree.join("src").join("auth.ts");
+    let source = read_text(&file);
+    assert_eq!(
+        source.matches(SIGNUP_RESPONSE).count(),
+        1,
+        "the signup response appears once in the pinned demo"
+    );
+    fs::write(
+        &file,
+        source.replace(SIGNUP_RESPONSE, REGRESSED_SIGNUP_RESPONSE),
+    )
+    .expect("the regression is written");
 }
 
 async fn worktree_route(running: &Running, token: &str, task: TaskId) -> reqwest::Response {
@@ -1133,10 +1965,12 @@ async fn settle<T>(
     .await;
     let Ok(found) = result else {
         let (log, _) = snapshot(running).await;
+        // Lease renewals arrive every few seconds and would hide the steps that stalled.
         let newest: Vec<&Event> = log
             .iter()
             .rev()
-            .take(4)
+            .filter(|stamped| !matches!(stamped.event, Event::LeaseRenewed { .. }))
+            .take(6)
             .map(|stamped| &stamped.event)
             .collect();
         panic!("timed out after {WAIT:?} waiting for {what}; newest events first: {newest:?}");

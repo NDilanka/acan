@@ -160,7 +160,8 @@ impl OpenAiCompatible {
     /// # Errors
     ///
     /// Returns the errors of [`ModelClient::chat_json`]. A reply that does not parse as `T`
-    /// is a [`LlmError::SchemaValidation`], which carries no trace fields.
+    /// is a [`LlmError::SchemaValidation`], which carries no trace fields. A reply that stopped
+    /// at the output cap is a [`LlmError::OutputCapped`].
     pub async fn chat_json_traced<T>(
         &self,
         role: Role,
@@ -169,12 +170,13 @@ impl OpenAiCompatible {
     where
         T: DeserializeOwned + JsonSchema,
     {
+        let cap = request.max_tokens;
         let Traced {
             value,
             request_id,
             reply_model,
         } = self.chat_traced(role, with_schema::<T>(request)).await?;
-        let structured = parse_structured(value, |text| self.keys.redact(text))?;
+        let structured = parse_structured(value, cap, |text| self.keys.redact(text))?;
         Ok(Traced {
             value: structured,
             request_id,

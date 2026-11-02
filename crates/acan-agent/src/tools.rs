@@ -26,7 +26,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
-/// The most bytes a read returns. Longer files are cut and marked.
+/// The most bytes one read returns. A longer file comes in pages: each cut page is marked with
+/// the offset of the next one, and a read from that offset returns it.
 const MAX_READ_BYTES: usize = 32 * 1024;
 /// The most entries a directory listing returns.
 const MAX_LISTING: usize = 200;
@@ -186,10 +187,20 @@ impl Worktree {
         vec![
             spec(
                 "read_file",
-                "Read a file in the worktree.",
+                &format!(
+                    "Read a file in the worktree. A file longer than {} KB comes in pages: a cut page names the offset of the next one, and you read on by passing that offset.",
+                    MAX_READ_BYTES / 1024
+                ),
                 json!({
                     "type": "object",
-                    "properties": { "path": { "type": "string" } },
+                    "properties": {
+                        "path": { "type": "string" },
+                        "offset": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "The byte offset to start from. Omit it to start at the beginning of the file.",
+                        },
+                    },
                     "required": ["path"],
                 }),
             ),
@@ -230,20 +241,33 @@ impl Worktree {
         ]
     }
 
-    /// Reads a file. Its text is cut at a limit and marked when it is longer.
+    /// Reads one page of a file, from the byte `offset`. A page is at most [`MAX_READ_BYTES`]
+    /// long; when more of the file follows, the text ends with a marker naming the offset of
+    /// the next page. Reading from offset zero gives the start of the file.
     ///
     /// # Errors
     ///
-    /// Returns the reason when the path is not inside the worktree or cannot be read.
-    pub async fn read_file(&self, path: &str) -> Result<String, String> {
+    /// Returns the reason when the path is not inside the worktree, cannot be read, or the
+    /// offset is past the end of the file.
+    pub async fn read_file(&self, path: &str, offset: u64) -> Result<String, String> {
         let relative = normalize_path(path)?;
         let bytes = tokio::fs::read(self.inside(&relative)?)
             .await
             .map_err(|err| format!("cannot read {relative}: {err}"))?;
-        let shown = &bytes[..bytes.len().min(MAX_READ_BYTES)];
-        let mut text = String::from_utf8_lossy(shown).into_owned();
-        if bytes.len() > MAX_READ_BYTES {
-            text.push_str("\n[truncated]");
+        let from = usize::try_from(offset).unwrap_or(usize::MAX);
+        if from > bytes.len() {
+            return Err(format!(
+                "offset {offset} is past the end of {relative}, which is {} bytes long",
+                bytes.len()
+            ));
+        }
+        let (start, end) = page_bounds(&bytes, from);
+        let mut text = String::from_utf8_lossy(&bytes[start..end]).into_owned();
+        if end < bytes.len() {
+            text.push_str(&format!(
+                "\n[truncated: bytes {start} to {end} of {} shown. Call read_file with offset {end} for the rest.]",
+                bytes.len()
+            ));
         }
         Ok(text)
     }
@@ -964,6 +988,24 @@ fn spec(name: &str, description: &str, parameters: Value) -> ToolSpec {
         parameters,
     }
 }
+
+/// The byte range one read page covers, from `from` forward to [`MAX_READ_BYTES`]. Both ends
+/// move to a character boundary, so a multi-byte character is never split between two pages:
+/// the start moves forward past continuation bytes, and the end moves back until it sits on a
+/// lead byte or the end of the file. `from` must not be past the end of `bytes`.
+fn page_bounds(bytes: &[u8], from: usize) -> (usize, usize) {
+    let continues = |index: usize| bytes.get(index).is_some_and(|byte| byte & 0xC0 == 0x80);
+    let mut start = from;
+    while continues(start) {
+        start += 1;
+    }
+    let mut end = bytes.len().min(start + MAX_READ_BYTES);
+    while end < bytes.len() && continues(end) {
+        end -= 1;
+    }
+    (start, end)
+}
+
 /// The repository-relative form of `path` that the origin keeps: `/`-separated normal components.
 /// A `.` is dropped, so `./model/store.ts` and `model/store.ts` are one path to the origin and to
 /// the worktree alike.
