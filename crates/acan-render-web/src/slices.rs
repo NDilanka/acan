@@ -30,6 +30,8 @@ pub struct Slice {
     /// The plan index of the machine.
     #[serde(skip)]
     pub machine: usize,
+    /// The machine's name on the plan.
+    pub name: String,
     /// The scope revision.
     pub rev: u32,
     /// Whether a human has confirmed this revision. Until then the plot is a draft and grants
@@ -42,7 +44,8 @@ pub struct Slice {
 }
 
 impl Slice {
-    /// The slice's one-line flag, such as `o-1 · plot + keep · draft rev 1`.
+    /// The slice's one-line flag, such as `o-1 · auth · plot + keep · draft rev 1`. It names
+    /// the machine, since the flag can cover the machine's own label.
     #[must_use]
     pub fn text(&self) -> String {
         let what = match (self.plots.is_empty(), self.keeps.is_empty()) {
@@ -51,7 +54,11 @@ impl Slice {
             _ => "keep",
         };
         let state = if self.confirmed { "confirmed" } else { "draft" };
-        format!("{} · {what} · {state} rev {}", self.order, self.rev)
+        let machine = self.name.rsplit('/').next().unwrap_or(&self.name);
+        format!(
+            "{} · {machine} · {what} · {state} rev {}",
+            self.order, self.rev
+        )
     }
 
     /// The lines Alt adds under the flag: each plot, then each keep.
@@ -121,6 +128,7 @@ pub fn slice_layout(lanes: &[LaneView], plan: &Plan) -> SliceLayout {
             let slice = Slice {
                 order: lane.order.to_string(),
                 machine,
+                name: plan.machines[machine].name.clone(),
                 rev: lane.rev.0,
                 confirmed: lane.confirmation.is_some(),
                 plots,

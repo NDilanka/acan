@@ -736,14 +736,16 @@ impl App {
             .collect()
     }
 
-    /// The flags and the open clash card, as JSON: `{"flags": [...], "card": {...} | null}`. The
+    /// The flags, the open clash card and the scope machine names the plant lacks, as JSON:
+    /// `{"flags": [...], "card": {...} | null, "unplaced": [...]}`. The
     /// page reads it when the view changes or a card opens. Flag `i` anchors where `flag_layout`
     /// puts index `i`.
     pub fn marks_json(&self) -> String {
         #[derive(serde::Serialize)]
-        struct Out {
+        struct Out<'a> {
             flags: Vec<marks::Flag>,
             card: Option<marks::Card>,
+            unplaced: &'a [String],
         }
         let card = self.card_clash.and_then(|index| {
             let view = self.view.as_ref()?;
@@ -753,6 +755,7 @@ impl App {
         serde_json::to_string(&Out {
             flags: self.motion.flags_now(&self.marks.flags),
             card,
+            unplaced: &self.marks.unplaced,
         })
         .expect("marks serialize as JSON")
     }

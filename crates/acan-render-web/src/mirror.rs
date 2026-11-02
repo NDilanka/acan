@@ -1681,9 +1681,12 @@ mod tests {
         assert!(!on_api.confirmed, "a draft grants nothing yet");
         assert_eq!(
             on_api.text(),
-            format!("{} · plot + keep · draft rev 1", fx.order)
+            format!("{} · api · plot + keep · draft rev 1", fx.order)
         );
-        assert_eq!(on_ui.text(), format!("{} · plot · draft rev 1", fx.order));
+        assert_eq!(
+            on_ui.text(),
+            format!("{} · ui · plot · draft rev 1", fx.order)
+        );
         assert_eq!(
             on_api.detail(),
             [
@@ -1730,7 +1733,7 @@ mod tests {
         assert!(on_ui.confirmed);
         assert_eq!(
             on_ui.text(),
-            format!("{} · plot · confirmed rev 1", view.lanes[0].order)
+            format!("{} · ui · plot · confirmed rev 1", view.lanes[0].order)
         );
     }
 

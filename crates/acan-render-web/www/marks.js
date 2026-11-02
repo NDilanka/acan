@@ -101,6 +101,13 @@ export function paintMarks() {
     flagsEl.append(el);
     return el;
   });
+  const unplaced = state.markState.unplaced;
+  if (unplaced.length > 0) {
+    const note = document.createElement("div");
+    note.className = "flag unplaced";
+    note.textContent = `scope names ${unplaced.length} machine${unplaced.length === 1 ? "" : "s"} this plant lacks: ${unplaced.join(", ")}`;
+    flagsEl.append(note);
+  }
   paintCard();
 }
 
@@ -126,6 +133,24 @@ function flagElement(flag) {
     el.append(text);
   }
   if (flag.check) el.append(checkChip(flag.check));
+  if (flag.kind === "plot") el.classList.add(flag.text.includes(" confirmed ") ? "confirmed" : "draft");
+  if (flag.scope) {
+    const scope = document.createElement("span");
+    scope.className = "scope";
+    scope.textContent = state.altDown ? flag.scope : "in confirmed scope";
+    el.title = flag.scope;
+    el.append(scope);
+  }
+  if (state.altDown && flag.detail.length > 0) {
+    const lines = document.createElement("span");
+    lines.className = "detail";
+    for (const line of flag.detail) {
+      const row = document.createElement("span");
+      row.textContent = line;
+      lines.append(row);
+    }
+    el.append(lines);
+  }
   if (flag.waiting) {
     const amber = document.createElement("span");
     amber.className = "dot wait";
