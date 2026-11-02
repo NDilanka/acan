@@ -1,18 +1,20 @@
 // The shell's alpha facts: the build's version, a quiet notice when a newer build exists, the
 // Report a bug dialog, and the model key banner and setup dialog. The data comes from GET /version,
-// GET /api/update, GET /api/bug-report, GET /api/setup and POST /api/setup/keys; what each answer
-// means is decided in release.js and setup.js. These calls do not use stream.js's `get`, because a
-// refused report or key (403 for an agent token) must not sign the tester out.
+// GET /api/update, GET /api/bug-report and the /api/setup routes; what each answer means is decided
+// in release.js and setup.js. These calls do not use stream.js's `get`, because a refused report,
+// key or pick (403 for an agent token) must not sign the tester out.
 import { $, state } from "./state.js";
 import { bugReportOutcome, stillChecking, updateNotice, versionLabel, versionLine } from "./release.js";
 import {
   bannerText,
+  keyRows,
   providerChoices,
   providerLabel,
-  routesFor,
+  removeOutcome,
+  roleOutcome,
+  roleRows,
   saveOutcome,
   showBanner,
-  singleProvider,
   statusText,
 } from "./setup.js";
 
@@ -26,6 +28,8 @@ let checkRun = 0;
 let reportBody = "";
 // The answer to GET /api/setup: null when there is no token or no answer.
 let setupStatus = null;
+// True while a pick or a remove is in flight, so a second one waits for the first answer.
+let setupBusy = false;
 
 export function bindShell() {
   $("report-bug").addEventListener("click", reportBug);
@@ -33,7 +37,16 @@ export function bindShell() {
   $("bug-copy").addEventListener("click", copyReport);
   $("bug-cancel").addEventListener("click", () => $("bug-dialog").close());
   $("setup-open").addEventListener("click", openSetup);
+  $("setup-manage").addEventListener("click", openSetup);
   $("setup-form").addEventListener("submit", saveKey);
+  $("setup-roles").addEventListener("change", (event) => {
+    const select = event.target;
+    if (select instanceof HTMLSelectElement) pickRole(select.dataset.role, select.value);
+  });
+  $("setup-keys").addEventListener("click", (event) => {
+    const button = event.target;
+    if (button instanceof HTMLButtonElement && button.dataset.provider) removeKey(button.dataset.provider);
+  });
   $("setup-cancel").addEventListener("click", () => $("setup-dialog").close());
   // The key leaves the page when the dialog closes, whatever the answer was.
   $("setup-dialog").addEventListener("close", () => {
@@ -169,6 +182,8 @@ async function loadSetup() {
   $("setup-banner").hidden = !banner;
   $("setup-banner-text").textContent = bannerText(setupStatus);
   $("setup-open").hidden = setupStatus?.can_save !== true;
+  // Once the banner's "Set a key" is gone, this is the way back to the keys and the role picks.
+  $("setup-manage").hidden = setupStatus === null || (banner && setupStatus.can_save === true);
   if ($("setup-dialog").open) paintSetupText();
 }
 
@@ -178,16 +193,15 @@ function openSetup() {
   paintSetupChoices(setupStatus);
   paintSetupText();
   setResult("", "");
+  setChanges("", "");
   $("setup-dialog").showModal();
   loadSetup();
 }
 
-// One radio per provider the server offers. The saved provider is chosen when a key is set; with no
-// key, none is chosen, so the tester picks one on purpose. Setup routes every role to the chosen
-// provider; see setup.js for the per-role structure.
+// One radio per provider the server offers, for the key to save. None is chosen, so the tester
+// picks one on purpose. Saving a key for a provider that has one replaces it.
 function paintSetupChoices(status) {
   const choices = providerChoices(status);
-  const current = status?.provider ?? null;
   $("setup-choices").replaceChildren(
     ...choices.map(({ value, label }) => {
       const row = document.createElement("label");
@@ -196,7 +210,6 @@ function paintSetupChoices(status) {
       input.type = "radio";
       input.name = "provider";
       input.value = value;
-      input.checked = value === current;
       const text = document.createElement("span");
       text.textContent = label;
       row.append(input, text);
@@ -213,6 +226,8 @@ function paintSetupText() {
     line.classList.remove("set");
     $("setup-form").hidden = true;
     $("setup-blocked").hidden = true;
+    $("setup-roles-section").hidden = true;
+    $("setup-keys-section").hidden = true;
     return;
   }
   const view = statusText(status);
@@ -222,6 +237,86 @@ function paintSetupText() {
   $("setup-form").hidden = !canSave;
   $("setup-blocked").hidden = canSave;
   $("setup-blocked").textContent = "Keys for this repository are set in its .env file, not here.";
+  paintSetupLists(status, canSave);
+}
+
+// The lists are painted again after every answer, so focus goes back to the control that had it.
+function paintSetupLists(status, canSave) {
+  const focused = focusKey();
+  const roles = roleRows(status);
+  $("setup-roles-section").hidden = roles.length === 0;
+  $("setup-roles").replaceChildren(...roles.map((row, index) => roleItem(row, index, canSave)));
+  const keys = keyRows(status);
+  $("setup-keys-section").hidden = keys.length === 0;
+  $("setup-keys").replaceChildren(...keys.map(keyItem));
+  refocus(focused);
+}
+
+function focusKey() {
+  return document.activeElement?.dataset?.focus ?? null;
+}
+
+function refocus(key) {
+  if (key === null) return;
+  const again = [...$("setup-dialog").querySelectorAll("[data-focus]")].find((el) => el.dataset.focus === key);
+  if (again && !again.disabled) again.focus();
+}
+
+// A role's row: its name, what serves it now, and a picker when this page may change it. The ids
+// use the row's place, because a role name comes from the server.
+function roleItem(row, index, canSave) {
+  const item = document.createElement("li");
+  item.className = "setup-row";
+  const id = `setup-role-${index}`;
+  const name = document.createElement(canSave ? "label" : "span");
+  name.className = "setup-name";
+  name.textContent = row.role;
+  const now = document.createElement("span");
+  now.className = row.off ? "setup-now off" : "setup-now";
+  now.id = `${id}-now`;
+  now.textContent = row.now;
+  item.append(name, now);
+  if (!canSave) return item;
+  name.htmlFor = id;
+  const select = document.createElement("select");
+  select.id = id;
+  select.dataset.role = row.role;
+  select.dataset.focus = `role:${row.role}`;
+  select.setAttribute("aria-describedby", now.id);
+  select.disabled = setupBusy;
+  for (const { value, label } of row.options) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    option.selected = value === row.value;
+    select.append(option);
+  }
+  item.append(select);
+  return item;
+}
+
+// A provider's row: its name, where its key comes from, and Remove only for a key saved here.
+function keyItem(row) {
+  const item = document.createElement("li");
+  item.className = "setup-row";
+  const name = document.createElement("span");
+  name.className = "setup-name";
+  name.textContent = row.label;
+  const from = document.createElement("span");
+  from.className = row.source === null ? "setup-now off" : "setup-now";
+  from.textContent = row.text;
+  item.append(name, from);
+  if (row.removable) {
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "Remove";
+    remove.dataset.provider = row.provider;
+    remove.dataset.focus = `key:${row.provider}`;
+    remove.setAttribute("aria-label", `Remove the ${row.label} key`);
+    remove.disabled = setupBusy;
+    item.append(remove);
+  }
+  return item;
 }
 
 function chosenProvider() {
@@ -234,6 +329,19 @@ function setResult(text, tone) {
   result.className = tone || "";
 }
 
+function setChanges(text, tone) {
+  const changes = $("setup-changes");
+  changes.textContent = text;
+  changes.className = tone || "";
+}
+
+function setBusy(busy) {
+  setupBusy = busy;
+  for (const control of $("setup-dialog").querySelectorAll("#setup-roles select, #setup-keys button")) {
+    control.disabled = busy;
+  }
+}
+
 // Sends the key to the server, which checks it with the provider before it saves. The key leaves
 // the field at once, and the page keeps no copy of it: the request carries it, nothing else does.
 async function saveKey(event) {
@@ -243,7 +351,7 @@ async function saveKey(event) {
     setResult("Paste the key first.", "bad");
     return;
   }
-  const provider = singleProvider(routesFor(chosenProvider()));
+  const provider = chosenProvider();
   if (provider === null) {
     setResult("Choose a provider first.", "bad");
     return;
@@ -268,4 +376,54 @@ async function saveKey(event) {
   $("setup-save").disabled = false;
   setResult(outcome.text, outcome.tone);
   if (saved) loadSetup();
+}
+
+// Picks a provider for one role, or clears the pick when the tester chooses Default. The status is
+// read again after any answer, so the picker shows what the server holds.
+async function pickRole(role, value) {
+  if (!state.token || typeof role !== "string" || setupBusy) return;
+  const provider = value === "" ? null : value;
+  const focused = focusKey();
+  setBusy(true);
+  setChanges(`Changing ${role}...`, "");
+  let outcome;
+  try {
+    const res = await fetch(`/api/setup/roles/${encodeURIComponent(role)}`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${state.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ provider }),
+    });
+    const body = await res.json().catch(() => ({}));
+    outcome = roleOutcome(res.status, body, role, provider);
+  } catch {
+    outcome = { tone: "bad", text: "Cannot reach acan. The pick did not change." };
+  }
+  setChanges(outcome.text, outcome.tone);
+  await loadSetup();
+  setBusy(false);
+  refocus(focused);
+}
+
+// Removes a key saved on this page. A key the environment sets has no Remove button; if the server
+// still refuses, its own words are shown.
+async function removeKey(provider) {
+  if (!state.token || typeof provider !== "string" || setupBusy) return;
+  const focused = focusKey();
+  setBusy(true);
+  setChanges(`Removing the ${providerLabel(provider)} key...`, "");
+  let outcome;
+  try {
+    const res = await fetch(`/api/setup/keys/${encodeURIComponent(provider)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${state.token}` },
+    });
+    const body = await res.json().catch(() => ({}));
+    outcome = removeOutcome(res.status, body, provider);
+  } catch {
+    outcome = { tone: "bad", text: "Cannot reach acan. Nothing was removed." };
+  }
+  setChanges(outcome.text, outcome.tone);
+  await loadSetup();
+  setBusy(false);
+  refocus(focused);
 }
