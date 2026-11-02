@@ -35,7 +35,9 @@
 //! slots, every resolved row fits its [`SlotSpec`] ([`SlotSpec::check`]: the declared column, a
 //! provenance that column admits, a value of the declared [`ValueType`], and a present value
 //! unless the slot is [`SlotPresence::Optional`]), and every mandatory item
-//! ([`PlantItem::is_mandatory`]) is reached ([`Tour::reaches`]). A cross-item, stale, swapped,
+//! ([`PlantItem::is_mandatory`]) is reached ([`Tour::reaches`]). A caption's template must also
+//! describe its item's class and state ([`CaptionTemplate::fits`]), so a caption never says of an
+//! item what the item is not. A cross-item, stale, swapped,
 //! mistyped or hypothetical binding rejects the whole tour, and the UI falls back to the
 //! deterministic tour and the plain card. Admitted slots become a [`BoundItemView`] whose values
 //! are copies of the resolved rows, never the model's text; the card writes each with
@@ -43,9 +45,11 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::marker::PhantomData;
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::admit::{MISSING_VALUE_TEXT, SlotMismatch, SlotPresence};
@@ -67,7 +71,7 @@ use crate::types::{
     ScopeRev, SlotName, StepId, TemplateId, UnixMillis,
 };
 use crate::verdict::{ItemClass, ItemState};
-use crate::version::{CaptionCatalogV1, CardV1, PlantViewV1};
+use crate::version::{CaptionCatalogV2, CardV1, PlantViewV1};
 
 /// The order on the plate.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
@@ -454,6 +458,8 @@ pub struct Caption {
     /// The template.
     pub template_id: TemplateId,
     /// Each slot's evidence. Never a literal.
+    #[serde(deserialize_with = "unique_slots")]
+    #[schemars(with = "BTreeMap<SlotName, EvidenceRef>")]
     pub slots: BTreeMap<SlotName, EvidenceRef>,
 }
 
@@ -491,7 +497,9 @@ impl Tour {
     }
 }
 
-/// A validated tour and who ordered it. The UI shows a `directed` or `plain` toggle.
+/// A validated tour and who ordered it. The UI shows a `directed` or `plain` toggle. Each tour
+/// carries the bindings admission made for its steps, in step order, so the page shows the
+/// values trusted code bound and never the model's text.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TourView {
@@ -501,11 +509,15 @@ pub enum TourView {
         model: ModelRef,
         /// The tour.
         tour: Tour,
+        /// The admitted bindings, one per step.
+        bindings: Vec<BoundItemView>,
     },
     /// The deterministic order: residue, then violations, then bounced, then fulfilled.
     Deterministic {
         /// The tour.
         tour: Tour,
+        /// The admitted bindings, one per step.
+        bindings: Vec<BoundItemView>,
     },
 }
 
@@ -531,13 +543,18 @@ pub enum ValueType {
     Number,
     /// A boolean.
     Boolean,
+    /// A present value of any type, JSON `null` included, for a caption that names a value
+    /// without reading it. A `null` is written as `null`, which is what the run observed.
+    Any,
 }
 
 impl ValueType {
     /// Whether a present JSON value is of this type: a status is an integer from 100 to 599, a
     /// count or duration a non-negative integer, a commit a commit hash string, an identifier a
-    /// non-empty string, text any string, a number any number, a boolean a boolean. JSON
-    /// `null` is of no type.
+    /// non-empty string, text any string, a number any number, a boolean a boolean, and any
+    /// value at all for [`ValueType::Any`]. A JSON `null` is of every type only as `any`; every
+    /// other type refuses it, and a missing value is never a value of any type (see
+    /// [`SlotSpec::check`]).
     #[must_use]
     pub fn admits(self, value: &Value) -> bool {
         match self {
@@ -552,6 +569,7 @@ impl ValueType {
             Self::Text => value.is_string(),
             Self::Number => value.is_number(),
             Self::Boolean => value.is_boolean(),
+            Self::Any => true,
         }
     }
 
@@ -564,9 +582,12 @@ impl ValueType {
             Self::Duration => unit == Some(ValueUnit::Ms),
             Self::Count => matches!(unit, None | Some(ValueUnit::Requests | ValueUnit::Bytes)),
             Self::Number => matches!(unit, None | Some(ValueUnit::Bytes)),
-            Self::Status | Self::Commit | Self::Identifier | Self::Text | Self::Boolean => {
-                unit.is_none()
-            }
+            Self::Status
+            | Self::Commit
+            | Self::Identifier
+            | Self::Text
+            | Self::Boolean
+            | Self::Any => unit.is_none(),
         }
     }
 }
@@ -711,23 +732,49 @@ pub struct CaptionTemplate {
     pub template_id: TemplateId,
     /// The text, with `{slot}` placeholders the trusted card fills.
     pub text: String,
+    /// The item classes the text describes. A caption on an item of another class is refused.
+    pub classes: Vec<ItemClass>,
+    /// The item states the text describes. A caption on an item in another state is refused.
+    pub states: Vec<ItemState>,
     /// Every slot, each of which a caption must bind.
+    #[serde(deserialize_with = "unique_slots")]
+    #[schemars(with = "BTreeMap<SlotName, SlotSpec>")]
     pub slots: BTreeMap<SlotName, SlotSpec>,
+}
+
+impl CaptionTemplate {
+    /// Whether the text describes `item`: its class and its state are both among the template's.
+    #[must_use]
+    pub fn fits(&self, item: &PlantItem) -> bool {
+        self.classes.contains(&item.class) && self.states.contains(&item.state)
+    }
 }
 
 /// The trusted caption catalog, shipped with the server and the UI.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CaptionCatalog {
-    /// Always `acan-caption-catalog/1`.
-    pub version: CaptionCatalogV1,
+    /// Always `acan-caption-catalog/2`.
+    pub version: CaptionCatalogV2,
     /// The catalog's version, which a plant view names.
     pub catalog_version: CatalogVersion,
     /// The templates.
     pub templates: Vec<CaptionTemplate>,
 }
 
+/// The catalog this build ships. The server and the page admit tours against this copy.
+const TRUSTED_CATALOG: &str = include_str!("../fixtures/caption-catalog.json");
+
 impl CaptionCatalog {
+    /// The trusted catalog, decoded from the copy this crate ships.
+    ///
+    /// # Errors
+    ///
+    /// Returns the decoder's error when the shipped copy does not parse.
+    pub fn trusted() -> Result<Self, serde_json::Error> {
+        serde_json::from_str(TRUSTED_CATALOG)
+    }
+
     /// The template `template_id` names.
     #[must_use]
     pub fn template(&self, template_id: &TemplateId) -> Option<&CaptionTemplate> {
@@ -747,6 +794,8 @@ pub struct BoundItemView {
     /// The receipt item.
     pub item_id: ItemId,
     /// Each slot's value.
+    #[serde(deserialize_with = "unique_slots")]
+    #[schemars(with = "BTreeMap<SlotName, BindableValue>")]
     pub typed_slot_bindings: BTreeMap<SlotName, BindableValue>,
     /// The template catalog version.
     pub catalog_version: CatalogVersion,
@@ -822,4 +871,35 @@ pub struct Card {
     pub contests: Vec<Contest>,
     /// The base, overlay and full tested context.
     pub prepared: PreparedCommit,
+}
+
+/// Decodes a map keyed by caption slot, refusing a key that appears twice. A repeated key would
+/// otherwise keep only its last value, so a caption could read one slot and bind another.
+fn unique_slots<'de, D, V>(deserializer: D) -> Result<BTreeMap<SlotName, V>, D::Error>
+where
+    D: Deserializer<'de>,
+    V: Deserialize<'de>,
+{
+    struct UniqueSlots<V>(PhantomData<V>);
+
+    impl<'de, V: Deserialize<'de>> Visitor<'de> for UniqueSlots<V> {
+        type Value = BTreeMap<SlotName, V>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a map of caption slots")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+            let mut slots = BTreeMap::new();
+            while let Some((slot, value)) = access.next_entry::<SlotName, V>()? {
+                if slots.contains_key(&slot) {
+                    return Err(de::Error::custom(format!("duplicate caption slot {slot}")));
+                }
+                slots.insert(slot, value);
+            }
+            Ok(slots)
+        }
+    }
+
+    deserializer.deserialize_map(UniqueSlots(PhantomData))
 }

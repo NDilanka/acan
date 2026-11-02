@@ -737,6 +737,61 @@ async fn restoring_does_not_write_through_a_junction() {
 }
 
 #[tokio::test]
+async fn an_export_reads_the_protected_files_of_its_commit_after_the_head_moves_on() {
+    let t = plant().await;
+    let old = main_head(&t);
+    commit_files(
+        &t.root,
+        &[(".acan/probes/login.json", "{\"probe\": \"logout\"}\n")],
+        "the probe changes, the route count does not",
+    );
+    let head = main_head(&t);
+    assert_ne!(head, old);
+
+    let export = t
+        .repo
+        .export_protected(&old, &protected())
+        .await
+        .expect("export");
+    let at_head = t
+        .repo
+        .export_protected(&head, &protected())
+        .await
+        .expect("export at the head");
+
+    assert_eq!(export.commit(), &old);
+    assert_eq!(export.overlay(), &plant_overlay());
+    assert_ne!(export.overlay_hash(), at_head.overlay_hash());
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hash = t
+        .repo
+        .write_protected(&export, dir.path())
+        .await
+        .expect("write");
+    assert_eq!(hash, export.overlay_hash());
+    assert_eq!(
+        read_text(&dir.path().join(".acan/probes/login.json")),
+        PROBE,
+        "the probe of the commit, not of the head"
+    );
+}
+
+#[tokio::test]
+async fn an_export_refuses_a_commit_the_repository_does_not_have() {
+    let t = plant().await;
+
+    let missing = sha(&"c".repeat(40));
+
+    assert!(
+        t.repo
+            .export_protected(&missing, &protected())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn the_gate_futures_can_run_on_a_spawned_task() {
     fn assert_send<T: Send>(_: &T) {}
     let t = plant().await;

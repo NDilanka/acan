@@ -50,7 +50,7 @@ use acan_core::{
     Stage, Step, SystemCmd, TaskId, TaskState, Timestamp, WitnessId, WitnessKind, WitnessOutcome,
     World,
 };
-use acan_git::{Preparation, PrepareOutcome, Repo};
+use acan_git::{Preparation, PrepareOutcome, ProtectedExport, Repo};
 use acan_intent::{
     AppContract, CommitSha, ContainerPolicy, DiscrepancyEpisode, GateContext, MachineId, ModelRef,
     OrderRef, PreparedCommit, ProbeCorpus, RepoPath, Scope, ScopeConfirmation, ScopeDraft,
@@ -1428,7 +1428,7 @@ async fn protected_base(repo: &Repo, policy: &ContainerPolicy) -> Result<Prepara
 }
 
 /// The protected-head snapshot a task's worktree is tested against: the protected paths of the
-/// protected head as it is now, prepared the way every gate pass prepares its base.
+/// protected head as it is now, read from the head's own tree.
 ///
 /// The snapshot sits under `state`, one directory per protected-head commit. A head that has not
 /// moved returns the directory already written. A new head is written under a temporary name and
@@ -1436,18 +1436,64 @@ async fn protected_base(repo: &Repo, policy: &ContainerPolicy) -> Result<Prepara
 ///
 /// # Errors
 ///
-/// Returns an error when git cannot prepare the protected head or the snapshot cannot be written.
+/// Returns an error when git cannot read the protected head or the snapshot cannot be written.
 pub(crate) async fn protected_snapshot(repo: &Repo, state: &Path) -> anyhow::Result<PathBuf> {
-    let base = protected_base(repo, &observe::runner_policy()).await?;
+    let head = protected_sha(repo).await?;
+    let export = repo
+        .export_protected(&head, &observe::protected_paths(&observe::runner_policy()))
+        .await?;
+    snapshot_of(repo, state, &export, &format!("head-{head}")).await
+}
+
+/// The protected paths a receipt ran against, read from the receipt's base commit and written
+/// under `state`. A plant view reads the corpus through this, so a receipt keeps its own route
+/// table after the protected head moves on.
+///
+/// The paths are read from `prepared.base_commit`, never from the protected head now. They are
+/// refused unless they hash to the overlay the receipt recorded, so a snapshot that does not
+/// match the receipt is never written.
+///
+/// # Errors
+///
+/// Returns an error when the receipt does not name its base as the protected head it ran on,
+/// when the paths at its base do not hash to its overlay, or when git or the snapshot fails.
+pub(crate) async fn receipt_snapshot(
+    repo: &Repo,
+    state: &Path,
+    prepared: &PreparedCommit,
+) -> anyhow::Result<PathBuf> {
+    let base = &prepared.base_commit;
+    if prepared.context.protected_head != *base {
+        anyhow::bail!("the receipt's protected head is not its base commit {base}");
+    }
+    let export = repo
+        .export_protected(base, &observe::protected_paths(&observe::runner_policy()))
+        .await?;
+    if export.overlay_hash() != prepared.context.overlay_hash {
+        anyhow::bail!(
+            "the protected paths at {base} do not hash to the overlay the receipt ran against"
+        );
+    }
+    snapshot_of(repo, state, &export, &format!("receipt-{base}")).await
+}
+
+/// Writes `export`'s protected paths under `state`, one directory per name. A name that is
+/// already written returns its directory. The names keep the snapshots of heads and of receipts
+/// apart, since they are read through different checks.
+async fn snapshot_of(
+    repo: &Repo,
+    state: &Path,
+    export: &ProtectedExport,
+    name: &str,
+) -> anyhow::Result<PathBuf> {
     let root = state.join(SNAPSHOT_DIR);
-    let head = base.protected_head();
-    let dir = root.join(head.as_str());
+    let dir = root.join(name);
     if dir.is_dir() {
         return Ok(dir);
     }
     fs::create_dir_all(&root)?;
-    let partial = root.join(format!("{head}-{}.partial", unique_suffix()));
-    observe::snapshot(repo, &base, &partial).await?;
+    let partial = root.join(format!("{name}-{}.partial", unique_suffix()));
+    observe::export_snapshot(repo, export, &partial).await?;
     match fs::rename(&partial, &dir) {
         Ok(()) => Ok(dir),
         // Another caller renamed the same head's snapshot into place first. Its copy is complete.
@@ -1508,5 +1554,145 @@ async fn record_usage<C: ModelClient>(host: &Host<C>, job: &Job, call: &CallReco
     // Metering is best-effort: a lost usage event must not retry the model call it paid for.
     if let Err(err) = host.submit(Command::System(command)).await {
         tracing::warn!(?job, error = %err, "recording model usage failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use acan_intent::OverlayHash;
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    const RECEIPT: &str = include_str!("../../acan-intent/fixtures/receipt.json");
+    const ROUTES: &str = ".acan/probes/core.json";
+
+    /// Runs git in `dir`, failing the test on a non-zero exit.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// Writes `files` into `root` and commits them on the current branch.
+    fn commit(root: &Path, files: &[(&str, &str)], message: &str) -> CommitSha {
+        for (name, content) in files {
+            let full = root.join(name);
+            fs::create_dir_all(full.parent().expect("a parent directory")).expect("mkdir");
+            fs::write(full, content).expect("write file");
+        }
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", message]);
+        CommitSha::from_str(&git(root, &["rev-parse", "HEAD"])).expect("a commit sha")
+    }
+
+    /// A repository on `main` whose protected paths carry two routes, and whose head then gains a
+    /// third route with the same count: the route table changes, its size does not. Returns the
+    /// repository, the commit the receipt ran on, and the head now.
+    async fn advanced_head() -> (tempfile::TempDir, Repo, CommitSha, CommitSha) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.name", "Tester"]);
+        git(root, &["config", "user.email", "tester@example.com"]);
+        let base = commit(
+            root,
+            &[(".acan/app.json", "{}\n"), (ROUTES, "routes: a, b\n")],
+            "protected inputs",
+        );
+        let head = commit(
+            root,
+            &[(ROUTES, "routes: a, c\n"), ("src/app.ts", "app v2\n")],
+            "the routes change",
+        );
+        let repo = Repo::open(root).await.expect("open the repository");
+        (dir, repo, base, head)
+    }
+
+    /// A receipt's prepared commit that names `base` and `overlay`, built from the fixture.
+    fn prepared_at(base: &CommitSha, overlay: OverlayHash) -> PreparedCommit {
+        let receipt: Value = serde_json::from_str(RECEIPT).expect("the fixture decodes");
+        let mut prepared = receipt["prepared"].clone();
+        prepared["base_commit"] = json!(base.as_str());
+        prepared["context"]["protected_head"] = json!(base.as_str());
+        prepared["context"]["overlay_hash"] = serde_json::to_value(overlay).expect("a hash");
+        serde_json::from_value(prepared).expect("the prepared commit decodes")
+    }
+
+    fn policy_paths() -> acan_git::ProtectedPaths {
+        observe::protected_paths(&observe::runner_policy())
+    }
+
+    #[tokio::test]
+    async fn a_receipt_reads_the_protected_paths_of_its_base_after_the_head_moves() {
+        let (dir, repo, base, head) = advanced_head().await;
+        let at_base = repo
+            .export_protected(&base, &policy_paths())
+            .await
+            .expect("the base exports");
+        let prepared = prepared_at(&base, at_base.overlay_hash());
+        let state = dir.path().join("state");
+
+        let snapshot = receipt_snapshot(&repo, &state, &prepared)
+            .await
+            .expect("the receipt's snapshot");
+        let current = protected_snapshot(&repo, &state)
+            .await
+            .expect("the head's snapshot");
+
+        assert_eq!(
+            fs::read_to_string(snapshot.join(ROUTES)).expect("the routes"),
+            "routes: a, b\n",
+            "the receipt keeps the routes it ran against"
+        );
+        assert_eq!(
+            fs::read_to_string(current.join(ROUTES)).expect("the routes"),
+            "routes: a, c\n",
+            "the head keeps its own routes"
+        );
+        assert_ne!(base, head);
+    }
+
+    #[tokio::test]
+    async fn a_receipt_whose_overlay_the_base_does_not_hold_is_refused() {
+        let (dir, repo, base, head) = advanced_head().await;
+        let at_head = repo
+            .export_protected(&head, &policy_paths())
+            .await
+            .expect("the head exports");
+        // The receipt names the old base but carries the head's overlay, the mismatch the snapshot
+        // used to hide by reading the head's files under the base's name.
+        let prepared = prepared_at(&base, at_head.overlay_hash());
+        let state = dir.path().join("state");
+
+        let err = receipt_snapshot(&repo, &state, &prepared)
+            .await
+            .expect_err("the overlay does not match the base");
+
+        assert!(
+            err.to_string().contains("do not hash to the overlay"),
+            "{err}"
+        );
+        assert!(
+            !state
+                .join(SNAPSHOT_DIR)
+                .join(format!("receipt-{base}"))
+                .exists(),
+            "nothing is written for a receipt that does not match"
+        );
     }
 }

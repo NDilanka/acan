@@ -9,7 +9,10 @@ mod receipt;
 
 use std::fs;
 
-use acan_intent::{ItemClass, Outcome, Receipt, RulingStatus, Scope, UnknownReason};
+use acan_intent::{
+    DeterministicError, ItemClass, Outcome, PlantView, Receipt, RulingStatus, Scope, TourView,
+    UnknownReason,
+};
 use receipt::{
     MachineInput, PlantViewError, PlateOrder, RenderError, plant_view, render_json, render_markdown,
 };
@@ -394,4 +397,139 @@ fn plant_view_refuses_a_machine_listed_twice() {
         plant_view(&fixture_receipt(), &fixture_scope(), &plate, &machines),
         Err(PlantViewError::DuplicateMachine(_))
     ));
+}
+
+/// The states an item can hold, as the receipt writes them.
+const STATES: [&str; 5] = ["open", "bounced", "fixed", "residue", "stopped"];
+
+/// The fixture receipt's JSON with the item at `index` in `state`. Counts are by class, so they
+/// still match the items.
+fn receipt_with_state(index: usize, state: &str) -> Value {
+    let mut value: Value = decode(RECEIPT);
+    value["items"][index]["state"] = json!(state);
+    value
+}
+
+/// The receipt item `item_id` in the receipt's JSON.
+fn item_mut<'a>(value: &'a mut Value, item_id: &str) -> &'a mut Value {
+    value["items"]
+        .as_array_mut()
+        .expect("the receipt lists its items")
+        .iter_mut()
+        .find(|item| item["item_id"] == item_id)
+        .expect("the receipt has the item")
+}
+
+/// The plant view of `receipt` with the fixture scope, plate and machines, and no tour.
+fn view_of(receipt: &Receipt) -> PlantView {
+    let plain = plain_view();
+    let (plate, machines) = plate_and_machines(&plain);
+    plant_view(receipt, &fixture_scope(), &plate, &machines).expect("the receipt builds a view")
+}
+
+/// The caption template and the slots bound in the step for `item_id`.
+fn caption_of(tour: &TourView, item_id: &str) -> (String, Vec<String>) {
+    let steps = match tour {
+        TourView::Deterministic { tour, .. } | TourView::Directed { tour, .. } => &tour.steps,
+    };
+    let step = steps
+        .iter()
+        .find(|step| step.item_id.as_str() == item_id)
+        .expect("the item has a step");
+    (
+        step.caption.template_id.as_str().to_owned(),
+        step.caption.slots.keys().map(ToString::to_string).collect(),
+    )
+}
+
+#[test]
+fn every_item_in_every_state_has_a_deterministic_tour() {
+    // The receipt builder can hold any state on any item, so each item is set to each state. A
+    // failed obligation in the fixed state is the state a regressed check takes: the receipt is
+    // built from the episode as it stood before the run, so a run that fails again keeps `fixed`.
+    let plain = plain_view();
+    let (plate, machines) = plate_and_machines(&plain);
+    let scope = fixture_scope();
+    let items = fixture_receipt().items.len();
+    let mut unbindable = Vec::new();
+    for index in 0..items {
+        for state in STATES {
+            let receipt: Receipt = decode_value(&receipt_with_state(index, state));
+            let view = plant_view(&receipt, &scope, &plate, &machines).expect("the view builds");
+            match acan_intent::deterministic(&view) {
+                Ok(_) => {}
+                Err(DeterministicError::Unbindable { item_id, .. }) => {
+                    unbindable.push((item_id.to_string(), state));
+                }
+                Err(other) => panic!("the deterministic tour failed: {other}"),
+            }
+        }
+    }
+    assert!(unbindable.is_empty(), "unbindable: {unbindable:?}");
+}
+
+#[test]
+fn a_failed_obligation_that_was_fixed_and_fails_again_is_captioned_as_a_failure() {
+    // Failure, then a fix, then a regression on the same item: the receipt of the regressed run
+    // names the failed class with the fixed state. The caption names the class and quotes nothing
+    // the receipt does not hold.
+    let index = fixture_receipt()
+        .items
+        .iter()
+        .position(|item| item.item_id.as_str() == "i-retry-after")
+        .expect("the fixture has the item");
+    let receipt: Receipt = decode_value(&receipt_with_state(index, "fixed"));
+    let plain = plain_view();
+    let (plate, machines) = plate_and_machines(&plain);
+    let view = plant_view(&receipt, &fixture_scope(), &plate, &machines).expect("the view builds");
+
+    let tour = acan_intent::deterministic(&view).expect("the regressed item has a tour");
+
+    let (template, _) = caption_of(&tour, "i-retry-after");
+    assert!(
+        matches!(
+            template.as_str(),
+            "failed.obligation" | "failed.obligation.bare"
+        ),
+        "{template}"
+    );
+}
+
+#[test]
+fn an_out_of_scope_item_with_no_base_rows_is_captioned_from_its_candidate_alone() {
+    // An addition has no base to compare, so its item carries the candidate rows only.
+    let mut value: Value = decode(RECEIPT);
+    item_mut(&mut value, "d-links-clicks")["evidence"]
+        .as_array_mut()
+        .expect("the item lists its evidence")
+        .retain(|row| !matches!(row["slot"].as_str(), Some("base_a" | "base_b")));
+    let view = view_of(&decode_value(&value));
+
+    let tour = acan_intent::deterministic(&view).expect("an addition has a caption");
+
+    let (template, slots) = caption_of(&tour, "d-links-clicks");
+    assert_eq!(template, "out_of_scope.candidate");
+    assert_eq!(slots, ["candidate"], "only the candidate is bound");
+}
+
+#[test]
+fn unknown_probe_items_with_no_evidence_are_captioned_by_their_class() {
+    // An unknown probe that produced no evidence rows names its class and nothing else.
+    let mut value: Value = decode(RECEIPT);
+    for item in ["chk-dashboard", "chk-links-delete", "chk-signup-store"] {
+        item_mut(&mut value, item)["evidence"] = json!([]);
+    }
+    let view = view_of(&decode_value(&value));
+
+    let tour = acan_intent::deterministic(&view).expect("the bare captions fit");
+
+    for (item, template) in [
+        ("chk-dashboard", "unknown.unstable_base.bare"),
+        ("chk-links-delete", "unknown.incomparable.bare"),
+        ("chk-signup-store", "unknown.error.bare"),
+    ] {
+        let (bound, slots) = caption_of(&tour, item);
+        assert_eq!(bound, template, "{item}");
+        assert!(slots.is_empty(), "{item} binds nothing");
+    }
 }

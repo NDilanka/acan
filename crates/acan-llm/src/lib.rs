@@ -19,7 +19,7 @@ pub use chat::{
     ChatRequest, ChatResponse, ContentPart, FunctionCall, ImageUrl, JsonSchemaFormat, Message,
     ToolCall, ToolKind, ToolSpec,
 };
-pub use client::{ModelClient, Structured};
+pub use client::{Destination, MUSE_SPARK_MODELS, MUSE_SPARK_PROVIDER, ModelClient, Structured};
 pub use config::{ConfigError, LlmConfig, ProviderConfig, StructuredOutput, TokenLimitField};
 pub use error::{LlmError, UnknownRole};
 pub use key::{ApiKey, ApiKeys};

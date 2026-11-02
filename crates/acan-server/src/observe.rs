@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 
 use acan_core::ProtectedInputs;
-use acan_git::{Preparation, ProtectedPaths, Repo};
+use acan_git::{Preparation, ProtectedExport, ProtectedPaths, Repo};
 use acan_intent::admit::AdmitError;
 use acan_intent::compare::{self, CompareError, Contrast};
 use acan_intent::receipt::{self, ProbeResult, ReceiptError, ReceiptInputs};
@@ -294,6 +294,22 @@ pub(crate) async fn snapshot(
 ) -> Result<(), ObserveError> {
     fs::create_dir_all(dir).map_err(|source| io_error(dir, source))?;
     repo.restore_protected(base, dir).await?;
+    Ok(())
+}
+
+/// Writes the protected paths of `export`, which were read from one commit, into `dir`. The same
+/// files [`snapshot`] writes for a prepared base. `dir` is created when missing.
+///
+/// # Errors
+///
+/// Returns [`ObserveError`] when the directory cannot be created or git cannot write the paths.
+pub(crate) async fn export_snapshot(
+    repo: &Repo,
+    export: &ProtectedExport,
+    dir: &Path,
+) -> Result<(), ObserveError> {
+    fs::create_dir_all(dir).map_err(|source| io_error(dir, source))?;
+    repo.write_protected(export, dir).await?;
     Ok(())
 }
 

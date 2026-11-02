@@ -17,6 +17,8 @@ pub enum Role {
     Fast,
     /// Image input. Compares page screenshots in the advisory vision witness.
     Vision,
+    /// Orders the tour of a plant view. Falls back to the foreman's route when not routed.
+    Director,
 }
 
 impl Role {
@@ -27,6 +29,7 @@ impl Role {
             Self::Worker => "worker",
             Self::Fast => "fast",
             Self::Vision => "vision",
+            Self::Director => "director",
         }
     }
 }
@@ -46,6 +49,7 @@ impl FromStr for Role {
             "worker" => Ok(Self::Worker),
             "fast" => Ok(Self::Fast),
             "vision" => Ok(Self::Vision),
+            "director" => Ok(Self::Director),
             other => Err(UnknownRole(other.to_owned())),
         }
     }
