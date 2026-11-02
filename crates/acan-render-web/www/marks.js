@@ -25,15 +25,16 @@ function isRiderFlag(flag) {
 }
 
 // Labels come in priority order, larger and nearer first. A label that would overlap one
-// already placed stays hidden, so the plant never shows a pile of names. The drones and the flags
-// that stay put are placed first, so no name lands on them. The names come next, and the plot
-// flags last: a plot flag moves clear of a name, so a name is never hidden by one.
+// already placed stays hidden, so the plant never shows a pile of names. The page's fixed panels,
+// the drones and the flags that stay put are placed first, so no name lands on them. The names
+// come next, and the plot flags last: a plot flag moves clear of a name, so a name is never hidden
+// by one. A plot flag that moves draws a leader to its machine.
 export function placeLabels() {
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
   state.labelGeneration += 1;
-  const placedBoxes = [];
-  const plots = placeFlags(placedBoxes);
+  const placedBoxes = hudBoxes();
+  const { plots, leaders } = placeFlags(placedBoxes);
   const quads = state.app.label_layout(state.altDown);
   const shown = [];
   for (let k = 0; k < quads.length; k += 4) {
@@ -55,7 +56,7 @@ export function placeLabels() {
     const [w, h] = el.size;
     shown.push({ el, x, y, opacity, w, h });
   }
-  const { labelShown, plotTops } = placeOverlays({
+  const { labelShown, plotTops, plotLeaders } = placeOverlays({
     placed: placedBoxes,
     labels: shown.map(({ x, y, w, h }) => ({
       box: boxAt(x - w / 2, y + LABEL_OFFSET_PX, w, h, LABEL_PAD_PX),
@@ -70,13 +71,46 @@ export function placeLabels() {
     el.style.opacity = String(opacity);
     el.style.transform = `translate(${x}px, ${y}px) translate(-50%, ${LABEL_OFFSET_PX}px)`;
   });
-  plots.forEach((plot, i) => showFlag(plot.el, plot.left, plotTops[i]));
+  let next = leaders;
+  plots.forEach((plot, i) => {
+    const visible = showFlag(plot.el, plot.left, plotTops[i]);
+    const leader = plotLeaders[i];
+    if (visible && leader !== null) {
+      // The leader takes the flag's own tint, so it reads as that flag's.
+      const tint = getComputedStyle(plot.el).borderTopColor;
+      drawLeader(next, leader.x1, leader.y1, leader.x2, leader.y2, tint);
+      next += 1;
+    }
+  });
+  hideLeadersFrom(next);
   for (const [index, el] of state.labels) {
     if (el.generation !== state.labelGeneration) {
       el.remove();
       state.labels.delete(index);
     }
   }
+}
+
+// The page's fixed panels: the shell, the order card, the key bar, the clash card, the usage
+// panel, the notice and the scope note. A flag or a name never sits under one. A panel that is
+// hidden has no box, so it blocks nothing.
+const HUD_SELECTORS = "#shell, #order, #hint, #card, #usage, #notice, #pov-chip, .flag.unplaced";
+
+// Each shown panel's box in canvas coordinates, as `{ left, right, top, bottom }`.
+function hudBoxes() {
+  const origin = canvas.getBoundingClientRect();
+  const boxes = [];
+  for (const el of document.querySelectorAll(HUD_SELECTORS)) {
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) continue;
+    boxes.push({
+      left: rect.left - origin.left,
+      right: rect.right - origin.left,
+      top: rect.top - origin.top,
+      bottom: rect.bottom - origin.top,
+    });
+  }
+  return boxes;
 }
 
 function makeLabel(index) {
@@ -185,9 +219,10 @@ function checkChip(check) {
 // it is off the canvas. An agent's flags stack in a column above their machine's drones, each with
 // a leader line to its drone's crown, and a flag never sits on a drone because the column starts
 // above the crowns. A clash label starts to the right of its diamond, and the order flag sits
-// above its machine. A flag that would cover a flag placed before it moves up clear of it. Each
-// flag keeps its place as the drones and diamonds move. The plot flags are the exception: they are
-// returned, not placed here, and placed after the names, so they move clear of a name.
+// above its machine. A flag that would cover a flag or a panel placed before it moves up clear of
+// it. Each flag keeps its place as the drones and diamonds move. The plot flags are the exception:
+// they are returned, not placed here, and placed after the names, so they move clear of a name.
+// Returns the plot flags and how many leader lines the flags drew.
 function placeFlags(placedBoxes) {
   const plots = [];
   // The drones come first, so no flag or name is placed over one.
@@ -209,7 +244,7 @@ function placeFlags(placedBoxes) {
     if (el.size === undefined) el.size = [el.offsetWidth, el.offsetHeight];
     if (machine < 0 && el.classList.contains("plot")) {
       const [w, h] = el.size;
-      plots.push({ el, left: x - w / 2, top: y - LABEL_OFFSET_PX - h, w, h });
+      plots.push({ el, left: x - w / 2, top: y - LABEL_OFFSET_PX - h, w, h, x, y });
       continue;
     }
     if (machine >= 0) {
@@ -243,10 +278,14 @@ function placeFlags(placedBoxes) {
       bottom = top - FLAG_ROW_GAP_PX;
     }
   }
-  for (let i = leaders; i < state.leaderEls.length; i += 1) {
+  return { plots, leaders };
+}
+
+// Hides the leader lines from `index` on: the ones this placement did not draw.
+function hideLeadersFrom(index) {
+  for (let i = index; i < state.leaderEls.length; i += 1) {
     state.leaderEls[i].style.display = "none";
   }
-  return plots;
 }
 
 function placeFlag(el, left, top, placedBoxes) {
@@ -255,17 +294,19 @@ function placeFlag(el, left, top, placedBoxes) {
   showFlag(el, left, top);
 }
 
-// Shows a flag at (left, top), unless it, with its padding, is off the canvas.
+// Shows a flag at (left, top), unless it, with its padding, is off the canvas. Returns whether it
+// shows.
 function showFlag(el, left, top) {
   const [w, h] = el.size;
   const inside = inView(boxAt(left, top, w, h, LABEL_PAD_PX), canvas.clientWidth, canvas.clientHeight);
   el.style.visibility = inside ? "visible" : "hidden";
   el.style.transform = `translate(${left}px, ${top}px)`;
+  return inside;
 }
 
 // A thin line from a flag's bottom edge to its bot's crown. The leaders sit under the flags, so
-// a flag hides the start of its own line.
-function drawLeader(index, x1, y1, x2, y2) {
+// a flag hides the start of its own line. A tint, when given, colours the line; else it is grey.
+function drawLeader(index, x1, y1, x2, y2, tint = "") {
   let line = state.leaderEls[index];
   if (line === undefined) {
     line = document.createElementNS(SVG_NS, "line");
@@ -276,6 +317,7 @@ function drawLeader(index, x1, y1, x2, y2) {
   line.setAttribute("y1", String(y1));
   line.setAttribute("x2", String(x2));
   line.setAttribute("y2", String(y2));
+  line.style.stroke = tint;
   line.style.display = "";
 }
 
