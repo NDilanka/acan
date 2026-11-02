@@ -17,6 +17,12 @@ impl ApiKey {
     pub(crate) fn expose(&self) -> &str {
         &self.0
     }
+
+    /// The key's text, for the bug report's redaction list. Never print it or send it anywhere.
+    #[must_use]
+    pub fn secret_text(&self) -> &str {
+        &self.0
+    }
 }
 
 impl fmt::Debug for ApiKey {
@@ -47,6 +53,20 @@ impl ApiKeys {
 
     pub fn insert(&mut self, provider: impl Into<String>, key: ApiKey) {
         self.0.insert(provider.into(), key);
+    }
+
+    /// Adds `key` for `provider` unless a key is already set, so an environment variable wins over
+    /// a saved key.
+    #[must_use]
+    pub fn with_fallback(mut self, provider: &str, key: ApiKey) -> Self {
+        self.0.entry(provider.to_owned()).or_insert(key);
+        self
+    }
+
+    /// Whether no provider has a key.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     pub(crate) fn get(&self, provider: &str) -> Option<&ApiKey> {

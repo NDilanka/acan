@@ -76,6 +76,12 @@ pub fn configure(redaction: Redaction) {
     state().redaction = redaction;
 }
 
+/// Adds a secret that every bug report removes. A model key saved from the setup page is not in
+/// the environment, so it is added when it is saved.
+pub fn add_secret(secret: &str) {
+    state().redaction.add_secret(secret);
+}
+
 /// The update check as it stands now. `current` is always this build's version, even before a
 /// check has run.
 #[must_use]

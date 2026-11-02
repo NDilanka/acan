@@ -80,6 +80,17 @@ impl Redaction {
         Self { secrets, roots }
     }
 
+    /// Adds one secret value, such as a model key saved while the server runs. A value shorter
+    /// than the minimum is not a secret, so it is not added.
+    pub fn add_secret(&mut self, secret: &str) {
+        if secret.len() < MIN_SECRET_LEN || self.secrets.iter().any(|known| known == secret) {
+            return;
+        }
+        self.secrets.push(secret.to_owned());
+        self.secrets
+            .sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    }
+
     /// The text with every secret, token and private path removed. Terminal colour codes are
     /// removed too, so a line reads the same in the report as it did on the terminal.
     #[must_use]
@@ -239,6 +250,18 @@ mod tests {
         assert_eq!(
             redaction.scrub(text),
             "call failed with key <redacted key> in the body"
+        );
+    }
+
+    #[test]
+    fn a_secret_added_later_is_removed_and_a_short_one_is_not_added() {
+        let mut redaction = Redaction::EMPTY;
+        redaction.add_secret("meta-saved-key-0123456789");
+        redaction.add_secret("short");
+        assert_eq!(redaction.secrets, vec!["meta-saved-key-0123456789"]);
+        assert_eq!(
+            redaction.scrub("saved as meta-saved-key-0123456789 today"),
+            "saved as <redacted key> today"
         );
     }
 

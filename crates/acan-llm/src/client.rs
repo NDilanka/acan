@@ -6,6 +6,7 @@ use serde::de::DeserializeOwned;
 use crate::chat::{ChatRequest, ChatResponse, JsonSchemaFormat};
 use crate::error::LlmError;
 use crate::role::Role;
+use crate::setup::{KeyOutcome, KeyStatus, SetupError};
 use crate::usage::CallRecord;
 
 /// The one interface the rest of Acan uses for model calls.
@@ -46,6 +47,27 @@ pub trait ModelClient: Send + Sync {
             let response = self.chat(role, with_schema::<T>(request)).await?;
             parse_structured(response, cap, str::to_owned)
         }
+    }
+
+    /// Whether a key is in use for model calls, and where it came from. A client with no setup
+    /// of its own reports no key.
+    fn key_status(&self) -> KeyStatus {
+        KeyStatus::default()
+    }
+
+    /// Checks `key` with `provider` and saves it, so calls use it from then on. Only a client
+    /// that keeps its keys in a keys file takes one; this default refuses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`save_checked`](crate::save_checked), or
+    /// [`SetupError::Unavailable`] when this client does not take saved keys.
+    fn save_key(
+        &self,
+        _provider: &str,
+        _key: &str,
+    ) -> impl Future<Output = Result<KeyOutcome, SetupError>> + Send {
+        async { Err(SetupError::Unavailable) }
     }
 }
 

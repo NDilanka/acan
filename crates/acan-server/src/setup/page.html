@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>acan: model key setup</title>
+<style>
+  :root { --ink: #1d1d1f; --muted: #5d5d63; --rule: #d6d6db; --face: #ffffff; --page: #f4f4f6;
+          --accent: #2d5bd6; --ok: #1f7a3d; --bad: #b3261e; --warn: #8a5a00; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--page); color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 540px; margin: 48px auto; padding: 0 20px; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 8px; }
+  p { margin: 0 0 12px; }
+  .muted { color: var(--muted); font-size: 14px; }
+  .card { background: var(--face); border: 1px solid var(--rule); border-radius: 8px; padding: 20px; margin-top: 20px; }
+  .status { font-size: 14px; padding: 10px 12px; border-radius: 6px; background: #eef1fb; margin: 0 0 16px; }
+  .status.set { background: #e8f4ec; }
+  fieldset { border: 0; padding: 0; margin: 0 0 16px; }
+  legend { font-weight: 600; margin-bottom: 8px; }
+  label.choice { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px;
+    border: 1px solid var(--rule); border-radius: 6px; margin-bottom: 8px; cursor: pointer; }
+  label.choice:has(input:checked) { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  label.choice input { margin-top: 3px; }
+  label.choice small { display: block; color: var(--muted); }
+  label.field { display: block; font-weight: 600; margin-bottom: 6px; }
+  input[type=password], input[type=text] { width: 100%; font: 15px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: 10px 12px; border: 1px solid var(--rule); border-radius: 6px; background: #fff; color: var(--ink); }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button { font: inherit; font-weight: 600; padding: 10px 18px; border-radius: 6px; border: 0;
+    background: var(--accent); color: #fff; cursor: pointer; margin-top: 14px; }
+  button:disabled { opacity: 0.55; cursor: default; }
+  #result { min-height: 1.45em; margin-top: 14px; font-size: 14px; }
+  #result.ok { color: var(--ok); }
+  #result.bad { color: var(--bad); }
+  #result.warn { color: var(--warn); }
+  .hidden { display: none; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Model key</h1>
+  <p class="muted">acan calls your model provider with a key you give it. The key is checked with that provider only, and saved in a file that only your user account can read. It is never shown again and never sent anywhere else.</p>
+
+  <div class="card">
+    <p id="status" class="status" role="status">Checking the current setup&hellip;</p>
+
+    <form id="form" class="hidden" autocomplete="off">
+      <fieldset>
+        <legend>Provider</legend>
+        <label class="choice">
+          <input type="radio" name="provider" value="meta" checked>
+          <span>Meta Model API<small>muse-spark-1.3 at api.meta.ai</small></span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="provider" value="baseten">
+          <span>Baseten<small>Muse Spark Open, hosted by Baseten</small></span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="provider" value="fireworks">
+          <span>Fireworks<small>Muse Spark Open, hosted by Fireworks</small></span>
+        </label>
+      </fieldset>
+
+      <div id="token-row" class="hidden" style="margin-bottom:16px">
+        <label class="field" for="token">Owner token</label>
+        <input id="token" type="text" spellcheck="false" autocapitalize="off" autocomplete="off"
+          placeholder="acan_&hellip;">
+        <p class="muted" style="margin:6px 0 0">This page has no owner token. The token was printed when acan first started, and it is kept in the repository's .acan/tokens.json.</p>
+      </div>
+
+      <label class="field" for="key">API key</label>
+      <input id="key" type="password" spellcheck="false" autocapitalize="off" autocomplete="off"
+        name="model-key" data-lpignore="true" data-1p-ignore="true" required>
+
+      <button id="save" type="submit">Check and save</button>
+      <p id="result" role="alert"></p>
+    </form>
+
+    <p id="blocked" class="muted hidden"></p>
+  </div>
+
+  <p class="muted" style="margin-top:16px">Until a key is saved, model jobs get built-in replies, labelled as offline. <a href="/">Back to acan</a></p>
+</main>
+<script>
+(() => {
+  const TOKEN_KEY = "acan.owner";
+  const LABELS = { meta: "Meta Model API", baseten: "Baseten", fireworks: "Fireworks" };
+  const $ = (id) => document.getElementById(id);
+  const statusLine = $("status");
+  const form = $("form");
+  const keyInput = $("key");
+  const tokenRow = $("token-row");
+  const tokenInput = $("token");
+  const result = $("result");
+  const save = $("save");
+
+  // The owner token arrives as #token= from `acan serve`. It is kept for this browser session and
+  // removed from the address bar, as the app does.
+  function adoptToken() {
+    const fragment = new URLSearchParams(location.hash.slice(1)).get("token");
+    if (fragment) {
+      sessionStorage.setItem(TOKEN_KEY, fragment);
+      history.replaceState(null, "", location.pathname + location.search);
+    }
+    return sessionStorage.getItem(TOKEN_KEY);
+  }
+
+  let token = adoptToken();
+
+  function authHeaders() {
+    return token ? { Authorization: "Bearer " + token } : {};
+  }
+
+  function say(text, tone) {
+    result.textContent = text;
+    result.className = tone || "";
+  }
+
+  function describe(status) {
+    if (status.source === "routing_file") {
+      return status.configured
+        ? { text: "This repository's .acan/llm.toml chooses the providers, and their keys are set.", set: true }
+        : { text: "This repository's .acan/llm.toml chooses the providers, but no key is set for them. Set their keys in its .env.", set: false };
+    }
+    if (status.configured) {
+      const name = LABELS[status.provider] || status.provider;
+      return { text: "Model calls use " + name + ". Save a new key below to replace it.", set: true };
+    }
+    return { text: "No model key is set. Model jobs get built-in replies until you add one.", set: false };
+  }
+
+  async function loadStatus() {
+    if (!token) {
+      tokenRow.classList.remove("hidden");
+      form.classList.remove("hidden");
+      statusLine.textContent = "Paste the owner token to continue.";
+      return;
+    }
+    let response;
+    try {
+      response = await fetch("/api/setup", { headers: authHeaders() });
+    } catch (_) {
+      statusLine.textContent = "Cannot reach acan. Check that it is running, then reload this page.";
+      return;
+    }
+    if (response.status === 401) {
+      token = null;
+      sessionStorage.removeItem(TOKEN_KEY);
+      tokenRow.classList.remove("hidden");
+      form.classList.remove("hidden");
+      statusLine.textContent = "The token was not accepted. Paste the owner token to continue.";
+      return;
+    }
+    if (!response.ok) {
+      statusLine.textContent = "Could not read the setup status.";
+      return;
+    }
+    const status = await response.json();
+    const view = describe(status);
+    statusLine.textContent = view.text;
+    statusLine.classList.toggle("set", view.set);
+    if (status.can_save) {
+      form.classList.remove("hidden");
+    } else {
+      $("blocked").textContent = "Keys for this repository are set in its .env file, not here.";
+      $("blocked").classList.remove("hidden");
+    }
+  }
+
+  const MESSAGES = {
+    stored: (body) => body.checked
+      ? { text: "Saved. " + (LABELS[body.provider] || body.provider) + " accepted the key, and acan will use it from now on.", tone: "ok" }
+      : { text: "Saved, but " + (LABELS[body.provider] || body.provider) + " did not confirm the key. The first model call will show whether it works.", tone: "warn" },
+    rejected: (body) => ({ text: (LABELS[body.provider] || body.provider) + " did not accept this key. Check it and try again. Nothing was saved.", tone: "bad" }),
+    unreachable: (body) => ({ text: "Could not reach " + (LABELS[body.provider] || body.provider) + ". Check the connection and try again. Nothing was saved.", tone: "bad" }),
+  };
+
+  function explain(response, body) {
+    if (response.status === 400) return { text: "That provider or key was not accepted. Paste the whole key, with no spaces.", tone: "bad" };
+    if (response.status === 401) return { text: "The owner token was not accepted. Paste it again.", tone: "bad" };
+    if (response.status === 403) return { text: "Only members can set a key, so this session cannot.", tone: "bad" };
+    if (response.status === 409 && body.what === "routing_file") return { text: "This repository's .acan/llm.toml chooses the providers. Set their keys in its .env.", tone: "bad" };
+    if (response.status === 409) return { text: "This acan cannot save a key from this page.", tone: "bad" };
+    return { text: "Something went wrong. Nothing was saved.", tone: "bad" };
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const provider = form.elements.provider.value;
+    // The key leaves the field at once, so it is not left in the page while the request runs.
+    const key = keyInput.value;
+    keyInput.value = "";
+    if (tokenRow.classList.contains("hidden") === false && tokenInput.value.trim()) {
+      token = tokenInput.value.trim();
+      sessionStorage.setItem(TOKEN_KEY, token);
+      tokenRow.classList.add("hidden");
+    }
+    if (!token) {
+      say("Paste the owner token first.", "bad");
+      return;
+    }
+    save.disabled = true;
+    say("Checking the key with " + (LABELS[provider] || provider) + "\u2026");
+    try {
+      const response = await fetch("/api/setup/keys", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, key }),
+      });
+      const body = await response.json().catch(() => ({}));
+      const outcome = response.status === 200 ? MESSAGES.stored(body)
+        : response.status === 422 ? MESSAGES.rejected(body)
+        : response.status === 503 ? MESSAGES.unreachable(body)
+        : explain(response, body);
+      say(outcome.text, outcome.tone);
+      if (response.status === 200) {
+        await loadStatus();
+      }
+    } catch (_) {
+      say("Cannot reach acan. Nothing was saved.", "bad");
+    } finally {
+      save.disabled = false;
+    }
+  });
+
+  loadStatus();
+})();
+</script>
+</body>
+</html>

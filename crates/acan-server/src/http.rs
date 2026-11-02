@@ -38,7 +38,7 @@ use crate::jobs;
 use crate::mcp;
 use crate::public::{self, PublicRoot};
 use crate::release::{self, BugReport, UpdateStatus, VersionInfo};
-use crate::{STATE_DIR, redact, stream};
+use crate::{STATE_DIR, redact, setup, stream};
 
 /// Builds the router. The public files are served for every path the API does not claim.
 pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<PublicRoot>) -> Router {
@@ -53,6 +53,9 @@ pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<Public
         .route("/api/usage", get(get_usage::<C>))
         .route("/api/update", get(get_update::<C>))
         .route("/api/bug-report", get(get_bug_report::<C>))
+        .route("/setup", get(setup::page))
+        .route("/api/setup", get(setup::get_status::<C>))
+        .route("/api/setup/keys", post(setup::post_key::<C>))
         .route("/api/stream", get(stream::upgrade::<C>))
         .route("/api/tasks/{task}/worktree", get(get_worktree::<C>))
         .route("/api/tasks/{task}/scope", get(get_scope::<C>))
@@ -86,6 +89,10 @@ pub enum ApiError {
     Forbidden(&'static str),
     /// The route names something the world does not have.
     NotFound(&'static str),
+    /// The request is malformed. The name says what it lacks, never what it sent.
+    BadRequest(&'static str),
+    /// The request is valid, but the server's state does not allow it. The name says why.
+    Conflict(&'static str),
     /// The origin refused the command. The body is the [`Rejection`].
     Rejected(Rejection),
     /// The scope-first lane refused the call with a closed code. The body is the [`McpError`].
@@ -110,6 +117,16 @@ impl IntoResponse for ApiError {
             Self::NotFound(what) => (
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "not_found", "what": what })),
+            )
+                .into_response(),
+            Self::BadRequest(what) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "bad_request", "what": what })),
+            )
+                .into_response(),
+            Self::Conflict(why) => (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "conflict", "what": why })),
             )
                 .into_response(),
             Self::Rejected(rejection) => (StatusCode::CONFLICT, Json(rejection)).into_response(),
@@ -186,7 +203,10 @@ pub(crate) fn authenticate<C: ModelClient>(
         .ok_or(ApiError::Unauthorized)
 }
 
-fn member<C: ModelClient>(host: &Host<C>, headers: &HeaderMap) -> Result<MemberId, ApiError> {
+pub(crate) fn member<C: ModelClient>(
+    host: &Host<C>,
+    headers: &HeaderMap,
+) -> Result<MemberId, ApiError> {
     match authenticate(host, bearer(headers))? {
         Principal::Member(member) => Ok(member),
         Principal::Agent(_) => Err(ApiError::Forbidden("only members may do this over HTTP")),

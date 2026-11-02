@@ -4,6 +4,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
+use acan_llm::{KeyFile, ModelClient};
 use acan_server::release::{self, Redaction};
 use acan_server::replay;
 use acan_server::{DEFAULT_WITNESS_CONCURRENCY, Models, ServerConfig, start};
@@ -128,7 +129,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let llm = args
         .llm
         .unwrap_or_else(|| args.repo.join(".acan").join("llm.toml"));
-    let models = Models::load(&llm)?;
+    let models = Models::open(&llm, KeyFile::for_user())?;
+    let needs_key = !models.key_status().configured;
     let ledger = models.ledger();
     let config = ServerConfig {
         repo: args.repo.clone(),
@@ -152,6 +154,20 @@ async fn serve(args: ServeArgs) -> Result<()> {
         args.repo.display(),
         running.local_addr
     );
+    if needs_key {
+        // Model jobs get built-in replies until a key is saved, so say where to save one.
+        match &running.owner_token {
+            Some(token) => println!(
+                "no model key is set. Add one at http://{}/setup#token={}",
+                running.local_addr,
+                token.as_str()
+            ),
+            None => println!(
+                "no model key is set. Add one at http://{}/setup",
+                running.local_addr
+            ),
+        }
+    }
     // Either way the same barrier runs: no write may still be in flight when this returns.
     let outcome = tokio::select! {
         result = running.wait() => result,

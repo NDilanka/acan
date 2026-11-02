@@ -40,3 +40,4 @@ uuid.workspace = true
 futures-util = "0.3"
 tempfile = "3"
 tokio-tungstenite = "0.29"
+wiremock = "0.6"
