@@ -36,6 +36,7 @@ use tokio::sync::Semaphore;
 
 use crate::DEFAULT_WITNESS_CONCURRENCY;
 use crate::deps::{self, InstallRecord, Installer, Role};
+use crate::git_env;
 use crate::init;
 use crate::jobs::{APP_PORT, RUNNER_PROGRAM};
 use crate::observe::{self, Judged, ObserveError, Order, Plan};
@@ -456,7 +457,9 @@ fn check_ref(flag: &'static str, name: &str) -> Result<(), ShadowError> {
 
 /// Resolves `spec` to the commit it names in the clone, or `None` when it names none.
 async fn resolve_commit(root: &Path, spec: &str) -> Option<CommitSha> {
-    let output = ProcessCommand::new("git")
+    let mut command = ProcessCommand::new("git");
+    git_env::prepare(command.as_std_mut());
+    let output = command
         .arg("-C")
         .arg(root)
         .args(["rev-parse", "--verify", "--quiet"])
@@ -535,9 +538,12 @@ async fn write_protected(
     Ok(())
 }
 
-/// Runs git in `root` and returns its standard output. A failure carries git's message.
+/// Runs git in `root` and returns its standard output. A failure carries git's message, and a
+/// missing object is a failure, because git is not allowed to fetch it.
 async fn git_stdout(root: &Path, args: &[&str]) -> Result<Vec<u8>, ShadowError> {
-    let output = ProcessCommand::new("git")
+    let mut command = ProcessCommand::new("git");
+    git_env::prepare(command.as_std_mut());
+    let output = command
         .arg("-C")
         .arg(root)
         .args(args)
@@ -1186,6 +1192,59 @@ mod tests {
             before,
             "the check left the clone's git directory as it found it"
         );
+    }
+
+    /// A partial clone of `origin` whose file contents are not local. Its promisor remote runs a
+    /// script that only records that it ran, so a fetch leaves a marker. Returns the clone and the
+    /// marker's path.
+    #[cfg(unix)]
+    fn promisor_clone_of(origin: &Path) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        git(origin, &["config", "uploadpack.allowFilter", "true"]);
+        let dir = tempfile::tempdir().expect("a directory for the partial clone");
+        let partial = dir.path().join("partial");
+        let source = format!("file://{}", origin.display());
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                "--no-checkout",
+                "--filter=blob:none",
+                &source,
+                &partial.to_string_lossy(),
+            ],
+        );
+        let marker = dir.path().join("fetch-ran");
+        let transport = dir.path().join("fake-upload-pack");
+        fs::write(
+            &transport,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .expect("the transport script");
+        fs::set_permissions(&transport, fs::Permissions::from_mode(0o755)).expect("executable");
+        git(
+            &partial,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                &transport.to_string_lossy(),
+            ],
+        );
+        (dir, partial, marker)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn check_contract_fetches_nothing_from_a_promisor_remote() {
+        let origin = clone_with(&contract_files());
+        let (_dir, partial, marker) = promisor_clone_of(origin.path());
+
+        let error = check_contract_with(&check_args(&partial, "main"), &missing_docker())
+            .await
+            .expect_err("the contract's contents are missing and are not fetched");
+
+        assert!(!marker.exists(), "git fetched a missing object: {error}");
     }
 
     #[tokio::test]

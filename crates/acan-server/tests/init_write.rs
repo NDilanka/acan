@@ -301,3 +301,60 @@ fn a_dangling_link_where_a_file_goes_counts_as_existing() {
     assert!(err.to_string().contains("already exists"), "{err}");
     assert!(!target.exists(), "the link was not followed");
 }
+
+/// A partial clone of a Node app whose file contents are not local. Its promisor remote runs a
+/// script that only records that it ran, so a fetch leaves a marker behind. Returns the clone and
+/// the marker's path.
+#[cfg(unix)]
+fn promisor_clone() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, origin) = clone();
+    git(&origin, &["config", "uploadpack.allowFilter", "true"]);
+    let partial = dir.path().join("partial");
+    let source = format!("file://{}", origin.display());
+    git(
+        dir.path(),
+        &[
+            "clone",
+            "-q",
+            "--no-checkout",
+            "--filter=blob:none",
+            &source,
+            &partial.to_string_lossy(),
+        ],
+    );
+    let marker = dir.path().join("fetch-ran");
+    let transport = dir.path().join("fake-upload-pack");
+    fs::write(
+        &transport,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    )
+    .expect("the transport script");
+    fs::set_permissions(&transport, fs::Permissions::from_mode(0o755)).expect("executable");
+    git(
+        &partial,
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            &transport.to_string_lossy(),
+        ],
+    );
+    (dir, partial, marker)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_missing_object_in_a_partial_clone_is_refused_and_nothing_is_fetched() {
+    let (_dir, partial, marker) = promisor_clone();
+
+    let err = run_with(&args(&partial), &mut |_| panic!("nothing is written"))
+        .expect_err("the file contents are missing and are not fetched");
+
+    assert!(!marker.exists(), "git fetched a missing object: {err}");
+    assert!(err.to_string().contains("could not read"), "{err}");
+    assert_eq!(
+        git(&partial, &["branch", "--list", DEFAULT_BRANCH]),
+        "",
+        "no branch was written"
+    );
+}

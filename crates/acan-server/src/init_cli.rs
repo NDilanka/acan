@@ -4,8 +4,10 @@
 //! The clone's checkout, index and HEAD are not touched in the default mode. The branch is written
 //! with git plumbing: each file becomes a blob, a tree is built in a temporary index, one commit is
 //! made, and one ref is created. No worktree is checked out. Every git call runs with hooks
-//! disabled and fsmonitor off, so the clone's configuration cannot run code on the host.
+//! disabled and fsmonitor off, so the clone's configuration cannot run code on the host. Each call
+//! also runs without the `GIT_` variables of the caller's environment, and without lazy fetch.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -15,6 +17,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 
+use crate::git_env;
 use crate::init::{self, FILES, Options, Plan, Snapshot};
 
 /// The branch the contract is committed to, unless `--branch` names another.
@@ -91,7 +94,10 @@ pub fn run_with(args: &InitArgs, confirm: &mut dyn FnMut(&str) -> bool) -> Resul
         package: args.package.clone(),
         ready_path: args.ready_path.clone(),
     };
-    let plan = init::detect(&snapshot, &options).map_err(|err| anyhow!("{err}"))?;
+    let detected = init::detect(&snapshot, &options);
+    // A file that could not be read looks absent to detection, so the read is checked first.
+    snapshot.ensure_readable()?;
+    let plan = detected.map_err(|err| anyhow!("{err}"))?;
     if args.print {
         return Ok(init::render(&plan));
     }
@@ -329,6 +335,9 @@ fn require_identity(repo: &Path) -> Result<()> {
 struct GitSnapshot {
     repo: PathBuf,
     blobs: BTreeMap<String, String>,
+    /// Each read that failed, as the path and git's message. A failed read returns no bytes, so
+    /// the caller must check this before it takes a file for absent.
+    unreadable: RefCell<Vec<String>>,
 }
 
 impl GitSnapshot {
@@ -355,15 +364,31 @@ impl GitSnapshot {
         Ok(Self {
             repo: repo.to_path_buf(),
             blobs,
+            unreadable: RefCell::new(Vec::new()),
         })
     }
 
     /// The text of one committed file.
     fn text(&self, path: &str) -> Result<String> {
-        let bytes = self
-            .read(path)
-            .ok_or_else(|| anyhow!("{path} is not in the commit"))?;
+        let Some(bytes) = self.read(path) else {
+            self.ensure_readable()?;
+            bail!("{path} is not in the commit");
+        };
         String::from_utf8(bytes).map_err(|_| anyhow!("{path} is not UTF-8"))
+    }
+
+    /// Refuses when any read failed. A partial clone's missing objects end up here, because git
+    /// is not allowed to fetch them.
+    fn ensure_readable(&self) -> Result<()> {
+        let unreadable = self.unreadable.borrow();
+        if unreadable.is_empty() {
+            return Ok(());
+        }
+        bail!(
+            "init refused: git could not read these files of the base, and does not fetch \
+             missing objects here; fetch the clone's objects, then run again: {}",
+            unreadable.join("; ")
+        )
     }
 }
 
@@ -374,7 +399,15 @@ impl Snapshot for GitSnapshot {
 
     fn read(&self, path: &str) -> Option<Vec<u8>> {
         let oid = self.blobs.get(path)?;
-        git(&self.repo, &["cat-file", "blob", oid]).ok()
+        match git(&self.repo, &["cat-file", "blob", oid]) {
+            Ok(bytes) => Some(bytes),
+            Err(error) => {
+                self.unreadable
+                    .borrow_mut()
+                    .push(format!("{path}: {error:#}"));
+                None
+            }
+        }
     }
 }
 
@@ -393,6 +426,7 @@ fn git_with(
     input: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     let mut command = Command::new("git");
+    git_env::prepare(&mut command);
     command
         .arg("-C")
         .arg(repo)
