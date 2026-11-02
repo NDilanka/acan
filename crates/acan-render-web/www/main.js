@@ -4,6 +4,7 @@
 // asks for no frames. Other modules import `requestRender` from here; the cycle is safe
 // because no module runs code from another at load time.
 import init, { App } from "./pkg/acan_render_web.js";
+import { backendPlan, createOnFirst, replaceCanvas } from "./backend.js";
 import { openCard, settleByKey, toggleCard } from "./cards.js";
 import { paintMarks, pinAt, placeLabels } from "./marks.js";
 import { paintOrderLine, paintRide, paintStale, paintUsage } from "./panels.js";
@@ -17,6 +18,7 @@ import {
   noticeEl,
   params,
   repoEl,
+  setCanvas,
   state,
 } from "./state.js";
 import { syncPlantViews } from "./plant.js";
@@ -339,14 +341,18 @@ function adoptToken() {
 }
 
 async function createApp() {
-  const backend = params.get("backend") || (navigator.gpu ? "webgpu" : "webgl");
-  try {
-    return await App.create(canvas, backend);
-  } catch (err) {
-    if (backend === "webgl") throw err;
-    console.error(err);
-    return App.create(canvas, "webgl");
-  }
+  const plan = backendPlan(params.get("backend"), Boolean(navigator.gpu));
+  const made = await createOnFirst(plan, canvas, {
+    create: (target, backend) => App.create(target, backend),
+    freshCanvas: (old) => {
+      setCanvas(replaceCanvas(old));
+      setDrawingSize();
+      return canvas;
+    },
+    onFail: (backend, err) => console.warn(`${backend} renderer failed:`, err),
+  });
+  console.info(`renderer: ${made.backend} (${made.app.backend()})`);
+  return made.app;
 }
 
 // The page loads its plant one of three ways. `?plant=stress&machines=N` builds a generated

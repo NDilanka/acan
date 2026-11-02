@@ -17,7 +17,13 @@ export const upto = params.has("upto") ? Number(params.get("upto")) : null;
 
 export const $ = (id) => document.getElementById(id);
 
-export const canvas = $("plant");
+// The renderer canvas. The page swaps in a fresh copy when a backend fails, so this is a `let`,
+// and importers see the copy through the live binding.
+export let canvas = $("plant");
+
+export function setCanvas(next) {
+  canvas = next;
+}
 
 export const labelsEl = $("labels");
 
