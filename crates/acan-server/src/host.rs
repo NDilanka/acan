@@ -19,7 +19,7 @@ use crate::index::Scan;
 use crate::jobs;
 use crate::store::EventStore;
 use crate::vision::Vision;
-use crate::writer::{Snapshot, Writer};
+use crate::writer::{Guard, Snapshot, Writer};
 
 /// How many events a live subscriber may fall behind before the server disconnects it.
 ///
@@ -98,7 +98,9 @@ struct Inner<C> {
     /// checks and installs.
     landing: tokio::sync::Mutex<()>,
     #[cfg(test)]
-    stream_hold: crate::stream::StreamHold,
+    stream_hold: crate::stream::Hold,
+    #[cfg(test)]
+    ruling_hold: crate::stream::Hold,
 }
 
 impl<C> Clone for Host<C> {
@@ -158,7 +160,9 @@ impl<C: ModelClient> Host<C> {
                 vision: parts.vision,
                 landing: tokio::sync::Mutex::new(()),
                 #[cfg(test)]
-                stream_hold: crate::stream::StreamHold::default(),
+                stream_hold: crate::stream::Hold::default(),
+                #[cfg(test)]
+                ruling_hold: crate::stream::Hold::default(),
             }),
         }
     }
@@ -271,12 +275,36 @@ impl<C: ModelClient> Host<C> {
     /// Returns [`SubmitError::Rejected`] when the origin refuses the command, and
     /// [`SubmitError::Internal`] when the events cannot be stored or the writer is gone.
     pub async fn submit(&self, command: Command) -> Result<Vec<Stamped>, SubmitError> {
+        self.submit_with(command, None).await
+    }
+
+    /// Like [`Host::submit`], but the writer first runs `guard` against the committed world, in
+    /// the same turn that it decides `command`. A guard that refuses records nothing, so a check
+    /// made from a read of the world cannot be overtaken by a write that lands in between.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubmitError::Rejected`] when the guard or the origin refuses the command, and
+    /// [`SubmitError::Internal`] when the events cannot be stored or the writer is gone.
+    pub(crate) async fn submit_guarded(
+        &self,
+        command: Command,
+        guard: Guard,
+    ) -> Result<Vec<Stamped>, SubmitError> {
+        self.submit_with(command, Some(guard)).await
+    }
+
+    async fn submit_with(
+        &self,
+        command: Command,
+        guard: Option<Guard>,
+    ) -> Result<Vec<Stamped>, SubmitError> {
         let _fence = if invalidates_landing(&command) {
             Some(self.inner.landing.lock().await)
         } else {
             None
         };
-        let events = self.inner.writer.submit(command).await?;
+        let events = self.inner.writer.submit_with(command, guard).await?;
         // A confirmation records the protected inputs it was confirmed under, at its base. When
         // recording fails the confirmation stands with no record, so a re-bind of its scope refuses.
         for stamped in &events {
@@ -367,8 +395,13 @@ impl<C: ModelClient> Host<C> {
     }
 
     #[cfg(test)]
-    pub(crate) fn stream_hold(&self) -> &crate::stream::StreamHold {
+    pub(crate) fn stream_hold(&self) -> &crate::stream::Hold {
         &self.inner.stream_hold
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ruling_hold(&self) -> &crate::stream::Hold {
+        &self.inner.ruling_hold
     }
 
     /// The set of live stream tasks, joined during shutdown.

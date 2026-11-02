@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use acan_core::{Command, Ctx, Event, Origin, Stamped, SystemCmd, World};
+use acan_core::{Command, Ctx, Event, Origin, Rejection, Stamped, SystemCmd, World};
 use anyhow::Context as _;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -32,9 +32,14 @@ pub struct Snapshot {
     pub scan: Arc<Scan>,
 }
 
+/// A check the writer runs against the committed world in the same turn that it decides the command
+/// it guards. A refusal is the origin's answer: nothing is decided, stored or published.
+pub(crate) type Guard = Box<dyn FnOnce(&World) -> Result<(), Rejection> + Send>;
+
 enum Request {
     Command {
         command: Command,
+        guard: Option<Guard>,
         reply: oneshot::Sender<Result<Vec<Stamped>, SubmitError>>,
     },
     Advisory {
@@ -98,7 +103,20 @@ impl Writer {
     }
 
     pub(crate) async fn submit(&self, command: Command) -> Result<Vec<Stamped>, SubmitError> {
-        self.call(|reply| Request::Command { command, reply }).await
+        self.submit_with(command, None).await
+    }
+
+    pub(crate) async fn submit_with(
+        &self,
+        command: Command,
+        guard: Option<Guard>,
+    ) -> Result<Vec<Stamped>, SubmitError> {
+        self.call(|reply| Request::Command {
+            command,
+            guard,
+            reply,
+        })
+        .await
     }
 
     pub(crate) async fn submit_advisory(
@@ -161,12 +179,17 @@ async fn run(
                 let _ = reply.send(());
                 return;
             }
-            Request::Command { command, reply } => {
+            Request::Command {
+                command,
+                guard,
+                reply,
+            } => {
                 let result = commit(
                     &mut origin,
                     &mut scan,
                     None,
                     command,
+                    guard,
                     Mode::Ordinary,
                     &store,
                     &events,
@@ -184,6 +207,7 @@ async fn run(
                     &mut scan,
                     None,
                     command,
+                    None,
                     Mode::Advisory,
                     &store,
                     &events,
@@ -203,6 +227,7 @@ async fn run(
                     &mut scan,
                     Some(candidate),
                     Command::System(SystemCmd::IndexUpdated),
+                    None,
                     Mode::Ordinary,
                     &store,
                     &events,
@@ -226,6 +251,7 @@ async fn commit(
     scan: &mut Arc<Scan>,
     candidate: Option<Scan>,
     command: Command,
+    guard: Option<Guard>,
     mode: Mode,
     store: &EventStore,
     broadcast_tx: &broadcast::Sender<Stamped>,
@@ -244,6 +270,11 @@ async fn commit(
         now: now(),
         index: &staged_scan.index,
     };
+    if let Some(guard) = guard {
+        // Decided against the committed world, in this turn, so no write can land between the
+        // check and the decision.
+        guard(origin.world()).map_err(SubmitError::Rejected)?;
+    }
     let mut staged = origin.clone();
     let batch = match mode {
         Mode::Ordinary => staged.execute(&ctx, command)?,

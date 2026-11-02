@@ -12,7 +12,7 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use acan_core::{Command, HumanCmd, MemberId, OrderId, Rejection, Stamped};
+use acan_core::{Command, GateRunId, HumanCmd, MemberId, OrderId, Rejection, Stamped, World};
 use acan_intent::compare::{self, Contrast};
 use acan_intent::predicate::{self, PredicateError, RetainedExample};
 use acan_intent::{
@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::host::{Host, SubmitError, now};
 use crate::http::ApiError;
+use crate::writer::Guard;
 use crate::{STATE_DIR, examples, jobs, observations};
 
 /// What a member needs to rule on one discrepancy episode: the contrast examples kept for it, the
@@ -40,6 +41,10 @@ pub(crate) struct RulingDraftView {
     ledger_head: LedgerHead,
     selector: Selector,
     probe_hash: ProbeHash,
+    /// The gate run whose evidence is the episode's latest.
+    evidence_run: GateRunId,
+    /// How many gate runs' evidence the episode holds, the latest included.
+    evidence_revision: u32,
     /// The example the ruling is on: the episode's latest candidate run, for its probe.
     ruled_on: ContrastExampleHash,
     normalization_version: NormalizationVersion,
@@ -66,7 +71,7 @@ pub(crate) fn draft<C: ModelClient>(
     order: OrderId,
     episode: EpisodeId,
 ) -> Result<RulingDraftView, ApiError> {
-    let (scope_hash, ledger_head, selector, latest) = host.read(|world| {
+    let (scope_hash, ledger_head, selector, latest, revision) = host.read(|world| {
         let lane = world
             .lane(order)
             .ok_or(ApiError::NotFound("scope for this order"))?;
@@ -82,10 +87,12 @@ pub(crate) fn draft<C: ModelClient>(
             lane.scope_hash,
             world.ledger().head(),
             found.selector.clone(),
-            (latest.run.to_string(), latest.probe_hash),
+            (latest.run, latest.probe_hash),
+            found.evidence.len(),
         ))
     })?;
     let (run, probe_hash) = latest;
+    let evidence_revision = u32::try_from(revision).map_err(internal)?;
     let dir = host.repo().join(STATE_DIR).join(examples::DIR);
     let kept = examples::read(&dir, &episode).map_err(internal)?;
     let examples = kept
@@ -103,7 +110,7 @@ pub(crate) fn draft<C: ModelClient>(
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
-    let ruled = ruled_example(&examples, &run, probe_hash)?;
+    let ruled = ruled_example(&examples, &run.to_string(), probe_hash)?;
     Ok(RulingDraftView {
         order: order.to_string(),
         episode,
@@ -111,6 +118,8 @@ pub(crate) fn draft<C: ModelClient>(
         ledger_head,
         selector,
         probe_hash,
+        evidence_run: run,
+        evidence_revision,
         ruled_on: ruled.hash,
         normalization_version: ruled.normalization_version.clone(),
         normalization_hash: ruled.normalization_hash,
@@ -171,6 +180,12 @@ pub(crate) struct RulingBody {
     draft_head: LedgerHead,
     /// The example the draft named as ruled on. Any other example is stale.
     ruled_on: ContrastExampleHash,
+    /// The scope revision the draft was read under. A newer revision moves it.
+    scope_hash: ScopeHash,
+    /// The gate run whose evidence the draft named as the episode's latest.
+    evidence_run: GateRunId,
+    /// How many gate runs' evidence the episode held when the draft was read.
+    evidence_revision: u32,
     /// What must hold on the example. The member chooses it; the server never infers it.
     predicate: Predicate,
     /// How far the decision reaches.
@@ -180,6 +195,11 @@ pub(crate) struct RulingBody {
 }
 
 /// Records a member's ruling on one episode, built from the draft the member read.
+///
+/// The draft is checked twice. First against a read of the committed world, which answers with a
+/// 409 that names what moved. Then the writer checks it again in the turn it decides the ruling,
+/// against the world as it is then, so a receipt or a scope revision that lands in between is
+/// refused rather than ruled on.
 ///
 /// # Errors
 ///
@@ -199,9 +219,20 @@ pub(crate) async fn record<C: ModelClient + 'static>(
         return Err(ApiError::BadRequest("label"));
     }
     let draft = draft(host, order, episode)?;
+    if body.scope_hash != draft.scope_hash {
+        return Err(ApiError::Conflict(
+            "the scope moved since the draft was read",
+        ));
+    }
     if body.draft_head != draft.ledger_head {
         return Err(ApiError::Conflict(
             "the ruling log moved since the draft was read",
+        ));
+    }
+    if body.evidence_run != draft.evidence_run || body.evidence_revision != draft.evidence_revision
+    {
+        return Err(ApiError::Conflict(
+            "the evidence the ruling is on moved since the draft was read",
         ));
     }
     if body.ruled_on != draft.ruled_on {
@@ -264,12 +295,25 @@ pub(crate) async fn record<C: ModelClient + 'static>(
         ),
     };
     let event = LedgerEvent::DecisionConfirmed(Box::new(decision));
-    host.submit(Command::Human {
-        member: member.clone(),
-        cmd: HumanCmd::RecordRuling {
-            event: Box::new(event),
+    let expect = Expect {
+        order,
+        episode,
+        scope_hash: draft.scope_hash,
+        head: draft.ledger_head,
+        evidence_run: draft.evidence_run,
+        evidence_revision: draft.evidence_revision,
+    };
+    #[cfg(test)]
+    host.ruling_hold().wait().await;
+    host.submit_guarded(
+        Command::Human {
+            member: member.clone(),
+            cmd: HumanCmd::RecordRuling {
+                event: Box::new(event),
+            },
         },
-    })
+        expect.guard(),
+    )
     .await
     .map_err(|err| match err {
         SubmitError::Rejected(Rejection::Forbidden { .. }) => {
@@ -277,6 +321,62 @@ pub(crate) async fn record<C: ModelClient + 'static>(
         }
         other => ApiError::from(other),
     })
+}
+
+/// What a ruling was built from: the scope revision, the ledger head and the latest evidence of
+/// the episode. The writer checks them against the committed world in the turn it decides the
+/// ruling, so a change after the draft was read refuses the ruling.
+struct Expect {
+    order: OrderId,
+    episode: EpisodeId,
+    scope_hash: ScopeHash,
+    head: LedgerHead,
+    evidence_run: GateRunId,
+    evidence_revision: u32,
+}
+
+impl Expect {
+    fn guard(self) -> Guard {
+        Box::new(move |world| self.check(world))
+    }
+
+    fn check(&self, world: &World) -> Result<(), Rejection> {
+        let lane = world
+            .lane(self.order)
+            .ok_or_else(|| moved("the order's scope is gone"))?;
+        if lane.scope_hash != self.scope_hash {
+            return Err(Rejection::StaleScope {
+                current_rev: lane.scope.rev,
+                current_hash: lane.scope_hash,
+            });
+        }
+        if world.ledger().head() != self.head {
+            return Err(moved("the ruling log moved since the draft was read"));
+        }
+        let latest = lane.episodes.get(&self.episode).and_then(|found| {
+            found
+                .evidence
+                .last()
+                .map(|last| (last.run, found.evidence.len()))
+        });
+        match latest {
+            Some((run, revision))
+                if run == self.evidence_run
+                    && u32::try_from(revision) == Ok(self.evidence_revision) =>
+            {
+                Ok(())
+            }
+            _ => Err(moved(
+                "the evidence the ruling is on moved since the draft was read",
+            )),
+        }
+    }
+}
+
+fn moved(detail: &str) -> Rejection {
+    Rejection::StaleEvidence {
+        detail: detail.to_owned(),
+    }
 }
 
 /// Runs the predicate check on the example the ruling is on. The example is rebuilt from the

@@ -146,7 +146,9 @@ pub struct Running {
     writer: Writer,
     streams: Arc<Mutex<JoinSet<()>>>,
     #[cfg(test)]
-    pub(crate) stream_hold: stream::StreamHold,
+    pub(crate) stream_hold: stream::Hold,
+    #[cfg(test)]
+    pub(crate) ruling_hold: stream::Hold,
 }
 
 impl Running {
@@ -333,6 +335,8 @@ pub async fn start_with_workers<C: ModelClient + 'static>(
     let streams = Arc::clone(host.streams());
     #[cfg(test)]
     let stream_hold = host.stream_hold().clone();
+    #[cfg(test)]
+    let ruling_hold = host.ruling_hold().clone();
     let app = http::router(host, web).layer(Extension(board));
     let mut shutdown_seen = shutdown.subscribe();
     let server = tokio::spawn(async move {
@@ -353,6 +357,8 @@ pub async fn start_with_workers<C: ModelClient + 'static>(
         streams,
         #[cfg(test)]
         stream_hold,
+        #[cfg(test)]
+        ruling_hold,
     })
 }
 
