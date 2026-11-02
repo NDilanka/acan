@@ -699,7 +699,7 @@ async fn an_unreachable_provider_never_turns_a_scope_draft_into_an_offline_one()
     let url = unreachable_url().await;
     let models = Models::live(config(&url), keys(true)).expect("the client builds");
     let plant = plant_with(fixed_machines());
-    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5));
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
 
     let err = models
         .chat_json::<DraftReply>(Role::Foreman, request)
@@ -713,11 +713,47 @@ async fn an_unreachable_provider_never_turns_a_scope_draft_into_an_offline_one()
     );
 }
 
+#[test]
+fn the_scope_request_states_the_side_effect_rule_and_carries_the_last_error() {
+    let plant = plant_with(fixed_machines());
+    let refusal = "selector is malformed: \"channel SideEffect with field_path None\"";
+    let retry = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), Some(refusal));
+    let first = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
+
+    assert!(
+        model::SCOPE_PROMPT.contains(
+            "A side_effect selector needs a field_path that starts with store or outbound_http."
+        ),
+        "the prompt states the rule"
+    );
+    let context = |request: &acan_llm::ChatRequest| -> Value {
+        let content = request
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                acan_llm::Message::User { content } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("the request has a user message");
+        serde_json::from_str(&content).expect("the context is JSON")
+    };
+    let schema = context(&retry)["schema"].to_string();
+    assert!(
+        schema.contains("starts with its sink, `store` or `outbound_http`"),
+        "the schema states the side_effect path rule: {schema}"
+    );
+    assert_eq!(context(&retry)["previous_error"], refusal);
+    assert!(
+        context(&first)["previous_error"].is_null(),
+        "a first attempt carries no error"
+    );
+}
+
 #[tokio::test]
 async fn an_offline_client_gives_no_scope_draft() {
     let models = Models::load(Path::new("no-such-routing-file.toml")).expect("the offline client");
     let plant = plant_with(fixed_machines());
-    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5));
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
 
     let err = models
         .chat_json::<DraftReply>(Role::Foreman, request)
@@ -735,7 +771,7 @@ async fn an_empty_scope_reply_is_a_provider_error_and_not_an_empty_scope() {
     let url = serve_reply("").await;
     let models = Models::live(config(&url), keys(true)).expect("the client builds");
     let plant = plant_with(fixed_machines());
-    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5));
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
 
     let err = models
         .chat_json::<DraftReply>(Role::Foreman, request)
@@ -755,7 +791,7 @@ async fn a_scope_draft_cut_at_the_output_cap_fails_the_foreman_call_and_names_th
     let url = serve_reply_capped(r#"{"may": [{"id": "limit-get-links""#).await;
     let models = Models::live(config(&url), keys(true)).expect("the client builds");
     let plant = plant_with(fixed_machines());
-    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5));
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
 
     let err = models
         .chat_json::<DraftReply>(Role::Foreman, request)
@@ -788,7 +824,7 @@ async fn a_draft_request_reaches_the_provider_with_a_generous_output_cap() {
     let (url, sent) = serve_reply_recording(&fixture_scope().to_string()).await;
     let models = Models::live(config(&url), keys(true)).expect("the client builds");
     let plant = plant_with(fixed_machines());
-    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5));
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
 
     models
         .chat_json::<DraftReply>(Role::Foreman, request)
@@ -811,7 +847,7 @@ async fn an_explicit_empty_scope_reply_is_refused_by_acan() {
     let url = serve_reply(&content).await;
     let models = Models::live(config(&url), keys(true)).expect("the client builds");
     let plant = plant_with(fixed_machines());
-    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5));
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
 
     let structured = models
         .chat_json::<DraftReply>(Role::Foreman, request)
@@ -830,7 +866,7 @@ async fn a_scope_reply_that_sets_a_count_is_refused() {
     let url = serve_reply(&scope.to_string()).await;
     let models = Models::live(config(&url), keys(true)).expect("the client builds");
     let plant = plant_with(fixed_machines());
-    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5));
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
 
     let structured = models
         .chat_json::<DraftReply>(Role::Foreman, request)
@@ -1020,7 +1056,7 @@ async fn muse_spark_drafts_the_scope_of_the_rate_limit_order() {
         fixtures: &corpus.fixtures,
         limits: app.limits,
     };
-    let request = model::scope_request(RATE_LIMIT_ORDER, &bounds);
+    let request = model::scope_request(RATE_LIMIT_ORDER, &bounds, None);
 
     let traced = client
         .chat_json_traced::<DraftReply>(Role::Foreman, request)

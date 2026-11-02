@@ -33,7 +33,7 @@ pub const EXPLAIN_PROMPT: &str = "You explain a clash between two tasks that dec
 
 /// The scope draft prompt. The reply is an `acan_intent::ScopeBody`, which Acan wraps as a
 /// `ModelProposal` that gains no authority until a human confirms it.
-pub const SCOPE_PROMPT: &str = "You draft the scope of one order for a code change. Reply with one JSON object that has three keys, may, must_keep and open, that matches the JSON schema under schema in the context. may lists what the order allows to change. Each may item names one HTTP route, copied exactly from the routes in the context, and the machines it touches, copied exactly from the machines in the context. Give every item at least one acceptance obligation, each with a predicate and one line of text. Give every item an example: one target value for one field of one step, written before any code exists. Set provenance to user when the order states the item, model when you interpret the order, and open when a human must still answer it. must_keep lists behavior the order must not break. open lists questions a human must answer, each with two or more options. Never state an observed value, a verdict or a pass. Never invent a route or a machine.";
+pub const SCOPE_PROMPT: &str = "You draft the scope of one order for a code change. Reply with one JSON object that has three keys, may, must_keep and open, that matches the JSON schema under schema in the context. may lists what the order allows to change. Each may item names one HTTP route, copied exactly from the routes in the context, and the machines it touches, copied exactly from the machines in the context. Give every item at least one acceptance obligation, each with a predicate and one line of text. Give every item an example: one target value for one field of one step, written before any code exists. Set provenance to user when the order states the item, model when you interpret the order, and open when a human must still answer it. must_keep lists behavior the order must not break. open lists questions a human must answer, each with two or more options. Never state an observed value, a verdict or a pass. Never invent a route or a machine. A side_effect selector needs a field_path that starts with store or outbound_http. When previous_error in the context is not null, the last attempt failed for that reason: fix it and reply again.";
 
 /// The probe prompt. The reply is an input-only `acan_intent::ProbeProposal`.
 pub const PROBE_PROMPT: &str = "You propose input only probe steps for one order. Reply with one JSON object that has four keys, fixture, steps, route_template and rationale, that matches the JSON schema under schema in the context. fixture is one id copied from the fixtures in the context. steps is a non empty list of steps. An http step sends one request, and its path, headers and body may use ${name} for a value that an earlier capture step bound. A capture step reads a value from an earlier http step. An advance_time step moves the controlled clock. route_template is one route copied exactly from the routes in the context, and the probe sends no more http requests than max_requests. Propose inputs only. Never write an expected value, a count, a mask, a class, an observed value or a verdict. rationale is one sentence.";
@@ -421,8 +421,13 @@ fn schema_value<T: JsonSchema>() -> Value {
 
 /// The scope draft prompt for an order's `sentence`, the order as the human wrote it, with the
 /// plant's machines, the routes a scope may name, and the schema of the scope body.
+/// `previous_error` is why the last attempt failed, or none for a first attempt.
 #[must_use]
-pub fn scope_request(sentence: &str, bounds: &DraftBounds<'_>) -> ChatRequest {
+pub fn scope_request(
+    sentence: &str,
+    bounds: &DraftBounds<'_>,
+    previous_error: Option<&str>,
+) -> ChatRequest {
     draft_request(
         SCOPE_PROMPT,
         &json!({
@@ -430,6 +435,7 @@ pub fn scope_request(sentence: &str, bounds: &DraftBounds<'_>) -> ChatRequest {
             "machines": bounds.machines,
             "routes": bounds.routes,
             "schema": schema_value::<ScopeBody>(),
+            "previous_error": previous_error,
         }),
     )
 }

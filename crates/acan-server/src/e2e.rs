@@ -789,6 +789,48 @@ impl ModelClient for Drafting {
     }
 }
 
+/// A foreman whose first scope reply is `refused` and whose later replies are `then`. Each
+/// scope request's user message is recorded in `asked`, in the order the foreman received them.
+struct RefusedFirst {
+    inner: TwoTasks,
+    refused: Value,
+    then: Value,
+    asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ModelClient for RefusedFirst {
+    async fn chat(&self, role: Role, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        if model::ask_of(&request) != Some(Ask::Scope) {
+            return self.inner.chat(role, request).await;
+        }
+        let draft = {
+            let mut asked = self.asked.lock().expect("the asked lock is not poisoned");
+            asked.extend(request.messages.iter().filter_map(|message| match message {
+                acan_llm::Message::User { content } => Some(content.clone()),
+                _ => None,
+            }));
+            if asked.len() == 1 {
+                &self.refused
+            } else {
+                &self.then
+            }
+            .clone()
+        };
+        Ok(ChatResponse {
+            content: Some(draft.to_string()),
+            tool_calls: Vec::new(),
+            finish_reason: None,
+            call: CallRecord {
+                role,
+                provider: "scripted".to_owned(),
+                model: "scripted-foreman".to_owned(),
+                usage: Usage::default(),
+                latency: Duration::ZERO,
+            },
+        })
+    }
+}
+
 /// Polls the latest scope draft of `order` until the draft job stores its outcome, and returns
 /// the view. A failed draft is a stored outcome too, so the caller checks the state.
 async fn scope_draft_of(running: &Running, order: OrderId) -> Value {
@@ -949,6 +991,45 @@ async fn a_scope_draft_that_never_checks_is_recorded_as_a_failure() {
     }
     let (_, origin) = snapshot(&running).await;
     assert!(origin.world().lane(order).is_none(), "no scope is opened");
+    running.stop().await.expect("the server stops");
+}
+
+/// A draft refused for a side-effect selector without a field path is asked again, and the retry
+/// carries the refusal. The second reply checks, so the draft is stored.
+#[tokio::test]
+async fn a_scope_draft_refused_for_a_side_effect_path_is_asked_again_with_the_refusal() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let mut refused = drafted_scope_body();
+    refused["may"][0]["selector"]["channel"] = json!("side_effect");
+    let asked = std::sync::Arc::<std::sync::Mutex<Vec<String>>>::default();
+    let foreman = RefusedFirst {
+        inner: TwoTasks::default(),
+        refused,
+        then: drafted_scope_body(),
+        asked: std::sync::Arc::clone(&asked),
+    };
+    let running = start_with(root, foreman, UsageLedger::default()).await;
+    post_order(&running).await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let view = scope_draft_of(&running, order).await;
+    assert_eq!(view["state"], "drafted", "the retry is stored: {view}");
+    let sent = asked
+        .lock()
+        .expect("the asked lock is not poisoned")
+        .clone();
+    assert!(sent.len() >= 2, "the foreman was asked again: {sent:?}");
+    let retry: Value = serde_json::from_str(&sent[1]).expect("the request is JSON");
+    assert!(
+        retry["previous_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("selector is malformed")),
+        "the retry carries the refusal: {retry}"
+    );
     running.stop().await.expect("the server stops");
 }
 
