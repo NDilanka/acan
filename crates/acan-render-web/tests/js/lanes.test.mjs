@@ -1,0 +1,149 @@
+// Node tests for the agent lanes strip: who was last heard of when, the rows, the stale flag, the
+// empty state and the G chord. Run with:
+//   node --test crates/acan-render-web/tests/js/lanes.test.mjs
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import {
+  GO_MS,
+  STALE_MS,
+  agoWords,
+  checkWords,
+  emptyLines,
+  goStep,
+  laneRows,
+  lastActivity,
+} from "../../www/lanes.js";
+
+const T0 = 1_760_000_000_000;
+
+function stamped(seq, at, actor, event) {
+  return { seq, at, actor, event };
+}
+
+const SYSTEM = { kind: "system" };
+const OWNER = { kind: "member", id: "owner" };
+const agent = (id) => ({ kind: "agent", id });
+
+// Two agents register; agent-a takes t-1 and renews; agent-b takes t-2, and its task lands later
+// under a system event. agent-c registers and never works.
+function log() {
+  return [
+    stamped(0, T0, OWNER, { type: "world_opened" }),
+    stamped(1, T0 + 1000, OWNER, { type: "agent_registered", agent: { id: "agent-a", owner: "owner" } }),
+    stamped(2, T0 + 2000, OWNER, { type: "agent_registered", agent: { id: "agent-b", owner: "owner" } }),
+    stamped(3, T0 + 3000, OWNER, { type: "agent_registered", agent: { id: "agent-c", owner: "owner" } }),
+    stamped(4, T0 + 10_000, agent("agent-a"), { type: "lease_granted", task: 1, lease: { holder: "agent-a", generation: 1 }, readback: 1 }),
+    stamped(5, T0 + 12_000, agent("agent-b"), { type: "lease_granted", task: 2, lease: { holder: "agent-b", generation: 1 }, readback: 2 }),
+    stamped(6, T0 + 30_000, agent("agent-a"), { type: "lease_renewed", task: 1, generation: 1 }),
+    stamped(7, T0 + 40_000, SYSTEM, { type: "build_cleared", task: 2 }),
+  ];
+}
+
+function view() {
+  return {
+    agents: [
+      { id: "agent-b", task: 2, activity: "building", machine: "src/web", body: [0, 0, 1, 1] },
+      { id: "agent-a", task: 1, activity: "gating", machine: "src/api", body: [0, 0, 1, 1] },
+      { id: "agent-c", task: null, activity: "idle", machine: null, body: null },
+    ],
+    tasks: [
+      { id: 1, order: 1, title: "add the retry header", state: "gating", agent: "agent-a", machine: "src/api", check: { name: "w-3", state: "passed" } },
+      { id: 2, order: 1, title: "show the retry banner", state: "building", agent: "agent-b", machine: "src/web", check: null },
+    ],
+  };
+}
+
+test("an agent is heard of as the actor, when registered, and through the task it leases", () => {
+  const seen = lastActivity(log());
+  assert.deepEqual(seen.get("agent-a"), { at: T0 + 30_000, seq: 6 });
+  // The build clearance is a system event, but it names agent-b's task.
+  assert.deepEqual(seen.get("agent-b"), { at: T0 + 40_000, seq: 7 });
+  assert.deepEqual(seen.get("agent-c"), { at: T0 + 3000, seq: 3 });
+});
+
+test("a task's events stop counting for its agent once the lease ends", () => {
+  const events = [
+    ...log(),
+    stamped(8, T0 + 50_000, SYSTEM, { type: "lease_ended", task: 1, generation: 1, why: "expired" }),
+    stamped(9, T0 + 90_000, SYSTEM, { type: "landed", task: 1, commit: "abc" }),
+  ];
+  assert.deepEqual(lastActivity(events).get("agent-a"), { at: T0 + 50_000, seq: 8 });
+});
+
+test("rows sort by name, carry the task, machine, activity and check, and number 1 to 9", () => {
+  const rows = laneRows(view(), lastActivity(log()), T0 + 60_000);
+  assert.deepEqual(rows.map((row) => row.agent), ["agent-a", "agent-b", "agent-c"]);
+  assert.deepEqual(rows.map((row) => row.key), [1, 2, 3]);
+  const [a, b, c] = rows;
+  assert.equal(a.task, "t-1");
+  assert.equal(a.title, "add the retry header");
+  assert.equal(a.machine, "src/api");
+  assert.equal(a.activity, "gating");
+  assert.equal(a.ago, "30s ago");
+  assert.deepEqual(a.check, { name: "w-3", state: "passed" });
+  assert.equal(b.check, null);
+  assert.equal(c.task, null);
+  assert.equal(c.rideable, false);
+  assert.equal(rows.some((row) => row.stale), false);
+});
+
+test("an agent holding a task is stale after STALE_MS with no event; an idle one never is", () => {
+  const now = T0 + 30_000 + STALE_MS;
+  const rows = laneRows(view(), lastActivity(log()), now);
+  const byAgent = Object.fromEntries(rows.map((row) => [row.agent, row]));
+  assert.equal(byAgent["agent-a"].stale, true);
+  assert.equal(byAgent["agent-a"].ago, "2m ago");
+  assert.equal(byAgent["agent-b"].stale, false, "agent-b was heard of 10 s later");
+  assert.equal(byAgent["agent-c"].stale, false, "an idle agent has nothing to report");
+  assert.equal(laneRows(view(), lastActivity(log()), now - 1)[0].stale, false);
+});
+
+test("an agent with no event yet reads as not heard from, and is not stale", () => {
+  const rows = laneRows(view(), new Map(), T0);
+  assert.equal(rows[0].ago, "not heard from");
+  assert.equal(rows[0].stale, false);
+});
+
+test("only the first nine rows get a key", () => {
+  const agents = Array.from({ length: 11 }, (_, i) => ({ id: `agent-${String(i).padStart(2, "0")}`, task: null, activity: "idle", machine: null, body: null }));
+  const rows = laneRows({ agents, tasks: [] }, new Map(), T0);
+  assert.deepEqual(rows.map((row) => row.key), [1, 2, 3, 4, 5, 6, 7, 8, 9, null, null]);
+});
+
+test("quiet times read in the largest whole unit", () => {
+  assert.equal(agoWords(0), "just now");
+  assert.equal(agoWords(9_999), "just now");
+  assert.equal(agoWords(45_000), "45s ago");
+  assert.equal(agoWords(120_000), "2m ago");
+  assert.equal(agoWords(3 * 3600_000 + 5), "3h ago");
+  assert.equal(agoWords(50 * 3600_000), "2d ago");
+  assert.equal(agoWords(-5), "just now");
+});
+
+test("the check reads as words for the row's label", () => {
+  assert.equal(checkWords({ name: "w-3", state: "failed" }), "check w-3 failed");
+  assert.equal(checkWords(null), "");
+});
+
+test("with no agent the strip names the worker command against this origin", () => {
+  const { line, command } = emptyLines("http://127.0.0.1:7311");
+  assert.equal(line, "No worker connected. Start one with:");
+  assert.equal(command, "acan-worker --server http://127.0.0.1:7311 --token <agent token> --repo <repo path>");
+  assert.doesNotMatch(line + command, /\$|cost|token usage/i);
+});
+
+test("G then a digit rides; the digit alone and a late digit are left to the page", () => {
+  const armed = goStep(null, "g", 100);
+  assert.deepEqual(armed, { armed: 100, taken: true, action: null });
+  assert.deepEqual(goStep(armed.armed, "2", 200), { armed: null, taken: true, action: { kind: "agent", index: 1 } });
+  assert.equal(goStep(null, "2", 200).taken, false, "a bare digit still settles");
+  assert.equal(goStep(100, "2", 100 + GO_MS + 1).taken, false, "the chord times out");
+  assert.equal(goStep(100, "0", 200).taken, false, "0 still fits the plant");
+});
+
+test("G then a letter another panel answers goes to it; any other letter is left to the page", () => {
+  const letters = new Map([["i", () => {}]]);
+  assert.deepEqual(goStep(100, "I", 200, letters), { armed: null, taken: true, action: { kind: "go", key: "i" } });
+  assert.deepEqual(goStep(100, "q", 200, letters), { armed: null, taken: false, action: null });
+});

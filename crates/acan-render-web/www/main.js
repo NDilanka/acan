@@ -26,8 +26,25 @@ import { playOf, syncPlantViews } from "./plant.js";
 import { bindPlate, paintPlate, stepBy, toggleMode, togglePlay } from "./plate.js";
 import { startReplay } from "./replay.js";
 import { bindShell, startShell } from "./shell.js";
-import { get, setLink, start } from "./stream.js";
+import {
+  clock,
+  feed,
+  forgetToken,
+  get,
+  hold,
+  installFeed,
+  isLive,
+  loadEvents,
+  onHoldEvent,
+  setLink,
+  showHold,
+  start,
+} from "./stream.js";
 import { requestUsage } from "./usage.js";
+import { installLanes } from "./lanes.js";
+import { installInbox } from "./inbox.js";
+import { installHistory } from "./history.js";
+import { installScrub } from "./scrub.js";
 
 const PAN_KEY_PX = 80;
 
@@ -46,6 +63,30 @@ const DRONE_PICK_PX = 6;
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 const timing = { started: performance.now() };
+
+// The registration point for the watch panels (lanes, inbox, history, scrubber). Each paint
+// hook runs when the view changes. A key hook runs before the page's own keys, and returning
+// true takes the key.
+const paintHooks = [];
+const keyHooks = [];
+const kit = {
+  state,
+  feed,
+  clock,
+  isLive,
+  freeze,
+  replay,
+  hold,
+  loadEvents,
+  onHoldEvent,
+  showHold,
+  forgetToken,
+  get,
+  setLink,
+  requestRender,
+  onPaint: (hook) => paintHooks.push(hook),
+  onKey: (hook) => keyHooks.push(hook),
+};
 
 export function requestRender() {
   if (state.scheduled || state.app === null) return;
@@ -102,6 +143,7 @@ function paint() {
   syncSeals(state, get, paintSlip);
   paintSlip();
   requestUsage(state, get, paintUsage);
+  for (const hook of paintHooks) hook();
 }
 
 // Sets the drawing buffer to the CSS box times the device pixel ratio. The wasm side rounds
@@ -251,6 +293,7 @@ function bindKeys() {
       return;
     }
     if (state.app === null || event.ctrlKey || event.metaKey) return;
+    if (keyHooks.some((hook) => hook(event))) return;
     if (ARROW_PAN[event.key]) {
       event.preventDefault();
       state.app.pan(...ARROW_PAN[event.key]);
@@ -439,10 +482,15 @@ async function boot() {
   setDrawingSize();
   const createStarted = performance.now();
   state.app = await createApp();
+  installFeed(state.app);
   timing.create = performance.now() - createStarted;
   sizeCanvas();
   bindCanvas();
   bindKeys();
+  installLanes(kit);
+  installInbox(kit);
+  installHistory(kit);
+  installScrub(kit);
   window.addEventListener("resize", sizeCanvas);
   state.app.set_still(freeze);
   // Reduced motion turns the hover bob off, and the page follows the setting as it changes.
