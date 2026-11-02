@@ -586,6 +586,40 @@ mod tests {
         assert_eq!(render_dirs(), before, "the render directories were removed");
     }
 
+    /// Runs the installed browser. Skipped when neither Edge nor Chrome is installed. The doctype
+    /// has a quoted identifier with a `>` in it, the shape that would move the policy out of the
+    /// head if the doctype were split in the wrong place.
+    #[tokio::test]
+    async fn a_quoted_doctype_does_not_let_a_script_run() {
+        const HEAD: &str =
+            "<!doctype html SYSTEM 'x>'><html><body style=\"background:#c00\"><h1>Totals</h1>";
+        let browser = default_browser();
+        if !browser.is_file() {
+            eprintln!("skipped: no Edge or Chrome at {}", browser.display());
+            return;
+        }
+        let _browser = BROWSER.lock().await;
+        let before = render_dirs();
+        let plain = render(&browser, &format!("{HEAD}</body></html>"))
+            .await
+            .expect("the page renders");
+        let hostile = render(
+            &browser,
+            &format!(
+                "{HEAD}<script>document.body.style.background='#0c0';\
+                 document.querySelector('h1').textContent='SCRIPT RAN'</script></body></html>"
+            ),
+        )
+        .await
+        .expect("the scripted page renders");
+        // Compared whole, not with assert_eq, so a failure does not print two PNGs.
+        assert!(
+            hostile.png == plain.png,
+            "the script ran: the scripted page renders differently"
+        );
+        assert_eq!(render_dirs(), before, "the render directories were removed");
+    }
+
     fn render_dirs() -> Vec<PathBuf> {
         let mut dirs: Vec<PathBuf> = std::fs::read_dir(std::env::temp_dir())
             .expect("the temp directory lists")

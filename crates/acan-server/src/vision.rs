@@ -13,9 +13,11 @@
 mod browser;
 mod judge;
 
+use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 
 use acan_core::{Command, GateRunId, Step, SystemCmd, TaskId, VisionCounts, VisionStatus, World};
 use acan_git::Preparation;
@@ -75,6 +77,9 @@ pub fn default_data_dir() -> PathBuf {
 pub struct Vision {
     browser: PathBuf,
     root: PathBuf,
+    /// The runs this process is witnessing now. A stored `pending` record outside this set was
+    /// left by a witness that a restart interrupted.
+    running: Arc<Mutex<BTreeSet<GateRunId>>>,
 }
 
 impl Vision {
@@ -108,6 +113,7 @@ impl Vision {
         Ok(Self {
             browser: config.browser.clone(),
             root,
+            running: Arc::default(),
         })
     }
 
@@ -115,6 +121,25 @@ impl Vision {
     /// path never leaves the root.
     fn run_dir(&self, task: TaskId, run: GateRunId) -> PathBuf {
         self.root.join(task.to_string()).join(run.to_string())
+    }
+
+    /// Marks `run` as witnessed by this process until the returned guard drops.
+    fn witnessing(&self, run: GateRunId) -> Witnessing {
+        self.running
+            .lock()
+            .expect("the running set is not poisoned")
+            .insert(run);
+        Witnessing {
+            running: Arc::clone(&self.running),
+            run,
+        }
+    }
+
+    fn is_witnessed(&self, run: GateRunId) -> bool {
+        self.running
+            .lock()
+            .expect("the running set is not poisoned")
+            .contains(&run)
     }
 
     /// The stored record of `run`, if one was written.
@@ -332,7 +357,8 @@ impl VisionWitness {
 }
 
 /// The record `GET /api/tasks/{task}/vision` serves for `run`: the stored one, `pending` when
-/// none is stored yet, or `failed` when this server runs no vision witness.
+/// none is stored yet, or `failed` when this server runs no vision witness or a stored check was
+/// interrupted by a restart.
 ///
 /// # Errors
 ///
@@ -349,10 +375,17 @@ pub(crate) async fn served(
             "this server runs no vision witness".to_owned(),
         ));
     };
-    Ok(vision
-        .record(task, run)
-        .await?
-        .unwrap_or_else(|| VisionWitness::new(task, run, WitnessStatus::Pending)))
+    let Some(record) = vision.record(task, run).await? else {
+        return Ok(VisionWitness::new(task, run, WitnessStatus::Pending));
+    };
+    if matches!(record.status, WitnessStatus::Pending) && !vision.is_witnessed(run) {
+        return Ok(VisionWitness::failed(
+            task,
+            run,
+            "the server stopped before the vision check finished".to_owned(),
+        ));
+    }
+    Ok(record)
 }
 
 /// The latest scope-first gate run of `task`, or `None` when it has none.
@@ -367,6 +400,22 @@ pub(crate) fn latest_run(world: &World, task: TaskId) -> Option<GateRunId> {
         .map(|(run, _)| *run)
 }
 
+/// Keeps `run` in [`Vision::witnessing`] until it drops, including on an early return.
+struct Witnessing {
+    running: Arc<Mutex<BTreeSet<GateRunId>>>,
+    run: GateRunId,
+}
+
+impl Drop for Witnessing {
+    fn drop(&mut self) {
+        // A destructor never panics. The set's critical sections cannot panic, so a poisoned
+        // lock is not expected here; skipping the removal is the only safe thing left to do.
+        if let Ok(mut running) = self.running.lock() {
+            running.remove(&self.run);
+        }
+    }
+}
+
 /// Runs the vision witness of `run` and records its verdicts. Nothing here returns an error or
 /// changes the gate: a failure is a `failed` record or a `not_checked` check, and is logged.
 pub(crate) async fn witness<C: ModelClient>(
@@ -377,6 +426,7 @@ pub(crate) async fn witness<C: ModelClient>(
     run: GateRunId,
     scope: &Scope,
 ) {
+    let _witnessing = vision.witnessing(run);
     let pending = VisionWitness::new(task, run, WitnessStatus::Pending);
     if let Err(err) = vision.save(task, run, &pending).await {
         tracing::warn!(%task, %run, error = %err, "the vision record could not be written");
@@ -584,6 +634,11 @@ async fn page(
                 .unwrap_or("with no content type"),
         ));
     }
+    if kept.truncated {
+        return Err(format!(
+            "the {what} page was longer than the capture limit, so it was not judged"
+        ));
+    }
     browser::render(&vision.browser, &kept.body)
         .await
         .map_err(|err| format!("the {what} page was not rendered: {err}"))
@@ -760,6 +815,36 @@ mod tests {
                 .root
                 .starts_with(std::fs::canonicalize(data.path()).expect("resolves"))
         );
+    }
+
+    #[tokio::test]
+    async fn a_pending_record_that_no_witness_runs_is_reported_as_interrupted() {
+        let (task, run) = ids();
+        let repo = tempfile::tempdir().expect("a repo dir");
+        let data = tempfile::tempdir().expect("a data dir");
+        let vision = Vision::open(
+            &VisionConfig {
+                browser: PathBuf::from(EDGE),
+                data_dir: data.path().to_path_buf(),
+            },
+            repo.path(),
+        )
+        .expect("opens");
+        let pending = VisionWitness::new(task, run, WitnessStatus::Pending);
+        vision.save(task, run, &pending).await.expect("saves");
+        let interrupted = served(Some(&vision), task, run).await.expect("serves");
+        assert_eq!(interrupted.status, WitnessStatus::Failed);
+        assert!(
+            interrupted
+                .failed_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("stopped")),
+            "{interrupted:?}"
+        );
+        let witnessing = vision.witnessing(run);
+        let running = served(Some(&vision), task, run).await.expect("serves");
+        assert_eq!(running.status, WitnessStatus::Pending);
+        drop(witnessing);
     }
 
     #[tokio::test]
