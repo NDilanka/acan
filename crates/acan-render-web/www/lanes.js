@@ -2,6 +2,8 @@
 // and check. A row whose agent holds a task but has sent nothing for STALE_MS is flagged stale.
 // The row logic has no DOM, so Node can test it. `installLanes` binds the strip to the page.
 
+import { workerCommand, workerSummary } from "./firstrun.js";
+
 // A worker renews its lease every 20 seconds, so two minutes with no event from an agent that
 // holds a task means it has stopped talking to the origin.
 export const STALE_MS = 2 * 60 * 1000;
@@ -92,12 +94,25 @@ export function checkWords(check) {
   return check === null ? "" : `check ${check.name} ${check.state}`;
 }
 
-// What the strip says with no agent: the line and the command that starts a worker.
+// What the strip says with no agent, on a server without GET /api/workers: the line and the
+// command that starts an outside worker, the same command the first-run checklist offers.
 export function emptyLines(origin) {
   return {
     line: "No worker connected. Start one with:",
-    command: `acan-worker --server ${origin} --token <agent token> --repo <repo path>`,
+    command: workerCommand(origin),
   };
+}
+
+// The strip's head status and its empty state, from the shared GET /api/workers answer and the
+// view's agents. With the route, its words are the first-run checklist's own; without it (404,
+// or no answer yet) the strip infers from the view's agents as before.
+export function workerLines(answer, agents, origin) {
+  const summary = workerSummary(answer, agents, origin);
+  if (summary.kind === "outside" || summary.kind === "connected") {
+    const { line, command } = emptyLines(origin);
+    return { kind: summary.kind, status: summary.status, line, command, setKey: false };
+  }
+  return { kind: summary.kind, status: summary.status, line: summary.detail, command: null, setKey: summary.setKey };
 }
 
 // The G chord. `armed` is when G was pressed, or null. Returns the chord's new state, whether
@@ -172,6 +187,24 @@ function rowButton(row) {
   return button;
 }
 
+// The worker line as nodes: its words with `code` in backticks, the command, and Set a key, which
+// opens the page's key setup when the shell shows its button.
+function workerWords(workers) {
+  const nodes = [element("span", undefined, "")];
+  nodes[0].replaceChildren(...workers.line.split("`").map((part, i) => (i % 2 === 0 ? document.createTextNode(part) : element("code", undefined, part))));
+  if (workers.command) nodes.push(element("code", undefined, workers.command));
+  if (workers.setKey) {
+    const opener = ["setup-open", "setup-manage"].map((id) => document.getElementById(id)).find((el) => el !== null && !el.hidden);
+    if (opener) {
+      const button = element("button", "set-key", "Set a key");
+      button.type = "button";
+      button.addEventListener("click", () => opener.click());
+      nodes.push(button);
+    }
+  }
+  return nodes;
+}
+
 // Binds the strip to `#lanes`. `kit` carries the page state, the feed, the clock, and the
 // registration points for paint and keys.
 export function installLanes(kit) {
@@ -179,9 +212,13 @@ export function installLanes(kit) {
   const list = element("ol");
   const empty = element("p", "empty");
   const head = element("h3");
-  head.append(element("span", undefined, "Agents"), element("span", "keys"));
+  const status = element("span", "status");
+  status.setAttribute("aria-live", "polite");
+  head.append(element("span", undefined, "Agents"), status, element("span", "keys"));
   head.lastChild.innerHTML = "<kbd>G</kbd> <kbd>1</kbd>-<kbd>9</kbd> ride";
-  panel.append(head, list, empty);
+  // A worker waiting for a model key says so above the rows too, since its rows can still show.
+  const waiting = element("p", "workers");
+  panel.append(head, waiting, list, empty);
   const shown = new Map();
   let last = { version: -1, feed: -1, tick: -1 };
 
@@ -190,17 +227,21 @@ export function installLanes(kit) {
     if (view === null) return;
     const now = kit.clock();
     const tick = Math.floor(now / TICK_MS);
-    if (last.version === kit.state.renderedVersion && last.feed === kit.feed.version && last.tick === tick) return;
-    last = { version: kit.state.renderedVersion, feed: kit.feed.version, tick };
+    kit.workers?.refresh();
+    const answer = kit.workers?.answer() ?? null;
+    if (last.version === kit.state.renderedVersion && last.feed === kit.feed.version && last.tick === tick && last.answer === answer) return;
+    last = { version: kit.state.renderedVersion, feed: kit.feed.version, tick, answer };
     panel.hidden = false;
     const rows = laneRows(view, lastActivity(kit.feed.events), now);
     kit.lanes = rows;
     empty.hidden = rows.length > 0;
     list.hidden = rows.length === 0;
-    if (rows.length === 0) {
-      const { line, command } = emptyLines(location.origin);
-      empty.replaceChildren(element("span", undefined, line), element("code", undefined, command));
-    }
+    const workers = workerLines(answer, view.agents.length, location.origin);
+    status.textContent = workers.status;
+    status.dataset.kind = workers.kind;
+    waiting.hidden = !(workers.setKey && rows.length > 0);
+    if (!waiting.hidden) waiting.replaceChildren(...workerWords(workers));
+    if (rows.length === 0) empty.replaceChildren(...workerWords(workers));
     const focused = list.contains(document.activeElement) ? document.activeElement.dataset.agent : null;
     const items = rows.map((row) => {
       const before = shown.get(row.agent);
@@ -221,6 +262,7 @@ export function installLanes(kit) {
   };
 
   kit.onPaint(paint);
+  kit.workers?.onChange(paint);
   setInterval(paint, TICK_MS);
   // G and a digit ride that lane's agent; keys.js owns the chord and calls this.
   kit.rideLane = (index) => {

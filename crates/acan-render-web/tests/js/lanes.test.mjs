@@ -13,7 +13,9 @@ import {
   goStep,
   laneRows,
   lastActivity,
+  workerLines,
 } from "../../www/lanes.js";
+import { steps, workerCommand } from "../../www/firstrun.js";
 
 const T0 = 1_760_000_000_000;
 
@@ -129,7 +131,8 @@ test("the check reads as words for the row's label", () => {
 test("with no agent the strip names the worker command against this origin", () => {
   const { line, command } = emptyLines("http://127.0.0.1:7311");
   assert.equal(line, "No worker connected. Start one with:");
-  assert.equal(command, "acan-worker --server http://127.0.0.1:7311 --token <agent token> --repo <repo path>");
+  assert.equal(command, "acan-worker --server http://127.0.0.1:7311 --token <agent token from .acan/tokens.json> --repo <path to your repo>");
+  assert.equal(command, workerCommand("http://127.0.0.1:7311"), "the checklist offers the same command");
   assert.doesNotMatch(line + command, /\$|cost|token usage/i);
 });
 
@@ -146,4 +149,46 @@ test("G then a letter another panel answers goes to it; any other letter is left
   const letters = new Map([["i", () => {}]]);
   assert.deepEqual(goStep(100, "I", 200, letters), { armed: null, taken: true, action: { kind: "go", key: "i" } });
   assert.deepEqual(goStep(100, "q", 200, letters), { armed: null, taken: false, action: null });
+});
+
+function workersAnswer(...states) {
+  return { status: 200, body: { workers: states.map((state, i) => ({ id: `local-${i + 1}`, state, last: null })) } };
+}
+
+test("with GET /api/workers the strip's status and empty state read the server's workers", () => {
+  const origin = "http://127.0.0.1:7311";
+  const running = workerLines(workersAnswer("running", "no_key"), 0, origin);
+  assert.deepEqual(running, { kind: "running", status: "1 local worker running", line: "1 local worker running.", command: null, setKey: false });
+  const keyless = workerLines(workersAnswer("no_key"), 1, origin);
+  assert.equal(keyless.line, "Workers are waiting for a model key.");
+  assert.equal(keyless.setKey, true, "the line links to Set a key");
+  assert.equal(keyless.command, null, "a server that runs its workers needs no outside command");
+  const none = workerLines(workersAnswer(), 0, origin);
+  assert.equal(none.kind, "none");
+  assert.match(none.line, /--workers 1/);
+});
+
+test("without GET /api/workers the strip infers from the view's agents, as before", () => {
+  const origin = "http://127.0.0.1:7311";
+  for (const answer of [{ status: 404, body: null }, { status: 403, body: null }, null]) {
+    const empty = workerLines(answer, 0, origin);
+    assert.deepEqual(empty, { kind: "outside", status: "no worker connected", ...emptyLines(origin), setKey: false });
+    assert.equal(workerLines(answer, 2, origin).status, "2 workers connected");
+  }
+});
+
+test("the strip and the first-run worker step never disagree on the same answer", () => {
+  const origin = "http://127.0.0.1:7311";
+  const answers = [workersAnswer("running"), workersAnswer("no_key", "no_key"), workersAnswer(), { status: 404, body: null }, null];
+  for (const answer of answers) {
+    for (const agents of [0, 2]) {
+      const view = { agents: Array.from({ length: agents }, (_, i) => ({ id: `a${i}` })), orders: [], lanes: [] };
+      const step = steps({ token: true, workers: answer, view, origin }).find((s) => s.id === "worker");
+      const lanes = workerLines(answer, agents, origin);
+      const lanesDone = lanes.kind === "running" || lanes.kind === "connected";
+      assert.equal(step.state === "done", lanesDone, `${JSON.stringify(answer)} with ${agents} agents`);
+      assert.equal(step.action?.kind === "setup", lanes.setKey);
+      if (step.command) assert.equal(lanes.command, step.command);
+    }
+  }
 });

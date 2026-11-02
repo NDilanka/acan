@@ -59,6 +59,7 @@ import { installInbox } from "./inbox.js";
 import { installHistory } from "./history.js";
 import { installScrub } from "./scrub.js";
 import { installFirstRun, paintFirstRun } from "./firstrun-panel.js";
+import { onWorkers, refreshWorkers, workersAnswer } from "./workers.js";
 import { closeViewer, installVision, placeVisionPins, syncVision, viewerOpen, viewerTakesEscape } from "./vision-pins.js";
 
 const ZOOM_KEY = 1.25;
@@ -99,6 +100,8 @@ const kit = {
   get,
   setLink,
   requestRender,
+  // The shared GET /api/workers answer, which the first-run checklist reads too.
+  workers: { answer: workersAnswer, refresh: refreshWorkers, onChange: onWorkers },
   onPaint: (hook) => paintHooks.push(hook),
   onKey: (hook) => keyHooks.push(hook),
 };

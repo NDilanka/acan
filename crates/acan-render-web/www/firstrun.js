@@ -61,26 +61,43 @@ export function workerCommand(origin) {
   return `acan-worker --server ${origin} --token <agent token from .acan/tokens.json> --repo <path to your repo>`;
 }
 
-function workerStep(workers, agents, origin) {
-  const step = { id: "worker", title: "Connect a worker" };
-  const state = workersState(workers);
+// The workers in one summary, read by the worker step here and by the lanes strip's status and
+// empty state, so the two never disagree. `answer` is the GET /api/workers answer, `agents` the
+// view's agent count. `kind` is `running`, `no_key`, `none`, `connected` (outside workers the
+// view shows, on a server without the route) or `outside` (none of those yet). `status` is the
+// short words for a strip's head, and `setKey` asks for the Set a key control.
+export function workerSummary(answer, agents, origin) {
+  const state = workersState(answer);
   if (state.kind === "running") {
-    return { ...step, state: DONE, detail: `${plural(state.running, "local worker")} running.`, action: null };
+    const words = `${plural(state.running, "local worker")} running`;
+    return { kind: "running", done: true, status: words, detail: `${words}.`, setKey: false };
   }
   if (state.kind === "no_key") {
-    return { ...step, state: TODO, detail: "Workers are waiting for a model key.", action: { kind: "setup", label: "Set a key" } };
+    return { kind: "no_key", done: false, status: "waiting for a model key", detail: "Workers are waiting for a model key.", setKey: true };
   }
   if (state.kind === "none") {
-    return { ...step, state: TODO, detail: "Start `acan serve` with `--workers 1`, so it runs a worker for you.", action: null };
+    return { kind: "none", done: false, status: "no local worker", detail: "Start `acan serve` with `--workers 1`, so it runs a worker for you.", setKey: false };
   }
-  if (agents > 0) return { ...step, state: DONE, detail: `${plural(agents, "worker")} connected.`, action: null };
+  if (agents > 0) {
+    const words = `${plural(agents, "worker")} connected`;
+    return { kind: "connected", done: true, status: words, detail: `${words}.`, setKey: false };
+  }
   return {
-    ...step,
-    state: TODO,
+    kind: "outside",
+    done: false,
+    status: "no worker connected",
     detail: "Start a worker with an agent token from .acan/tokens.json. The demo's `pwsh demo/run.ps1` starts its own server and workers instead.",
     command: workerCommand(origin),
-    action: { kind: "copy", label: "Copy command" },
+    setKey: false,
   };
+}
+
+function workerStep(workers, agents, origin) {
+  const summary = workerSummary(workers, agents, origin);
+  const step = { id: "worker", title: "Connect a worker", state: summary.done ? DONE : TODO, detail: summary.detail };
+  if (summary.setKey) return { ...step, action: { kind: "setup", label: "Set a key" } };
+  if (summary.command) return { ...step, command: summary.command, action: { kind: "copy", label: "Copy command" } };
+  return { ...step, action: null };
 }
 
 function plural(count, word) {

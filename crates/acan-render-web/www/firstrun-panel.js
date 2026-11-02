@@ -1,20 +1,15 @@
 // The first-run checklist on the page: an island at the top right that walks a new tester from
 // sign-in to watching the map, until they dismiss it. What each step says is decided in firstrun.js.
-// It reads GET /api/setup, GET /api/workers and GET /api/plant itself, with its own fetch, so a
-// server without a route (404) or a refused read never signs the tester out.
+// It reads GET /api/setup and GET /api/plant itself, with its own fetch, so a server without a
+// route (404) or a refused read never signs the tester out. GET /api/workers is read once for the
+// page, in workers.js, so the lanes strip says the same.
 import { $, card, gate, params, replay, slipEl, state } from "./state.js";
-import { DONE, FIRSTRUN_KEY, UNAVAILABLE, UNKNOWN, contractOf, progressText, shouldShow, steps, workersState } from "./firstrun.js";
+import { DONE, FIRSTRUN_KEY, UNAVAILABLE, UNKNOWN, contractOf, progressText, shouldShow, steps } from "./firstrun.js";
+import { loadWorkers, onWorkers, refreshWorkers, workersAnswer } from "./workers.js";
 
 const panel = $("firstrun");
 
-// While the worker step waits, the workers are read again at most this often, when the view moves.
-const WORKERS_EVERY_MS = 5000;
-
 let setup = null;
-// The GET /api/workers answer, `{ status, body }`, or null before one.
-let workers = null;
-let workersAt = 0;
-let workersInFlight = false;
 // undefined until the plant is asked, then null (the server did not say) or `{ present, version }`.
 let contract;
 let checking = false;
@@ -54,6 +49,7 @@ export function installFirstRun() {
   // The clash card and the slip need the room more, so the checklist folds while either shows.
   const observer = new MutationObserver(paintFirstRun);
   for (const el of [card, slipEl, gate]) observer.observe(el, { attributes: true, attributeFilter: ["hidden"] });
+  onWorkers(paintFirstRun);
   loadSetup();
 }
 
@@ -71,29 +67,6 @@ async function loadSetup() {
   paintFirstRun();
   loadWorkers();
   if (state.token && contract === undefined) checkContract();
-}
-
-// Reads the server's own workers. A server without the route answers 404, and the step falls back
-// to the view's agents.
-async function loadWorkers() {
-  if (!state.token || workersInFlight) return;
-  workersInFlight = true;
-  workersAt = Date.now();
-  try {
-    const res = await fetch("/api/workers", { headers: { Authorization: `Bearer ${state.token}` } });
-    workers = { status: res.status, body: res.ok ? await res.json().catch(() => null) : null };
-  } catch {
-    workers = { status: 0, body: null };
-  }
-  workersInFlight = false;
-  paintFirstRun();
-}
-
-// The workers change without an event the view carries, such as a key arriving, so a waiting
-// worker step reads them again now and then while the view moves.
-function refreshWorkers() {
-  if (workers?.status !== 200 || workersState(workers).kind === "running") return;
-  if (Date.now() - workersAt >= WORKERS_EVERY_MS) loadWorkers();
 }
 
 // Asks the plant for its contract field. A read only: it changes nothing on the server.
@@ -150,7 +123,7 @@ export function paintFirstRun() {
     token: Boolean(state.token),
     setup,
     contract,
-    workers,
+    workers: workersAnswer(),
     view: state.view,
     watched: false,
     origin: location.origin,
