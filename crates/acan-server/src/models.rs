@@ -233,10 +233,13 @@ impl Models {
     }
 }
 
-/// Whether a failed call for `role` may be answered offline. A foreman, vision or director call
-/// never is: a tour the offline client made up would pass for a directed one.
+/// Whether a failed call for `role` may be answered offline. A foreman, vision, director or wonder
+/// call never is: an offline reply would pass for a directed tour or a checked page.
 fn answers_offline(role: Role) -> bool {
-    !matches!(role, Role::Foreman | Role::Vision | Role::Director)
+    !matches!(
+        role,
+        Role::Foreman | Role::Vision | Role::Director | Role::Wonder
+    )
 }
 
 /// The refusal for a call to a role that is off for want of a Meta key. Such a role has no route,

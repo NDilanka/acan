@@ -1,5 +1,6 @@
 use acan_llm::{
-    ApiKey, ApiKeys, ConfigError, LlmConfig, ModelClient, OpenAiCompatible, Role, TokenLimitField,
+    ApiKey, ApiKeys, ConfigError, LlmConfig, LlmError, ModelClient, OpenAiCompatible, Role,
+    TokenLimitField,
 };
 
 const CANARY: &str = "sk-canary-must-never-print";
@@ -155,6 +156,42 @@ fn director_route_is_optional_and_checked_when_present() {
     }
 }
 
+#[tokio::test]
+async fn an_unrouted_wonder_role_sends_nothing() {
+    let config = LlmConfig::from_toml_str(CONFIG).expect("config is valid without a wonder route");
+    let mut keys = ApiKeys::default();
+    keys.insert("meta", ApiKey::new(CANARY));
+    let client = OpenAiCompatible::new(config, keys).expect("client builds");
+
+    let err = client
+        .chat(Role::Wonder, acan_llm::ChatRequest::default())
+        .await
+        .expect_err("wonder has no route");
+    assert!(
+        matches!(
+            err,
+            LlmError::Config(ConfigError::Unrouted { role: Role::Wonder })
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_wonder_route_must_name_a_known_provider() {
+    let routed =
+        format!("{CONFIG}\n[routing.wonder]\nprovider = \"meta\"\nmodel = \"muse-wonder-1.0\"\n");
+    LlmConfig::from_toml_str(&routed).expect("a wonder route to meta is valid");
+
+    let unknown = format!("{CONFIG}\n[routing.wonder]\nprovider = \"fireworks\"\n");
+    match LlmConfig::from_toml_str(&unknown).expect_err("fireworks is not defined") {
+        ConfigError::UnknownProvider { role, provider } => {
+            assert_eq!(role, Role::Wonder);
+            assert_eq!(provider, "fireworks");
+        }
+        other => panic!("expected UnknownProvider, got {other}"),
+    }
+}
+
 /// The client for `text`, with the keys the environment holds.
 fn client_from(text: &str) -> OpenAiCompatible {
     let config = LlmConfig::from_toml_str(text).expect("config is valid");
@@ -193,5 +230,15 @@ fn a_director_routed_off_meta_or_to_another_model_is_not_muse_spark() {
     assert!(
         !destination.is_muse_spark(),
         "{destination:?} is not an allowed model"
+    );
+}
+
+#[test]
+fn the_example_config_routes_wonder_to_muse_wonder() {
+    let text = include_str!("../llm.example.toml");
+    let config = LlmConfig::from_toml_str(text).expect("the example config is valid");
+    assert!(
+        format!("{config:?}").contains("muse-wonder-1.0"),
+        "the example names the wonder model"
     );
 }

@@ -180,7 +180,7 @@ fn preference(role: Role, needs_meta: bool) -> &'static [&'static str] {
     match role {
         Role::Foreman => &["meta", "baseten", "fireworks"],
         Role::Worker | Role::Fast => &["baseten", "fireworks", "meta"],
-        Role::Vision | Role::Director => &["meta"],
+        Role::Vision | Role::Director | Role::Wonder => &["meta"],
     }
 }
 
@@ -198,7 +198,7 @@ pub fn routing_roles(config: &LlmConfig) -> Vec<RoleStatus> {
             let off = role.needs_meta() && !muse_spark;
             RoleStatus {
                 role,
-                provider: (!off).then(|| config.route_of(role).to_owned()),
+                provider: config.route_of(role).filter(|_| !off).map(str::to_owned),
                 picked: false,
                 off_reason: off.then_some(NEEDS_MUSE_SPARK),
                 meta_only: role.needs_meta(),
@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn meta_alone_serves_every_role() {
         let plan = resolve(&saved(&["meta"], &[]), &ApiKeys::default()).expect("resolves");
-        assert_eq!(served_by(&plan), [Some("meta"); 5]);
+        assert_eq!(served_by(&plan), [Some("meta"); 6]);
         assert!(plan.config.is_some());
     }
 
@@ -298,11 +298,13 @@ mod tests {
                 Some("baseten"),
                 Some("baseten"),
                 None,
+                None,
                 None
             ]
         );
         assert_eq!(plan.roles[3].off_reason, Some(NEEDS_META));
         assert_eq!(plan.roles[4].off_reason, Some(NEEDS_META));
+        assert_eq!(plan.roles[5].off_reason, Some(NEEDS_META));
         assert!(plan.config.is_some(), "the other roles still run live");
     }
 
@@ -331,6 +333,7 @@ mod tests {
                 Some("fireworks"),
                 Some("fireworks"),
                 None,
+                None,
                 None
             ]
         );
@@ -346,6 +349,7 @@ mod tests {
                 Some("meta"),
                 Some("baseten"),
                 Some("baseten"),
+                Some("meta"),
                 Some("meta"),
                 Some("meta"),
             ]
@@ -446,6 +450,7 @@ mod tests {
                     (Role::Fast, false),
                     (Role::Vision, true),
                     (Role::Director, true),
+                    (Role::Wonder, true),
                 ]
             );
         }

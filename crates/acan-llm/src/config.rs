@@ -62,6 +62,7 @@ pub struct Route {
 
 /// One route per role. Foreman, worker and fast must be routed, so a missing one fails at load
 /// time. Vision and director are optional: without a route, they use the foreman's route.
+/// Wonder is optional and has no fallback: without its route, no wonder call is sent.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Routing {
@@ -72,27 +73,35 @@ pub struct Routing {
     pub vision: Option<Route>,
     #[serde(default)]
     pub director: Option<Route>,
+    #[serde(default)]
+    pub wonder: Option<Route>,
 }
 
 impl Routing {
-    fn route(&self, role: Role) -> &Route {
+    fn route(&self, role: Role) -> Option<&Route> {
         match role {
-            Role::Foreman => &self.foreman,
-            Role::Worker => &self.worker,
-            Role::Fast => &self.fast,
-            Role::Vision => self.vision.as_ref().unwrap_or(&self.foreman),
-            Role::Director => self.director.as_ref().unwrap_or(&self.foreman),
+            Role::Foreman => Some(&self.foreman),
+            Role::Worker => Some(&self.worker),
+            Role::Fast => Some(&self.fast),
+            Role::Vision => Some(self.vision.as_ref().unwrap_or(&self.foreman)),
+            Role::Director => Some(self.director.as_ref().unwrap_or(&self.foreman)),
+            Role::Wonder => self.wonder.as_ref(),
+        }
+    }
+
+    fn route_mut(&mut self, role: Role) -> &mut Route {
+        match role {
+            Role::Foreman => &mut self.foreman,
+            Role::Worker => &mut self.worker,
+            Role::Fast => &mut self.fast,
+            Role::Vision => self.vision.get_or_insert_with(|| self.foreman.clone()),
+            Role::Director => self.director.get_or_insert_with(|| self.foreman.clone()),
+            Role::Wonder => self.wonder.get_or_insert_with(|| self.foreman.clone()),
         }
     }
 
     fn set(&mut self, role: Role, route: Route) {
-        match role {
-            Role::Foreman => self.foreman = route,
-            Role::Worker => self.worker = route,
-            Role::Fast => self.fast = route,
-            Role::Vision => self.vision = Some(route),
-            Role::Director => self.director = Some(route),
-        }
+        *self.route_mut(role) = route;
     }
 }
 
@@ -142,10 +151,12 @@ impl LlmConfig {
         &self.providers
     }
 
-    /// The name of the provider `role` is routed to.
+    /// The name of the provider `role` is routed to. `None` when the role has no route.
     #[must_use]
-    pub fn route_of(&self, role: Role) -> &str {
-        &self.routing.route(role).provider
+    pub fn route_of(&self, role: Role) -> Option<&str> {
+        self.routing
+            .route(role)
+            .map(|route| route.provider.as_str())
     }
 
     /// Where calls for `role` go: the provider its effective route names, explicit or inherited,
@@ -183,7 +194,10 @@ impl LlmConfig {
     }
 
     pub(crate) fn resolve(&self, role: Role) -> Result<ResolvedRoute<'_>, ConfigError> {
-        let route = self.routing.route(role);
+        let route = self
+            .routing
+            .route(role)
+            .ok_or(ConfigError::Unrouted { role })?;
         let provider = self
             .providers
             .iter()
@@ -222,6 +236,9 @@ impl LlmConfig {
         ] {
             self.resolve(role)?;
         }
+        if self.routing.wonder.is_some() {
+            self.resolve(Role::Wonder)?;
+        }
         Ok(())
     }
 }
@@ -248,6 +265,9 @@ pub enum ConfigError {
 
     #[error("{role} routes to unknown provider {provider}")]
     UnknownProvider { role: Role, provider: String },
+
+    #[error("{role} has no route; add a [routing.{role}] block to send its calls")]
+    Unrouted { role: Role },
 
     #[error("cannot build the HTTP client")]
     Client(#[from] reqwest::Error),

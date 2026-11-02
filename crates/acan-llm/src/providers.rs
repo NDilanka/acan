@@ -151,7 +151,7 @@ mod tests {
         let names: Vec<&str> = config.providers().iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, PROVIDERS);
         for role in Role::ALL {
-            assert_eq!(config.route_of(role), "meta");
+            assert_eq!(config.route_of(role), Some("meta"));
         }
     }
 
