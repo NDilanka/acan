@@ -13,6 +13,7 @@ import {
   chipText,
   clampIndex,
   countLines,
+  countSummary,
   itemTone,
   shortHash,
   shortSha,
@@ -147,4 +148,8 @@ test("the count lines carry the payload's own figures, each with its denominator
 test("a class with no items is left out of the count line", () => {
   const [items] = countLines(play());
   assert.ok(!items.includes("obligation fulfilled"), items);
+});
+
+test("the closed count line gives the item total and the obligations passed, with the denominator", () => {
+  assert.equal(countSummary(play()), "4 items · obligations 5 of 7 passed");
 });

@@ -12,6 +12,7 @@ import {
   chipText,
   clampIndex,
   countLines,
+  countSummary,
   itemTone,
   shortHash,
   shortSha,
@@ -152,6 +153,9 @@ export function paintPlate() {
     : `${entry.order} · ${entry.error ? "the plant view was not kept" : "no tour plays"}`;
   $("receipt-shas").textContent = play ? `base ${shortSha(play.base_sha)} → merged ${shortSha(play.merged_sha)}` : "";
 
+  // The counts open under one summary line, so the item list keeps the height the plate has.
+  $("receipt-counts-wrap").hidden = !play;
+  $("receipt-counts-summary").textContent = play ? countSummary(play) : "counts";
   const counts = $("receipt-counts");
   counts.replaceChildren(...(play ? countLines(play).map((line) => element("li", line)) : []));
 
@@ -220,6 +224,8 @@ function paintMore() {
 // Wires the plate's buttons and keys. Called once at boot.
 export function bindPlate() {
   $("receipt-items").addEventListener("scroll", paintMore);
+  // The list's height follows the window's, so the count of rows below does too.
+  window.addEventListener("resize", paintMore);
   $("tour-play").addEventListener("click", togglePlay);
   $("tour-prev").addEventListener("click", () => stepBy(-1));
   $("tour-next").addEventListener("click", () => stepBy(1));
