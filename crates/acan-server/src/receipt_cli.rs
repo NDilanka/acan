@@ -14,6 +14,7 @@
 //! merges are written to its object store, and every run writes into a temporary directory that
 //! is removed when the command ends.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -24,8 +25,8 @@ use acan_git::{Preparation, PrepareOutcome, ProtectedPaths, Repo};
 use acan_intent::fold::fold;
 use acan_intent::{
     CanonicalError, CommitSha, GateState, HumanRef, ImageName, OrderRef, Receipt, RepairBudget,
-    RepairRounds, RunOutcome, Scope, ScopeBody, ScopeConfirmation, ScopeConfirmationV1, ScopeRev,
-    ScopeV1, UnixMillis,
+    RepairRounds, RepoPath, RunOutcome, Scope, ScopeBody, ScopeConfirmation, ScopeConfirmationV1,
+    ScopeRev, ScopeV1, UnixMillis,
 };
 use acan_witness::RunnerConfig;
 use clap::ValueEnum;
@@ -395,14 +396,11 @@ async fn check_contract_with(
 ) -> Result<ContractCheck, ShadowError> {
     check_ref("--base", &args.base)?;
     let (repo, base_commit) = open_base(args).await?;
-    let protected = observe::protected_paths(&observe::runner_policy());
-    let base = prepare(&repo, &base_commit, &protected, "the base").await?;
+    let protected = observe::runner_policy().mounts.protected;
     let scratch_root = tempfile::TempDir::new()
         .map_err(|err| ShadowError::Observe(format!("cannot create a scratch directory: {err}")))?;
     let snapshot = scratch_root.path().join("snapshot");
-    observe::snapshot(&repo, &base, &snapshot)
-        .await
-        .map_err(|err| ShadowError::Observe(err.to_string()))?;
+    write_protected(repo.root(), &base_commit, &protected, &snapshot).await?;
     let (app, corpus) =
         observe::read_protected(&snapshot).map_err(|err| ShadowError::Contract(err.to_string()))?;
     init::cross_check(&corpus).map_err(|err| ShadowError::Contract(err.to_string()))?;
@@ -478,6 +476,84 @@ async fn resolve_commit(root: &Path, spec: &str) -> Option<CommitSha> {
 fn commit_sha(text: &str) -> Result<CommitSha, ShadowError> {
     CommitSha::from_str(text)
         .map_err(|err| ShadowError::Observe(format!("{text} is not a commit: {err}")))
+}
+
+/// Writes the protected paths of `commit` into `dir`, in the layout `observe::read_protected`
+/// reads. The files are listed and read with git's read-only commands, so the clone gets no
+/// index, objects or refs. A link or a submodule under a protected path is refused, because a
+/// contract is only ever plain files.
+async fn write_protected(
+    root: &Path,
+    commit: &CommitSha,
+    protected: &BTreeSet<RepoPath>,
+    dir: &Path,
+) -> Result<(), ShadowError> {
+    let commit = commit.to_string();
+    for path in protected {
+        let listing = git_stdout(
+            root,
+            &[
+                "ls-tree",
+                "-r",
+                "-z",
+                "--full-tree",
+                &commit,
+                "--",
+                path.as_str(),
+            ],
+        )
+        .await?;
+        for entry in listing
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+        {
+            let entry = String::from_utf8_lossy(entry);
+            let malformed = || ShadowError::Observe(format!("git listed {entry:?} oddly"));
+            let (meta, name) = entry.split_once('\t').ok_or_else(malformed)?;
+            let mut fields = meta.split(' ');
+            let (Some(mode), Some(kind), Some(oid)) = (fields.next(), fields.next(), fields.next())
+            else {
+                return Err(malformed());
+            };
+            if kind != "blob" || mode == "120000" {
+                return Err(ShadowError::Contract(format!(
+                    "{name} is a link or a submodule; a contract is only plain files"
+                )));
+            }
+            let bytes = git_stdout(root, &["cat-file", "blob", oid]).await?;
+            let target = dir.join(name);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|err| {
+                    ShadowError::Observe(format!("cannot create {}: {err}", parent.display()))
+                })?;
+            }
+            fs::write(&target, bytes).map_err(|err| {
+                ShadowError::Observe(format!("cannot write {}: {err}", target.display()))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Runs git in `root` and returns its standard output. A failure carries git's message.
+async fn git_stdout(root: &Path, args: &[&str]) -> Result<Vec<u8>, ShadowError> {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|err| ShadowError::Observe(format!("cannot run git: {err}")))?;
+    if !output.status.success() {
+        return Err(ShadowError::Observe(format!(
+            "git {} failed: {}",
+            args.first().copied().unwrap_or_default(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(output.stdout)
 }
 
 /// Prepares `commit` on the protected head. A conflict is a refusal: there is no merged commit
@@ -1059,6 +1135,56 @@ mod tests {
         assert!(
             matches!(&error, ShadowError::Usage(text) if text.contains("--check-contract")),
             "missing head: {error}"
+        );
+    }
+
+    /// Every path under `dir` with its length, sorted, so a change to a directory shows.
+    fn listing(dir: &Path) -> Vec<(PathBuf, u64)> {
+        let mut found = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(current) = pending.pop() {
+            for entry in fs::read_dir(&current).expect("a directory") {
+                let path = entry.expect("an entry").path();
+                let meta = fs::symlink_metadata(&path).expect("metadata");
+                if meta.is_dir() {
+                    pending.push(path.clone());
+                }
+                found.push((path, meta.len()));
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[cfg(unix)]
+    fn set_writable(dir: &Path, writable: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if writable { 0o755 } else { 0o555 };
+        fs::set_permissions(dir, fs::Permissions::from_mode(mode)).expect("the mode is set");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn check_contract_writes_nothing_to_the_clone() {
+        let repo = clone_with(&contract_files());
+        let git_dir = repo.path().join(".git");
+        let before = listing(&git_dir);
+        // A check that needs a file in the git directory, such as an index, fails here.
+        set_writable(&git_dir, false);
+        let probe_refused = fs::write(git_dir.join("probe"), "").is_err();
+        let checked =
+            check_contract_with(&check_args(repo.path(), "main"), &missing_docker()).await;
+        set_writable(&git_dir, true);
+
+        assert!(
+            probe_refused,
+            "the test needs a git directory its user cannot write"
+        );
+        checked.expect("the check passes with a git directory it cannot write");
+        assert_eq!(
+            listing(&git_dir),
+            before,
+            "the check left the clone's git directory as it found it"
         );
     }
 

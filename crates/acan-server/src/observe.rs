@@ -30,13 +30,13 @@ use acan_intent::admit::AdmitError;
 use acan_intent::compare::{self, CompareError, Contrast};
 use acan_intent::receipt::{self, ProbeResult, ReceiptError, ReceiptInputs};
 use acan_intent::{
-    AppContract, ArtifactHash, CanonicalError, CheckResult, Comparison, ContainerPolicy,
-    ContentHash, ContrastExample, ContrastExampleHash, ContrastExampleV1, CoreDerived, CorpusProbe,
-    DiscrepancyEpisode, EnvHash, EnvManifest, EpisodeKey, EpisodeState, EpisodeV1,
-    EvaluatorVersion, Fixture, FixtureId, FixtureSetHash, FixtureSetManifest, FoldedLedger,
-    GateContext, GateState, InvalidValue, Mask, NODE_RUNTIME, ObservationHash, ObservedRun,
-    PreparedCommit, ProbeCorpus, ProbeHash, ProbeSetHash, ProbeSetManifest, Receipt, RepoPath,
-    RunManifest, RunOutcome, RunRole, RunnerBuild, RunnerHash, RunnerManifest, RuntimeId,
+    AppContract, AppContractVersion, ArtifactHash, CanonicalError, CheckResult, Comparison,
+    ContainerPolicy, ContentHash, ContrastExample, ContrastExampleHash, ContrastExampleV1,
+    CoreDerived, CorpusProbe, DiscrepancyEpisode, EnvHash, EnvManifest, EpisodeKey, EpisodeState,
+    EpisodeV1, EvaluatorVersion, Fixture, FixtureId, FixtureSetHash, FixtureSetManifest,
+    FoldedLedger, GateContext, GateState, InvalidValue, Mask, NODE_RUNTIME, ObservationHash,
+    ObservedRun, PreparedCommit, ProbeCorpus, ProbeHash, ProbeSetHash, ProbeSetManifest, Receipt,
+    RepoPath, RunManifest, RunOutcome, RunRole, RunnerBuild, RunnerHash, RunnerManifest, RuntimeId,
     SandboxPolicyHash, Scope, ScopeConfirmation, ScopeRevision, StepId, UnixMillis,
 };
 use acan_witness::{KeptBody, RunnerConfig, SequenceInput, run_sequence, run_sequence_keeping};
@@ -282,8 +282,9 @@ pub(crate) fn runner_policy() -> ContainerPolicy {
     ContainerPolicy::default_run()
 }
 
-/// The container policy an app's runs apply: the policy of its runtime and install, with the
-/// environment the app's contract names added.
+/// The container policy an app's runs apply: the policy of its runtime and install. An
+/// `acan-app/2` contract adds the environment it names. An `acan-app/1` contract keeps the policy
+/// it has always run under, so its environment is not applied and its hashes do not change.
 ///
 /// # Errors
 ///
@@ -291,7 +292,9 @@ pub(crate) fn runner_policy() -> ContainerPolicy {
 /// refused.
 pub(crate) fn policy_for(app: &AppContract) -> Result<ContainerPolicy, ObserveError> {
     let mut policy = ContainerPolicy::for_runtime(app.runtime.as_str(), app.install.is_some())?;
-    policy.with_app_environment(&app.env)?;
+    if app.version == AppContractVersion::V2 {
+        policy.with_app_environment(&app.env)?;
+    }
     Ok(policy)
 }
 
@@ -1084,6 +1087,45 @@ mod tests {
         assert!(
             policy.image.digest.is_some(),
             "the image is pinned by digest"
+        );
+    }
+
+    /// The protected fixture contract, which is `acan-app/1` with `NODE_ENV=test`, at `version`.
+    fn fixture_app(version: &str) -> AppContract {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../acan-intent/fixtures/app-contract.json"))
+                .expect("the fixture is JSON");
+        value["version"] = serde_json::json!(version);
+        serde_json::from_value(value).expect("the fixture decodes")
+    }
+
+    #[test]
+    fn an_acan_app_1_contract_keeps_the_policy_it_always_ran_under() {
+        let app = fixture_app("acan-app/1");
+        assert_eq!(app.env.get("NODE_ENV").map(String::as_str), Some("test"));
+
+        let policy = policy_for(&app).expect("the policy");
+
+        assert_eq!(policy, runner_policy(), "its environment is not applied");
+        assert_eq!(
+            policy.sandbox_policy_hash().expect("the hash"),
+            runner_policy().sandbox_policy_hash().expect("the hash"),
+            "its policy hash, and so every receipt's, is unchanged"
+        );
+    }
+
+    #[test]
+    fn an_acan_app_2_contract_gives_the_app_its_environment() {
+        let policy = policy_for(&fixture_app("acan-app/2")).expect("the policy");
+
+        assert_eq!(
+            policy.environment.get("NODE_ENV").map(String::as_str),
+            Some("test")
+        );
+        assert_ne!(
+            policy.sandbox_policy_hash().expect("the hash"),
+            runner_policy().sandbox_policy_hash().expect("the hash"),
+            "the environment is part of the policy hash"
         );
     }
 

@@ -121,6 +121,7 @@ pub(crate) async fn create(docker: PathBuf, args: Vec<String>) -> Result<String,
     let output = Command::new(&docker)
         .args(&args)
         .stdin(Stdio::null())
+        .kill_on_drop(true)
         .output()
         .await
         .map_err(CreateError::Spawn)?;

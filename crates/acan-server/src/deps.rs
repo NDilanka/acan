@@ -17,9 +17,10 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use acan_git::{Preparation, Repo};
-use acan_intent::{AppContract, ContainerPolicy, ContainerUser, ContentHash};
+use acan_intent::{AppContract, ContainerPolicy, ContainerUser, ContentHash, NPM_REGISTRY};
 use acan_witness::{InstallError, RunnerConfig, install_dependencies};
 use serde::Serialize;
+use serde_json::{Map, Value};
 use tokio::sync::Semaphore;
 
 /// The lockfile a node app is installed from, relative to the tree's root.
@@ -133,6 +134,14 @@ pub enum DepsError {
         /// The role.
         role: Role,
     },
+    /// The lockfile names a package source the install may not fetch from. Nothing is installed.
+    #[error("the {} lockfile cannot be installed: {detail}", role.name())]
+    Lockfile {
+        /// The role.
+        role: Role,
+        /// What the lockfile names, without any URL, so no credential reaches the message.
+        detail: String,
+    },
     /// The install did not finish.
     #[error("the {} install failed: {source}", role.name())]
     Install {
@@ -147,6 +156,15 @@ pub enum DepsError {
     NoModules {
         /// The role.
         role: Role,
+    },
+    /// A path in the cache is a link, or it is open to other users, so nothing in it is trusted.
+    /// Remove the entry, or make the cache root private to this user, and run again.
+    #[error("the cache path {} cannot be used: {detail}", path.display())]
+    Tampered {
+        /// The path.
+        path: PathBuf,
+        /// What is wrong with it.
+        detail: String,
     },
     /// The entry could not be stored under its key.
     #[error("cannot store the cache entry {}: {source}", path.display())]
@@ -212,6 +230,7 @@ impl Installer<'_> {
             }
             Err(source) => return Err(io_error(&lock_path, source)),
         };
+        check_lockfile(role, &lock)?;
         let manifests = manifests(&tree).map_err(|source| io_error(&tree, source))?;
         let mut policy = ContainerPolicy::node_install();
         let image = policy
@@ -234,19 +253,20 @@ impl Installer<'_> {
             network: NETWORK,
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         };
-        if entry.join(COMPLETE).is_file() {
+        if read_entry(&entry)? == Entry::Complete {
             return Ok(Some(Installed {
                 modules: entry.join(MODULES),
                 record: record(Cache::Hit),
             }));
         }
 
-        fs::create_dir_all(self.cache).map_err(|source| io_error(self.cache, source))?;
+        prepare_root(self.cache)?;
         // The partial directory is removed when it drops, unless the entry was stored from it.
         let partial = tempfile::Builder::new()
             .prefix("partial-")
             .tempdir_in(self.cache)
             .map_err(|source| io_error(self.cache, source))?;
+        check_root(self.cache, partial.path())?;
         let work = partial.path().join("work");
         fs::create_dir(&work).map_err(|source| io_error(&work, source))?;
         open_to_install(&work).map_err(|source| io_error(&work, source))?;
@@ -266,10 +286,13 @@ impl Installer<'_> {
             return Err(DepsError::NoModules { role });
         }
         fs::write(work.join(COMPLETE), b"").map_err(|source| io_error(&work, source))?;
+        // The install left the tree open to its user. Every run reads the entry, so it is sealed
+        // before it is published.
+        seal(&work).map_err(|source| io_error(&work, source))?;
         match fs::rename(&work, &entry) {
             Ok(()) => {}
             // Another install of the same key stored the entry first. Its entry is the same tree.
-            Err(_) if entry.join(COMPLETE).is_file() => {}
+            Err(_) if matches!(read_entry(&entry), Ok(Entry::Complete)) => {}
             Err(source) => {
                 return Err(DepsError::Store {
                     path: entry,
@@ -282,6 +305,209 @@ impl Installer<'_> {
             record: record(Cache::Miss),
         }))
     }
+}
+
+/// Refuses a lockfile that names a package source the install may not fetch from. The install has
+/// network egress, so each fetch is a request the host makes. Only the public registry is allowed.
+/// A git, file, plain-HTTP or local-address source is refused, a link outside the tree is refused,
+/// and so is a version that names a source where a semver version belongs.
+///
+/// Residual risk: npm follows the redirects the registry sends, and the host resolves the
+/// registry's name. This check sees neither.
+fn check_lockfile(role: Role, lock: &[u8]) -> Result<(), DepsError> {
+    let value: Value = serde_json::from_slice(lock).map_err(|_| DepsError::Lockfile {
+        role,
+        detail: "it is not JSON".to_owned(),
+    })?;
+    check_sources(role, "the lockfile root", &value)
+}
+
+/// Checks each entry of a lockfile and every entry nested under it. `name` is the key the entry
+/// sits under, which a refusal names.
+fn check_sources(role: Role, name: &str, value: &Value) -> Result<(), DepsError> {
+    let Some(entry) = value.as_object() else {
+        return Ok(());
+    };
+    check_entry(role, name, entry)?;
+    for (key, child) in entry {
+        check_sources(role, key, child)?;
+    }
+    Ok(())
+}
+
+/// Checks one entry's `resolved` source and its `version`.
+fn check_entry(role: Role, name: &str, entry: &Map<String, Value>) -> Result<(), DepsError> {
+    if let Some(resolved) = entry.get("resolved").and_then(Value::as_str) {
+        if entry.get("link") == Some(&Value::Bool(true)) {
+            if !is_tree_path(resolved) {
+                return Err(DepsError::Lockfile {
+                    role,
+                    detail: format!("{name} links to a path outside the tree"),
+                });
+            }
+        } else if !resolved.starts_with(NPM_REGISTRY) {
+            return Err(DepsError::Lockfile {
+                role,
+                detail: format!(
+                    "{name} names a source other than {NPM_REGISTRY}, and the install fetches \
+                     only from that registry"
+                ),
+            });
+        }
+    }
+    if let Some(version) = entry.get("version").and_then(Value::as_str)
+        && version.contains([':', '/', '#'])
+    {
+        return Err(DepsError::Lockfile {
+            role,
+            detail: format!("{name} names a source where a version belongs"),
+        });
+    }
+    Ok(())
+}
+
+/// Whether a link's target is a relative path that stays inside the tree.
+fn is_tree_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains([':', '\\'])
+        && path.split('/').all(|part| part != "..")
+}
+
+/// What the cache holds under one key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    /// Nothing is stored under the key, or only a partial entry is.
+    Absent,
+    /// A complete entry: a real directory with a real `node_modules` and the complete marker, and
+    /// nothing in it that another user can write.
+    Complete,
+}
+
+/// Reads what the cache holds under `entry`. A link where the entry, its `node_modules` or its
+/// marker should be, or an entry another user can write, is refused: a run would mount or trust
+/// whatever it reaches.
+fn read_entry(entry: &Path) -> Result<Entry, DepsError> {
+    let marker = entry.join(COMPLETE);
+    match fs::symlink_metadata(&marker) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Err(tampered(&marker, "the complete marker is not a plain file")),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(Entry::Absent),
+        Err(source) => return Err(io_error(&marker, source)),
+    }
+    let meta = fs::symlink_metadata(entry).map_err(|source| io_error(entry, source))?;
+    if !meta.is_dir() {
+        return Err(tampered(entry, "the entry is not a directory"));
+    }
+    if writable_by_others(&meta) {
+        return Err(tampered(
+            entry,
+            "the entry is writable by its group or others; remove it and install again",
+        ));
+    }
+    let modules = entry.join(MODULES);
+    let modules_meta =
+        fs::symlink_metadata(&modules).map_err(|source| io_error(&modules, source))?;
+    if !modules_meta.is_dir() {
+        return Err(tampered(&modules, "node_modules is not a plain directory"));
+    }
+    Ok(Entry::Complete)
+}
+
+/// Creates the cache root when it is missing, private to its owner. Its parents are created as
+/// usual.
+fn prepare_root(cache: &Path) -> Result<(), DepsError> {
+    if let Some(parent) = cache.parent() {
+        fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+    }
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(cache) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(source) => Err(io_error(cache, source)),
+    }
+}
+
+/// Checks the cache root before anything is stored in it: a real directory, not open to its
+/// group or others, and owned by the user this process runs as. `owner` is a directory this
+/// process created inside the root, so its owner is that user.
+fn check_root(cache: &Path, owner: &Path) -> Result<(), DepsError> {
+    let root = fs::symlink_metadata(cache).map_err(|source| io_error(cache, source))?;
+    if !root.is_dir() {
+        return Err(tampered(cache, "the cache root is not a plain directory"));
+    }
+    if writable_by_others(&root) {
+        return Err(tampered(
+            cache,
+            "the cache root is writable by its group or others; make it private to this user",
+        ));
+    }
+    let ours = fs::metadata(owner).map_err(|source| io_error(owner, source))?;
+    if !same_owner(&root, &ours) {
+        return Err(tampered(cache, "the cache root belongs to another user"));
+    }
+    Ok(())
+}
+
+fn tampered(path: &Path, detail: &str) -> DepsError {
+    DepsError::Tampered {
+        path: path.to_path_buf(),
+        detail: detail.to_owned(),
+    }
+}
+
+/// Whether the group or others can write `meta`.
+#[cfg(unix)]
+fn writable_by_others(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o022 != 0
+}
+
+#[cfg(not(unix))]
+fn writable_by_others(_meta: &fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn same_owner(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.uid() == right.uid()
+}
+
+#[cfg(not(unix))]
+fn same_owner(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
+    true
+}
+
+/// Clears the group and other write bits of every directory and file under `root`, and of `root`
+/// itself. Links are left alone: changing a link's mode would change its target.
+#[cfg(unix)]
+fn seal(root: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fn walk(path: &Path) -> io::Result<()> {
+        let meta = fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() {
+            return Ok(());
+        }
+        if meta.is_dir() {
+            for entry in fs::read_dir(path)? {
+                walk(&entry?.path())?;
+            }
+        }
+        let mode = meta.permissions().mode() & 0o7777;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode & !0o022))
+    }
+    walk(root)
+}
+
+#[cfg(not(unix))]
+fn seal(_root: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 /// The directory cache entries are stored under: `explicit` when given, else
@@ -442,6 +668,73 @@ mod tests {
         key(image, argv, lock, manifests).to_string()
     }
 
+    /// The refusal a lockfile gets, as its text, or `None` when it is admitted.
+    fn refusal(lock: &str) -> Option<String> {
+        check_lockfile(Role::Base, lock.as_bytes())
+            .err()
+            .map(|err| err.to_string())
+    }
+
+    #[test]
+    fn a_lockfile_that_fetches_only_from_the_registry_is_admitted() {
+        let lock = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "app", "version": "1.0.0" },
+                "node_modules/left-pad": {
+                    "version": "1.3.0",
+                    "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz",
+                    "integrity": "sha512-x"
+                },
+                "node_modules/shared": { "resolved": "packages/shared", "link": true },
+                "packages/shared": { "name": "shared", "version": "0.1.0" }
+            }
+        }"#;
+
+        assert_eq!(refusal(lock), None);
+    }
+
+    #[test]
+    fn a_source_other_than_the_registry_is_refused_and_no_url_is_named() {
+        let sources = [
+            "http://169.254.169.254/latest/meta-data.tgz",
+            "https://10.0.0.5/pkg.tgz",
+            "git+ssh://git@github.com/x/y.git#abc",
+            "file:../../outside",
+            "https://registry.npmjs.org.example.test/pkg.tgz",
+            "https://user:secret@registry.npmjs.org/pkg.tgz",
+        ];
+        for source in sources {
+            let lock = format!(
+                r#"{{"packages": {{"node_modules/pkg": {{"version": "1.0.0", "resolved": "{source}"}}}}}}"#
+            );
+
+            let text = refusal(&lock).expect("the source is refused");
+
+            assert!(text.contains("node_modules/pkg"), "{text}");
+            assert!(!text.contains(source), "the URL is not echoed: {text}");
+            assert!(!text.contains("secret"), "no credential is echoed: {text}");
+        }
+    }
+
+    #[test]
+    fn a_link_outside_the_tree_and_a_version_that_names_a_source_are_refused() {
+        for link in ["/etc", "../../outside", "C:/outside"] {
+            let lock = format!(
+                r#"{{"packages": {{"node_modules/x": {{"resolved": "{link}", "link": true}}}}}}"#
+            );
+            assert!(refusal(&lock).is_some(), "{link} is refused");
+        }
+        let lock =
+            r#"{"packages": {"node_modules/x": {"version": "git+ssh://git@github.com/x/y.git"}}}"#;
+        assert!(refusal(lock).expect("refused").contains("node_modules/x"));
+    }
+
+    #[test]
+    fn a_lockfile_that_is_not_json_is_refused() {
+        assert!(refusal("{not json").expect("refused").contains("not JSON"));
+    }
+
     #[test]
     fn the_key_follows_every_input_the_install_reads() {
         let manifests = manifests_of(&[("package.json", "{}")]);
@@ -521,6 +814,103 @@ mod tests {
             fs::read(dir.path().join("packages/a/package.json")).expect("the manifest"),
             b"{\"a\":1}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sealed_tree_is_private_to_its_owner_and_leaves_links_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let outside = tempfile::tempdir().expect("a target outside the tree");
+        let target = outside.path().join("target");
+        fs::write(&target, "x").expect("the target");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).expect("its mode");
+        let root = dir.path().join("work");
+        let modules = root.join(MODULES);
+        fs::create_dir_all(&modules).expect("the tree");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o777)).expect("open root");
+        fs::set_permissions(&modules, fs::Permissions::from_mode(0o777)).expect("open dir");
+        let file = modules.join("file.js");
+        fs::write(&file, "y").expect("a file");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o666)).expect("open file");
+        std::os::unix::fs::symlink(&target, root.join("link")).expect("a link");
+
+        seal(&root).expect("the tree is sealed");
+
+        let mode_of = |path: &Path| fs::metadata(path).expect("metadata").permissions().mode();
+        assert_eq!(
+            mode_of(&root) & 0o777,
+            0o755,
+            "the root is readable, not open"
+        );
+        assert_eq!(mode_of(&modules) & 0o022, 0, "node_modules is not open");
+        assert_eq!(mode_of(&file) & 0o022, 0, "a file is not open");
+        assert_eq!(
+            mode_of(&target) & 0o777,
+            0o644,
+            "a link's target is not changed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cache_root_others_can_write_is_refused_and_a_private_one_is_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let cache = dir.path().join("deps");
+        prepare_root(&cache).expect("a new root is created");
+        assert_eq!(
+            fs::metadata(&cache).expect("metadata").permissions().mode() & 0o777,
+            0o700,
+            "a new root is private"
+        );
+        let partial = tempfile::tempdir_in(&cache).expect("a partial directory");
+        check_root(&cache, partial.path()).expect("a private root of this user is accepted");
+
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o777)).expect("open root");
+        let refused = check_root(&cache, partial.path()).expect_err("an open root is refused");
+        assert!(matches!(refused, DepsError::Tampered { .. }), "{refused}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_or_an_open_entry_is_refused_and_a_complete_one_is_a_hit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let elsewhere = dir.path().join("elsewhere");
+        fs::create_dir_all(elsewhere.join(MODULES)).expect("a target tree");
+        fs::write(elsewhere.join(COMPLETE), "").expect("a target marker");
+
+        let good = dir.path().join("good");
+        fs::create_dir_all(good.join(MODULES)).expect("a complete entry");
+        fs::write(good.join(COMPLETE), "").expect("its marker");
+        fs::set_permissions(&good, fs::Permissions::from_mode(0o755)).expect("its mode");
+        assert_eq!(read_entry(&good).expect("a read"), Entry::Complete);
+        assert_eq!(
+            read_entry(&dir.path().join("missing")).expect("a read"),
+            Entry::Absent
+        );
+
+        let linked = dir.path().join("linked");
+        std::os::unix::fs::symlink(&elsewhere, &linked).expect("an entry link");
+        let refused = read_entry(&linked).expect_err("a linked entry is refused");
+        assert!(matches!(refused, DepsError::Tampered { .. }), "{refused}");
+
+        let linked_modules = dir.path().join("linked-modules");
+        fs::create_dir_all(&linked_modules).expect("an entry");
+        fs::write(linked_modules.join(COMPLETE), "").expect("its marker");
+        fs::set_permissions(&linked_modules, fs::Permissions::from_mode(0o755)).expect("mode");
+        std::os::unix::fs::symlink(elsewhere.join(MODULES), linked_modules.join(MODULES))
+            .expect("a modules link");
+        let refused = read_entry(&linked_modules).expect_err("a linked node_modules is refused");
+        assert!(matches!(refused, DepsError::Tampered { .. }), "{refused}");
+
+        let open = dir.path().join("open");
+        fs::create_dir_all(open.join(MODULES)).expect("an entry");
+        fs::write(open.join(COMPLETE), "").expect("its marker");
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).expect("open entry");
+        let refused = read_entry(&open).expect_err("an open entry is refused");
+        assert!(matches!(refused, DepsError::Tampered { .. }), "{refused}");
     }
 
     #[test]

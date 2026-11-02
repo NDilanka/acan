@@ -56,6 +56,9 @@ const NODE_IMAGE_DIGEST: &str =
 const NODE_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 /// Where a run mounts the install phase's `node_modules`, inside the worktree.
 const DEPENDENCIES_TARGET: &str = "/work/node_modules";
+/// The one registry an install fetches packages from. The install names it explicitly, and every
+/// `resolved` URL in a lockfile must start with it, so no other source is ever fetched.
+pub const NPM_REGISTRY: &str = "https://registry.npmjs.org/";
 
 /// Fragments that mark a variable as a credential. No variable whose name contains one reaches a
 /// container.
@@ -455,6 +458,8 @@ impl ContainerPolicy {
         policy.tmp_bytes = nonzero64(1 << 30);
         policy.environment = BTreeMap::from([
             ("HOME".to_owned(), "/tmp".to_owned()),
+            ("NPM_CONFIG_GLOBALCONFIG".to_owned(), "/dev/null".to_owned()),
+            ("NPM_CONFIG_REGISTRY".to_owned(), NPM_REGISTRY.to_owned()),
             ("NPM_CONFIG_USERCONFIG".to_owned(), "/dev/null".to_owned()),
             ("PATH".to_owned(), NODE_PATH.to_owned()),
         ]);

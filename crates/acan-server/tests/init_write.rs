@@ -187,3 +187,117 @@ fn working_tree_mode_writes_files_without_a_commit() {
     let again = run_with(&args, &mut yes).expect_err("the files exist now");
     assert!(again.to_string().contains("already exists"), "{again}");
 }
+
+#[cfg(unix)]
+#[test]
+fn the_clones_hooks_and_filters_run_nothing_while_the_branch_is_written() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (dir, repo) = clone();
+    // The filter applies to every path. It is set up after the last commit the test makes, so
+    // only acan's writes could run it.
+    fs::write(repo.join(".gitattributes"), "* filter=mark\n").expect(".gitattributes");
+    git(&repo, &["add", ".gitattributes"]);
+    git(&repo, &["commit", "-q", "-m", "attributes"]);
+    let hook_marker = dir.path().join("hook-ran");
+    let filter_marker = dir.path().join("filter-ran");
+    let hooks = dir.path().join("hooks");
+    fs::create_dir(&hooks).expect("the hooks directory");
+    for name in [
+        "pre-commit",
+        "post-commit",
+        "post-checkout",
+        "reference-transaction",
+    ] {
+        let script = hooks.join(name);
+        fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\n", hook_marker.display()),
+        )
+        .expect("a hook");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("executable");
+    }
+    git(
+        &repo,
+        &["config", "core.hooksPath", &hooks.to_string_lossy()],
+    );
+    git(
+        &repo,
+        &[
+            "config",
+            "filter.mark.clean",
+            &format!("sh -c 'touch \"{}\"; cat'", filter_marker.display()),
+        ],
+    );
+
+    run_with(&args(&repo), &mut yes).expect("the branch is written");
+
+    assert!(!hook_marker.exists(), "no hook of the clone ran");
+    assert!(!filter_marker.exists(), "no clean filter of the clone ran");
+    assert!(git(&repo, &["show", "acan/init:.acan/app.json"]).contains("acan-app/2"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_where_the_contract_goes_is_refused_and_nothing_is_written_through_it() {
+    let (dir, repo) = clone();
+    let outside = dir.path().join("outside");
+    fs::create_dir(&outside).expect("the outside directory");
+    std::os::unix::fs::symlink(&outside, repo.join(".acan")).expect("a link named .acan");
+    let mut args = args(&repo);
+    args.working_tree = true;
+
+    let err = run_with(&args, &mut yes).expect_err("a link is refused");
+
+    assert!(err.to_string().contains("link or junction"), "{err}");
+    assert_eq!(
+        fs::read_dir(&outside)
+            .expect("the outside directory")
+            .count(),
+        0,
+        "nothing was written through the link"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_inside_acan_is_refused_before_any_file_is_written() {
+    let (dir, repo) = clone();
+    let outside = dir.path().join("outside");
+    fs::create_dir(&outside).expect("the outside directory");
+    fs::create_dir(repo.join(".acan")).expect(".acan");
+    std::os::unix::fs::symlink(&outside, repo.join(".acan/probes")).expect("a link named probes");
+    let mut args = args(&repo);
+    args.working_tree = true;
+
+    let err = run_with(&args, &mut yes).expect_err("a link is refused");
+
+    assert!(err.to_string().contains("link or junction"), "{err}");
+    assert_eq!(
+        fs::read_dir(&outside)
+            .expect("the outside directory")
+            .count(),
+        0,
+        "nothing was written through the link"
+    );
+    assert!(
+        !repo.join(".acan/app.json").exists(),
+        "no file was written before the refusal"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_link_where_a_file_goes_counts_as_existing() {
+    let (dir, repo) = clone();
+    let target = dir.path().join("created-by-link");
+    fs::create_dir(repo.join(".acan")).expect(".acan");
+    std::os::unix::fs::symlink(&target, repo.join(".acan/app.json")).expect("a dangling link");
+    let mut args = args(&repo);
+    args.working_tree = true;
+
+    let err = run_with(&args, &mut yes).expect_err("the link is in the way");
+
+    assert!(err.to_string().contains("already exists"), "{err}");
+    assert!(!target.exists(), "the link was not followed");
+}

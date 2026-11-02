@@ -1,8 +1,10 @@
 //! `acan init` in a clone. It reads the committed files of a base branch, shows the plan, and
 //! writes the four protected files to a new branch, or to the working tree with `--working-tree`.
 //!
-//! The clone's checkout, index and HEAD are not touched in the default mode. The new branch is
-//! created in a temporary worktree, which is removed before the command returns.
+//! The clone's checkout, index and HEAD are not touched in the default mode. The branch is written
+//! with git plumbing: each file becomes a blob, a tree is built in a temporary index, one commit is
+//! made, and one ref is created. No worktree is checked out. Every git call runs with hooks
+//! disabled and fsmonitor off, so the clone's configuration cannot run code on the host.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -21,6 +23,11 @@ pub const DEFAULT_BRANCH: &str = "acan/init";
 const COMMIT_MESSAGE: &str = "Add the acan app contract (acan init)";
 /// The answer that confirms a write.
 const CONFIRMATION: &str = "yes";
+/// Where git looks for hooks. Pointing it at the null device means no hook runs.
+#[cfg(windows)]
+const NO_HOOKS: &str = "NUL";
+#[cfg(not(windows))]
+const NO_HOOKS: &str = "/dev/null";
 
 /// The arguments of `acan init`.
 #[derive(Debug, Clone, Args)]
@@ -171,81 +178,140 @@ fn local_branch_commit(repo: &Path, base: &str) -> Result<String> {
     }
 }
 
-/// Writes the four files to a new branch made from `base_commit`, in a temporary worktree.
-/// Returns the new commit. On failure the branch is deleted, if this call created it.
+/// Writes the four files to a new branch made from `base_commit`. Each file becomes a blob, a tree
+/// is built from the base's tree in a temporary index, and one commit is made on it. The branch is
+/// created last, and only if it does not exist, so a failure leaves no branch behind. Returns the
+/// new commit.
 fn write_branch(repo: &Path, base_commit: &str, branch: &str, plan: &Plan) -> Result<String> {
-    git(repo, &["check-ref-format", &format!("refs/heads/{branch}")])
+    let reference = format!("refs/heads/{branch}");
+    git(repo, &["check-ref-format", &reference])
         .map_err(|_| anyhow!("{branch} is not a valid branch name"))?;
-    if !git(
-        repo,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
-        ],
-    )
-    .unwrap_or_default()
-    .is_empty()
+    if !git(repo, &["rev-parse", "--verify", "--quiet", &reference])
+        .unwrap_or_default()
+        .is_empty()
     {
         bail!("the branch {branch} already exists; pass --branch <new name>");
     }
     require_identity(repo)?;
-    let dir = tempfile::tempdir().context("a temporary directory for the worktree")?;
-    let worktree = dir.path().join("init");
-    let worktree_arg = worktree.to_string_lossy().into_owned();
-    git(
-        repo,
-        &["worktree", "add", "-b", branch, &worktree_arg, base_commit],
-    )?;
-    let result = commit_in(&worktree, plan);
-    let removed = git(repo, &["worktree", "remove", "--force", &worktree_arg]);
-    match (result, removed) {
-        (Ok(commit), Ok(_)) => Ok(commit),
-        (Ok(_), Err(err)) => {
-            let _ = git(repo, &["branch", "-D", branch]);
-            Err(err.context("removing the temporary worktree"))
-        }
-        (Err(err), _) => {
-            let _ = git(repo, &["worktree", "remove", "--force", &worktree_arg]);
-            let _ = git(repo, &["branch", "-D", branch]);
-            Err(err)
-        }
+    let scratch = tempfile::tempdir().context("a temporary directory for the index")?;
+    let index = scratch.path().join("index").to_string_lossy().into_owned();
+    let env = [("GIT_INDEX_FILE", index.as_str())];
+    git_with(repo, &env, &["read-tree", base_commit], None)?;
+    for file in &plan.files {
+        let blob = text(&git_with(
+            repo,
+            &[],
+            &["hash-object", "-w", "--no-filters", "--stdin"],
+            Some(file.contents.as_bytes()),
+        )?);
+        let cacheinfo = format!("100644,{blob},{}", file.path);
+        git_with(
+            repo,
+            &env,
+            &["update-index", "--add", "--cacheinfo", &cacheinfo],
+            None,
+        )?;
     }
+    let tree = text(&git_with(repo, &env, &["write-tree"], None)?);
+    let commit = text(&git_with(
+        repo,
+        &[],
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            base_commit,
+            "-m",
+            COMMIT_MESSAGE,
+        ],
+        None,
+    )?);
+    // An empty old value makes the update fail if the branch exists, so nothing is replaced.
+    git_with(repo, &[], &["update-ref", &reference, &commit, ""], None)?;
+    Ok(commit)
 }
 
-/// Writes the files into a worktree, commits them, and returns the commit.
-fn commit_in(worktree: &Path, plan: &Plan) -> Result<String> {
-    write_files(worktree, plan)?;
-    git(worktree, &["add", "--", ".acan"])?;
-    git(worktree, &["commit", "-q", "-m", COMMIT_MESSAGE])?;
-    Ok(text(&git(worktree, &["rev-parse", "HEAD"])?))
-}
-
-/// Writes the four files into the clone's working tree. Refuses when any of them exists or when
-/// `.acan/` has changes.
+/// Writes the four files into the clone's working tree. Refuses when any of them exists, when
+/// `.acan/` has changes, or when a directory on the way is a link or junction. Every path is
+/// checked before anything is written, and each file is created without following a link.
 fn write_working_tree(repo: &Path, plan: &Plan) -> Result<()> {
     for file in FILES {
-        if repo.join(file).exists() {
+        if fs::symlink_metadata(repo.join(file)).is_ok() {
             bail!("{file} already exists in the working tree; remove it, then run again");
+        }
+    }
+    for file in &plan.files {
+        let parts: Vec<&str> = file.path.split('/').collect();
+        let mut current = repo.to_path_buf();
+        for part in &parts[..parts.len() - 1] {
+            current.push(part);
+            match fs::symlink_metadata(&current) {
+                Ok(meta) if is_link(&meta) => bail!(
+                    "{} is a link or junction; refusing to write through it",
+                    current.display()
+                ),
+                Ok(meta) if meta.is_dir() => {}
+                Ok(_) => bail!("{} is not a directory", current.display()),
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(source).with_context(|| format!("reading {}", current.display()));
+                }
+            }
         }
     }
     if !git(repo, &["status", "--porcelain", "--", ".acan"])?.is_empty() {
         bail!("the working tree has changes under .acan/; commit or stash them first");
     }
-    write_files(repo, plan)
-}
-
-/// Writes every generated file under `root`, creating directories as needed.
-fn write_files(root: &Path, plan: &Plan) -> Result<()> {
     for file in &plan.files {
-        let path = root.join(file.path);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        let parts: Vec<&str> = file.path.split('/').collect();
+        let (name, dirs) = parts.split_last().context("a file has a name")?;
+        let mut current = repo.to_path_buf();
+        for part in dirs {
+            current.push(part);
+            // Checked again here, because the tree may change between the two passes.
+            match fs::symlink_metadata(&current) {
+                Ok(meta) if is_link(&meta) => bail!(
+                    "{} is a link or junction; refusing to write through it",
+                    current.display()
+                ),
+                Ok(_) => {}
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                    fs::create_dir(&current)
+                        .with_context(|| format!("creating {}", current.display()))?;
+                }
+                Err(source) => {
+                    return Err(source).with_context(|| format!("reading {}", current.display()));
+                }
+            }
         }
-        fs::write(&path, &file.contents).with_context(|| format!("writing {}", file.path))?;
+        let path = current.join(name);
+        let mut handle = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| format!("creating {}", file.path))?;
+        handle
+            .write_all(file.contents.as_bytes())
+            .with_context(|| format!("writing {}", file.path))?;
     }
     Ok(())
+}
+
+/// Whether `meta` is a symbolic link, or a junction or other reparse point on Windows.
+fn is_link(meta: &fs::Metadata) -> bool {
+    meta.file_type().is_symlink() || is_reparse_point(meta)
+}
+
+#[cfg(windows)]
+fn is_reparse_point(meta: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const REPARSE_POINT: u32 = 0x400;
+    meta.file_attributes() & REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_meta: &fs::Metadata) -> bool {
+    false
 }
 
 /// Refuses to commit without a configured identity. acan never invents one.
@@ -312,15 +378,43 @@ impl Snapshot for GitSnapshot {
     }
 }
 
-/// Runs git in `repo` and returns its standard output. A failure carries git's message.
+/// Runs git in `repo` and returns its standard output. Hooks are disabled and fsmonitor is off, so
+/// the clone's configuration cannot run code here. A failure carries git's message.
 fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new("git")
+    git_with(repo, &[], args, None)
+}
+
+/// As [`git`], with extra environment variables, and with `input` written to git's standard input
+/// when it is given.
+fn git_with(
+    repo: &Path,
+    env: &[(&str, &str)],
+    args: &[&str],
+    input: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(repo)
+        .args(["-c", &format!("core.hooksPath={NO_HOOKS}")])
+        .args(["-c", "core.fsmonitor=false"])
         .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .context("running git")?;
+        .envs(env.iter().copied())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().context("running git")?;
+    if let Some(bytes) = input
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        // A git that exits early closes its input. Its exit status reports that failure.
+        let _ = stdin.write_all(bytes);
+    }
+    let output = child.wait_with_output().context("running git")?;
     if !output.status.success() {
         bail!(
             "git {} failed: {}",
