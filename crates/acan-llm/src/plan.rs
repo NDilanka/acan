@@ -13,8 +13,9 @@ use crate::providers::{PROVIDERS, catalog, config_for};
 use crate::role::Role;
 use crate::setup::SavedSetup;
 
-/// Why a role that needs Meta is off.
-const NEEDS_META: &str = "needs a Meta key";
+/// Why a role that needs Meta is off. Read after the role's name, as in "vision is off: it needs a
+/// Meta key".
+const NEEDS_META: &str = "it needs a Meta key";
 
 /// Why a role is off when no provider has a key.
 const NO_KEY: &str = "no model key is set";
@@ -44,6 +45,16 @@ pub struct RoleStatus {
     pub off_reason: Option<&'static str>,
 }
 
+impl RoleStatus {
+    /// The sentence that says why the role is off, such as "vision is off: it needs a Meta key".
+    /// `None` when a provider serves the role.
+    #[must_use]
+    pub fn off_message(&self) -> Option<String> {
+        self.off_reason
+            .map(|reason| format!("{} is off: {reason}", self.role))
+    }
+}
+
 /// The setup resolved for one server: who has a key, who serves each role, and the keys and
 /// routing a live client needs.
 #[derive(Debug)]
@@ -53,7 +64,7 @@ pub struct Plan {
     /// One entry per role, in [`Role::ALL`] order.
     pub roles: Vec<RoleStatus>,
     /// The routing, when every role that may run on any provider has one. A role off for want of
-    /// Meta is routed to Meta, so its calls fail. `None` otherwise: calls get the offline replies.
+    /// Meta has no route and no calls. `None` otherwise: calls get the offline replies.
     pub config: Option<LlmConfig>,
     /// The keys. The environment wins over a saved key for the same provider.
     pub keys: ApiKeys,
@@ -101,15 +112,19 @@ pub fn resolve(saved: &SavedSetup, environment: &ApiKeys) -> Result<Plan, Config
         keys = keys.with_fallback(provider, key.clone());
     }
 
-    // A role that needs Meta and is off is routed to Meta anyway. Its calls then fail for want of
-    // a key before any request is sent, so no other provider answers for it.
+    // A role that needs Meta and is off has no route. Its calls are never made, so it does not
+    // hold back the other roles, and no other provider answers for it.
     let config = if roles
         .iter()
         .all(|role| role.provider.is_some() || role.role.needs_meta())
     {
         let routes: Vec<(Role, &str)> = roles
             .iter()
-            .map(|role| (role.role, role.provider.as_deref().unwrap_or("meta")))
+            .filter_map(|role| {
+                role.provider
+                    .as_deref()
+                    .map(|provider| (role.role, provider))
+            })
             .collect();
         Some(config_for(&routes)?)
     } else {
@@ -225,11 +240,14 @@ mod tests {
     }
 
     #[test]
-    fn vision_that_is_off_is_routed_to_meta_so_it_never_reaches_another_provider() {
+    fn an_off_vision_role_says_why_in_a_sentence_and_the_others_stay_live() {
         let plan = resolve(&saved(&["baseten"], &[]), &ApiKeys::default()).expect("resolves");
-        let config = plan.config.expect("the config is built");
-        assert_eq!(config.route_of(Role::Vision), "meta");
-        assert_eq!(config.route_of(Role::Worker), "baseten");
+        assert_eq!(
+            plan.roles[3].off_message().as_deref(),
+            Some("vision is off: it needs a Meta key")
+        );
+        assert_eq!(plan.roles[0].off_message(), None);
+        assert!(plan.config.is_some());
     }
 
     #[test]

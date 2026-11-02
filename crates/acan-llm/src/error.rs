@@ -71,6 +71,11 @@ pub enum LlmError {
 
     #[error("no scripted reply for role {role}")]
     NoScriptedReply { role: Role },
+
+    /// A role that needs Meta is off, because no Meta key is set. No request is sent. The role
+    /// has no route, so no other provider can answer for it.
+    #[error("{role} is off: {reason}")]
+    RoleOff { role: Role, reason: &'static str },
 }
 
 fn cap_text(max_tokens: &Option<u32>) -> String {

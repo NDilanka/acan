@@ -65,6 +65,14 @@ pub struct KeyStatus {
     pub roles: Vec<RoleStatus>,
 }
 
+impl KeyStatus {
+    /// The status of `role`, or `None` when this status does not list it.
+    #[must_use]
+    pub fn role(&self, role: Role) -> Option<&RoleStatus> {
+        self.roles.iter().find(|status| status.role == role)
+    }
+}
+
 /// What a key check and save found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyOutcome {

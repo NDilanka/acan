@@ -4,8 +4,10 @@
 //! A repository's routing file decides the providers, and its keys come from the environment or
 //! its `.env`. Without one, each provider with a key (saved from the setup page, or set in the
 //! environment) serves the roles it is picked for, or the default provider for each role. A role
-//! with no provider is off, and the setup page says why. Until every role has a provider, calls
-//! get the offline replies. A key or pick saved while the server runs takes effect at once.
+//! with no provider is off, and the setup page says why. A role that needs Meta is off without a
+//! Meta key: its calls are refused before any request is sent, to any provider. Until every other
+//! role has a provider, calls get the offline replies. A key or pick saved while the server runs
+//! takes effect at once.
 //!
 //! A foreman or vision call never falls back. When it fails, its job fails with the provider error,
 //! so no offline split or draft stands in for a live one. Other roles keep a labelled offline
@@ -242,9 +244,20 @@ impl Models {
     }
 }
 
-/// Whether a failed call for `role` may be answered offline. Foreman and vision calls never are.
+/// Whether a failed call for `role` may be answered offline. Foreman calls never are.
 fn answers_offline(role: Role) -> bool {
     !matches!(role, Role::Foreman | Role::Vision)
+}
+
+/// The refusal for a call to a role that is off for want of a Meta key. Such a role has no route,
+/// so the call is not sent to any provider and gets no offline reply. `None` when the call may go
+/// on.
+fn off_refusal(state: &State, role: Role) -> Option<LlmError> {
+    if !role.needs_meta() {
+        return None;
+    }
+    let reason = state.status.role(role)?.off_reason?;
+    Some(LlmError::RoleOff { role, reason })
 }
 
 /// Whether `request` is a review. The server no longer sends review to any model.
@@ -280,6 +293,9 @@ impl ModelClient for Models {
             return Err(refuse_review(role));
         }
         let state = self.current();
+        if let Some(refusal) = off_refusal(&state, role) {
+            return Err(refusal);
+        }
         let Some(live) = state.live.as_ref() else {
             return self.offline.chat(role, request).await;
         };
@@ -307,6 +323,9 @@ impl ModelClient for Models {
             return Err(refuse_review(role));
         }
         let state = self.current();
+        if let Some(refusal) = off_refusal(&state, role) {
+            return Err(refusal);
+        }
         let Some(live) = state.live.as_ref() else {
             return self.offline.chat_json::<T>(role, request).await;
         };
@@ -333,6 +352,9 @@ impl ModelClient for Models {
             return Err(refuse_review(role));
         }
         let state = self.current();
+        if let Some(refusal) = off_refusal(&state, role) {
+            return Err(refusal);
+        }
         let Some(live) = state.live.as_ref() else {
             return self.offline.chat_traced(role, request).await;
         };
@@ -400,7 +422,7 @@ impl ModelClient for Models {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -617,5 +639,73 @@ provider = "meta"
             models.chat(Role::Worker, request).await.is_err(),
             "with no key, a non-model call has no offline reply"
         );
+    }
+
+    #[tokio::test]
+    async fn a_vision_call_without_a_meta_key_is_refused_before_any_request() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = keys_file(&dir);
+        file.set_key("baseten", "baseten-saved-key-0123456789")
+            .expect("saves");
+        let models = models_with(&dir, &file);
+        assert_eq!(
+            models.key_status().roles[3].off_reason,
+            Some("it needs a Meta key"),
+            "vision is the fourth role and is off"
+        );
+        let request = || ChatRequest {
+            messages: vec![acan_llm::Message::user("hello")],
+            ..ChatRequest::default()
+        };
+
+        let refused = |err: LlmError| {
+            matches!(
+                err,
+                LlmError::RoleOff {
+                    role: Role::Vision,
+                    reason: "it needs a Meta key",
+                }
+            ) && err.to_string() == "vision is off: it needs a Meta key"
+        };
+        assert!(refused(
+            models
+                .chat(Role::Vision, request())
+                .await
+                .expect_err("refused")
+        ));
+        assert!(refused(
+            models
+                .chat_traced(Role::Vision, request())
+                .await
+                .expect_err("refused")
+        ));
+        assert!(refused(
+            models
+                .chat_json::<Value>(Role::Vision, request())
+                .await
+                .expect_err("refused")
+        ));
+        assert!(
+            models.ledger().records().is_empty(),
+            "no request was sent and no offline reply was given"
+        );
+    }
+
+    #[tokio::test]
+    async fn vision_is_refused_with_no_key_at_all_too() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let models = models_with(&dir, &keys_file(&dir));
+        let request = ChatRequest {
+            messages: vec![acan_llm::Message::user("hello")],
+            ..ChatRequest::default()
+        };
+        assert!(matches!(
+            models.chat(Role::Vision, request).await,
+            Err(LlmError::RoleOff {
+                role: Role::Vision,
+                reason: "it needs a Meta key",
+            })
+        ));
+        assert!(models.ledger().records().is_empty());
     }
 }
