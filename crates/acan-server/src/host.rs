@@ -93,6 +93,8 @@ struct Inner<C> {
     /// [`invalidates_landing`]. A command cannot change what a land is checking while the land
     /// checks and installs.
     landing: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    stream_hold: crate::stream::StreamHold,
 }
 
 impl<C> Clone for Host<C> {
@@ -150,6 +152,8 @@ impl<C: ModelClient> Host<C> {
                 witness_slots: Arc::new(Semaphore::new(parts.witness_concurrency)),
                 probe_concurrency: parts.probe_concurrency,
                 landing: tokio::sync::Mutex::new(()),
+                #[cfg(test)]
+                stream_hold: crate::stream::StreamHold::default(),
             }),
         }
     }
@@ -334,6 +338,11 @@ impl<C: ModelClient> Host<C> {
     /// Signalled when the server shuts down.
     pub(crate) fn shutdown_signal(&self) -> watch::Receiver<bool> {
         self.inner.shutdown.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stream_hold(&self) -> &crate::stream::StreamHold {
+        &self.inner.stream_hold
     }
 
     /// The set of live stream tasks, joined during shutdown.
