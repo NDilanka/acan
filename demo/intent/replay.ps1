@@ -429,7 +429,7 @@ function New-InjectedChangeRecord {
 }
 
 function New-InjectedBundle {
-    # The acan-demo-control/1 bundle for one drawn order. control.ps1 applies it to the pinned base.
+    # The acan-demo-control/1 bundle for one drawn order. control.ps1 -OnWorkerCandidate applies it to the worker's candidate.
     param([string]$OrderId)
     $edit = Get-InjectorEdit -OrderId $OrderId
     [ordered]@{
@@ -785,7 +785,7 @@ function Invoke-O1Controls {
     $line['wall_seconds'] = [math]::Round($watch.Elapsed.TotalSeconds, 1)
     Add-ResultLine -Record $line
 
-    # m-harmless-difference: out of scope at first, not a regression once the human rules it acceptable
+    # m-harmless-difference: out of scope at first, not a regression once the owner's rules accept it
     $mh = Join-Path $script:CtrlDir 'm-harmless-difference.json'
     $watch = [Diagnostics.Stopwatch]::StartNew()
     try {
@@ -986,7 +986,7 @@ if (-not $DryRun) {
     # ---- take.ps1, as a library ---------------------------------------------------------------
     if (-not (Test-Path -LiteralPath $TakeScript)) { throw "missing input: $TakeScript" }
     if (-not (Select-String -LiteralPath $TakeScript -Pattern '\[switch\]\$LibraryOnly' -Quiet)) {
-        throw 'take.ps1 has no -LibraryOnly guard yet; a live replay refuses to dot-source the take as a script'
+        throw 'take.ps1 has no -LibraryOnly guard; a live replay refuses to dot-source the take as a script'
     }
     . $TakeScript -LibraryOnly -Label $Label -Port $Port -RunsRoot $RunsRoot -DemoRepo $DemoRepo -Pin $Pin -AcanRepo $AcanRepo -AcanExe $AcanExe -WorkerExe $WorkerExe -LlmSource $LlmSource -EnvSource $EnvSource -MaxEpisodes $MaxEpisodes -HealthWaitSec $HealthWaitSec -StepWaitSec $StepWaitSec -WorkerWaitSec $WorkerWaitSec -ControlWaitSec $ControlWaitSec -RulingWaitSec $RulingWaitSec -WorkerMaxSteps $WorkerMaxSteps -ClaimWaitSec $ClaimWaitSec
     Test-TakeFunctions
@@ -1218,7 +1218,7 @@ if (-not $DryRun) {
             scope_delegated = @($orderLines | Where-Object { $_.scope_decided_by -eq $DelegatedLabel }).Count
             rulings_human = @($orderLines | Where-Object { $_.rulings_decided_by -eq $HumanLabel }).Count
             rulings_delegated = @($orderLines | Where-Object { $_.rulings_decided_by -eq $DelegatedLabel }).Count
-            note = 'one count per order that made the decision. Controls use the human rulings of o-1 and are labelled on their own lines.'
+            note = 'one count per order that made the decision. The controls use the rulings file of o-1, and each line names that file''s decided_by.'
         }
         if ($script:Pause) {
             $script:Summary['status'] = 'paused'

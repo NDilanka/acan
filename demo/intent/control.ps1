@@ -5,10 +5,10 @@ into the task's worktree, reports the build, and records the gate's receipt.
 
 .DESCRIPTION
 A control is not a model. Its code is the bundle in demo/intent/controls/<id>.json: exact edits
-applied to the pinned version of each file, so the candidate does not depend on what has already
+applied to the pinned version of each file by default, so the candidate does not depend on what has already
 landed. The control drives the same MCP tools a worker uses (get_scope, post_scoped_readback,
 claim_task, declare_changes, get_task, get_worktree, report_built, get_receipt, release_task), with
-its own agent token. Every call is recorded in the result file, and the token is never printed.
+its own agent token. Every call is recorded in the result file, and the token is never printed. With -OnWorkerCandidate, the edits are applied to the task worktree's files at its HEAD (the worker's candidate), which must be clean, and committed on top of that HEAD; the result records base_source and base_head.
 
 Waits are bounded: each wait ends on a terminal state or on its timeout, whichever comes first.
 #>
