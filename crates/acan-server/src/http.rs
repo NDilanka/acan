@@ -36,6 +36,7 @@ use crate::host::{Host, SubmitError};
 use crate::intent_api::{self, IntentError};
 use crate::jobs;
 use crate::mcp;
+use crate::plant_view;
 use crate::public::{self, PublicRoot};
 use crate::vision::{self, Side, VisionWitness};
 use crate::{STATE_DIR, redact, stream};
@@ -55,6 +56,7 @@ pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<Public
         .route("/api/tasks/{task}/scope", get(get_scope::<C>))
         .route("/api/tasks/{task}/rulings", get(get_rulings::<C>))
         .route("/api/tasks/{task}/receipt", get(get_receipt::<C>))
+        .route("/api/orders/{order}/plant-view", get(get_plant_view::<C>))
         .route("/api/orders/{order}/scope-draft", get(get_scope_draft::<C>))
         .route(
             "/api/orders/{order}/scope/confirmation",
@@ -397,6 +399,18 @@ pub(crate) struct ScopeDraftView {
     rev: OrderRev,
     #[serde(flatten)]
     outcome: ScopeDraftOutcome,
+}
+
+/// The plant view of the order's latest receipt, with its tour filled in. Members only, as the
+/// other order reads are; a 404 names what the order lacks.
+async fn get_plant_view<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+    Path(order): Path<String>,
+) -> Result<Json<acan_intent::PlantView>, ApiError> {
+    member(&host, &headers)?;
+    let order: OrderId = order.parse().map_err(|_| ApiError::NotFound("order"))?;
+    Ok(Json(plant_view::order_view(&host, order).await?))
 }
 
 async fn get_scope_draft<C: ModelClient + 'static>(

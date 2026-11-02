@@ -1439,15 +1439,47 @@ async fn protected_base(repo: &Repo, policy: &ContainerPolicy) -> Result<Prepara
 /// Returns an error when git cannot prepare the protected head or the snapshot cannot be written.
 pub(crate) async fn protected_snapshot(repo: &Repo, state: &Path) -> anyhow::Result<PathBuf> {
     let base = protected_base(repo, &observe::runner_policy()).await?;
+    let head = base.protected_head().as_str().to_owned();
+    snapshot_of(repo, state, &base, &head).await
+}
+
+/// The protected paths of `commit`, prepared and written the way [`protected_snapshot`] writes the
+/// head. A plant view reads the corpus its receipt ran against through this, so a receipt keeps
+/// its own route table after the protected head moves on.
+///
+/// # Errors
+///
+/// Returns an error when git cannot prepare `commit` or the snapshot cannot be written.
+pub(crate) async fn receipt_snapshot(
+    repo: &Repo,
+    state: &Path,
+    commit: &CommitSha,
+) -> anyhow::Result<PathBuf> {
+    let PrepareOutcome::Prepared(base) = repo
+        .prepare(commit, &observe::protected_paths(&observe::runner_policy()))
+        .await?
+    else {
+        anyhow::bail!("the receipt's base commit does not prepare onto itself");
+    };
+    snapshot_of(repo, state, &base, commit.as_str()).await
+}
+
+/// Writes `base`'s protected paths under `state`, one directory per name. A name that is already
+/// written returns its directory.
+async fn snapshot_of(
+    repo: &Repo,
+    state: &Path,
+    base: &Preparation,
+    name: &str,
+) -> anyhow::Result<PathBuf> {
     let root = state.join(SNAPSHOT_DIR);
-    let head = base.protected_head();
-    let dir = root.join(head.as_str());
+    let dir = root.join(name);
     if dir.is_dir() {
         return Ok(dir);
     }
     fs::create_dir_all(&root)?;
-    let partial = root.join(format!("{head}-{}.partial", unique_suffix()));
-    observe::snapshot(repo, &base, &partial).await?;
+    let partial = root.join(format!("{name}-{}.partial", unique_suffix()));
+    observe::snapshot(repo, base, &partial).await?;
     match fs::rename(&partial, &dir) {
         Ok(()) => Ok(dir),
         // Another caller renamed the same head's snapshot into place first. Its copy is complete.

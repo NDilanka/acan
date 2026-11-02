@@ -1,17 +1,17 @@
 {
   "version": "acan-caption-catalog/2",
-  "catalog_version": "captions-2",
+  "catalog_version": "captions-3",
   "templates": [
     {
       "template_id": "unspecified.authorized",
-      "text": "The scope allows this change, and no obligation checks it. Base answered {base}; the candidate answers {candidate}.",
+      "text": "Classified: authorized but unspecified. Base value here: {base}. Candidate value here: {candidate}.",
       "classes": ["authorized_but_unspecified"],
       "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {
         "base": {
           "column": "base_a",
           "value_type": "any",
-          "presence": "required"
+          "presence": "optional"
         },
         "candidate": {
           "column": "candidate",
@@ -21,21 +21,48 @@
       }
     },
     {
+      "template_id": "unspecified.candidate",
+      "text": "Classified: authorized but unspecified. Candidate value here: {candidate}.",
+      "classes": ["authorized_but_unspecified"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
+      "slots": {
+        "candidate": {
+          "column": "candidate",
+          "value_type": "any",
+          "presence": "optional"
+        }
+      }
+    },
+    {
+      "template_id": "unspecified.bare",
+      "text": "Classified: authorized but unspecified. No value is quoted for this check.",
+      "classes": ["authorized_but_unspecified"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
+      "slots": {}
+    },
+    {
       "template_id": "violation.ruling",
-      "text": "The candidate answers {candidate}, which the ruling forbids.",
+      "text": "Classified: violates a ruling. Candidate value here: {candidate}.",
       "classes": ["violates_ruling"],
       "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {
         "candidate": {
           "column": "candidate",
           "value_type": "any",
-          "presence": "required"
+          "presence": "optional"
         }
       }
     },
     {
+      "template_id": "violation.bare",
+      "text": "Classified: violates a ruling. No value is quoted for this check.",
+      "classes": ["violates_ruling"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
+      "slots": {}
+    },
+    {
       "template_id": "bounced.obligation_failed",
-      "text": "The scope wants {target} here; the candidate does not answer it.",
+      "text": "Classified: obligation failed. Scope target here: {target}.",
       "classes": ["obligation_failed"],
       "states": ["open", "bounced", "residue", "stopped"],
       "slots": {
@@ -48,7 +75,7 @@
     },
     {
       "template_id": "failed.obligation",
-      "text": "An obligation the scope sets fails here; the candidate answers {candidate}.",
+      "text": "Classified: obligation failed. Candidate value here: {candidate}.",
       "classes": ["obligation_failed"],
       "states": ["open", "bounced", "residue", "stopped"],
       "slots": {
@@ -60,8 +87,15 @@
       }
     },
     {
+      "template_id": "failed.obligation.bare",
+      "text": "Classified: obligation failed. No value is quoted for this check.",
+      "classes": ["obligation_failed"],
+      "states": ["open", "bounced", "residue", "stopped"],
+      "slots": {}
+    },
+    {
       "template_id": "unknown.unstable_base",
-      "text": "The second base run answered {base_b}, so this check has no answer.",
+      "text": "Classified: unstable base. Second base run value here: {base_b}.",
       "classes": ["unstable_base"],
       "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {
@@ -73,15 +107,22 @@
       }
     },
     {
+      "template_id": "unknown.unstable_base.bare",
+      "text": "Classified: unstable base. No value is quoted for this check.",
+      "classes": ["unstable_base"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
+      "slots": {}
+    },
+    {
       "template_id": "out_of_scope.changed_value",
-      "text": "Base answered {base}; the candidate answers {candidate}. No scope item covers it.",
+      "text": "Classified: out of scope. Base value here: {base}. Candidate value here: {candidate}. No scope item covers this difference.",
       "classes": ["out_of_scope"],
       "states": ["open", "bounced", "fixed", "residue"],
       "slots": {
         "base": {
           "column": "base_a",
           "value_type": "any",
-          "presence": "required"
+          "presence": "optional"
         },
         "candidate": {
           "column": "candidate",
@@ -92,14 +133,14 @@
     },
     {
       "template_id": "stopped.out_of_scope",
-      "text": "Base answered {base}; the candidate answers {candidate}. Out of scope, and the repair budget is spent.",
+      "text": "Classified: out of scope. Base value here: {base}. Candidate value here: {candidate}. Recorded state: stopped, the repair budget ran out.",
       "classes": ["out_of_scope"],
       "states": ["stopped"],
       "slots": {
         "base": {
           "column": "base_a",
           "value_type": "any",
-          "presence": "required"
+          "presence": "optional"
         },
         "candidate": {
           "column": "candidate",
@@ -109,8 +150,28 @@
       }
     },
     {
+      "template_id": "out_of_scope.candidate",
+      "text": "Classified: out of scope. Candidate value here: {candidate}. No scope item covers this difference.",
+      "classes": ["out_of_scope"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
+      "slots": {
+        "candidate": {
+          "column": "candidate",
+          "value_type": "any",
+          "presence": "optional"
+        }
+      }
+    },
+    {
+      "template_id": "out_of_scope.bare",
+      "text": "Classified: out of scope. No value is quoted for this check.",
+      "classes": ["out_of_scope"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
+      "slots": {}
+    },
+    {
       "template_id": "unknown.incomparable",
-      "text": "Base reached this step with {base_a}; the candidate did not, so the runs cannot be compared.",
+      "text": "Classified: incomparable. Base value here: {base_a}.",
       "classes": ["incomparable"],
       "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {
@@ -122,8 +183,15 @@
       }
     },
     {
+      "template_id": "unknown.incomparable.bare",
+      "text": "Classified: incomparable. No value is quoted for this check.",
+      "classes": ["incomparable"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
+      "slots": {}
+    },
+    {
       "template_id": "unknown.error",
-      "text": "Base answered {base_a}; the candidate run did not complete, so this check has no answer.",
+      "text": "Classified: error. Base value here: {base_a}.",
       "classes": ["error"],
       "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {
@@ -135,8 +203,15 @@
       }
     },
     {
+      "template_id": "unknown.error.bare",
+      "text": "Classified: error. No value is quoted for this check.",
+      "classes": ["error"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
+      "slots": {}
+    },
+    {
       "template_id": "fulfilled.obligations",
-      "text": "The candidate answers {candidate}, as the scope asked.",
+      "text": "Classified: obligation fulfilled. Candidate value here: {candidate}.",
       "classes": ["obligation_fulfilled"],
       "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {
@@ -146,6 +221,34 @@
           "presence": "required"
         }
       }
+    },
+    {
+      "template_id": "fulfilled.bare",
+      "text": "Classified: obligation fulfilled. No value is quoted for this check.",
+      "classes": ["obligation_fulfilled"],
+      "states": ["bounced", "residue", "stopped"],
+      "slots": {}
+    },
+    {
+      "template_id": "preserved.held_nearby.bounced",
+      "text": "Classified: preserved. Must-keep check: held. Another item on the same route is bounced.",
+      "classes": ["preserved"],
+      "states": ["bounced"],
+      "slots": {}
+    },
+    {
+      "template_id": "preserved.held_nearby.residue",
+      "text": "Classified: preserved. Must-keep check: held. Another item on the same route is in residue.",
+      "classes": ["preserved"],
+      "states": ["residue"],
+      "slots": {}
+    },
+    {
+      "template_id": "preserved.held_nearby.stopped",
+      "text": "Classified: preserved. Must-keep check: held. Another item on the same route is stopped.",
+      "classes": ["preserved"],
+      "states": ["stopped"],
+      "slots": {}
     }
   ]
 }

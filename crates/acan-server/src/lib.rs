@@ -30,6 +30,7 @@ mod models;
 mod observations;
 mod observe;
 mod offline;
+mod plant_view;
 mod public;
 #[allow(
     dead_code,
@@ -44,7 +45,6 @@ mod receipt_cli;
 mod redact;
 mod store;
 mod stream;
-#[allow(dead_code, reason = "the guided tour has no caller in the server yet")]
 mod tour;
 mod vision;
 mod writer;

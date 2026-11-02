@@ -18,6 +18,7 @@ use crate::git::Workspace;
 use crate::index::Scan;
 use crate::jobs;
 use crate::store::EventStore;
+use crate::tour::TourCache;
 use crate::vision::Vision;
 use crate::writer::{Snapshot, Writer};
 
@@ -99,6 +100,8 @@ struct Inner<C> {
     landing: tokio::sync::Mutex<()>,
     #[cfg(test)]
     stream_hold: crate::stream::StreamHold,
+    /// The director's answer for each receipt the plant view has asked about.
+    tours: TourCache,
 }
 
 impl<C> Clone for Host<C> {
@@ -159,8 +162,14 @@ impl<C: ModelClient> Host<C> {
                 landing: tokio::sync::Mutex::new(()),
                 #[cfg(test)]
                 stream_hold: crate::stream::StreamHold::default(),
+                tours: TourCache::default(),
             }),
         }
+    }
+
+    /// The director's answers, one per receipt.
+    pub(crate) fn tours(&self) -> &TourCache {
+        &self.inner.tours
     }
 
     /// The git workspace, or `None` when the served directory is not a usable repository.
@@ -405,4 +414,61 @@ pub(crate) fn now() -> Timestamp {
         .expect("system clock is before the unix epoch")
         .as_millis();
     Timestamp::from_millis(u64::try_from(millis).expect("clock is within u64 milliseconds"))
+}
+
+/// Test helpers for a host over a repository.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::path::Path;
+    use std::str::FromStr;
+
+    use acan_core::{MemberId, Origin, Timestamp, WorldId, WorldRef};
+    use acan_llm::{ModelClient, UsageLedger};
+    use tokio::sync::watch;
+
+    use super::{Host, HostParts};
+    use crate::auth::Tokens;
+    use crate::index::scan;
+    use crate::store::EventStore;
+    use crate::{DEFAULT_PROBE_CONCURRENCY, DEFAULT_WITNESS_CONCURRENCY};
+
+    /// A host over the repository at `repo`, which holds only the world's opening event, with
+    /// `client` as its model client and no git workspace.
+    pub(crate) async fn host_with<C: ModelClient + 'static>(repo: &Path, client: C) -> Host<C> {
+        let state = repo.join(".acan");
+        std::fs::create_dir_all(&state).expect("the state dir");
+        let store = EventStore::open(&state.join("world.db"))
+            .await
+            .expect("the event store");
+        let owner = MemberId::from_str("owner").expect("a member id");
+        let (origin, opened) = Origin::open(
+            WorldRef {
+                id: WorldId::from_str("test").expect("a world id"),
+                repo: repo.display().to_string(),
+            },
+            owner.clone(),
+            Timestamp::from_millis(1),
+        );
+        store
+            .append(&[opened])
+            .await
+            .expect("the open event stores");
+        let (tokens, _) = Tokens::load_or_create(&state, &owner).expect("the tokens");
+        let (_shutdown, shutdown) = watch::channel(false);
+        Host::new(HostParts {
+            origin,
+            store,
+            tokens,
+            scan: scan(repo).expect("the scan"),
+            ledger: UsageLedger::default(),
+            client,
+            repo: repo.to_path_buf(),
+            shutdown,
+            git: None,
+            witness_http_base_url: None,
+            witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
+            probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
+            vision: None,
+        })
+    }
 }

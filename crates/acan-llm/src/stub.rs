@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::chat::{ChatRequest, ChatResponse, ToolCall};
-use crate::client::ModelClient;
+use crate::client::{Destination, ModelClient};
 use crate::error::LlmError;
 use crate::role::Role;
 use crate::usage::{CallRecord, Usage, UsageLedger};
@@ -15,6 +15,7 @@ type Matcher = Box<dyn Fn(&ChatRequest) -> bool + Send + Sync>;
 #[derive(Default)]
 pub struct Stub {
     rules: Vec<Rule>,
+    routes: Vec<(Role, Destination)>,
     ledger: UsageLedger,
 }
 
@@ -66,6 +67,22 @@ impl Reply {
 }
 
 impl Stub {
+    /// Declares where calls for `role` are routed, as a routing file would. The call records of
+    /// that role name this destination. A role with no declared route has no destination, and its
+    /// calls are recorded as the stub's own.
+    pub fn routed(mut self, role: Role, destination: Destination) -> Self {
+        self.routes.push((role, destination));
+        self
+    }
+
+    /// The destination `role` was declared with, if any.
+    fn route(&self, role: Role) -> Option<&Destination> {
+        self.routes
+            .iter()
+            .find(|(routed, _)| *routed == role)
+            .map(|(_, destination)| destination)
+    }
+
     /// Adds a reply for `role` when `matches` returns true. The first matching rule wins.
     pub fn when(
         mut self,
@@ -95,16 +112,24 @@ impl fmt::Debug for Stub {
 }
 
 impl ModelClient for Stub {
+    fn destination(&self, role: Role) -> Option<Destination> {
+        self.route(role).cloned()
+    }
+
     async fn chat(&self, role: Role, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         let rule = self
             .rules
             .iter()
             .find(|rule| rule.role == role && (rule.matches)(&request))
             .ok_or(LlmError::NoScriptedReply { role })?;
+        let (provider, model) = match self.route(role) {
+            Some(destination) => (destination.provider.clone(), destination.model.clone()),
+            None => ("stub".to_owned(), "stub".to_owned()),
+        };
         let call = CallRecord {
             role,
-            provider: "stub".to_owned(),
-            model: "stub".to_owned(),
+            provider,
+            model,
             usage: rule.reply.usage,
             latency: Duration::ZERO,
         };

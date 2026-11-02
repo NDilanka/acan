@@ -1,4 +1,6 @@
-use acan_llm::{ApiKey, ApiKeys, ConfigError, LlmConfig, OpenAiCompatible, Role, TokenLimitField};
+use acan_llm::{
+    ApiKey, ApiKeys, ConfigError, LlmConfig, ModelClient, OpenAiCompatible, Role, TokenLimitField,
+};
 
 const CANARY: &str = "sk-canary-must-never-print";
 
@@ -151,4 +153,45 @@ fn director_route_is_optional_and_checked_when_present() {
         }
         other => panic!("expected UnknownProvider, got {other}"),
     }
+}
+
+/// The client for `text`, with the keys the environment holds.
+fn client_from(text: &str) -> OpenAiCompatible {
+    let config = LlmConfig::from_toml_str(text).expect("config is valid");
+    let keys = ApiKeys::from_env(&config);
+    OpenAiCompatible::new(config, keys).expect("the client builds")
+}
+
+#[test]
+fn an_unrouted_director_is_muse_spark_on_the_foremans_route() {
+    let destination = client_from(CONFIG)
+        .destination(Role::Director)
+        .expect("the director inherits the foreman's route");
+
+    assert_eq!(destination.provider, "meta");
+    assert_eq!(destination.model, "muse-spark-1.3");
+    assert!(destination.is_muse_spark());
+}
+
+#[test]
+fn a_director_routed_off_meta_or_to_another_model_is_not_muse_spark() {
+    let off_meta = format!("{CONFIG}\n[routing.director]\nprovider = \"baseten\"\n");
+    let other_model =
+        format!("{CONFIG}\n[routing.director]\nprovider = \"meta\"\nmodel = \"muse-spark-open\"\n");
+
+    let destination = client_from(&off_meta)
+        .destination(Role::Director)
+        .expect("the director has a route");
+    assert!(
+        !destination.is_muse_spark(),
+        "{destination:?} is on baseten"
+    );
+
+    let destination = client_from(&other_model)
+        .destination(Role::Director)
+        .expect("the director has a route");
+    assert!(
+        !destination.is_muse_spark(),
+        "{destination:?} is not an allowed model"
+    );
 }

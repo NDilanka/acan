@@ -23,7 +23,7 @@ use serde_json::Value;
 
 /// The caption catalog version the plant view names. It must equal the `catalog_version` of the
 /// shipped caption catalog; `fixtures/caption-catalog.json` carries the same value.
-const CATALOG_VERSION: &str = "captions-2";
+const CATALOG_VERSION: &str = "captions-3";
 
 /// Why a receipt could not be rendered. A renderer never prints a receipt it cannot check.
 #[derive(Debug, thiserror::Error)]

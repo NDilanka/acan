@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::chat::{ChatRequest, ChatResponse, Message, ToolCall, ToolKind, ToolSpec};
-use crate::client::{ModelClient, Structured, parse_structured, with_schema};
+use crate::client::{Destination, ModelClient, Structured, parse_structured, with_schema};
 use crate::config::{ConfigError, LlmConfig, ProviderConfig, StructuredOutput, TokenLimitField};
 use crate::error::LlmError;
 use crate::key::{ApiKey, ApiKeys};
@@ -301,6 +301,14 @@ impl ModelClient for OpenAiCompatible {
         self.chat_traced(role, request)
             .await
             .map(|traced| traced.value)
+    }
+
+    fn destination(&self, role: Role) -> Option<Destination> {
+        let route = self.config.resolve(role).ok()?;
+        Some(Destination {
+            provider: route.provider.name.clone(),
+            model: route.model.to_owned(),
+        })
     }
 
     async fn chat_json<T>(

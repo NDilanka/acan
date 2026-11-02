@@ -1,16 +1,17 @@
 //! The model client the server runs: the providers in a routing file, with the offline replies
 //! behind them.
 //!
-//! A foreman call never falls back. When it fails, its job fails with the provider error, so no
-//! offline split or draft stands in for a live one. Other roles keep a labelled offline answer
-//! for a call that fails. Review is retired: its calls are refused before any provider is asked.
+//! A foreman or director call never falls back. When it fails, its job fails with the provider
+//! error, so no offline split, draft or tour stands in for a live one. Other roles keep a labelled
+//! offline answer for a call that fails. Review is retired: its calls are refused before any
+//! provider is asked.
 //! Live and offline calls are metered in one ledger, so the usage panel shows which calls were
 //! offline.
 
 use std::path::Path;
 
 use acan_llm::{
-    ApiKeys, ChatRequest, ChatResponse, ConfigError, LlmConfig, LlmError, ModelClient,
+    ApiKeys, ChatRequest, ChatResponse, ConfigError, Destination, LlmConfig, LlmError, ModelClient,
     OpenAiCompatible, Role, Structured, Traced, UsageLedger,
 };
 use anyhow::Context;
@@ -27,13 +28,15 @@ use crate::offline::Offline;
 )]
 pub enum Models {
     /// Calls the configured OpenAI-compatible providers. A failed call for a role other than the
-    /// foreman or vision is answered by `offline`. A failed foreman or vision call returns its error.
+    /// foreman, vision or the director is answered by `offline`. A failed foreman, vision or
+    /// director call returns its error.
     Live {
         client: OpenAiCompatible,
         offline: Offline,
     },
     /// Answers split and explain from built-in replies. Used when there is no routing file.
-    /// Review, scope and probe calls are refused.
+    /// Review, scope and probe calls are refused. Offline has no route, so the director has no
+    /// Muse Spark destination and the plant view serves the deterministic tour.
     Offline(Offline),
 }
 
@@ -59,7 +62,7 @@ impl Models {
     }
 
     /// Builds the live client for `config` with `keys`. A failed call for a role other than the
-    /// foreman or vision is answered offline.
+    /// foreman, vision or the director is answered offline.
     ///
     /// # Errors
     ///
@@ -117,6 +120,13 @@ fn warn_failed(role: Role, err: &LlmError, outcome: &'static str) {
 }
 
 impl ModelClient for Models {
+    fn destination(&self, role: Role) -> Option<Destination> {
+        match self {
+            Self::Live { client, .. } => client.destination(role),
+            Self::Offline(_) => None,
+        }
+    }
+
     async fn chat(&self, role: Role, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         if is_retired(&request) {
             return Err(refuse_review(role));
@@ -196,9 +206,36 @@ impl ModelClient for Models {
 
 #[cfg(test)]
 mod tests {
-    use acan_llm::Role;
+    use acan_llm::{
+        ApiKeys, Destination, LlmConfig, MUSE_SPARK_MODELS, MUSE_SPARK_PROVIDER, ModelClient, Role,
+    };
 
-    use super::answers_offline;
+    use super::{Models, answers_offline};
+    use crate::offline::Offline;
+
+    /// Two providers, and a foreman route with no director route of its own.
+    const CONFIG: &str = r#"
+[[providers]]
+name = "meta"
+base_url = "https://example.invalid/v1"
+api_key_env = "META_API_KEY"
+default_model = "muse-spark-1.3"
+
+[[providers]]
+name = "baseten"
+base_url = "https://example.invalid/v1"
+api_key_env = "BASETEN_API_KEY"
+default_model = "meta-models/muse-spark-open-1026"
+
+[routing.foreman]
+provider = "meta"
+
+[routing.worker]
+provider = "baseten"
+
+[routing.fast]
+provider = "baseten"
+"#;
 
     #[test]
     fn a_director_or_foreman_call_is_never_answered_offline() {
@@ -206,5 +243,33 @@ mod tests {
         assert!(!answers_offline(Role::Foreman));
         assert!(answers_offline(Role::Fast));
         assert!(answers_offline(Role::Worker));
+    }
+
+    #[test]
+    fn a_live_director_is_muse_spark_on_the_foremans_route() {
+        let config = LlmConfig::from_toml_str(CONFIG).expect("the config is valid");
+        let keys = ApiKeys::from_env(&config);
+        let models = Models::live(config, keys).expect("the client builds");
+
+        let destination = models
+            .destination(Role::Director)
+            .expect("a live director has a route");
+
+        assert_eq!(
+            destination,
+            Destination {
+                provider: MUSE_SPARK_PROVIDER.to_owned(),
+                model: MUSE_SPARK_MODELS[0].to_owned(),
+            }
+        );
+        assert!(destination.is_muse_spark());
+    }
+
+    #[test]
+    fn an_offline_client_has_no_destination_for_any_role() {
+        let models = Models::Offline(Offline::default());
+
+        assert!(models.destination(Role::Director).is_none());
+        assert!(models.destination(Role::Foreman).is_none());
     }
 }
