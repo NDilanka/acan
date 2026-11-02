@@ -10,11 +10,12 @@
 use std::collections::BTreeMap;
 
 use crate::admit::{self, TourRejection};
+use crate::report::EvidenceRow;
 use crate::types::{ItemId, NonEmpty, SlotName};
 use crate::verdict::{ItemClass, ItemState};
 use crate::view::{
     Camera, Caption, CaptionCatalog, CaptionTemplate, EvidenceRef, MarkRef, PlantItem, PlantView,
-    Tour, TourStep, ZoomLevel,
+    SlotSpec, Tour, TourStep, TourView, ZoomLevel,
 };
 
 /// Why the deterministic tour could not be built.
@@ -40,22 +41,22 @@ pub enum DeterministicError {
     Catalog(#[from] serde_json::Error),
 }
 
-/// The deterministic tour of `view`, over the trusted caption catalog. Every step is admitted
-/// before the tour is returned.
+/// The deterministic tour of `view`, over the trusted caption catalog, with the bindings
+/// admission made for its steps. Every step is admitted before the tour is returned.
 ///
 /// # Errors
 ///
 /// Returns [`DeterministicError::NothingToVisit`] when no item has a place in the tour, and
 /// [`DeterministicError::Unbindable`] or [`DeterministicError::Refused`] when a mandatory item
 /// has no admissible step.
-pub fn deterministic(view: &PlantView) -> Result<Tour, DeterministicError> {
+pub fn deterministic(view: &PlantView) -> Result<TourView, DeterministicError> {
     let catalog = CaptionCatalog::trusted()?;
     let tour = Tour {
         receipt_hash: view.receipt_hash,
         steps: steps(view, &catalog)?,
     };
-    admit::tour(view, &catalog, &tour)?;
-    Ok(tour)
+    let bindings = admit::tour(view, &catalog, &tour)?;
+    Ok(TourView::Deterministic { tour, bindings })
 }
 
 /// The items in deterministic order: residue, then ruling violations, then bounced, then the
@@ -205,32 +206,70 @@ fn stage(view: &PlantView, item: &PlantItem) -> Vec<MarkRef> {
     }
 }
 
-/// The reference that fills each slot of `template`: the item's first row the slot accepts. A
-/// slot that no row fills leaves the item unbindable.
+/// The reference that fills each slot of `template`. The comparative slots (base and candidate)
+/// take the rows of one step and field, the first address that holds a row every one of them
+/// accepts, so the caption compares one difference. Any other slot takes the item's first row it
+/// accepts. A slot that no row fills leaves the item unbindable.
 fn bind_slots(
     item: &PlantItem,
     template: &CaptionTemplate,
 ) -> Result<BTreeMap<SlotName, EvidenceRef>, DeterministicError> {
-    template
+    let mut bound = BTreeMap::new();
+    let comparative: Vec<(&SlotName, &SlotSpec)> = template
         .slots
         .iter()
-        .map(
-            |(slot, spec)| -> Result<(SlotName, EvidenceRef), DeterministicError> {
-                let row = item
-                    .evidence
+        .filter(|(_, spec)| spec.column.compares())
+        .collect();
+    if !comparative.is_empty() {
+        let joint = item
+            .evidence
+            .iter()
+            .map(|row| (&row.step, &row.field))
+            .find_map(|address| {
+                comparative
                     .iter()
-                    .find(|row| spec.accepts(row))
-                    .ok_or_else(|| unbindable(item, format!("no evidence row fills {slot}")))?;
-                let reference = EvidenceRef {
-                    item_id: item.item_id.clone(),
-                    slot: row.slot,
-                    step: row.step.clone(),
-                    field: row.field.clone(),
-                };
-                Ok((slot.clone(), reference))
-            },
-        )
-        .collect()
+                    .map(|(slot, spec)| {
+                        item.evidence
+                            .iter()
+                            .find(|row| (&row.step, &row.field) == address && spec.accepts(row))
+                            .map(|row| ((*slot).clone(), row))
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+            .ok_or_else(|| {
+                unbindable(
+                    item,
+                    "no step and field holds a row for every comparative slot",
+                )
+            })?;
+        for (slot, row) in joint {
+            bound.insert(slot, reference(item, row));
+        }
+    }
+    let unbound: Vec<(&SlotName, &SlotSpec)> = template
+        .slots
+        .iter()
+        .filter(|(slot, _)| !bound.contains_key(*slot))
+        .collect();
+    for (slot, spec) in unbound {
+        let row = item
+            .evidence
+            .iter()
+            .find(|row| spec.accepts(row))
+            .ok_or_else(|| unbindable(item, format!("no evidence row fills {slot}")))?;
+        bound.insert(slot.clone(), reference(item, row));
+    }
+    Ok(bound)
+}
+
+/// The reference to `row` of `item`, the address a caption slot binds.
+fn reference(item: &PlantItem, row: &EvidenceRow) -> EvidenceRef {
+    EvidenceRef {
+        item_id: item.item_id.clone(),
+        slot: row.slot,
+        step: row.step.clone(),
+        field: row.field.clone(),
+    }
 }
 
 /// Returns `step` when admission accepts it as a tour of its own. Admission reports the mandatory

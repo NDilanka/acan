@@ -2,8 +2,8 @@
 
 use acan_intent::admit::{self, SlotMismatch, StepFault, TourRejection};
 use acan_intent::{
-    CaptionCatalog, DeterministicError, EvidenceRef, EvidenceSlot, ItemClass, ItemState, PlantView,
-    Tour, TourStep, TourView, deterministic,
+    Caption, CaptionCatalog, CaptionTemplate, DeterministicError, EvidenceRef, EvidenceSlot,
+    ItemClass, ItemState, PlantView, Tour, TourStep, TourView, ValueType, deterministic,
 };
 use serde_json::{Value, json};
 
@@ -20,6 +20,27 @@ const ALL_STATES: [ItemState; 5] = [
     ItemState::Fixed,
     ItemState::Residue,
     ItemState::Stopped,
+];
+
+/// Phrases a caption must not use: each claims more than the recorded classification shows.
+const OVERCLAIMS: [&str; 17] = [
+    "no obligation checks",
+    "which the ruling forbids",
+    "missed the target",
+    "as the scope asked",
+    "did not complete",
+    "cannot be compared",
+    "the candidate did not",
+    "does not answer",
+    "requested",
+    "is right",
+    "is wrong",
+    "causes",
+    "violates",
+    "budget",
+    "covers",
+    "wants",
+    "should",
 ];
 
 fn view(text: &str) -> PlantView {
@@ -42,7 +63,10 @@ fn directed_tour(view: &PlantView) -> Tour {
 }
 
 fn deterministic_tour(view: &PlantView) -> Tour {
-    deterministic(view).expect("the view has a deterministic tour")
+    match deterministic(view).expect("the view has a deterministic tour") {
+        TourView::Deterministic { tour, .. } => tour,
+        TourView::Directed { .. } => panic!("deterministic returns the deterministic tour"),
+    }
 }
 
 /// The item ids of `tour`, in step order.
@@ -74,6 +98,15 @@ fn bound<'a>(step: &'a TourStep, slot: &str) -> &'a EvidenceRef {
 /// The template the step about `item` names.
 fn template_of<'a>(tour: &'a Tour, item: &str) -> &'a str {
     step_of(tour, item).caption.template_id.as_str()
+}
+
+/// The text of the trusted template `template_id`.
+fn text_of(template_id: &str) -> String {
+    trusted()
+        .template(&template_id.parse().expect("a template id"))
+        .unwrap_or_else(|| panic!("no template {template_id}"))
+        .text
+        .clone()
 }
 
 fn index_of(tour: &Tour, item: &str) -> usize {
@@ -195,10 +228,11 @@ fn an_optional_item_that_cannot_be_bound_is_left_out() {
 }
 
 #[test]
-fn a_mandatory_item_that_cannot_be_bound_fails_the_deterministic_tour() {
+fn the_one_class_and_state_without_a_caption_fails_the_deterministic_tour() {
+    // A bounced obligation failure that is later marked fixed has no caption, so the view has no
+    // deterministic tour. Every other mandatory class and state has one.
     let mut value = raw_view();
-    row_mut(item_mut(&mut value, "chk-signup-store"), "base_a")["value"] =
-        json!({ "state": "present", "value": "created" });
+    item_mut(&mut value, "i-retry-after")["state"] = json!("fixed");
     let view: PlantView = serde_json::from_value(value).expect("decoding the view");
 
     let err = deterministic(&view).expect_err("a mandatory item has no caption");
@@ -207,7 +241,7 @@ fn a_mandatory_item_that_cannot_be_bound_fails_the_deterministic_tour() {
         matches!(
             &err,
             DeterministicError::Unbindable { item_id, .. }
-                if item_id.as_str() == "chk-signup-store"
+                if item_id.as_str() == "i-retry-after"
         ),
         "{err}"
     );
@@ -243,13 +277,9 @@ fn an_authorized_item_is_captioned_as_unspecified_in_every_state() {
 
 #[test]
 fn an_out_of_scope_item_that_is_open_or_bounced_is_not_captioned_as_stopped() {
-    let catalog = trusted();
-    let stopped = catalog
-        .template(&"stopped.out_of_scope".parse().expect("a template id"))
-        .expect("the stopped template");
     assert!(
-        stopped.text.contains("repair budget is spent"),
-        "the stopped template says the budget is spent"
+        text_of("stopped.out_of_scope").ends_with("Recorded state: stopped."),
+        "the stopped template names the recorded state"
     );
     for state in [ItemState::Open, ItemState::Bounced] {
         let mut value = raw_view();
@@ -327,10 +357,58 @@ fn a_template_that_does_not_describe_its_item_is_refused() {
     );
 }
 
+/// The deterministic tour of the fixture with the held must-keep check `chk-health` moved to
+/// `state`.
+fn held_check_in(state: ItemState) -> (PlantView, Tour) {
+    let mut value = raw_view();
+    item_mut(&mut value, "chk-health")["state"] = json!(state);
+    let view: PlantView = serde_json::from_value(value).expect("decoding the view");
+    let tour = deterministic_tour(&view);
+    (view, tour)
+}
+
 #[test]
-fn the_mandatory_classes_and_states_without_a_caption_are_exactly_the_known_gaps() {
+fn a_held_must_keep_check_in_bounced_says_another_item_on_its_route_is_bounced() {
+    let (view, tour) = held_check_in(ItemState::Bounced);
+
+    assert_eq!(
+        template_of(&tour, "chk-health"),
+        "preserved.held_nearby.bounced"
+    );
+    assert!(step_of(&tour, "chk-health").caption.slots.is_empty());
+    assert!(admit::tour(&view, &trusted(), &tour).is_ok());
+    assert!(text_of("preserved.held_nearby.bounced").ends_with("is bounced."));
+}
+
+#[test]
+fn a_held_must_keep_check_in_residue_says_another_item_on_its_route_is_in_residue() {
+    let (view, tour) = held_check_in(ItemState::Residue);
+
+    assert_eq!(
+        template_of(&tour, "chk-health"),
+        "preserved.held_nearby.residue"
+    );
+    assert!(admit::tour(&view, &trusted(), &tour).is_ok());
+    assert!(text_of("preserved.held_nearby.residue").ends_with("is in residue."));
+}
+
+#[test]
+fn a_held_must_keep_check_when_stopped_says_another_item_on_its_route_is_stopped() {
+    let (view, tour) = held_check_in(ItemState::Stopped);
+
+    assert_eq!(
+        template_of(&tour, "chk-health"),
+        "preserved.held_nearby.stopped"
+    );
+    assert!(admit::tour(&view, &trusted(), &tour).is_ok());
+    assert!(text_of("preserved.held_nearby.stopped").ends_with("is stopped."));
+}
+
+#[test]
+fn the_only_mandatory_class_and_state_without_a_caption_is_a_fixed_obligation_failure() {
     // A mandatory item the catalog cannot caption makes the deterministic tour fail, so every
-    // gap is listed here until the catalog covers it.
+    // gap is listed here. A fixed obligation failure is a contradiction in the classes, not a
+    // missing template, so it stays a gap on purpose.
     let catalog = trusted();
     let mut uncaptioned = Vec::new();
     for class in ItemClass::ALL {
@@ -350,12 +428,246 @@ fn the_mandatory_classes_and_states_without_a_caption_are_exactly_the_known_gaps
     }
     assert_eq!(
         uncaptioned,
-        [
-            (ItemClass::Preserved, ItemState::Bounced),
-            (ItemClass::Preserved, ItemState::Residue),
-            (ItemClass::Preserved, ItemState::Stopped),
-            (ItemClass::ObligationFailed, ItemState::Fixed),
-        ]
+        [(ItemClass::ObligationFailed, ItemState::Fixed)]
+    );
+}
+
+#[test]
+fn an_unknown_probe_item_with_no_evidence_is_captioned_by_its_class() {
+    // The receipt holds an unknown probe with no evidence rows: its caption names the class only.
+    let mut value = raw_view();
+    for item in ["chk-dashboard", "chk-links-delete", "chk-signup-store"] {
+        item_mut(&mut value, item)["evidence"] = json!([]);
+    }
+    let view: PlantView = serde_json::from_value(value).expect("decoding the view");
+
+    let tour = deterministic_tour(&view);
+
+    for (item, template) in [
+        ("chk-dashboard", "unknown.unstable_base.bare"),
+        ("chk-links-delete", "unknown.incomparable.bare"),
+        ("chk-signup-store", "unknown.error.bare"),
+    ] {
+        assert_eq!(template_of(&tour, item), template, "{item}");
+    }
+    assert!(admit::tour(&view, &trusted(), &tour).is_ok());
+}
+
+#[test]
+fn an_out_of_scope_addition_with_no_base_step_is_captioned_by_its_candidate() {
+    // The base run has no step where the candidate added a value, so there is no base row to
+    // quote. The caption quotes the candidate alone, whatever the state.
+    for state in ["open", "stopped"] {
+        let mut value = raw_view();
+        let clicks = item_mut(&mut value, "d-links-clicks");
+        clicks["state"] = json!(state);
+        clicks["evidence"]
+            .as_array_mut()
+            .expect("evidence")
+            .retain(|row| row["slot"] != "base_a");
+        let view: PlantView = serde_json::from_value(value).expect("decoding the view");
+
+        let tour = deterministic_tour(&view);
+
+        assert_eq!(
+            template_of(&tour, "d-links-clicks"),
+            "out_of_scope.candidate",
+            "{state}"
+        );
+        assert!(
+            admit::tour(&view, &trusted(), &tour).is_ok(),
+            "{state}: the tour is admitted"
+        );
+    }
+}
+
+#[test]
+fn deterministic_binds_base_and_candidate_to_one_address() {
+    // The base run's first row is at another field than the candidate's. The binder must pick the
+    // base row at the candidate's field, or the caption compares two differences.
+    let mut value = raw_view();
+    let clicks = item_mut(&mut value, "d-links-clicks");
+    let mut earlier = row_mut(clicks, "base_a").clone();
+    earlier["field"] = json!("body.links[0].code");
+    clicks["evidence"]
+        .as_array_mut()
+        .expect("evidence")
+        .insert(0, earlier);
+    let view: PlantView = serde_json::from_value(value).expect("decoding the view");
+
+    let tour = deterministic_tour(&view);
+
+    let step = step_of(&tour, "d-links-clicks");
+    assert_eq!(bound(step, "base").field, bound(step, "candidate").field);
+    assert!(admit::tour(&view, &trusted(), &tour).is_ok());
+}
+
+/// The directed fixture with an extra copy of the `d-links-clicks` candidate row, changed by
+/// `change`, and the tour's candidate slot pointed at that copy by `slot_change`.
+fn comparing_extra_candidate(
+    change: impl Fn(&mut Value),
+    slot_change: impl Fn(&mut Value),
+) -> (PlantView, Tour) {
+    let mut value = raw_view();
+    let clicks = item_mut(&mut value, "d-links-clicks");
+    let mut copy = row_mut(clicks, "candidate").clone();
+    copy["value"] = json!({ "state": "present", "value": "a1" });
+    change(&mut copy);
+    clicks["evidence"]
+        .as_array_mut()
+        .expect("evidence")
+        .push(copy);
+    let step = value["tour"]["tour"]["steps"]
+        .as_array_mut()
+        .expect("tour steps")
+        .iter_mut()
+        .find(|step| step["item_id"] == "d-links-clicks")
+        .expect("a step about the stopped item");
+    slot_change(&mut step["caption"]["slots"]["candidate"]);
+    let view: PlantView = serde_json::from_value(value).expect("decoding the view");
+    let tour = directed_tour(&view);
+    (view, tour)
+}
+
+#[test]
+fn a_caption_comparing_two_fields_is_refused_at_the_candidate_slot() {
+    let (view, tour) = comparing_extra_candidate(
+        |copy| copy["field"] = json!("body.links[0].code"),
+        |slot| slot["field"] = json!("body.links[0].code"),
+    );
+
+    assert_eq!(
+        admit::tour(&view, &trusted(), &tour),
+        Err(TourRejection::Step {
+            tour_step: index_of(&tour, "d-links-clicks"),
+            fault: StepFault::MismatchedAddress {
+                slot: "candidate".parse().expect("a slot"),
+            },
+        })
+    );
+}
+
+#[test]
+fn a_caption_comparing_two_steps_is_refused_at_the_candidate_slot() {
+    let (view, tour) = comparing_extra_candidate(
+        |copy| copy["step"] = json!("s9"),
+        |slot| slot["step"] = json!("s9"),
+    );
+
+    assert_eq!(
+        admit::tour(&view, &trusted(), &tour),
+        Err(TourRejection::Step {
+            tour_step: index_of(&tour, "d-links-clicks"),
+            fault: StepFault::MismatchedAddress {
+                slot: "candidate".parse().expect("a slot"),
+            },
+        })
+    );
+}
+
+#[test]
+fn a_present_null_is_quoted_as_null_in_an_any_slot() {
+    // `violation.ruling` takes any value, so a JSON null binds and reads as `null`, which is
+    // what the run observed. It is not the missing-value text.
+    let mut value = raw_view();
+    row_mut(item_mut(&mut value, "d-links-sort"), "candidate")["value"] =
+        json!({ "state": "present", "value": null });
+    let view: PlantView = serde_json::from_value(value).expect("decoding the view");
+
+    let TourView::Deterministic { tour, bindings } =
+        deterministic(&view).expect("the view has a deterministic tour")
+    else {
+        panic!("deterministic returns the deterministic tour");
+    };
+
+    assert_eq!(template_of(&tour, "d-links-sort"), "violation.ruling");
+    let candidate = "candidate".parse().expect("a slot");
+    let value = &bindings[index_of(&tour, "d-links-sort")].typed_slot_bindings[&candidate];
+    assert_eq!(value.to_string(), "null");
+}
+
+#[test]
+fn a_present_null_in_a_typed_slot_is_refused_and_an_optional_item_is_left_out() {
+    // `fulfilled.obligations` takes a status, which a JSON null is not, and the fixed item has no
+    // other caption.
+    let mut value = raw_view();
+    row_mut(item_mut(&mut value, "i-login-limit"), "candidate")["value"] =
+        json!({ "state": "present", "value": null });
+    let view: PlantView = serde_json::from_value(value).expect("decoding the view");
+
+    let tour = deterministic_tour(&view);
+
+    assert!(!tour.reaches(&"i-login-limit".parse().expect("an id")));
+}
+
+#[test]
+fn only_an_any_slot_admits_a_json_null() {
+    assert!(ValueType::Any.admits(&Value::Null));
+    for kind in [
+        ValueType::Status,
+        ValueType::Count,
+        ValueType::Duration,
+        ValueType::Commit,
+        ValueType::Identifier,
+        ValueType::Text,
+        ValueType::Number,
+        ValueType::Boolean,
+    ] {
+        assert!(!kind.admits(&Value::Null), "{kind:?} admits null");
+    }
+}
+
+#[test]
+fn every_caption_says_its_classification_before_any_value() {
+    for template in &trusted().templates {
+        assert!(
+            template.text.starts_with("Classified: "),
+            "{} does not open with its classification",
+            template.template_id
+        );
+    }
+}
+
+#[test]
+fn no_caption_claims_more_than_its_classification_shows() {
+    for template in &trusted().templates {
+        for claim in OVERCLAIMS {
+            assert!(
+                !template.text.contains(claim),
+                "{} claims {claim}",
+                template.template_id
+            );
+        }
+    }
+}
+
+#[test]
+fn a_caption_that_repeats_a_slot_does_not_decode() {
+    let text = r#"{"template_id":"unspecified.authorized","slots":{
+        "base":{"item_id":"d-login-error-body","slot":"base_a","step":"s6","field":"body.error"},
+        "base":{"item_id":"d-login-error-body","slot":"candidate","step":"s6","field":"body.error"}}}"#;
+
+    let err = serde_json::from_str::<Caption>(text).expect_err("a repeated slot is refused");
+
+    assert!(
+        err.to_string().contains("duplicate caption slot base"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_template_that_repeats_a_slot_does_not_decode() {
+    let text = r#"{"template_id":"violation.ruling","text":"Classified: violates a ruling.",
+        "classes":["violates_ruling"],"states":["open"],"slots":{
+        "candidate":{"column":"candidate","value_type":"any","presence":"optional"},
+        "candidate":{"column":"base_a","value_type":"any","presence":"optional"}}}"#;
+
+    let err = serde_json::from_str::<CaptionTemplate>(text)
+        .expect_err("a repeated template slot is refused");
+
+    assert!(
+        err.to_string().contains("duplicate caption slot candidate"),
+        "{err}"
     );
 }
 

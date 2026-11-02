@@ -1437,7 +1437,241 @@
           }
         }
       ]
-    }
+    },
+    "bindings": [
+      {
+        "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+        "item_id": "d-login-error-body",
+        "typed_slot_bindings": {
+          "base": {
+            "value_type": "any",
+            "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+            "item_id": "d-login-error-body",
+            "row": {
+              "slot": "base_a",
+              "run_id": "run-basea-login",
+              "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+              "step": "s6",
+              "field": "body.error",
+              "value": {
+                "state": "present",
+                "value": "invalid credentials"
+              },
+              "provenance": "observed",
+              "observation_hash": "sha256:593f5e1e25b38795d44208574161c9b22d191340a38d8ebbc9c2e6206a8b28cd"
+            }
+          },
+          "candidate": {
+            "value_type": "any",
+            "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+            "item_id": "d-login-error-body",
+            "row": {
+              "slot": "candidate",
+              "run_id": "run-candidate-login",
+              "commit": "a27a5f30da19543ee34362516e29bf7561214156",
+              "step": "s6",
+              "field": "body.error",
+              "value": {
+                "state": "present",
+                "value": "too many attempts"
+              },
+              "provenance": "observed",
+              "observation_hash": "sha256:442efc8c55e82a971ed67e3ae431c6a3c39211c6869bce9a69aa42b369692258"
+            }
+          }
+        },
+        "catalog_version": "captions-3"
+      },
+      {
+        "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+        "item_id": "d-links-sort",
+        "typed_slot_bindings": {
+          "candidate": {
+            "value_type": "any",
+            "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+            "item_id": "d-links-sort",
+            "row": {
+              "slot": "candidate",
+              "run_id": "run-candidate-links",
+              "commit": "a27a5f30da19543ee34362516e29bf7561214156",
+              "step": "s4",
+              "field": "body.links[0].code",
+              "value": {
+                "state": "present",
+                "value": "a1"
+              },
+              "provenance": "observed",
+              "observation_hash": "sha256:c6fbaf3983bd31bf4cd5c03981c44688dfa2b36344d8b89b7ea9b1e79a0814ea"
+            }
+          }
+        },
+        "catalog_version": "captions-3"
+      },
+      {
+        "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+        "item_id": "i-retry-after",
+        "typed_slot_bindings": {
+          "target": {
+            "value_type": "any",
+            "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+            "item_id": "i-retry-after",
+            "row": {
+              "slot": "target",
+              "step": "s6",
+              "field": "header.retry-after",
+              "value": {
+                "state": "present",
+                "value": "60"
+              },
+              "provenance": "human_spec"
+            }
+          }
+        },
+        "catalog_version": "captions-3"
+      },
+      {
+        "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+        "item_id": "chk-dashboard",
+        "typed_slot_bindings": {
+          "base_b": {
+            "value_type": "status",
+            "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+            "item_id": "chk-dashboard",
+            "row": {
+              "slot": "base_b",
+              "run_id": "run-baseb-dashboard",
+              "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+              "step": "s1",
+              "field": "status",
+              "value": {
+                "state": "present",
+                "value": 500
+              },
+              "provenance": "observed",
+              "observation_hash": "sha256:e44940d1793a175eca991f33d3d29e2f709e5af2648d5aa26c7597c6842e5105"
+            }
+          }
+        },
+        "catalog_version": "captions-3"
+      },
+      {
+        "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+        "item_id": "d-links-clicks",
+        "typed_slot_bindings": {
+          "base": {
+            "value_type": "any",
+            "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+            "item_id": "d-links-clicks",
+            "row": {
+              "slot": "base_a",
+              "run_id": "run-basea-links",
+              "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+              "step": "s4",
+              "field": "body.links[0].clicks",
+              "value": {
+                "state": "present",
+                "value": 0
+              },
+              "provenance": "observed",
+              "observation_hash": "sha256:f9f82156bead5da4cab94a71f9d61bb8bdce1486bde10e487d66d82123224d52"
+            }
+          },
+          "candidate": {
+            "value_type": "any",
+            "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+            "item_id": "d-links-clicks",
+            "row": {
+              "slot": "candidate",
+              "run_id": "run-candidate-links",
+              "commit": "a27a5f30da19543ee34362516e29bf7561214156",
+              "step": "s4",
+              "field": "body.links[0].clicks",
+              "value": {
+                "state": "missing"
+              },
+              "provenance": "observed",
+              "observation_hash": "sha256:c6fbaf3983bd31bf4cd5c03981c44688dfa2b36344d8b89b7ea9b1e79a0814ea"
+            }
+          }
+        },
+        "catalog_version": "captions-3"
+      },
+      {
+        "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+        "item_id": "chk-links-delete",
+        "typed_slot_bindings": {
+          "base_a": {
+            "value_type": "status",
+            "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+            "item_id": "chk-links-delete",
+            "row": {
+              "slot": "base_a",
+              "run_id": "run-basea-delete",
+              "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+              "step": "s3",
+              "field": "status",
+              "value": {
+                "state": "present",
+                "value": 404
+              },
+              "provenance": "observed",
+              "observation_hash": "sha256:edb15bdfddd59e35465e9c6c182442a7320def834ec3bd37520ba1072f9db114"
+            }
+          }
+        },
+        "catalog_version": "captions-3"
+      },
+      {
+        "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+        "item_id": "chk-signup-store",
+        "typed_slot_bindings": {
+          "base_a": {
+            "value_type": "status",
+            "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+            "item_id": "chk-signup-store",
+            "row": {
+              "slot": "base_a",
+              "run_id": "run-basea-signup",
+              "commit": "178c1b07097a9f510882d139061ed50b4b44b1d4",
+              "step": "s1",
+              "field": "status",
+              "value": {
+                "state": "present",
+                "value": 201
+              },
+              "provenance": "observed",
+              "observation_hash": "sha256:5f9844e3f7a60f48e5ad350b7e262c47f8f51d38db81809aec2ae24c31972e19"
+            }
+          }
+        },
+        "catalog_version": "captions-3"
+      },
+      {
+        "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+        "item_id": "i-login-limit",
+        "typed_slot_bindings": {
+          "candidate": {
+            "value_type": "status",
+            "receipt_hash": "sha256:dcd24a773280538b33214f5808daa50a811f2bfb65604ab35738788af3c135f8",
+            "item_id": "i-login-limit",
+            "row": {
+              "slot": "candidate",
+              "run_id": "run-candidate-login",
+              "commit": "a27a5f30da19543ee34362516e29bf7561214156",
+              "step": "s6",
+              "field": "status",
+              "value": {
+                "state": "present",
+                "value": 429
+              },
+              "provenance": "observed",
+              "observation_hash": "sha256:442efc8c55e82a971ed67e3ae431c6a3c39211c6869bce9a69aa42b369692258"
+            }
+          }
+        },
+        "catalog_version": "captions-3"
+      }
+    ]
   },
-  "catalog_version": "captions-2"
+  "catalog_version": "captions-3"
 }

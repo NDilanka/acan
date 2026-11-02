@@ -5,10 +5,11 @@
 //! [`admit::tour`], the one admission path. When the view has no tour, or the proposal is not
 //! admitted, the page plays [`acan_intent::deterministic`], the same order the server builds from
 //! the same view. Captions are catalog templates whose slots take copies of evidence rows, so no
-//! model prose is ever shown. Nothing here changes a class, count or denominator: the page draws
-//! those from the view, and a tour only orders the walk over them.
+//! model prose is ever shown. The captions show the bindings the tour carries, and only when local
+//! admission binds the same values. Nothing here changes a class, count or denominator: the page
+//! draws those from the view, and a tour only orders the walk over them.
 
-use acan_intent::admit::{self, TourRejection};
+use acan_intent::admit;
 use acan_intent::{
     BoundItemView, CaptionCatalog, CaptionTemplate, CommitSha, DeterministicError, GateState,
     ItemClass, ItemId, ItemState, MachineId, MarkRef, ModelRef, OrderRef, PlantCounts, PlantView,
@@ -151,48 +152,59 @@ pub fn play(json: &str) -> Result<Play, PlayError> {
     let note = match proposed {
         None => "This view carries no tour, so the deterministic order plays.".to_owned(),
         Some(value) => match serde_json::from_value::<TourView>(known_tour(value)) {
-            Ok(tour_view) => {
-                let (mode, model, tour) = match tour_view {
-                    TourView::Directed { model, tour } => (Mode::Directed, Some(model), tour),
-                    TourView::Deterministic { tour } => (Mode::Deterministic, None, tour),
-                };
-                match admit::tour(&view, &catalog, &tour) {
-                    Ok(bound) => {
-                        return assemble(
-                            &view,
-                            &catalog,
-                            mode,
-                            model,
-                            &tour,
-                            &bound,
-                            String::new(),
-                        );
-                    }
-                    Err(rejection) => not_admitted(&rejection),
-                }
-            }
+            Ok(tour_view) => match admit_view(&view, &catalog, tour_view) {
+                Ok(admitted) => return assemble(&view, &catalog, admitted, String::new()),
+                Err(reason) => not_admitted(&reason),
+            },
             Err(err) => format!(
                 "The view's tour could not be read ({err}), so the deterministic order plays."
             ),
         },
     };
-    let tour = deterministic_tour(&view)?;
-    let bound = admit::tour(&view, &catalog, &tour)
-        .map_err(|rejection| PlayError::NoTour(rejection.to_string()))?;
-    assemble(
-        &view,
-        &catalog,
-        Mode::Deterministic,
-        None,
-        &tour,
-        &bound,
-        note,
-    )
+    let tour_view = deterministic_tour(&view)?;
+    let admitted = admit_view(&view, &catalog, tour_view).map_err(PlayError::NoTour)?;
+    assemble(&view, &catalog, admitted, note)
 }
 
-/// The deterministic order of `view`, built and admitted by acan-intent. The server builds the same
-/// walk from the same view.
-fn deterministic_tour(view: &PlantView) -> Result<Tour, PlayError> {
+/// A tour the page plays: who ordered it, the tour, and the bindings its steps show.
+struct Admitted {
+    mode: Mode,
+    model: Option<ModelRef>,
+    tour: Tour,
+    bindings: Vec<BoundItemView>,
+}
+
+/// Checks a tour against the view and returns the bindings the page shows. The bindings the tour
+/// carries are the ones shown, and local admission is the check: it must bind the same values, or
+/// the tour is refused. The reason is the plain text the note names.
+fn admit_view(
+    view: &PlantView,
+    catalog: &CaptionCatalog,
+    tour_view: TourView,
+) -> Result<Admitted, String> {
+    let (mode, model, tour, sent) = match tour_view {
+        TourView::Directed {
+            model,
+            tour,
+            bindings,
+        } => (Mode::Directed, Some(model), tour, bindings),
+        TourView::Deterministic { tour, bindings } => (Mode::Deterministic, None, tour, bindings),
+    };
+    let local = admit::tour(view, catalog, &tour).map_err(|rejection| rejection.to_string())?;
+    if local != sent {
+        return Err("its bindings differ from the values trusted code binds".to_owned());
+    }
+    Ok(Admitted {
+        mode,
+        model,
+        tour,
+        bindings: sent,
+    })
+}
+
+/// The deterministic order of `view`, built and admitted by acan-intent, with its bindings. The
+/// server builds the same walk from the same view.
+fn deterministic_tour(view: &PlantView) -> Result<TourView, PlayError> {
     acan_intent::deterministic(view).map_err(|err| match err {
         DeterministicError::Unbindable { item_id, .. } => PlayError::Unbindable { item_id },
         DeterministicError::Catalog(err) => PlayError::Catalog(err.to_string()),
@@ -201,8 +213,8 @@ fn deterministic_tour(view: &PlantView) -> Result<Tour, PlayError> {
 }
 
 /// The note the page shows when the view's tour is refused.
-fn not_admitted(rejection: &TourRejection) -> String {
-    format!("The view's tour was not admitted ({rejection}), so the deterministic order plays.")
+fn not_admitted(reason: &str) -> String {
+    format!("The view's tour was not admitted ({reason}), so the deterministic order plays.")
 }
 
 /// The zoom level a view names, as the page's JSON spells it: `fit`, `machine` or `close`.
@@ -239,20 +251,23 @@ fn catalog() -> Result<CaptionCatalog, PlayError> {
     CaptionCatalog::trusted().map_err(|err| PlayError::Catalog(err.to_string()))
 }
 
-/// Builds the played result from an admitted tour and its bound captions.
+/// Builds the played result from an admitted tour and the bindings its steps show.
 fn assemble(
     view: &PlantView,
     catalog: &CaptionCatalog,
-    mode: Mode,
-    model: Option<ModelRef>,
-    tour: &Tour,
-    bound: &[BoundItemView],
+    admitted: Admitted,
     note: String,
 ) -> Result<Play, PlayError> {
+    let Admitted {
+        mode,
+        model,
+        tour,
+        bindings,
+    } = admitted;
     let steps = tour
         .steps
         .iter()
-        .zip(bound)
+        .zip(&bindings)
         .map(|(step, bound)| play_step(catalog, step, bound))
         .collect::<Result<Vec<_>, _>>()?;
     let items = view
@@ -363,7 +378,8 @@ const REF_FIELDS: &[&str] = &["item_id", "slot", "step", "field"];
 /// decodes. A mark of a kind this build does not know is left whole, so it fails to decode and the
 /// page plays the deterministic order.
 fn known_tour(mut value: Value) -> Value {
-    keep(&mut value, &["mode", "model", "tour"]);
+    // The bindings are kept whole: admission compares them with its own, so none is dropped.
+    keep(&mut value, &["mode", "model", "tour", "bindings"]);
     if let Some(tour) = value.get_mut("tour") {
         keep(tour, &["receipt_hash", "steps"]);
         if let Some(steps) = tour.get_mut("steps").and_then(Value::as_array_mut) {
@@ -475,15 +491,15 @@ mod tests {
         let play = play(DIRECTED).expect("the fixture plays");
         assert_eq!(
             step(&play, "i-login-limit").caption,
-            "The candidate answers 429, as the scope asked."
+            "Classified: obligation fulfilled. Candidate value here: 429."
         );
         assert_eq!(
             step(&play, "d-links-clicks").caption,
-            "Base answered 0; the candidate answers no value. Out of scope, and the repair budget is spent."
+            "Classified: out of scope. Base value here: 0. Candidate value here: no value. Recorded state: stopped."
         );
         assert_eq!(
             step(&play, "d-links-sort").caption,
-            "The candidate answers a1, which the ruling forbids."
+            "Classified: ruling violation. Candidate value here: a1."
         );
     }
 
@@ -632,7 +648,7 @@ mod tests {
         assert_eq!(play.mode, Mode::Directed);
         assert_eq!(
             step(&play, "i-login-limit").caption,
-            "The candidate answers 429, as the scope asked."
+            "Classified: obligation fulfilled. Candidate value here: 429."
         );
     }
 
@@ -774,8 +790,11 @@ mod tests {
         });
         let play = play(&json).expect("the changed-value caption fits an open item");
         let caption = &step(&play, "d-links-clicks").caption;
-        assert!(caption.contains("No scope item covers it."), "{caption}");
-        assert!(!caption.contains("repair budget"), "{caption}");
+        assert_eq!(
+            caption,
+            "Classified: out of scope. Base value here: 0. Candidate value here: no value."
+        );
+        assert!(!caption.contains("Recorded state"), "{caption}");
     }
 
     #[test]
@@ -792,31 +811,70 @@ mod tests {
         });
         let play = play(&json).expect("the unspecified caption fits the item");
         let caption = &step(&play, "d-links-clicks").caption;
-        assert!(
-            caption.starts_with("The scope allows this change, and no obligation checks it."),
-            "{caption}"
+        assert_eq!(
+            caption,
+            "Classified: authorized but unspecified. Base value here: 0. Candidate value here: no value."
+        );
+    }
+
+    #[test]
+    fn a_preserved_item_in_a_bounced_state_takes_the_held_caption() {
+        let json = plain_edited(|value| {
+            plain_item(value, "chk-health")["state"] = "bounced".into();
+        });
+        let play = play(&json).expect("the held caption fits a preserved item");
+        assert_eq!(
+            step(&play, "chk-health").caption,
+            "Classified: preserved. Must-keep check: held. Another item on the same route is bounced."
         );
     }
 
     #[test]
     fn a_mandatory_item_with_no_caption_refuses_the_walk_plainly_and_names_it() {
+        // A fixed obligation failure is the one mandatory state the catalog leaves without a caption.
         let json = plain_edited(|value| {
-            plain_item(value, "chk-health")["state"] = "bounced".into();
+            plain_item(value, "i-retry-after")["state"] = "fixed".into();
         });
-        let err = play(&json).expect_err("no caption covers a bounced preserved item");
+        let err = play(&json).expect_err("no caption covers a fixed obligation failure");
         assert!(
-            matches!(&err, PlayError::Unbindable { item_id } if item_id.to_string() == "chk-health"),
+            matches!(&err, PlayError::Unbindable { item_id } if item_id.to_string() == "i-retry-after"),
             "{err}"
         );
         let message = err.to_string();
         assert!(
-            message.starts_with("This receipt cannot be walked: item chk-health"),
+            message.starts_with("This receipt cannot be walked: item i-retry-after"),
             "{message}"
         );
         assert!(
             message.ends_with("Every item is listed below."),
             "{message}"
         );
+    }
+
+    #[test]
+    fn a_directed_tour_whose_bindings_are_not_what_admission_binds_is_refused() {
+        let json = edited(|value| {
+            value["tour"]["bindings"]
+                .as_array_mut()
+                .expect("the fixture carries bindings")
+                .reverse();
+        });
+        let play = play(&json).expect("the built order plays");
+        assert_eq!(play.mode, Mode::Deterministic);
+        assert!(play.note.contains("bindings differ"), "{}", play.note);
+    }
+
+    #[test]
+    fn a_directed_tour_without_its_bindings_is_refused_and_the_built_order_plays() {
+        let json = edited(|value| {
+            value["tour"]
+                .as_object_mut()
+                .expect("the fixture has a tour")
+                .remove("bindings");
+        });
+        let play = play(&json).expect("the built order plays");
+        assert_eq!(play.mode, Mode::Deterministic);
+        assert!(play.note.contains("could not be read"), "{}", play.note);
     }
 
     /// The directed fixture with its tour replaced by `tour`, one of the spec's invalid tours.
