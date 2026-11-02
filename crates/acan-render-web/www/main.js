@@ -26,6 +26,7 @@ import { playOf, syncPlantViews } from "./plant.js";
 import { bindPlate, paintPlate, stepBy, toggleMode, togglePlay } from "./plate.js";
 import { startReplay } from "./replay.js";
 import { bindShell, startShell } from "./shell.js";
+import { installFirstRun, paintFirstRun } from "./firstrun-panel.js";
 import { get, setLink, start } from "./stream.js";
 import { requestUsage } from "./usage.js";
 import { installVision, placeVisionPins, syncVision } from "./vision-pins.js";
@@ -105,6 +106,7 @@ function paint() {
   paintSlip();
   requestUsage(state, get, paintUsage);
   syncVision();
+  paintFirstRun();
 }
 
 // Sets the drawing buffer to the CSS box times the device pixel ratio. The wasm side rounds
@@ -458,6 +460,7 @@ async function boot() {
   if (!replay) {
     bindShell();
     startShell();
+    installFirstRun();
   }
   // `?plate=fixture` or `?plate=plain` shows the receipt plate over a fixture plant view, without
   // the origin. The plate is watermarked FIXTURE.

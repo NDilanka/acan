@@ -383,11 +383,15 @@
   <p class="foot">P play · [ ] step · T directed / plain · directed is off by default until it wins the comparison</p>
 </aside>
 <aside id="vision" class="island" hidden aria-label="vision check"></aside>
+<aside id="firstrun" class="island" hidden aria-label="first run checklist"></aside>
 <div id="gate" hidden>
   <form id="token-form">
-    <label for="token" class="muted">owner token</label>
-    <input id="token" type="password" autocomplete="off" spellcheck="false">
-    <button type="submit">open</button>
+    <div class="gate-row">
+      <label for="token" class="muted">owner token</label>
+      <input id="token" type="password" autocomplete="off" spellcheck="false" aria-describedby="token-hint">
+      <button type="submit">open</button>
+    </div>
+    <p id="token-hint" class="gate-hint">The first <code>acan serve</code> in a repo prints this token with a sign-in link, and keeps it in that repo's <code>.acan/tokens.json</code>.</p>
   </form>
 </div>
 <div class="island" id="usage" hidden>
