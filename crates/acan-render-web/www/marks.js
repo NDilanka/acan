@@ -23,6 +23,12 @@ const FLAG_ROW_GAP_PX = 4;
 // size the wasm side names a machine at rest (`labels::REST_MIN_CSS_PX`).
 const UNNAMED_MIN_PX = 18;
 
+// The note of the scope machines the plant lacks: its top, its left with no receipt plate, and
+// its gap from the plate when one shows.
+const UNPLACED_TOP_PX = 96;
+const UNPLACED_LEFT_PX = 12;
+const UNPLACED_GAP_PX = 12;
+
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 // The riding agent's own flag is hidden: the chip replaces it.
@@ -40,6 +46,7 @@ export function placeLabels() {
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
   state.labelGeneration += 1;
+  placeUnplacedNote();
   const placedBoxes = hudBoxes();
   const { plots, leaders } = placeFlags(placedBoxes);
   const quads = state.app.label_layout(state.altDown);
@@ -124,6 +131,18 @@ function footprints() {
   return state.view.machines
     .filter((machine) => indexes.of.has(machine.name))
     .map((machine) => ({ index: indexes.of.get(machine.name), quad: machineQuad(machine, project) }));
+}
+
+// The note sits at the top left, and beside the receipt plate while that shows, so it never
+// covers the plate. The note is fixed, so these are window coordinates.
+function placeUnplacedNote() {
+  const note = flagsEl.querySelector(".flag.unplaced");
+  if (note === null) return;
+  const receipt = document.getElementById("receipt");
+  const box = receipt !== null && !receipt.hidden ? receipt.getBoundingClientRect() : null;
+  const left = box !== null && box.width > 0 ? box.right + UNPLACED_GAP_PX : UNPLACED_LEFT_PX;
+  note.style.left = `${left}px`;
+  note.style.top = `${UNPLACED_TOP_PX}px`;
 }
 
 // The page's fixed panels: the shell, the order line, the key bar, the usage panel, the notice,
