@@ -33,6 +33,7 @@ pub use clash::{
 };
 pub use event::{
     Actor, AgentCmd, Command, Event, HumanCmd, Rejection, ReplayError, Stamped, SystemCmd,
+    VisionCounts, VisionStatus,
 };
 pub use gate::{GateRun, GateVerdict, WitnessOutcome};
 pub use ids::{

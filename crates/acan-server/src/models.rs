@@ -7,9 +7,9 @@
 //! with no provider is off, and the setup page says why. Until every role has a provider, calls
 //! get the offline replies. A key or pick saved while the server runs takes effect at once.
 //!
-//! A foreman call never falls back. When it fails, its job fails with the provider error, so no
-//! offline split or draft stands in for a live one. Other roles keep a labelled offline answer for
-//! a call that fails. Review is retired: its calls are refused before any provider is asked. Live
+//! A foreman or vision call never falls back. When it fails, its job fails with the provider error,
+//! so no offline split or draft stands in for a live one. Other roles keep a labelled offline
+//! answer for a call that fails. Review is retired: its calls are refused before any provider is asked. Live
 //! and offline calls are metered in one ledger, so the usage panel shows which calls were offline.
 
 use std::path::Path;
@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use acan_llm::{
     ApiKeys, ChatRequest, ChatResponse, ConfigError, KeyFile, KeyOutcome, KeySource, KeyStatus,
     LlmConfig, LlmError, ModelClient, OpenAiCompatible, Plan, ProviderStatus, Role, RoleStatus,
-    SavedSetup, SetupError, Structured, UsageLedger, catalog, environment_keys, is_provider,
-    resolve, save_checked,
+    SavedSetup, SetupError, Structured, Traced, UsageLedger, catalog, environment_keys,
+    is_provider, resolve, save_checked,
 };
 use anyhow::Context;
 use schemars::JsonSchema;
@@ -242,9 +242,9 @@ impl Models {
     }
 }
 
-/// Whether a failed call for `role` may be answered offline. A foreman call never is.
+/// Whether a failed call for `role` may be answered offline. Foreman and vision calls never are.
 fn answers_offline(role: Role) -> bool {
-    role != Role::Foreman
+    !matches!(role, Role::Foreman | Role::Vision)
 }
 
 /// Whether `request` is a review. The server no longer sends review to any model.
@@ -322,6 +322,30 @@ impl ModelClient for Models {
         }
         warn_failed(role, &err, "answering with the offline reply");
         self.offline.chat_json::<T>(role, request).await
+    }
+
+    async fn chat_traced(
+        &self,
+        role: Role,
+        request: ChatRequest,
+    ) -> Result<Traced<ChatResponse>, LlmError> {
+        if is_retired(&request) {
+            return Err(refuse_review(role));
+        }
+        let state = self.current();
+        let Some(live) = state.live.as_ref() else {
+            return self.offline.chat_traced(role, request).await;
+        };
+        let err = match live.chat_traced(role, request.clone()).await {
+            Ok(traced) => return Ok(traced),
+            Err(err) => err,
+        };
+        if !answers_offline(role) {
+            warn_failed(role, &err, "the job fails with this error");
+            return Err(err);
+        }
+        warn_failed(role, &err, "answering with the offline reply");
+        self.offline.chat_traced(role, request).await
     }
 
     fn key_status(&self) -> KeyStatus {

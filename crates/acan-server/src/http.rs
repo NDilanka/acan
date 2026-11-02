@@ -10,7 +10,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use acan_core::{
-    AgentId, Command, Generation, HumanCmd, MemberId, OrderId, OrderRev, Rejection,
+    AgentId, Command, GateRunId, Generation, HumanCmd, MemberId, OrderId, OrderRev, Rejection,
     ScopeConfirmation, ScopeDraftOutcome, Seq, Stamped, TaskId, TaskState,
 };
 use acan_intent::{
@@ -22,7 +22,7 @@ use acan_intent::{
 use acan_llm::{ModelClient, UsageTotals};
 use acan_scan::Plant;
 use axum::extract::{Path, Query, State};
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -38,6 +38,7 @@ use crate::jobs;
 use crate::mcp;
 use crate::public::{self, PublicRoot};
 use crate::release::{self, BugReport, UpdateStatus, VersionInfo};
+use crate::vision::{self, Side, VisionWitness};
 use crate::{STATE_DIR, redact, setup, stream};
 
 /// Builds the router. The public files are served for every path the API does not claim.
@@ -71,6 +72,15 @@ pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<Public
         .route(
             "/api/orders/{order}/episodes/{episode}/ruling-draft",
             get(get_ruling_draft::<C>),
+        )
+        .route("/api/tasks/{task}/vision", get(get_vision::<C>))
+        .route(
+            "/api/tasks/{task}/vision/{file}",
+            get(get_vision_image::<C>),
+        )
+        .route(
+            "/api/tasks/{task}/vision/{index}/baseline.png",
+            get(get_vision_baseline::<C>),
         );
     let router = match web {
         Some(root) => {
@@ -621,6 +631,82 @@ async fn get_receipt<C: ModelClient + 'static>(
         task: task_ref(&task)?,
     };
     Ok(Json(intent_api::get_receipt(&host, &request)?))
+}
+
+/// The advisory vision record of the task's latest gate run.
+async fn get_vision<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+    Path(task): Path<String>,
+) -> Result<Json<VisionWitness>, ApiError> {
+    authenticate(&host, bearer(&headers))?;
+    let (task, run) = vision_run(&host, &task)?;
+    Ok(Json(vision::served(host.vision(), task, run).await?))
+}
+
+/// The candidate screenshot of one vision check. The segment is `{index}.png`.
+async fn get_vision_image<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+    Path((task, file)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    authenticate(&host, bearer(&headers))?;
+    let index = file
+        .strip_suffix(".png")
+        .ok_or(ApiError::NotFound("image"))?;
+    vision_png(&host, &task, index, Side::Candidate).await
+}
+
+/// The baseline screenshot of one vision check. 404 when the check has no baseline.
+async fn get_vision_baseline<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+    Path((task, index)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    authenticate(&host, bearer(&headers))?;
+    vision_png(&host, &task, &index, Side::Baseline).await
+}
+
+/// The task and its latest gate run. A task with no gate run is 404.
+fn vision_run<C: ModelClient>(host: &Host<C>, raw: &str) -> Result<(TaskId, GateRunId), ApiError> {
+    let task: TaskId = raw.parse().map_err(|_| ApiError::NotFound("task"))?;
+    host.read(|world| {
+        if world.task(task).is_none() {
+            return Err(ApiError::NotFound("task"));
+        }
+        vision::latest_run(world, task)
+            .map(|run| (task, run))
+            .ok_or(ApiError::NotFound("gate run"))
+    })
+}
+
+/// One stored screenshot as `image/png`. The index is parsed as a number, so the file read is
+/// always one the vision witness named.
+async fn vision_png<C: ModelClient>(
+    host: &Host<C>,
+    task: &str,
+    index: &str,
+    side: Side,
+) -> Result<Response, ApiError> {
+    let (task, run) = vision_run(host, task)?;
+    let index: u32 = index.parse().map_err(|_| ApiError::NotFound("image"))?;
+    let Some(vision) = host.vision() else {
+        return Err(ApiError::NotFound("image"));
+    };
+    let png = vision
+        .image(task, run, index, side)
+        .await
+        .map_err(|err| ApiError::Internal(err.into()))?
+        .ok_or(ApiError::NotFound("image"))?;
+    Ok((
+        [
+            (CONTENT_TYPE, "image/png"),
+            (X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (CACHE_CONTROL, "no-store"),
+        ],
+        png,
+    )
+        .into_response())
 }
 
 /// A task id from a path. One that has no contract spelling names no task.

@@ -165,6 +165,9 @@ async fn pump<C: ModelClient>(host: Host<C>, mut socket: WebSocket, from: Seq, a
         }
     }
 
+    #[cfg(test)]
+    host.stream_hold().wait().await;
+
     loop {
         tokio::select! {
             () = shutting_down(&mut shutdown) => {
@@ -228,6 +231,52 @@ async fn close(socket: &mut WebSocket, code: u16, reason: String) {
     let _ = socket.send(Message::Close(Some(frame))).await;
 }
 
+/// A gate each stream waits at once, after its backlog and before its first live event. Tests
+/// hold it to fall a stream behind the live buffer without depending on socket buffer sizes.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct StreamHold {
+    held: std::sync::Arc<watch::Sender<bool>>,
+    parked: std::sync::Arc<watch::Sender<usize>>,
+}
+
+#[cfg(test)]
+impl Default for StreamHold {
+    fn default() -> Self {
+        Self {
+            held: std::sync::Arc::new(watch::Sender::new(false)),
+            parked: std::sync::Arc::new(watch::Sender::new(0)),
+        }
+    }
+}
+
+#[cfg(test)]
+impl StreamHold {
+    /// Makes every stream that reaches the gate wait there.
+    pub(crate) fn hold(&self) {
+        self.held.send_replace(true);
+    }
+
+    /// Lets waiting and later streams through.
+    pub(crate) fn release(&self) {
+        self.held.send_replace(false);
+    }
+
+    /// Resolves once `count` streams have reached the gate since the server started.
+    pub(crate) async fn parked(&self, count: usize) {
+        let _ = self
+            .parked
+            .subscribe()
+            .wait_for(|parked| *parked >= count)
+            .await;
+    }
+
+    async fn wait(&self) {
+        self.parked.send_modify(|parked| *parked += 1);
+        let _ = self.held.subscribe().wait_for(|held| !*held).await;
+    }
+}
+
 /// What to do with one event on a stream.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Offer {
@@ -269,11 +318,148 @@ impl Resume {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
     use std::str::FromStr;
+    use std::time::Duration;
 
-    use acan_core::{Actor, CodeRev, Event, Seq, Stamped, Timestamp};
+    use acan_core::{
+        Actor, CodeRev, Event, HumanCmd, MemberId, Role as MemberRole, Seq, Stamped, Timestamp,
+    };
+    use acan_llm::{Stub, UsageLedger};
+    use futures_util::StreamExt;
+    use tokio::net::TcpStream;
+    use tokio::time::timeout;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+    use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+    use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-    use super::{Offer, Resume};
+    use super::{CLOSE_RESUME, Offer, Resume};
+    use crate::{DEFAULT_WITNESS_CONCURRENCY, LIVE_BUFFER, Running, ServerConfig, start};
+
+    type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+    /// How long the stream test waits for the server before it gives up.
+    const WAIT: Duration = Duration::from_secs(10);
+
+    async fn boot(repo: &std::path::Path) -> Running {
+        std::fs::create_dir_all(repo.join("model")).expect("model dir");
+        std::fs::write(
+            repo.join("model/store.ts"),
+            "export function load() {\n  return 1;\n}\n",
+        )
+        .expect("write fixture");
+        let config = ServerConfig {
+            repo: repo.to_path_buf(),
+            addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            team: false,
+            web: None,
+            protected_branch: None,
+            witness_http_base_url: None,
+            witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
+            vision: None,
+        };
+        start(config, Stub::default(), UsageLedger::default())
+            .await
+            .expect("the server starts")
+    }
+
+    async fn connect(running: &Running, token: &str) -> Socket {
+        let mut request = format!("ws://{}/api/stream?from=0", running.local_addr)
+            .into_client_request()
+            .expect("stream URL");
+        let value = HeaderValue::from_str(&format!("Bearer {token}")).expect("header value");
+        request.headers_mut().insert(AUTHORIZATION, value);
+        let (socket, _response) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("the stream connects");
+        socket
+    }
+
+    /// Reads events until the server closes the stream. Returns the events and the close frame.
+    async fn drain(socket: &mut Socket) -> (Vec<Stamped>, u16, String) {
+        let mut events = Vec::new();
+        loop {
+            let message = timeout(WAIT, socket.next())
+                .await
+                .expect("the stream went quiet without closing");
+            match message {
+                Some(Ok(WsMessage::Text(text))) => {
+                    events.push(serde_json::from_str::<Stamped>(&text).expect("a stream event"));
+                }
+                Some(Ok(WsMessage::Close(Some(frame)))) => {
+                    return (events, u16::from(frame.code), frame.reason.to_string());
+                }
+                Some(Ok(_)) => {}
+                Some(Err(err)) => panic!("the stream failed before a close frame: {err}"),
+                None => panic!(
+                    "the stream ended without a close frame after {} events",
+                    events.len()
+                ),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_client_that_falls_behind_is_closed_with_a_resume_reason() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let running = boot(dir.path()).await;
+        let token = running
+            .owner_token
+            .as_ref()
+            .expect("the first start mints the owner token")
+            .as_str()
+            .to_owned();
+        let hold = running.stream_hold.clone();
+        hold.hold();
+        let mut socket = connect(&running, &token).await;
+        // Parked means subscribed and done with the backlog, so every command below is live.
+        timeout(WAIT, hold.parked(1))
+            .await
+            .expect("the stream reaches the hold");
+
+        let http = reqwest::Client::new();
+        for n in 0..=LIVE_BUFFER {
+            let cmd = HumanCmd::AddMember {
+                member: MemberId::from_str(&format!("member-{n}")).expect("valid member id"),
+                role: MemberRole::Member,
+            };
+            let response = http
+                .post(format!("http://{}/api/commands", running.local_addr))
+                .bearer_auth(&token)
+                .json(&cmd)
+                .send()
+                .await
+                .expect("the command request is sent");
+            assert!(
+                response.status().is_success(),
+                "flood command {n} is accepted"
+            );
+        }
+        hold.release();
+
+        let (events, code, reason) = drain(&mut socket).await;
+        assert_eq!(
+            code, CLOSE_RESUME,
+            "a lagging client is closed with the resume code"
+        );
+        let next = events.last().map_or(0, |event| event.seq.get() + 1);
+        assert_eq!(
+            reason,
+            format!("lagged; resume from seq {next}"),
+            "the reason names the seq the client must resume from"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.seq.get())
+                .collect::<Vec<_>>(),
+            (0..next).collect::<Vec<u64>>(),
+            "every event before the close arrived in order, with none dropped"
+        );
+        running.stop().await.expect("the server stops");
+    }
 
     fn stamped(seq: u64) -> Stamped {
         Stamped {

@@ -48,6 +48,7 @@ async fn boot(repo: &Path, models: Models) -> Running {
         protected_branch: None,
         witness_http_base_url: None,
         witness_concurrency: acan_server::DEFAULT_WITNESS_CONCURRENCY,
+        vision: None,
     };
     let ledger: UsageLedger = models.ledger();
     start(config, models, ledger)
@@ -161,7 +162,7 @@ async fn the_status_lists_providers_and_roles_but_never_a_key() {
         .map(|provider| provider["name"].as_str().expect("a name"))
         .collect();
     assert_eq!(providers, ["meta", "baseten", "fireworks"]);
-    assert_eq!(status["roles"].as_array().expect("roles").len(), 3);
+    assert_eq!(status["roles"].as_array().expect("roles").len(), 4);
     assert!(
         status["roles"][0]["off_reason"].is_string(),
         "an off role says why"

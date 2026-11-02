@@ -52,8 +52,8 @@ pub struct Plan {
     pub providers: Vec<ProviderStatus>,
     /// One entry per role, in [`Role::ALL`] order.
     pub roles: Vec<RoleStatus>,
-    /// The routing, when every role has a provider. `None` otherwise: calls get the offline
-    /// replies.
+    /// The routing, when every role that may run on any provider has one. A role off for want of
+    /// Meta is routed to Meta, so its calls fail. `None` otherwise: calls get the offline replies.
     pub config: Option<LlmConfig>,
     /// The keys. The environment wins over a saved key for the same provider.
     pub keys: ApiKeys,
@@ -101,14 +101,15 @@ pub fn resolve(saved: &SavedSetup, environment: &ApiKeys) -> Result<Plan, Config
         keys = keys.with_fallback(provider, key.clone());
     }
 
-    let config = if roles.iter().all(|role| role.provider.is_some()) {
+    // A role that needs Meta and is off is routed to Meta anyway. Its calls then fail for want of
+    // a key before any request is sent, so no other provider answers for it.
+    let config = if roles
+        .iter()
+        .all(|role| role.provider.is_some() || role.role.needs_meta())
+    {
         let routes: Vec<(Role, &str)> = roles
             .iter()
-            .filter_map(|role| {
-                role.provider
-                    .as_deref()
-                    .map(|provider| (role.role, provider))
-            })
+            .map(|role| (role.role, role.provider.as_deref().unwrap_or("meta")))
             .collect();
         Some(config_for(&routes)?)
     } else {
@@ -130,6 +131,7 @@ fn preference(role: Role, needs_meta: bool) -> &'static [&'static str] {
     match role {
         Role::Foreman => &["meta", "baseten", "fireworks"],
         Role::Worker | Role::Fast => &["baseten", "fireworks", "meta"],
+        Role::Vision => &["meta"],
     }
 }
 
@@ -207,20 +209,41 @@ mod tests {
     #[test]
     fn meta_alone_serves_every_role() {
         let plan = resolve(&saved(&["meta"], &[]), &ApiKeys::default()).expect("resolves");
-        assert_eq!(served_by(&plan), [Some("meta"); 3]);
+        assert_eq!(served_by(&plan), [Some("meta"); 4]);
         assert!(plan.config.is_some());
     }
 
     #[test]
-    fn baseten_alone_serves_every_role_with_no_meta_needed() {
+    fn baseten_alone_serves_every_role_but_vision_which_needs_meta() {
         let plan = resolve(&saved(&["baseten"], &[]), &ApiKeys::default()).expect("resolves");
-        assert_eq!(served_by(&plan), [Some("baseten"); 3]);
+        assert_eq!(
+            served_by(&plan),
+            [Some("baseten"), Some("baseten"), Some("baseten"), None]
+        );
+        assert_eq!(plan.roles[3].off_reason, Some(NEEDS_META));
+        assert!(plan.config.is_some(), "the other roles still run live");
     }
 
     #[test]
-    fn fireworks_alone_serves_every_role() {
+    fn vision_that_is_off_is_routed_to_meta_so_it_never_reaches_another_provider() {
+        let plan = resolve(&saved(&["baseten"], &[]), &ApiKeys::default()).expect("resolves");
+        let config = plan.config.expect("the config is built");
+        assert_eq!(config.route_of(Role::Vision), "meta");
+        assert_eq!(config.route_of(Role::Worker), "baseten");
+    }
+
+    #[test]
+    fn fireworks_alone_serves_every_role_but_vision_which_needs_meta() {
         let plan = resolve(&saved(&["fireworks"], &[]), &ApiKeys::default()).expect("resolves");
-        assert_eq!(served_by(&plan), [Some("fireworks"); 3]);
+        assert_eq!(
+            served_by(&plan),
+            [
+                Some("fireworks"),
+                Some("fireworks"),
+                Some("fireworks"),
+                None
+            ]
+        );
     }
 
     #[test]
@@ -229,7 +252,7 @@ mod tests {
             resolve(&saved(&["meta", "baseten"], &[]), &ApiKeys::default()).expect("resolves");
         assert_eq!(
             served_by(&plan),
-            [Some("meta"), Some("baseten"), Some("baseten")]
+            [Some("meta"), Some("baseten"), Some("baseten"), Some("meta")]
         );
         assert!(plan.roles.iter().all(|role| !role.picked));
     }
@@ -278,7 +301,12 @@ mod tests {
         assert!(plan.config.is_none());
         for role in &plan.roles {
             assert_eq!(role.provider, None);
-            assert_eq!(role.off_reason, Some(NO_KEY));
+            let reason = if role.role.needs_meta() {
+                NEEDS_META
+            } else {
+                NO_KEY
+            };
+            assert_eq!(role.off_reason, Some(reason));
         }
     }
 

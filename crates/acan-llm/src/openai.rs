@@ -315,6 +315,14 @@ impl ModelClient for OpenAiCompatible {
             .await
             .map(|traced| traced.value)
     }
+
+    async fn chat_traced(
+        &self,
+        role: Role,
+        request: ChatRequest,
+    ) -> Result<Traced<ChatResponse>, LlmError> {
+        OpenAiCompatible::chat_traced(self, role, request).await
+    }
 }
 
 /// A successful reply body and the request id read from its headers or body.

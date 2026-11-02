@@ -8,6 +8,7 @@ pub mod bends;
 pub mod feed;
 pub mod kind;
 pub mod labels;
+pub mod lanes;
 pub mod layout;
 pub mod marks;
 pub mod mirror;

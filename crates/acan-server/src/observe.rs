@@ -37,9 +37,9 @@ use acan_intent::{
     GateContext, GateState, InvalidValue, Mask, ObservationHash, ObservedRun, PreparedCommit,
     ProbeCorpus, ProbeHash, ProbeSetHash, ProbeSetManifest, Receipt, RepoPath, RunManifest,
     RunOutcome, RunRole, RunnerBuild, RunnerHash, RunnerManifest, RuntimeId, SandboxPolicyHash,
-    Scope, ScopeConfirmation, ScopeRevision, UnixMillis,
+    Scope, ScopeConfirmation, ScopeRevision, StepId, UnixMillis,
 };
-use acan_witness::{RunnerConfig, SequenceInput, run_sequence};
+use acan_witness::{KeptBody, RunnerConfig, SequenceInput, run_sequence, run_sequence_keeping};
 use serde::de::DeserializeOwned;
 use tokio::sync::Semaphore;
 
@@ -507,6 +507,31 @@ async fn settled(
     .await
 }
 
+/// Runs `probe` once on `preparation` and keeps the response body of `step`, or `None` when the
+/// run did not reach it. The run is not stored, compared or judged: only the vision witness
+/// reads the page, and it never feeds the receipt.
+pub(crate) async fn keep_page(
+    plan: &Plan<'_>,
+    probe: &CorpusProbe,
+    step: &StepId,
+    preparation: &Preparation,
+    role: RunRole,
+    dir: &Path,
+) -> Result<Option<KeptBody>, ObserveError> {
+    let fixture = fixture_of(plan.corpus, probe)?;
+    let staged = stage(plan.repo, preparation, dir).await?;
+    let input = sequence(plan, probe, fixture, &staged, role);
+    let (_, kept) = {
+        let _slot = plan
+            .slots
+            .acquire()
+            .await
+            .expect("the container permits are never closed");
+        run_sequence_keeping(&input, std::slice::from_ref(step), pending::<()>()).await?
+    };
+    Ok(kept.into_iter().find(|body| &body.step_id == step))
+}
+
 /// Runs `attempt` until its run sets up, starting it again while it does not, at most
 /// [`SETUP_RETRIES`] times after the first start. `setup_failure` returns the reason a run did
 /// not set up, or `None` when it did. Every start that does not set up is logged.
@@ -582,8 +607,8 @@ pub(crate) fn compare_runs<'a>(
             };
             let probe = runs.probe.spec.probe_hash()?;
             let compared = |source: CompareError| ObserveError::Compare { probe, source };
-            let masks = compare::derive_masks(&contrast).map_err(&compared)?;
-            let comparison = compare::compare(&contrast, &masks).map_err(&compared)?;
+            let masks = compare::derive_masks(&contrast).map_err(compared)?;
+            let comparison = compare::compare(&contrast, &masks).map_err(compared)?;
             Ok(Judgement {
                 contrast,
                 masks,

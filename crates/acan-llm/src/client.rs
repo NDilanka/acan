@@ -7,6 +7,7 @@ use crate::chat::{ChatRequest, ChatResponse, JsonSchemaFormat};
 use crate::error::LlmError;
 use crate::role::Role;
 use crate::setup::{KeyOutcome, KeyStatus, SetupError};
+use crate::trace::Traced;
 use crate::usage::CallRecord;
 
 /// The one interface the rest of Acan uses for model calls.
@@ -88,6 +89,27 @@ pub trait ModelClient: Send + Sync {
     /// Returns [`SetupError::Unavailable`] when this client does not take saved keys.
     fn set_role(&self, _role: Role, _provider: Option<&str>) -> Result<(), SetupError> {
         Err(SetupError::Unavailable)
+    }
+
+    /// Runs [`ModelClient::chat`] and also returns the provider's trace fields. A client that
+    /// reads none, such as [`crate::Stub`], returns them empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`ModelClient::chat`].
+    fn chat_traced(
+        &self,
+        role: Role,
+        request: ChatRequest,
+    ) -> impl Future<Output = Result<Traced<ChatResponse>, LlmError>> + Send {
+        async move {
+            let value = self.chat(role, request).await?;
+            Ok(Traced {
+                value,
+                request_id: None,
+                reply_model: None,
+            })
+        }
     }
 }
 

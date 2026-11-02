@@ -44,9 +44,7 @@ pub fn waiting_ring() -> Model {
         );
     }
     band(&mut mesh, 0, 2, RING_SEGMENTS);
-    for surface in &mut mesh.surfaces {
-        *surface = Surface::Lit;
-    }
+    mesh.surfaces.fill(Surface::Lit);
     model_of(mesh)
 }
 

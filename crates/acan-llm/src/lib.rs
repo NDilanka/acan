@@ -19,8 +19,8 @@ mod trace;
 mod usage;
 
 pub use chat::{
-    ChatRequest, ChatResponse, FunctionCall, JsonSchemaFormat, Message, ToolCall, ToolKind,
-    ToolSpec,
+    ChatRequest, ChatResponse, ContentPart, FunctionCall, ImageUrl, JsonSchemaFormat, Message,
+    ToolCall, ToolKind, ToolSpec,
 };
 pub use client::{ModelClient, Structured};
 pub use config::{ConfigError, LlmConfig, ProviderConfig, StructuredOutput, TokenLimitField};

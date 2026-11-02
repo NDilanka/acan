@@ -209,7 +209,7 @@ fn render(built: &Model, view: &View) -> (String, String) {
 fn front_faces(built: &Model, view: &View) -> Vec<Face> {
     let mut faces = Vec::new();
     for mesh in &built.meshes {
-        for tri in mesh.indices.chunks_exact(3) {
+        for tri in mesh.indices.as_chunks::<3>().0 {
             let idx = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
             let p = idx.map(|i| mesh.positions[i]);
             let facing = cross(sub(p[1], p[0]), sub(p[2], p[0]));
