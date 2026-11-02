@@ -1,6 +1,7 @@
 // The HTML panels: the order island, the point-of-view chip and reticle, the usage table, and
 // the note that an older page passes events over.
 import { label } from "./marks.js";
+import { shownOrderOf } from "./order.js";
 import {
   hintEl,
   hintRest,
@@ -135,11 +136,9 @@ export function paintStale() {
     : `this page is older than the server: ${passed} ${passed === 1 ? "event" : "events"} not shown, rebuild the UI`;
 }
 
-// The order the order island shows, and the slip shows its scope: the first that is neither
-// cancelled nor landed, else the newest.
+// The order the order island shows, and the slip shows its scope. See `shownOrderOf`.
 export function shownOrder(view) {
-  return view.orders.find((item) => item.phase !== "cancelled" && item.phase !== "landed")
-    ?? view.orders.at(-1);
+  return shownOrderOf(view, state.postedOrder);
 }
 
 export function paintOrderLine() {

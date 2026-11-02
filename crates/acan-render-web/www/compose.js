@@ -198,6 +198,7 @@ async function send() {
       const order = postedOrder(events);
       accepted = true;
       line = order === null ? `Posted on ${machine}.` : `Posted o-${order} on ${machine}.`;
+      if (order !== null) state.postedOrder = order;
       awaited = { order, machine };
       // The frozen page does not hear the stream, so it folds the order's own events here.
       if (freeze) {

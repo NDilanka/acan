@@ -69,6 +69,15 @@ export function machineContext(view, name) {
   return parts.length === 0 ? "Nothing is in flight here." : `Here now: ${parts.join(" · ")}.`;
 }
 
+// The order the order island names, and the slip shows the scope of: the order this page posted
+// last, while it is in flight, so a new order is named even while an older one is open. Else the
+// first order in flight, else the newest. `posted` is the id this page posted last, or null.
+export function shownOrderOf(view, posted = null) {
+  const inFlight = (order) => order.phase !== "cancelled" && order.phase !== "landed";
+  const mine = posted === null ? undefined : view.orders.find((order) => order.id === posted && inFlight(order));
+  return mine ?? view.orders.find(inFlight) ?? view.orders.at(-1);
+}
+
 // The machine's footprint on screen, as its four ground corners.
 export function machineQuad(machine, project) {
   const [x, y] = machine.min;

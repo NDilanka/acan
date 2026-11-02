@@ -15,6 +15,7 @@ import {
   orderCommand,
   orderRefusal,
   postedOrder,
+  shownOrderOf,
 } from "../../www/order.js";
 
 // A flat projection: one world unit is ten CSS pixels, with no turn or tilt.
@@ -89,6 +90,21 @@ test("the machine's context names its orders in flight and its agents", () => {
   assert.equal(machineContext(busy, "nowhere"), "Nothing is in flight here.");
 });
 
+test("the island names the order this page posted last while it is in flight", () => {
+  const orders = [
+    { id: 0, machine: "auth", sentence: "a", phase: "splitting", tasks: 0, at: null },
+    { id: 3, machine: "store", sentence: "b", phase: "split", tasks: 1, at: null },
+    { id: 4, machine: "store", sentence: "c", phase: "landed", tasks: 1, at: null },
+  ];
+  const held = view({ orders });
+  assert.equal(shownOrderOf(held).id, 0, "with nothing posted, the first in flight");
+  assert.equal(shownOrderOf(held, 3).id, 3, "the page's own order, though an older one is open");
+  assert.equal(shownOrderOf(held, 4).id, 0, "a posted order that landed gives way");
+  assert.equal(shownOrderOf(held, 9).id, 0, "an id the view lacks yet gives way");
+  const done = view({ orders: [orders[2]] });
+  assert.equal(shownOrderOf(done, null).id, 4, "with none in flight, the newest");
+  assert.equal(shownOrderOf(view(), 3), undefined);
+});
 test("a click inside a footprint picks the machine, the smallest one first", () => {
   assert.equal(machineAt(MACHINES, flat, 80, 80), "auth");
   assert.equal(machineAt(MACHINES, flat, 30, 30), "auth/session", "the inner machine wins");
