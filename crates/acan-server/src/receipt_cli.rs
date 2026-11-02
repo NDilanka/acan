@@ -35,6 +35,7 @@ use tokio::sync::Semaphore;
 
 use crate::DEFAULT_WITNESS_CONCURRENCY;
 use crate::deps::{self, InstallRecord, Installer, Role};
+use crate::init;
 use crate::jobs::{APP_PORT, RUNNER_PROGRAM};
 use crate::observe::{self, Judged, ObserveError, Order, Plan};
 use crate::receipt::render_markdown;
@@ -124,6 +125,9 @@ pub enum ShadowError {
     /// The receipt could not be written.
     #[error("cannot write the receipt: {0}")]
     Output(String),
+    /// The arguments do not name what the mode needs.
+    #[error("{0}")]
+    Usage(String),
 }
 
 /// The arguments of `acan receipt`.
@@ -136,13 +140,17 @@ pub struct ShadowArgs {
     /// `git branch <name> <sha>` when the base is a commit.
     #[arg(long)]
     pub base: String,
-    /// The head ref, observed against the base.
+    /// The head ref, observed against the base. Required, except with `--check-contract`.
     #[arg(long)]
-    pub head: String,
+    pub head: Option<String>,
     /// Where a node app's installed dependencies are cached. Defaults to `$XDG_CACHE_HOME/acan/deps`,
     /// or `~/.cache/acan/deps`.
     #[arg(long)]
     pub cache_dir: Option<PathBuf>,
+    /// Checks the base's protected contract without running it, and needs no `--head`. Docker is
+    /// reported as information only, and no container starts.
+    #[arg(long)]
+    pub check_contract: bool,
 }
 
 /// The format `acan receipt` prints.
@@ -185,7 +193,7 @@ impl ShadowReceipt {
             "acan receipt --repo {} --base {} --head {}",
             shell_word(&self.args.repo.display().to_string()),
             shell_word(&self.args.base),
-            shell_word(&self.args.head),
+            shell_word(self.args.head.as_deref().unwrap_or_default()),
         )
     }
 
@@ -208,26 +216,19 @@ pub async fn run(args: &ShadowArgs) -> Result<ShadowReceipt, ShadowError> {
 }
 
 async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, ShadowError> {
-    check_ref("--base", &args.base)?;
-    check_ref("--head", &args.head)?;
-    let repo = Repo::open_with_protected(&args.repo, args.base.as_str())
-        .await
-        .map_err(|err| ShadowError::Repo {
-            repo: args.repo.clone(),
-            detail: err.to_string(),
-        })?;
-    let base_head = repo.protected_head().await.map_err(|_| ShadowError::Ref {
-        flag: "--base",
-        name: args.base.clone(),
-        detail: "--base must be a local branch; create one with `git branch <name> <sha>`"
-            .to_owned(),
+    let head = args.head.as_deref().ok_or_else(|| {
+        ShadowError::Usage(
+            "--head is required; it is only omitted with --check-contract".to_owned(),
+        )
     })?;
-    let base_commit = commit_sha(&base_head.to_string())?;
-    let head_commit = resolve_commit(repo.root(), &args.head)
+    check_ref("--base", &args.base)?;
+    check_ref("--head", head)?;
+    let (repo, base_commit) = open_base(args).await?;
+    let head_commit = resolve_commit(repo.root(), head)
         .await
         .ok_or_else(|| ShadowError::Ref {
             flag: "--head",
-            name: args.head.clone(),
+            name: head.to_owned(),
             detail: "it does not name a commit of the clone".to_owned(),
         })?;
 
@@ -339,6 +340,102 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
         receipt: judged.receipt,
         installs,
     })
+}
+
+/// Opens the clone and resolves the protected head that `--base` names. The base must be a local
+/// branch.
+async fn open_base(args: &ShadowArgs) -> Result<(Repo, CommitSha), ShadowError> {
+    let repo = Repo::open_with_protected(&args.repo, args.base.as_str())
+        .await
+        .map_err(|err| ShadowError::Repo {
+            repo: args.repo.clone(),
+            detail: err.to_string(),
+        })?;
+    let base_head = repo.protected_head().await.map_err(|_| ShadowError::Ref {
+        flag: "--base",
+        name: args.base.clone(),
+        detail: "--base must be a local branch; create one with `git branch <name> <sha>`"
+            .to_owned(),
+    })?;
+    let base_commit = commit_sha(&base_head.to_string())?;
+    Ok((repo, base_commit))
+}
+
+/// What `--check-contract` found in the base's protected contract.
+#[derive(Debug, Clone)]
+pub struct ContractCheck {
+    /// The base commit the contract was read from.
+    pub base_commit: String,
+    /// The runtime the contract names.
+    pub runtime: String,
+    /// Whether the contract names an install phase.
+    pub install: bool,
+    /// How many probes the corpus holds.
+    pub probes: usize,
+    /// Whether Docker answered. This is information only: the check starts no container.
+    pub docker: Result<(), String>,
+}
+
+/// Checks the base's protected contract without running the app. It reads the contract from the
+/// base's protected paths, as a receipt does, decodes it, runs the contract's own checks and the
+/// corpus cross-checks, and checks the container policy the runs would use. Docker is asked
+/// whether it answers, and that answer is information only.
+///
+/// # Errors
+///
+/// Returns [`ShadowError`] when the base cannot be used, the clone cannot be read, the contract
+/// does not decode or fails its checks, or its container policy is invalid.
+pub async fn check_contract(args: &ShadowArgs) -> Result<ContractCheck, ShadowError> {
+    check_contract_with(args, Path::new(RUNNER_PROGRAM)).await
+}
+
+async fn check_contract_with(
+    args: &ShadowArgs,
+    docker: &Path,
+) -> Result<ContractCheck, ShadowError> {
+    check_ref("--base", &args.base)?;
+    let (repo, base_commit) = open_base(args).await?;
+    let protected = observe::protected_paths(&observe::runner_policy());
+    let base = prepare(&repo, &base_commit, &protected, "the base").await?;
+    let scratch_root = tempfile::TempDir::new()
+        .map_err(|err| ShadowError::Observe(format!("cannot create a scratch directory: {err}")))?;
+    let snapshot = scratch_root.path().join("snapshot");
+    observe::snapshot(&repo, &base, &snapshot)
+        .await
+        .map_err(|err| ShadowError::Observe(err.to_string()))?;
+    let (app, corpus) =
+        observe::read_protected(&snapshot).map_err(|err| ShadowError::Contract(err.to_string()))?;
+    init::cross_check(&corpus).map_err(|err| ShadowError::Contract(err.to_string()))?;
+    let policy = observe::policy_for(&app).map_err(|err| ShadowError::Contract(err.to_string()))?;
+    policy
+        .check_environment()
+        .map_err(|err| ShadowError::Observe(format!("the container policy is invalid: {err}")))?;
+    Ok(ContractCheck {
+        base_commit: base_commit.to_string(),
+        runtime: app.runtime.as_str().to_owned(),
+        install: app.install.is_some(),
+        probes: corpus.probes.len(),
+        docker: docker_command(docker, &["version", "--format", "{{.Server.Version}}"]).await,
+    })
+}
+
+/// The check as a person reads it: the contract's facts, then Docker as information.
+#[must_use]
+pub fn check_text(check: &ContractCheck) -> String {
+    let install = if check.install {
+        "with an install phase"
+    } else {
+        "with no install phase"
+    };
+    let docker = match &check.docker {
+        Ok(()) => "available".to_owned(),
+        Err(detail) => format!("not available: {detail}"),
+    };
+    format!(
+        "contract ok at base {}: runtime {}, {install}, {} probes\n\
+         docker: {docker} (information only; the check starts no container)",
+        check.base_commit, check.runtime, check.probes
+    )
 }
 
 /// Refuses a ref that is empty, looks like an option, or has whitespace or control characters.
@@ -638,7 +735,7 @@ fn markdown_header(report: &ShadowReceipt) -> String {
         ),
         format!(
             "- Head: {} at {}",
-            code(&report.args.head),
+            code(report.args.head.as_deref().unwrap_or_default()),
             code(&report.head_commit)
         ),
         format!("- Merged commit tested: {}", code(&report.merged_commit)),
@@ -859,8 +956,17 @@ mod tests {
         ShadowArgs {
             repo: repo.to_path_buf(),
             base: base.to_owned(),
-            head: head.to_owned(),
+            head: Some(head.to_owned()),
             cache_dir: None,
+            check_contract: false,
+        }
+    }
+
+    fn check_args(repo: &Path, base: &str) -> ShadowArgs {
+        ShadowArgs {
+            head: None,
+            check_contract: true,
+            ..args(repo, base, "")
         }
     }
 
@@ -939,6 +1045,84 @@ mod tests {
         assert!(
             matches!(&error, ShadowError::Ref { flag: "--head", .. }),
             "option-like ref: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_without_a_head_is_refused_before_anything_runs() {
+        let repo = clone_with(&contract_files());
+        let mut without = args(repo.path(), "main", "main");
+        without.head = None;
+        let error = run_with(&without, &missing_docker())
+            .await
+            .expect_err("a run needs a head");
+        assert!(
+            matches!(&error, ShadowError::Usage(text) if text.contains("--check-contract")),
+            "missing head: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_contract_passes_a_valid_contract_and_needs_no_head() {
+        let repo = clone_with(&contract_files());
+        let check = check_contract_with(&check_args(repo.path(), "main"), &missing_docker())
+            .await
+            .expect("the contract passes");
+        assert_eq!(check.runtime, "bun-1.4.4");
+        assert!(!check.install, "the bun fixture has no install phase");
+        assert!(check.probes > 0, "the corpus has probes");
+        assert!(
+            check.docker.is_err(),
+            "docker is information, not a failure"
+        );
+        let text = check_text(&check);
+        assert!(text.contains("information only"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn check_contract_refuses_a_contract_that_fails_its_checks() {
+        // An install phase is only for acan-app/2, so this version 1 contract cannot pass.
+        let app = APP_CONTRACT.replacen(
+            '{',
+            "{\n  \"install\": [\"npm\", \"ci\", \"--ignore-scripts\"],",
+            1,
+        );
+        let repo = clone_with(&[
+            (".acan/app.json", app.as_str()),
+            (".acan/probes/core.json", PROBE_CORPUS),
+        ]);
+        let error = check_contract_with(&check_args(repo.path(), "main"), &missing_docker())
+            .await
+            .expect_err("a contract that fails its checks is refused");
+        assert!(
+            matches!(error, ShadowError::Contract(_)),
+            "failing check: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn check_contract_asks_docker_only_for_its_version() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = clone_with(&contract_files());
+        let tools = tempfile::tempdir().expect("a directory for a fake docker");
+        let calls = tools.path().join("calls.txt");
+        let docker = tools.path().join("docker");
+        fs::write(
+            &docker,
+            format!("#!/bin/sh\necho \"$@\" >> {}\nexit 1\n", calls.display()),
+        )
+        .expect("the fake docker");
+        fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).expect("executable");
+        let check = check_contract_with(&check_args(repo.path(), "main"), &docker)
+            .await
+            .expect("the contract passes without docker");
+        assert!(check.docker.is_err(), "the fake docker failed");
+        let text = fs::read_to_string(&calls).expect("docker was asked");
+        assert_eq!(
+            text.trim(),
+            "version --format {{.Server.Version}}",
+            "only the version was asked: {text}"
         );
     }
 
@@ -1034,6 +1218,35 @@ mod tests {
             value["receipt"].is_object(),
             "the receipt is inside the envelope"
         );
+    }
+
+    #[test]
+    fn installs_are_named_in_the_envelope_only_when_a_run_mounted_one() {
+        let repo = Path::new("clone");
+        let without = json_text(&report_for(repo, fixture_receipt())).expect("the envelope");
+        let value: Value = serde_json::from_str(&without).expect("the envelope is JSON");
+        assert!(value.get("installs").is_none(), "no install, no field");
+
+        let mut report = report_for(repo, fixture_receipt());
+        report.installs = vec![InstallRecord {
+            role: Role::Candidate,
+            commit: "3".repeat(40),
+            key: "sha256:0".to_owned(),
+            lockfile_sha256: "sha256:1".to_owned(),
+            cache: deps::Cache::Hit,
+            image_digest: "sha256:2".to_owned(),
+            argv: vec!["npm".to_owned(), "ci".to_owned()],
+            install_scripts: "ignored",
+            network: "egress",
+            duration_ms: 10,
+        }];
+        let text = json_text(&report).expect("the envelope serializes");
+        let value: Value = serde_json::from_str(&text).expect("the envelope is JSON");
+        assert_eq!(value["installs"][0]["role"], "candidate");
+        assert_eq!(value["installs"][0]["cache"], "hit");
+        assert_eq!(value["installs"][0]["install_scripts"], "ignored");
+        assert_eq!(value["installs"][0]["network"], "egress");
+        assert_eq!(value["installs"][0]["argv"][1], "ci");
     }
 
     #[test]

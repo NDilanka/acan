@@ -440,4 +440,70 @@ mod tests {
         let refusal = bind(&odd, "/work", false).expect_err("comma refused");
         assert!(refusal.contains("cannot be passed"), "{refusal}");
     }
+
+    #[test]
+    fn an_install_has_egress_and_only_its_scratch_mounted() {
+        let policy = ContainerPolicy::node_install();
+        let argv = ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"]
+            .map(str::to_owned)
+            .to_vec();
+        let args = install_args("n", "r", &policy, Path::new("/scratch/base"), &argv)
+            .expect("the install builds");
+        let network = args
+            .iter()
+            .position(|arg| arg == "--network")
+            .expect("a network");
+        assert_eq!(
+            args[network + 1],
+            "bridge",
+            "the install reaches the registry"
+        );
+        let mounts: Vec<&str> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--mount")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(mounts.len(), 1, "only the scratch is mounted: {mounts:?}");
+        assert!(
+            mounts[0].contains("source=/scratch/base") && mounts[0].contains("target=/work"),
+            "{}",
+            mounts[0]
+        );
+        assert!(!mounts[0].ends_with(",readonly"), "the scratch is writable");
+        let image = image_ref(&policy).expect("the node image is pinned");
+        let tail: Vec<&str> = args[args.len() - 7..].iter().map(String::as_str).collect();
+        assert_eq!(
+            tail,
+            [
+                "--entrypoint",
+                "npm",
+                image.as_str(),
+                "ci",
+                "--ignore-scripts",
+                "--no-audit",
+                "--no-fund",
+            ],
+            "the argv follows the image"
+        );
+        assert!(args.iter().any(|arg| arg == "--read-only"));
+        assert!(args.iter().any(|arg| arg == "no-new-privileges"));
+    }
+
+    #[test]
+    fn an_install_refuses_an_empty_argv_and_a_closed_network() {
+        let policy = ContainerPolicy::node_install();
+        let refusal = install_args("n", "r", &policy, Path::new("/scratch"), &[])
+            .expect_err("an empty argv is refused");
+        assert!(refusal.contains("empty"), "{refusal}");
+        let argv = ["npm".to_owned(), "ci".to_owned()];
+        let refusal = install_args(
+            "n",
+            "r",
+            &ContainerPolicy::default_run(),
+            Path::new("/s"),
+            &argv,
+        )
+        .expect_err("a run's closed network is refused");
+        assert!(refusal.contains("egress"), "{refusal}");
+    }
 }

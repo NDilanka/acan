@@ -1062,6 +1062,16 @@ pub fn check_files(app_bytes: &str, corpus_bytes: &str) -> Result<(), InitError>
             "probes do not re-encode to the same bytes".to_owned(),
         ));
     }
+    cross_check(&corpus)
+}
+
+/// The checks that need the corpus alone: every probe names a fixture the corpus has. The app
+/// contract is checked when it is decoded, by [`AppContract::check`].
+///
+/// # Errors
+///
+/// Returns [`InitError::Internal`] naming the first probe that names no fixture.
+pub fn cross_check(corpus: &ProbeCorpus) -> Result<(), InitError> {
     let fixtures: BTreeSet<&str> = corpus
         .fixtures
         .iter()

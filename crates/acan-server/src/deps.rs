@@ -413,3 +413,120 @@ fn io_error(path: &Path, source: io::Error) -> DepsError {
         source,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IMAGE: &str = "node:24@sha256:a";
+
+    fn argv() -> Vec<String> {
+        ["npm", "ci", "--ignore-scripts"]
+            .map(str::to_owned)
+            .to_vec()
+    }
+
+    fn manifests_of(pairs: &[(&str, &str)]) -> Vec<(String, Vec<u8>)> {
+        pairs
+            .iter()
+            .map(|(path, text)| ((*path).to_owned(), text.as_bytes().to_vec()))
+            .collect()
+    }
+
+    fn key_of(
+        image: &str,
+        argv: &[String],
+        lock: &[u8],
+        manifests: &[(String, Vec<u8>)],
+    ) -> String {
+        key(image, argv, lock, manifests).to_string()
+    }
+
+    #[test]
+    fn the_key_follows_every_input_the_install_reads() {
+        let manifests = manifests_of(&[("package.json", "{}")]);
+        let base = key_of(IMAGE, &argv(), b"lock", &manifests);
+        assert_eq!(
+            base,
+            key_of(IMAGE, &argv(), b"lock", &manifests),
+            "the same inputs give the same key"
+        );
+        let other_argv = ["npm", "ci", "--ignore-scripts", "--no-fund"]
+            .map(str::to_owned)
+            .to_vec();
+        let changed = [
+            key_of("node:24@sha256:b", &argv(), b"lock", &manifests),
+            key_of(IMAGE, &other_argv, b"lock", &manifests),
+            key_of(IMAGE, &argv(), b"lock2", &manifests),
+            key_of(
+                IMAGE,
+                &argv(),
+                b"lock",
+                &manifests_of(&[("package.json", "{ }")]),
+            ),
+            key_of(
+                IMAGE,
+                &argv(),
+                b"lock",
+                &manifests_of(&[("package.json", "{}"), ("packages/a/package.json", "{}")]),
+            ),
+        ];
+        for other in changed {
+            assert_ne!(base, other, "an input the install reads is in the key");
+        }
+    }
+
+    #[test]
+    fn manifests_are_every_package_json_by_sorted_path_and_nothing_else() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let root = dir.path();
+        let files = [
+            ("package.json", "{}"),
+            ("packages/b/package.json", "{\"b\":1}"),
+            ("packages/a/package.json", "{\"a\":1}"),
+            ("node_modules/x/package.json", "{}"),
+            (".git/package.json", "{}"),
+            ("README.md", "text"),
+        ];
+        for (path, text) in files {
+            let file = root.join(path);
+            fs::create_dir_all(file.parent().expect("a parent")).expect("a directory");
+            fs::write(&file, text).expect("a file");
+        }
+        let found = manifests(root).expect("the tree is read");
+        let paths: Vec<&str> = found.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "package.json",
+                "packages/a/package.json",
+                "packages/b/package.json"
+            ]
+        );
+    }
+
+    #[test]
+    fn stage_writes_the_lockfile_and_the_manifests_where_the_tree_has_them() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let manifests = manifests_of(&[
+            ("package.json", "{}"),
+            ("packages/a/package.json", "{\"a\":1}"),
+        ]);
+        stage(dir.path(), b"lock", &manifests).expect("the tree is staged");
+        assert_eq!(
+            fs::read(dir.path().join(LOCKFILE)).expect("the lockfile"),
+            b"lock"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("packages/a/package.json")).expect("the manifest"),
+            b"{\"a\":1}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_cache_dir_is_named_absolute() {
+        let dir = cache_dir(Some(Path::new("relative/cache"))).expect("a directory is named");
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert!(dir.ends_with("relative/cache"), "{}", dir.display());
+    }
+}
