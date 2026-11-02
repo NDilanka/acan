@@ -179,6 +179,69 @@
   #card button:disabled { color: var(--muted); cursor: default; }
   #card .key { font-family: var(--mono); color: var(--muted); min-width: 10px; }
   #card .note { font-family: var(--mono); font-size: 11px; color: var(--red); }
+  /* The compose panel opens beside the machine an order is written for, and a dashed ring marks
+     the spot. A posted order's ring spreads out from its machine once the view carries it. */
+  #compose { width: 300px; box-sizing: border-box; padding: 10px 12px; font: 12px/1.4 var(--sans); }
+  #compose .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  #compose h2 { margin: 0; font: 600 13px/1.3 var(--mono); overflow-wrap: anywhere; }
+  #compose .sub { margin: 2px 0 8px; color: var(--muted); font-size: 11px; }
+  #compose input { display: block; width: 100%; box-sizing: border-box; padding: 6px 8px; font: 13px/1.3 var(--sans);
+    color: var(--ink); background: var(--face); border: 1px solid var(--rule); border-radius: 4px; }
+  #compose input:focus { outline: none; border-color: var(--ink); }
+  #compose .actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  #compose .actions .muted { margin-left: auto; font-size: 11px; }
+  #compose button { font: 12px/1.3 var(--mono); padding: 3px 10px; border-radius: 4px; border: 1px solid var(--ink);
+    background: var(--ink); color: #ffffff; cursor: pointer; }
+  #compose button:disabled { opacity: 0.6; cursor: default; }
+  #compose button.close { background: none; border: none; color: var(--muted); padding: 0; font-size: 11px; }
+  #compose .note { margin: 6px 0 0; font: 11px/1.4 var(--mono); color: var(--ink); }
+  #compose .note.bad { color: var(--red); }
+  #compose .note:empty { display: none; }
+  #pulses { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+  .pulse { position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px; box-sizing: border-box;
+    border-radius: 50%; border: 2px solid var(--ink); }
+  .pulse.target { border-style: dashed; background: rgba(255, 255, 255, 0.55); }
+  .pulse.sent { opacity: 0; animation: order-pulse 950ms var(--pov-ease) 2; }
+  @keyframes order-pulse { from { transform: scale(0.5); opacity: 0.9; } to { transform: scale(3.4); opacity: 0; } }
+  @keyframes order-still { 0%, 60% { opacity: 1; } to { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .pulse.sent { animation: order-still 1900ms ease-out; } }
+  /* The question card: the clash card's twin, beside the question's pin. */
+  #question { width: 300px; box-sizing: border-box; padding: 12px 14px; transition: opacity 0.4s ease; }
+  #question.fading { opacity: 0; }
+  #question .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  #question h2 { margin: 0 0 6px; font: 600 13px/1.3 var(--mono); }
+  #question p { margin: 6px 0; }
+  #question .ask { font: 13px/1.4 var(--sans); }
+  #question .sub { color: var(--muted); font-size: 11px; }
+  #question .resolved { font-family: var(--mono); color: var(--muted); }
+  #question .note { font: 11px/1.4 var(--mono); color: var(--red); }
+  #question ol.options { list-style: none; margin: 8px 0 0; padding: 0; border-top: 1px solid var(--rule); }
+  #question ol.options li { margin: 0; border-bottom: 1px solid var(--rule); }
+  #question button.option { display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box; padding: 7px 2px;
+    background: none; border: none; color: var(--ink); font: 12px/1.3 var(--sans); text-align: left; cursor: pointer; }
+  #question button.option:hover span { text-decoration: underline; }
+  #question button.option:disabled { color: var(--muted); cursor: default; }
+  #question button.option kbd { min-width: 16px; text-align: center; background: var(--card); border-color: var(--rule); border-radius: 3px; }
+  #question button.close { flex: none; font: 11px var(--mono); color: var(--muted); border: none; background: none; padding: 0; cursor: pointer; }
+  .flag.question { pointer-events: auto; cursor: pointer; }
+  /* The command bar on "/": a field and its results, under the key bar. */
+  #command { top: 52px; left: 50%; transform: translateX(-50%); width: min(540px, calc(100vw - 32px)); box-sizing: border-box; padding: 8px; }
+  #command input { display: block; width: 100%; box-sizing: border-box; padding: 7px 10px; font: 14px/1.3 var(--mono); color: var(--ink);
+    background: var(--face); border: 1px solid var(--ink); border-radius: 6px; outline: none; }
+  #command ul { list-style: none; margin: 6px 0 0; padding: 0; max-height: 50vh; overflow-y: auto; }
+  #command ul:empty { display: none; }
+  #command li { display: grid; grid-template-columns: 5.5em minmax(0, 1fr) auto; column-gap: 8px; padding: 5px 8px; border-radius: 4px; cursor: pointer; }
+  #command li .kind { grid-row: 1 / span 2; font: 10px/1.7 var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  #command li .label { font: 12px/1.4 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #command li .detail { grid-column: 2; font: 11px/1.3 var(--sans); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #command li .verb { grid-column: 3; grid-row: 1; font: 11px var(--mono); color: var(--muted); }
+  #command li.question .kind, #command li.clash .kind { color: var(--amber); }
+  #command li[aria-selected="true"] { background: var(--ink); color: #ffffff; }
+  #command li[aria-selected="true"] .kind, #command li[aria-selected="true"] .detail, #command li[aria-selected="true"] .verb { color: #d5d5d0; }
+  #command .note { margin: 6px 4px 0; font: 11px/1.4 var(--mono); color: var(--muted); }
+  #command .note:empty { display: none; }
+  #command .foot { margin: 6px 4px 0; font: 11px var(--sans); color: var(--muted); }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   #gate { position: fixed; inset: 0; display: grid; place-items: center; }
   #gate form { background: var(--card); border: 1px solid var(--rule); border-radius: 6px; padding: 16px; display: flex; gap: 8px; align-items: center; }
   #gate input { font: 12px var(--mono); padding: 4px 6px; width: 280px; }
@@ -437,7 +500,7 @@
   <p id="setup-blocked" class="muted" hidden></p>
 </dialog>
 <div class="island" id="order" hidden><span id="order-line" class="muted"></span></div>
-<div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle</div>
+<div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle&nbsp;&nbsp;<kbd>A</kbd> answer&nbsp;&nbsp;<kbd>O</kbd> order here&nbsp;&nbsp;<kbd>/</kbd> command</div>
 <div id="watch">
   <aside id="inbox" class="island" aria-label="needs you" hidden></aside>
   <aside id="lanes" class="island" aria-label="agents" hidden></aside>
@@ -445,6 +508,27 @@
   <aside id="scrub" class="island" aria-label="timeline" hidden></aside>
 </div>
 <aside id="card" class="island" hidden></aside>
+<div id="pulses" aria-hidden="true"><div class="pulse target" id="compose-target" hidden></div></div>
+<aside id="compose" class="island" role="dialog" aria-labelledby="compose-title" hidden>
+  <form id="compose-form" autocomplete="off">
+    <div class="head"><h2 id="compose-title"></h2><button type="button" class="close" id="compose-close" aria-label="Close the order panel">close</button></div>
+    <p class="sub" id="compose-context"></p>
+    <label class="sr" for="compose-sentence">The order, in one sentence</label>
+    <input id="compose-sentence" type="text" maxlength="500" spellcheck="true" enterkeyhint="send" placeholder="One sentence: what should change here?">
+    <div class="actions"><button type="submit" id="compose-send">Send</button><span class="muted"><kbd>Enter</kbd> send · <kbd>Esc</kbd> close</span></div>
+    <p class="note" id="compose-note" role="status" aria-live="polite"></p>
+  </form>
+</aside>
+<aside id="question" class="island" role="dialog" aria-labelledby="question-title" hidden></aside>
+<div id="command" class="island" role="dialog" aria-label="Command bar" hidden>
+  <input id="command-input" type="text" role="combobox" aria-expanded="false" aria-controls="command-list" aria-autocomplete="list"
+    aria-label="Command: a name, an order id, agent, touched, go, ride, order here or seal" autocomplete="off" spellcheck="false"
+    placeholder="auth · o-3 · agent w2 · touched auth · order here · seal">
+  <ul id="command-list" role="listbox" aria-label="Results"></ul>
+  <p class="note" id="command-note" role="status" aria-live="polite"></p>
+  <p class="foot"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Enter</kbd> run · <kbd>Tab</kbd> fill a verb · <kbd>Esc</kbd> close</p>
+</div>
+<p id="direct-live" class="sr" role="status" aria-live="polite"></p>
 <aside id="slip" class="island" hidden></aside>
 <aside id="receipt" class="island" hidden aria-label="receipt">
   <h2><span id="receipt-title"></span><span id="receipt-fixture" class="fixture" hidden>FIXTURE</span></h2>

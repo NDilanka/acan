@@ -1,9 +1,11 @@
 // The HTML marks over the canvas: agent flags with their witness chips, the leaders to each
 // drone, the machine labels and the clash pins. Positions come from the wasm side; this file
 // only places the elements.
-import { openCard, paintCard } from "./cards.js";
+import { openCard, openQuestionCard, paintCard, placeQuestion, syncQuestions } from "./cards.js";
+import { placeCompose, syncCompose } from "./compose.js";
 import { canvas, flagsEl, labelsEl, leadersEl, state } from "./state.js";
 import { boxAt, clearOf, inView, placeOverlays } from "./place.js";
+import { questionOfFlag } from "./question.js";
 
 const ID_PREFIX = { order: "o", clash: "c", question: "q", task: "t" };
 
@@ -89,12 +91,14 @@ export function placeLabels() {
       state.labels.delete(index);
     }
   }
+  placeCompose();
+  placeQuestion();
 }
 
 // The page's fixed panels: the shell, the order card, the key bar, the clash card, the usage
-// panel, the notice and the scope note. A flag or a name never sits under one. A panel that is
-// hidden has no box, so it blocks nothing.
-const HUD_SELECTORS = "#shell, #order, #hint, #card, #usage, #notice, #pov-chip, #slip, .flag.unplaced";
+// panel, the notice, the scope note, the compose panel, the question card and the command bar. A
+// flag or a name never sits under one. A panel that is hidden has no box, so it blocks nothing.
+const HUD_SELECTORS = "#shell, #order, #hint, #card, #usage, #notice, #pov-chip, #slip, #compose, #question, #command, .flag.unplaced";
 
 // Each shown panel's box in canvas coordinates, as `{ left, right, top, bottom }`.
 function hudBoxes() {
@@ -147,6 +151,8 @@ export function paintMarks() {
     flagsEl.append(note);
   }
   paintCard();
+  syncCompose();
+  syncQuestions();
 }
 
 function flagElement(flag) {
@@ -199,6 +205,12 @@ function flagElement(flag) {
   }
   if (flag.clash !== null) {
     el.addEventListener("click", () => openCard(flag.clash));
+  }
+  if (flag.kind === "question") {
+    el.addEventListener("click", () => {
+      const question = questionOfFlag(state.view, flag);
+      if (question !== undefined) openQuestionCard(question.id);
+    });
   }
   return el;
 }

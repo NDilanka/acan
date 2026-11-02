@@ -4,7 +4,16 @@
 // asks for no frames. Other modules import `requestRender` from here; the cycle is safe
 // because no module runs code from another at load time.
 import init, { App } from "./pkg/acan_render_web.js";
-import { openCard, settleByKey, toggleCard } from "./cards.js";
+import {
+  closeQuestionCard,
+  openCard,
+  pressDigit,
+  questionOpen,
+  toggleCard,
+  toggleQuestionCard,
+} from "./cards.js";
+import { openCommand } from "./commandbar.js";
+import { clickMachine, closeCompose, composeOpen, orderHere } from "./compose.js";
 import { paintMarks, pinAt, placeLabels } from "./marks.js";
 import { paintOrderLine, paintRide, paintStale, paintUsage } from "./panels.js";
 import { syncSeals } from "./seal.js";
@@ -225,10 +234,9 @@ function bindCanvas() {
     requestRender();
   });
 
-  // A press that did not move is a click. A click near a clash pin's tip opens its card; the
-  // camera stays where it is.
-  // A click on a clash pin opens its card. A click on a drone rides it, or switches the ride to
-  // the drone nearest the click.
+  // A press that did not move is a click, and the camera stays where it is. A click on a clash
+  // pin opens its card. A click on a drone rides it, or switches the ride to the drone nearest the
+  // click. A click on a machine opens the compose panel there, to post an order on it.
   const endDrag = (event) => {
     const pressed = state.press;
     state.press = null;
@@ -245,6 +253,8 @@ function bindCanvas() {
     } else if (droneAt(x, y)) {
       state.app.ride_nearest(x, y);
       requestRender();
+    } else {
+      clickMachine(x, y);
     }
   };
   canvas.addEventListener("pointerup", endDrag);
@@ -308,13 +318,28 @@ function bindKeys() {
       return;
     }
     if (/^[1-3]$/.test(event.key)) {
-      settleByKey(Number(event.key));
+      pressDigit(Number(event.key));
       return;
     }
     switch (event.key) {
       case "c":
       case "C":
         if (!event.repeat) toggleCard();
+        break;
+      case "/":
+        // The key is not typed into the bar's field, which takes the focus.
+        event.preventDefault();
+        if (!event.repeat) openCommand();
+        break;
+      case "a":
+      case "A":
+        if (!event.repeat) toggleQuestionCard();
+        break;
+      case "o":
+      case "O":
+        // The key is not typed into the panel's field, which takes the focus.
+        event.preventDefault();
+        if (!event.repeat) orderHere();
         break;
       case "+":
       case "=":
@@ -342,7 +367,11 @@ function bindKeys() {
         requestRender();
         break;
       case "Escape":
-        if (state.ridden !== "") {
+        if (composeOpen()) {
+          closeCompose();
+        } else if (questionOpen()) {
+          closeQuestionCard();
+        } else if (state.ridden !== "") {
           state.app.leave();
           requestRender();
         }
