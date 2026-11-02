@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -33,6 +33,11 @@ const EXIT_GRACE: Duration = Duration::from_secs(5);
 /// may find the daemon still busy with the container it has just been asked to stop.
 const REMOVE_ATTEMPTS: u32 = 10;
 const REMOVE_RETRY_GAP: Duration = Duration::from_millis(50);
+/// How long one container removal may take in all before it is given up. A stalled daemon must
+/// not hold a run or an install past its limit.
+pub(crate) const REMOVE_DEADLINE: Duration = Duration::from_secs(10);
+/// How often a removal that cannot await checks whether docker has finished.
+const BLOCKING_POLL: Duration = Duration::from_millis(10);
 
 /// Bytes of the CLI's stderr kept for diagnosis.
 const STDERR_HEAD_BYTES: usize = 8 * 1024;
@@ -138,21 +143,88 @@ pub(crate) async fn create(docker: PathBuf, args: Vec<String>) -> Result<String,
     }
 }
 
+/// Why a container could not be removed. The container may still exist.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RemoveError {
+    /// docker did not finish the removal within the deadline.
+    #[error("docker did not finish the removal within {0:?}")]
+    Timeout(Duration),
+    /// docker refused the removal on every attempt. The text is its last stderr, or a spawn error.
+    #[error("docker refused the removal: {0}")]
+    Refused(String),
+}
+
 /// Removes the container `target`, which is a container id or name. A container that does not
-/// exist is already removed. The removal is retried while the daemon is busy.
+/// exist is already removed. The removal is retried while the daemon is busy, and all of it is
+/// given `deadline`.
+///
+/// # Errors
+///
+/// Returns [`RemoveError`] when docker refuses the removal on every attempt, or does not finish
+/// within the deadline. The container may then still exist.
+pub(crate) async fn remove_bounded(
+    docker: &Path,
+    target: &str,
+    deadline: Duration,
+) -> Result<(), RemoveError> {
+    let attempts = async {
+        let mut last = String::new();
+        for _ in 0..REMOVE_ATTEMPTS {
+            let output = Command::new(docker)
+                .args(["rm", "--force", target])
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output()
+                .await;
+            match output {
+                Ok(output) if output.status.success() => return Ok(()),
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                    if stderr.contains("No such container") {
+                        return Ok(());
+                    }
+                    last = stderr.trim().to_owned();
+                }
+                Err(source) => last = source.to_string(),
+            }
+            sleep(REMOVE_RETRY_GAP).await;
+        }
+        Err(RemoveError::Refused(last))
+    };
+    timeout(deadline, attempts)
+        .await
+        .unwrap_or(Err(RemoveError::Timeout(deadline)))
+}
+
+/// Removes a probe's container, bounded by [`REMOVE_DEADLINE`]. A removal that fails is not
+/// reported here: the run's record does not carry it, and the bound only keeps a stalled daemon
+/// from holding the run.
 pub(crate) async fn remove(docker: &Path, target: &str) {
-    for _ in 0..REMOVE_ATTEMPTS {
-        let output = Command::new(docker)
-            .args(["rm", "--force", target])
-            .stdin(Stdio::null())
-            .output()
-            .await;
-        match output {
-            Ok(output) if output.status.success() => return,
-            Ok(output) if String::from_utf8_lossy(&output.stderr).contains("No such container") => {
+    let _ = remove_bounded(docker, target, REMOVE_DEADLINE).await;
+}
+
+/// Removes `target` without awaiting, for a drop that cannot await. The removal is given
+/// `deadline`, after which the docker client is killed. A failed removal is not retried here.
+pub(crate) fn remove_blocking(docker: &Path, target: &str, deadline: Duration) {
+    let Ok(mut child) = std::process::Command::new(docker)
+        .args(["rm", "--force", target])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    let until = Instant::now() + deadline;
+    loop {
+        match child.try_wait() {
+            Ok(None) if Instant::now() < until => std::thread::sleep(BLOCKING_POLL),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
                 return;
             }
-            _ => sleep(REMOVE_RETRY_GAP).await,
+            Ok(Some(_)) | Err(_) => return,
         }
     }
 }
@@ -270,13 +342,8 @@ impl Drop for Container {
             return;
         }
         // Reached only when the run future was dropped before the container was finished.
-        // Remove the container synchronously so none is left running.
-        let _ = std::process::Command::new(&self.docker)
-            .args(["rm", "--force", &self.id])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        // Remove the container without awaiting, under a deadline, so none is left running.
+        remove_blocking(&self.docker, &self.id, REMOVE_DEADLINE);
     }
 }
 

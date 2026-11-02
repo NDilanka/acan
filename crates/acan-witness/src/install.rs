@@ -8,7 +8,9 @@
 //!
 //! The whole install, from create to removal, runs under the policy's time limit. The container is
 //! removed by its name whichever way the install ends, including when its caller stops waiting, so
-//! no install container keeps running after the install returns or is dropped.
+//! no install container keeps running after the install returns or is dropped. The removal has its
+//! own deadline, and when docker does not confirm it, the install reports that, because the
+//! container may still exist.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -52,6 +54,15 @@ pub enum InstallError {
     /// The install ran past the policy's time limit and was removed.
     #[error("the install did not finish within {0:?}")]
     Timeout(Duration),
+    /// The install container could not be removed, so it may still exist. This is reported even
+    /// when the install itself also failed.
+    #[error("the install container {name} could not be removed, so it may still exist: {detail}")]
+    Remove {
+        /// The container's name.
+        name: String,
+        /// Why the removal failed.
+        detail: String,
+    },
     /// The install exited unsuccessfully. `detail` is the head of its stderr.
     #[error("the install exited with status {code}: {detail}")]
     Failed {
@@ -75,6 +86,17 @@ pub async fn install_dependencies(
     scratch: &Path,
     argv: &[String],
 ) -> Result<InstallReport, InstallError> {
+    install_within(config, policy, scratch, argv, driver::REMOVE_DEADLINE).await
+}
+
+/// As [`install_dependencies`], with the deadline the container's removal is given.
+async fn install_within(
+    config: &RunnerConfig,
+    policy: &ContainerPolicy,
+    scratch: &Path,
+    argv: &[String],
+    removal: Duration,
+) -> Result<InstallReport, InstallError> {
     let run_id = uuid::Uuid::new_v4().to_string();
     let name = format!("acan-install-{run_id}");
     let args = docker::install_args(&name, &run_id, policy, scratch, argv)
@@ -87,13 +109,17 @@ pub async fn install_dependencies(
         docker: config.docker.clone(),
         name,
         removed: false,
+        removal,
     };
     let outcome = match timeout(limit, run(config, args)).await {
         Ok(outcome) => outcome,
         Err(_elapsed) => Err(InstallError::Timeout(limit)),
     };
-    container.remove().await;
-    outcome.map(|()| InstallReport {
+    // A container that may still exist is the failure the caller must hear of, so it is reported
+    // before the outcome of the install.
+    container.remove().await?;
+    outcome?;
+    Ok(InstallReport {
         duration: started.elapsed(),
     })
 }
@@ -152,19 +178,32 @@ async fn run(config: &RunnerConfig, args: Vec<String>) -> Result<(), InstallErro
     })
 }
 
-/// The install container, by its name. It is removed on every path that returns, and synchronously
-/// on drop, so an install that stops early leaves no container running.
+/// The install container, by its name. It is removed on every path that returns, and without
+/// awaiting on drop, so an install that stops early leaves no container running.
 struct InstallContainer {
     docker: PathBuf,
     name: String,
+    /// Set only when docker confirmed the removal, so a removal that failed is retried on drop.
     removed: bool,
+    /// The deadline each removal is given.
+    removal: Duration,
 }
 
 impl InstallContainer {
-    /// Removes the container, retrying while docker is busy.
-    async fn remove(&mut self) {
-        driver::remove(&self.docker, &self.name).await;
+    /// Removes the container, retrying while docker is busy, and within the removal's deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InstallError::Remove`] when docker does not confirm the removal.
+    async fn remove(&mut self) -> Result<(), InstallError> {
+        driver::remove_bounded(&self.docker, &self.name, self.removal)
+            .await
+            .map_err(|err| InstallError::Remove {
+                name: self.name.clone(),
+                detail: err.to_string(),
+            })?;
         self.removed = true;
+        Ok(())
     }
 }
 
@@ -173,13 +212,9 @@ impl Drop for InstallContainer {
         if self.removed {
             return;
         }
-        // Reached only when the install stopped before its removal, so the container may be running.
-        let _ = std::process::Command::new(&self.docker)
-            .args(["rm", "--force", &self.name])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        // Reached when the install stopped before its removal was confirmed, so the container may
+        // be running. The retry is bounded too, so a stalled daemon cannot hold the thread.
+        driver::remove_blocking(&self.docker, &self.name, self.removal);
     }
 }
 
@@ -194,19 +229,39 @@ mod tests {
     /// A stand-in for docker. `create` prints a container id, `start` runs until it is killed, and
     /// every other command is appended to the returned log.
     fn fake_docker(dir: &Path) -> (PathBuf, PathBuf) {
+        fake_docker_with(dir, "true")
+    }
+
+    /// As [`fake_docker`], except that each `rm` is logged and then runs `on_rm`, a shell command.
+    fn fake_docker_with(dir: &Path, on_rm: &str) -> (PathBuf, PathBuf) {
         let log = dir.join("log");
         let program = dir.join("docker");
+        let log_text = log.display();
         let script = format!(
             "#!/bin/sh\n\
              case \"$1\" in\n\
              create) echo 0123456789abcdef ;;\n\
              start) exec sleep 30 ;;\n\
-             *) echo \"$*\" >> '{}' ;;\n\
-             esac\n",
-            log.display()
+             rm) echo \"$*\" >> '{log_text}'; {on_rm} ;;\n\
+             *) echo \"$*\" >> '{log_text}' ;;\n\
+             esac\n"
         );
         fs::write(&program, script).expect("the fake docker");
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("executable");
+        // A fork in another test can inherit the script's write handle for a moment, and an exec of
+        // a file that is open for writing fails with "text file busy". Wait until it can run.
+        for _ in 0..200 {
+            let probe = std::process::Command::new(&program)
+                .arg("create")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            if probe.is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
         (program, log)
     }
 
@@ -245,6 +300,67 @@ mod tests {
         assert!(
             log.contains("rm --force acan-install-"),
             "the container is removed by name: {log}"
+        );
+    }
+
+    #[test]
+    fn a_removal_that_stalls_is_given_up_at_its_deadline_and_reported() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (program, _log) = fake_docker_with(dir.path(), "exec sleep 30");
+        let config = RunnerConfig::new(program, 3000);
+        let mut policy = ContainerPolicy::node_install();
+        policy.timeout_ms = NonZeroU64::new(300).expect("a limit");
+        let started = Instant::now();
+
+        let err = runtime()
+            .block_on(install_within(
+                &config,
+                &policy,
+                dir.path(),
+                &argv(),
+                Duration::from_millis(300),
+            ))
+            .expect_err("the removal never finishes");
+
+        assert!(
+            matches!(&err, InstallError::Remove { name, .. } if name.starts_with("acan-install-")),
+            "{err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the stalled removal was given up at its deadline"
+        );
+    }
+
+    #[test]
+    fn a_removal_docker_refuses_is_retried_and_reported_with_its_container() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (program, log) =
+            fake_docker_with(dir.path(), "echo 'Error: device is busy' >&2; exit 1");
+        let config = RunnerConfig::new(program, 3000);
+        let mut policy = ContainerPolicy::node_install();
+        policy.timeout_ms = NonZeroU64::new(300).expect("a limit");
+
+        let err = runtime()
+            .block_on(install_within(
+                &config,
+                &policy,
+                dir.path(),
+                &argv(),
+                Duration::from_secs(5),
+            ))
+            .expect_err("docker refuses the removal");
+
+        let text = err.to_string();
+        assert!(matches!(&err, InstallError::Remove { .. }), "{text}");
+        assert!(
+            text.contains("acan-install-") && text.contains("device is busy"),
+            "{text}"
+        );
+        let log = fs::read_to_string(&log).expect("the log");
+        assert!(
+            log.matches("rm --force acan-install-").count() > 1,
+            "the refused removal was retried, and again on drop: {log}"
         );
     }
 
