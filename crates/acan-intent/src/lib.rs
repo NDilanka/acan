@@ -27,6 +27,7 @@ mod hash;
 mod ledger;
 mod mcp;
 mod observation;
+mod order;
 pub mod predicate;
 mod probe;
 pub mod provenance;
@@ -81,6 +82,7 @@ pub use observation::{
     MaskSelector, NormalizationPlan, Observation, ObservedRun, Projection, ProjectionKind,
     Relation, RequestRecord, StepPath, TypedCapture,
 };
+pub use order::{DeterministicError, deterministic};
 pub use probe::{
     AdvanceTimeStep, AppContract, CaptureKind, CaptureOutcome, CaptureSource, CaptureStep,
     ClockControl, CompletionBarrier, CorpusProbe, Fixture, HttpStep, Isolation, MissingCapture,
@@ -119,7 +121,7 @@ pub use verdict::{
     ObligationCheck, Outcome, UnknownReason,
 };
 pub use version::{
-    AppContractV1, CaptionCatalogV1, CardV1, ContestV1, ContrastExampleV1, EpisodeV1, LedgerV1,
+    AppContractV1, CaptionCatalogV2, CardV1, ContestV1, ContrastExampleV1, EpisodeV1, LedgerV1,
     McpV1, ObservationV1, PlantViewV1, ProbeCorpusV1, ReceiptV1, RepairRoundV1, RunV1,
     RunnerContractV1, ScopeConfirmationV1, ScopeDraftV1, ScopeV1, TwinV1,
 };
