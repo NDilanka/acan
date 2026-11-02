@@ -31,6 +31,9 @@ param(
     # The first control on an order. When its claim ends before the build is cleared, it claims and
     # declares again once (see the wait for build clearance below).
     [switch]$RedeclareOnce,
+    # Apply the bundle's edits to the task worktree's current files (the worker's candidate, at its HEAD),
+    # not to the pinned base. The worktree must be clean; the commit goes on top of its HEAD.
+    [switch]$OnWorkerCandidate,
     [string]$Pin = 'f91962156841332d5753d869554839f7c4cdea79'
 )
 
@@ -214,20 +217,32 @@ try {
     $wt = Call-Tool -Name 'get_worktree' -Arguments @{ task = $Task }
     if (-not $wt.ok) { throw "get_worktree refused: $($wt.text)" }
     $wtPath = [string]$wt.value.path
+    $baseSource = if ($OnWorkerCandidate) { 'task worktree HEAD (the worker candidate)' } else { 'pinned base' }
+    if ($OnWorkerCandidate) {
+        $dirty = @(& git -C $wtPath status --porcelain)
+        if ($dirty.Count -gt 0) { throw "the task worktree has $($dirty.Count) uncommitted entries; the injection needs the worker's candidate committed" }
+    }
+    $baseHead = (& git -C $wtPath rev-parse HEAD).Trim()
+    $result['base_source'] = $baseSource
+    $result['base_head'] = $baseHead
     $written = @()
     foreach ($file in @($bundleObj.files)) {
-        $text = Read-PinnedFile -Path ([string]$file.path)
+        if ($OnWorkerCandidate) {
+            $text = [IO.File]::ReadAllText((Join-Path $wtPath ([string]$file.path))) -replace "`r`n", "`n"
+        } else {
+            $text = Read-PinnedFile -Path ([string]$file.path)
+        }
         $text = Apply-Edits -Text $text -Edits $file.edits -Path ([string]$file.path)
         $target = Join-Path $wtPath ([string]$file.path)
         [IO.File]::WriteAllText($target, $text, (New-Object System.Text.UTF8Encoding($false)))
         $written += [string]$file.path
     }
-    Add-Step -Name 'control writes its bundle into the task worktree' -Ok $true -Evidence @{ worktree = $wtPath; files = $written }
+    Add-Step -Name 'control writes its bundle into the task worktree' -Ok $true -Evidence @{ worktree = $wtPath; files = $written; base_source = $baseSource }
     & git -C $wtPath add -A
     & git -C $wtPath commit -q -m "control $($bundleObj.id) on $Task ($($bundleObj.applies_to))"
     if ($LASTEXITCODE -ne 0) { throw 'git commit failed in the worktree (nothing to commit, or identity missing)' }
     $head = (& git -C $wtPath rev-parse HEAD).Trim()
-    Add-Step -Name 'control commits the candidate' -Ok ([bool]$head) -Evidence @{ head = $head; base = [string]$bundleObj.base }
+    Add-Step -Name 'control commits the candidate' -Ok ([bool]$head) -Evidence @{ head = $head; base = [string]$bundleObj.base; base_head = $baseHead }
     $result['head'] = $head
 
     # ---- report and wait for the receipt -----------------------------------------------------
