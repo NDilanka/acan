@@ -165,6 +165,7 @@ export function installInbox(kit) {
   paintOptIn();
 
   let seen = null;
+  let shownCount = -1;
   let last = { version: -1, feed: -1, views: -1 };
   const paint = () => {
     const view = kit.state.view;
@@ -174,9 +175,14 @@ export function installInbox(kit) {
     last = now;
     panel.hidden = false;
     const items = inboxItems(view, kit.state.plantViews, visionDoubts(kit.feed.events));
-    const fresh = seen === null ? [] : freshItems(seen, items);
-    const changed = seen === null || fresh.length > 0 || items.length !== seen.size;
-    seen = new Set(items.map((item) => item.key));
+    // What is new is judged against the last live list only, so rewinding the map and coming back
+    // announces nothing twice.
+    const live = kit.isLive();
+    const fresh = seen === null || !live ? [] : freshItems(seen, items);
+    // The first list is on screen already, so only a later change is announced.
+    const changed = shownCount !== -1 && (fresh.length > 0 || items.length !== shownCount);
+    shownCount = items.length;
+    if (live || seen === null) seen = new Set(items.map((item) => item.key));
 
     badge.textContent = String(items.length);
     badge.classList.toggle("some", items.length > 0);
@@ -209,7 +215,7 @@ export function installInbox(kit) {
       hidden: document.hidden,
       optedIn: optedIn(),
       permission: canNotify ? Notification.permission : "default",
-      live: kit.isLive(),
+      live,
     });
     if (notify) {
       // The tag is the item's key, so a browser shows one notification per item at most.

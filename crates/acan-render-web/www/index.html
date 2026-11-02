@@ -299,7 +299,11 @@
      clash card opens over it. A row that changed glows once. */
   #watch { position: fixed; top: 12px; right: 12px; width: 300px; max-height: calc(100vh - 24px);
     display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
-  #watch > .island { position: static; pointer-events: auto; padding: 8px 10px; min-height: 0; }
+  #watch > .island { position: static; pointer-events: auto; padding: 8px 10px; min-height: 0;
+    display: flex; flex-direction: column; overflow: hidden; }
+  #watch > .island > * { flex: none; }
+  #watch > .island > ol { flex: 0 1 auto; min-height: 0; }
+  #watch > #scrub { flex: none; }
   #watch h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 0 4px;
     font: 600 11px/1.2 var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
   #watch h3 .keys { text-transform: none; letter-spacing: 0; font-weight: 400; }
@@ -351,6 +355,18 @@
   #history button.cancel:disabled { cursor: default; opacity: 0.6; }
   #history .more, #history .note { margin: 4px 0 0; font: 11px/1.4 var(--sans); color: var(--muted); }
   #history .note:not(:empty) { color: var(--ink); }
+  /* The timeline. While the map shows the past it is drawn paler, and the scrubber says so in
+     amber until Esc or Live. */
+  #scrub input[type=range] { display: block; width: 100%; margin: 2px 0; accent-color: var(--ink); }
+  #scrub .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 0;
+    font: 11px/1.4 var(--mono); color: var(--muted); }
+  #scrub.held { border-color: var(--amber); }
+  #scrub.held input[type=range] { accent-color: var(--amber); }
+  #scrub.held .where { color: #7a5a12; font-weight: 600; }
+  #scrub .live { font: 11px var(--mono); padding: 1px 8px; background: var(--ink); color: #ffffff; border: 1px solid var(--ink);
+    border-radius: 4px; cursor: pointer; }
+  body.history canvas { filter: saturate(0.3) brightness(1.03); transition: filter 200ms ease-out; }
+  @media (prefers-reduced-motion: reduce) { body.history canvas { transition: none; } }
   #lanes li + li { border-top: 1px solid var(--rule); }
   #lanes button.lane { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 1px 8px; width: 100%;
     padding: 4px 2px; background: none; border: none; color: var(--ink); text-align: left; cursor: pointer; font: 12px/1.3 var(--mono); }
@@ -426,6 +442,7 @@
   <aside id="inbox" class="island" aria-label="needs you" hidden></aside>
   <aside id="lanes" class="island" aria-label="agents" hidden></aside>
   <aside id="history" class="island" aria-label="orders" hidden></aside>
+  <aside id="scrub" class="island" aria-label="timeline" hidden></aside>
 </div>
 <aside id="card" class="island" hidden></aside>
 <aside id="slip" class="island" hidden></aside>
