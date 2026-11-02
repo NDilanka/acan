@@ -268,7 +268,7 @@ function roleItem(row, index, canSave) {
   const item = document.createElement("li");
   item.className = "setup-row";
   const id = `setup-role-${index}`;
-  const name = document.createElement(canSave ? "label" : "span");
+  const name = document.createElement(canSave && row.picker ? "label" : "span");
   name.className = "setup-name";
   name.textContent = row.role;
   const now = document.createElement("span");
@@ -277,6 +277,13 @@ function roleItem(row, index, canSave) {
   now.textContent = row.now;
   item.append(name, now);
   if (!canSave) return item;
+  if (!row.picker) {
+    const note = document.createElement("span");
+    note.className = "setup-note";
+    note.textContent = row.note;
+    item.append(note);
+    return item;
+  }
   name.htmlFor = id;
   const select = document.createElement("select");
   select.id = id;

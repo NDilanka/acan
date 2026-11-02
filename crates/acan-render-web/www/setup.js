@@ -68,19 +68,27 @@ export function pickChoices(status) {
 
 // One row per role the server lists. `value` is the picked provider, or "" when the role takes its
 // default. The choices always hold the role's own pick, so the picker shows what the server holds.
+// A role marked meta_only is offered Meta alone, and no picker when Meta has no key. A server that
+// sends no meta_only gets every keyed provider, and its 400 needs_meta answer explains a wrong pick.
 export function roleRows(status) {
   const choices = pickChoices(status);
-  return rolesOf(status).map(({ role, provider, picked, off_reason: offReason }) => {
+  const meta = choices.find((choice) => choice.value === "meta") ?? null;
+  return rolesOf(status).map(({ role, provider, picked, off_reason: offReason, meta_only: metaOnly }) => {
     const value = picked === true && typeof provider === "string" ? provider : "";
-    const options = [{ value: "", label: "Default" }, ...choices];
-    if (value !== "" && !choices.some((choice) => choice.value === value)) {
-      options.push({ value, label: providerLabel(value) });
-    }
     let now;
     if (typeof offReason === "string" && offReason !== "") now = `Off: ${offReason}`;
     else if (typeof provider !== "string") now = "Off";
     else now = picked === true ? `${providerLabel(provider)}, picked` : `${providerLabel(provider)}, by default`;
-    return { role, value, options, now, off: typeof provider !== "string" || (typeof offReason === "string" && offReason !== "") };
+    const off = typeof provider !== "string" || (typeof offReason === "string" && offReason !== "");
+    if (metaOnly === true && meta === null) {
+      return { role, value: "", options: [], now, off, picker: false, note: `${capital(role)} needs a Meta key.` };
+    }
+    const own = metaOnly === true ? [meta] : choices;
+    const options = [{ value: "", label: "Default" }, ...own];
+    if (value !== "" && !options.some((option) => option.value === value)) {
+      options.push({ value, label: providerLabel(value) });
+    }
+    return { role, value, options, now, off, picker: true, note: null };
   });
 }
 

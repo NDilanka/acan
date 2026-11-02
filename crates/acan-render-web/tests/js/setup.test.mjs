@@ -306,3 +306,60 @@ test("no message echoes an answer's fields beyond the provider's name, or a key"
     assert.doesNotMatch(JSON.stringify(row), /placeholder-not-shown/);
   }
 });
+
+// The same answer from a server that marks the roles that may use only Meta.
+const MARKED = {
+  ...SET,
+  roles: SET.roles.map((role) => ({ ...role, meta_only: role.role === "vision" })),
+};
+const MARKED_META = {
+  ...MARKED,
+  providers: MARKED.providers.map((provider) =>
+    provider.name === "meta" ? { ...provider, saved: true, source: "saved" } : provider,
+  ),
+};
+
+test("a meta_only role with a Meta key is offered Default and Meta only", () => {
+  const vision = roleRows(MARKED_META).find((row) => row.role === "vision");
+  assert.equal(vision.picker, true);
+  assert.equal(vision.note, null);
+  assert.deepEqual(vision.options, [
+    { value: "", label: "Default" },
+    { value: "meta", label: "Meta Model API" },
+  ]);
+});
+
+test("a meta_only role with no Meta key gets one sentence and no picker", () => {
+  const vision = roleRows(MARKED).find((row) => row.role === "vision");
+  assert.equal(vision.picker, false);
+  assert.deepEqual(vision.options, []);
+  assert.equal(vision.note, "Vision needs a Meta key.");
+  assert.equal(vision.now, "Off: it needs a Meta key");
+  const director = roleRows({ ...MARKED, roles: [{ role: "director", provider: null, picked: false, off_reason: "it needs a Meta key", meta_only: true }] })[0];
+  assert.equal(director.note, "Director needs a Meta key.");
+});
+
+test("a role that is not meta_only is offered every provider with a key", () => {
+  for (const status of [MARKED, MARKED_META]) {
+    const worker = roleRows(status).find((row) => row.role === "worker");
+    assert.equal(worker.picker, true);
+    assert.deepEqual(
+      worker.options.map((option) => option.value),
+      ["", ...pickChoices(status).map((choice) => choice.value)],
+    );
+  }
+  assert.deepEqual(
+    roleRows(MARKED_META).find((row) => row.role === "worker").options.map((option) => option.value),
+    ["", "meta", "baseten", "fireworks"],
+  );
+});
+
+test("with no meta_only field the page does not guess, and the server's needs_meta answer explains a wrong pick", () => {
+  const vision = roleRows(SET).find((row) => row.role === "vision");
+  assert.equal(vision.picker, true);
+  assert.deepEqual(
+    vision.options.map((option) => option.value),
+    ["", "baseten", "fireworks"],
+  );
+  assert.match(roleOutcome(400, { error: "bad_request", what: "needs_meta" }, "vision", "baseten").text, /Meta Model API only/);
+});
