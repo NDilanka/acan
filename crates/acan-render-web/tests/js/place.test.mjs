@@ -167,6 +167,27 @@ test("a moved flag records a leader from its box to its anchor", () => {
   }, "the leader leaves the bottom edge of the flag and ends at its anchor");
 });
 
+test("a keep flag pushed up by a name records its leader down to its own machine", () => {
+  // The store's keep flag on the mock: its natural spot is over the auth name, so it moves up past
+  // that name. Its leader must still run from the flag down to the store's top, not to auth.
+  const authName = boxAt(720, 490, 66, 16, PAD);
+  const keep = { left: 849 - 164, top: 534 - 6 - 35, w: 328, h: 35, x: 849, y: 534 };
+  const { plotTops, plotLeaders } = placeOverlays({
+    placed: [authName],
+    labels: [],
+    plots: [keep],
+    ...VIEW,
+    pad: PAD,
+  });
+  assert.ok(plotTops[0] < keep.top, "the flag moved up past the name");
+  assert.deepEqual(plotLeaders[0], {
+    x1: keep.x,
+    y1: plotTops[0] + keep.h,
+    x2: keep.x,
+    y2: keep.y,
+  });
+});
+
 test("a plot flag with a clear spot above its anchor does not drop onto the machine", () => {
   // A name just under the natural spot: the nearest free top is below it, past the anchor.
   const name = { left: 60, right: 200, top: 186, bottom: 196 };

@@ -305,7 +305,8 @@ function showFlag(el, left, top) {
 }
 
 // A thin line from a flag's bottom edge to its bot's crown. The leaders sit under the flags, so
-// a flag hides the start of its own line. A tint, when given, colours the line; else it is grey.
+// a flag hides the start of its own line. A tint, when given, colours the line and makes it a
+// little heavier, so a moved plot or keep flag's line reads at a glance; else it is grey.
 function drawLeader(index, x1, y1, x2, y2, tint = "") {
   let line = state.leaderEls[index];
   if (line === undefined) {
@@ -318,6 +319,7 @@ function drawLeader(index, x1, y1, x2, y2, tint = "") {
   line.setAttribute("x2", String(x2));
   line.setAttribute("y2", String(y2));
   line.style.stroke = tint;
+  line.style.strokeWidth = tint === "" ? "" : "1.5px";
   line.style.display = "";
 }
 
