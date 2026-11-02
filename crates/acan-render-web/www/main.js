@@ -421,9 +421,9 @@ async function loadPlateFixture(name) {
   if (!response.ok) throw new Error(`fixture HTTP ${response.status}`);
   const text = await response.text();
   const order = JSON.parse(text).order.id;
-  const { play, playError } = playOf(state.app, text);
+  const { play, playError, items } = playOf(state.app, text);
   const summary = JSON.parse(state.app.plant_view_summary(text));
-  state.plantViews.set(order, { recorded: -1, summary, error: null, play, playError, fixture: true });
+  state.plantViews.set(order, { recorded: -1, summary, error: null, play, playError, items, fixture: true });
   paintPlate();
 }
 

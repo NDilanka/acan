@@ -1,48 +1,69 @@
 {
-  "version": "acan-caption-catalog/1",
-  "catalog_version": "captions-1",
+  "version": "acan-caption-catalog/2",
+  "catalog_version": "captions-2",
   "templates": [
     {
-      "template_id": "residue.changed_value",
-      "text": "Base answered {base}; the candidate answers {candidate}. No scope item covers it.",
+      "template_id": "unspecified.authorized",
+      "text": "The scope allows this change, and no obligation checks it. Base answered {base}; the candidate answers {candidate}.",
+      "classes": ["authorized_but_unspecified"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {
         "base": {
           "column": "base_a",
-          "value_type": "text",
+          "value_type": "any",
           "presence": "required"
         },
         "candidate": {
           "column": "candidate",
-          "value_type": "text",
-          "presence": "required"
+          "value_type": "any",
+          "presence": "optional"
         }
       }
     },
     {
       "template_id": "violation.ruling",
       "text": "The candidate answers {candidate}, which the ruling forbids.",
+      "classes": ["violates_ruling"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {
         "candidate": {
           "column": "candidate",
-          "value_type": "identifier",
+          "value_type": "any",
           "presence": "required"
         }
       }
     },
     {
       "template_id": "bounced.obligation_failed",
-      "text": "The scope wants {target} here; the candidate does not answer it yet.",
+      "text": "The scope wants {target} here; the candidate does not answer it.",
+      "classes": ["obligation_failed"],
+      "states": ["open", "bounced", "residue", "stopped"],
       "slots": {
         "target": {
           "column": "target",
-          "value_type": "text",
+          "value_type": "any",
           "presence": "required"
+        }
+      }
+    },
+    {
+      "template_id": "failed.obligation",
+      "text": "An obligation the scope sets fails here; the candidate answers {candidate}.",
+      "classes": ["obligation_failed"],
+      "states": ["open", "bounced", "residue", "stopped"],
+      "slots": {
+        "candidate": {
+          "column": "candidate",
+          "value_type": "any",
+          "presence": "optional"
         }
       }
     },
     {
       "template_id": "unknown.unstable_base",
       "text": "The second base run answered {base_b}, so this check has no answer.",
+      "classes": ["unstable_base"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {
         "base_b": {
           "column": "base_b",
@@ -52,17 +73,37 @@
       }
     },
     {
-      "template_id": "stopped.out_of_scope",
-      "text": "Base answered {base}; the candidate answers {candidate}. Out of scope, and the repair budget is spent.",
+      "template_id": "out_of_scope.changed_value",
+      "text": "Base answered {base}; the candidate answers {candidate}. No scope item covers it.",
+      "classes": ["out_of_scope"],
+      "states": ["open", "bounced", "fixed", "residue"],
       "slots": {
         "base": {
           "column": "base_a",
-          "value_type": "number",
+          "value_type": "any",
           "presence": "required"
         },
         "candidate": {
           "column": "candidate",
-          "value_type": "number",
+          "value_type": "any",
+          "presence": "optional"
+        }
+      }
+    },
+    {
+      "template_id": "stopped.out_of_scope",
+      "text": "Base answered {base}; the candidate answers {candidate}. Out of scope, and the repair budget is spent.",
+      "classes": ["out_of_scope"],
+      "states": ["stopped"],
+      "slots": {
+        "base": {
+          "column": "base_a",
+          "value_type": "any",
+          "presence": "required"
+        },
+        "candidate": {
+          "column": "candidate",
+          "value_type": "any",
           "presence": "optional"
         }
       }
@@ -70,6 +111,8 @@
     {
       "template_id": "unknown.incomparable",
       "text": "Base reached this step with {base_a}; the candidate did not, so the runs cannot be compared.",
+      "classes": ["incomparable"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {
         "base_a": {
           "column": "base_a",
@@ -81,6 +124,8 @@
     {
       "template_id": "unknown.error",
       "text": "Base answered {base_a}; the candidate run did not complete, so this check has no answer.",
+      "classes": ["error"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {
         "base_a": {
           "column": "base_a",
@@ -92,6 +137,8 @@
     {
       "template_id": "fulfilled.obligations",
       "text": "The candidate answers {candidate}, as the scope asked.",
+      "classes": ["obligation_fulfilled"],
+      "states": ["open", "bounced", "fixed", "residue", "stopped"],
       "slots": {
         "candidate": {
           "column": "candidate",
