@@ -158,6 +158,15 @@ pub enum DepsError {
         /// What the lockfile names, without any URL, so no credential reaches the message.
         detail: String,
     },
+    /// A `package.json` names a package source the install may not fetch from. Nothing is
+    /// installed.
+    #[error("the {} tree cannot be installed: {detail}", role.name())]
+    Manifest {
+        /// The role.
+        role: Role,
+        /// What the manifest names, without any URL, so no credential reaches the message.
+        detail: String,
+    },
     /// The install did not finish.
     #[error("the {} install failed: {source}", role.name())]
     Install {
@@ -265,6 +274,7 @@ impl Installer<'_> {
         };
         check_lockfile(role, &lock)?;
         let manifests = manifests(&tree).map_err(|source| io_error(&tree, source))?;
+        check_manifests(role, &manifests)?;
         let mut policy = ContainerPolicy::node_install();
         let image = policy
             .image
@@ -343,58 +353,252 @@ impl Installer<'_> {
 /// Refuses a lockfile that names a package source the install may not fetch from. The install has
 /// network egress, so each fetch is a request the host makes. Only the public registry is allowed.
 /// A git, file, plain-HTTP or local-address source is refused, a link outside the tree is refused,
-/// and so is a version that names a source where a semver version belongs.
+/// and so is a version that names a source where a semver version belongs. Every dependency map
+/// and every override is checked too, so a node with no `resolved` cannot name a source either.
 ///
 /// Residual risk: npm follows the redirects the registry sends, and the host resolves the
 /// registry's name. This check sees neither.
 fn check_lockfile(role: Role, lock: &[u8]) -> Result<(), DepsError> {
-    let value: Value = serde_json::from_slice(lock).map_err(|_| DepsError::Lockfile {
-        role,
-        detail: "it is not JSON".to_owned(),
-    })?;
-    check_sources(role, "the lockfile root", &value)
+    check_lock(lock).map_err(|detail| DepsError::Lockfile { role, detail })
 }
 
-/// Checks each entry of a lockfile and every entry nested under it. `name` is the key the entry
-/// sits under, which a refusal names.
-fn check_sources(role: Role, name: &str, value: &Value) -> Result<(), DepsError> {
-    let Some(entry) = value.as_object() else {
-        return Ok(());
-    };
-    check_entry(role, name, entry)?;
-    for (key, child) in entry {
-        check_sources(role, key, child)?;
+/// The reason a lockfile is refused, or `Ok` when every source in it is admitted.
+fn check_lock(lock: &[u8]) -> Result<(), String> {
+    let value: Value = serde_json::from_slice(lock).map_err(|_| "it is not JSON".to_owned())?;
+    let root = value
+        .as_object()
+        .ok_or_else(|| "it is not a JSON object".to_owned())?;
+    check_node("the lockfile root", root)?;
+    if let Some(packages) = root.get("packages") {
+        let packages = packages
+            .as_object()
+            .ok_or_else(|| "its packages are not an object".to_owned())?;
+        for (path, node) in packages {
+            let node = node
+                .as_object()
+                .ok_or_else(|| format!("{path} is not an object"))?;
+            check_node(path, node)?;
+        }
     }
     Ok(())
 }
 
-/// Checks one entry's `resolved` source and its `version`.
-fn check_entry(role: Role, name: &str, entry: &Map<String, Value>) -> Result<(), DepsError> {
+/// Checks one lockfile node: its own source and version, its dependency maps and its overrides. A
+/// version 1 lockfile nests a node's dependencies as nodes, and those are checked as well. `name`
+/// is the key the node sits under, which a refusal names.
+fn check_node(name: &str, node: &Map<String, Value>) -> Result<(), String> {
+    check_entry(name, node)?;
+    for (key, child) in node {
+        if is_spec_map(key, true) {
+            check_lock_specs(name, key, child)?;
+        } else if is_redirect_map(key) {
+            check_redirects(name, child)?;
+        }
+    }
+    Ok(())
+}
+
+/// Checks a lockfile node's map of dependencies. A string is a spec, and an object is a nested
+/// node of a version 1 lockfile.
+fn check_lock_specs(owner: &str, key: &str, value: &Value) -> Result<(), String> {
+    let map = value
+        .as_object()
+        .ok_or_else(|| format!("{owner} has a {key} that is not an object"))?;
+    for (dep, child) in map {
+        check_dep_name(owner, dep)?;
+        match child {
+            Value::Object(nested) => check_node(dep, nested)?,
+            spec => {
+                if let Some(refusal) = refused_spec(owner, dep, spec) {
+                    return Err(refusal);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a manifest that names a package source the install may not fetch from. npm builds the
+/// tree from every manifest before it checks the lockfile against them, so a spec in a manifest is
+/// fetched even when the lockfile does not list it.
+fn check_manifests(role: Role, manifests: &[(String, Vec<u8>)]) -> Result<(), DepsError> {
+    for (path, bytes) in manifests {
+        check_manifest(path, bytes).map_err(|detail| DepsError::Manifest { role, detail })?;
+    }
+    Ok(())
+}
+
+/// The reason a manifest is refused, or `Ok` when every spec in it is admitted.
+fn check_manifest(path: &str, bytes: &[u8]) -> Result<(), String> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| format!("{path} is not JSON"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{path} is not a JSON object"))?;
+    for (key, child) in object {
+        if is_spec_map(key, false) {
+            check_manifest_specs(path, key, child)?;
+        } else if is_redirect_map(key) {
+            check_redirects(path, child)?;
+        }
+    }
+    Ok(())
+}
+
+/// Checks a manifest's map of dependencies: every name is a package name, and every value is a
+/// spec the install may fetch.
+fn check_manifest_specs(owner: &str, key: &str, value: &Value) -> Result<(), String> {
+    let map = value
+        .as_object()
+        .ok_or_else(|| format!("{owner} has a {key} that is not an object"))?;
+    for (dep, spec) in map {
+        check_dep_name(owner, dep)?;
+        if let Some(refusal) = refused_spec(owner, dep, spec) {
+            return Err(refusal);
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a dependency whose name is not a package name. Such a name is never echoed.
+fn check_dep_name(owner: &str, dep: &str) -> Result<(), String> {
+    if is_package_name(dep) {
+        return Ok(());
+    }
+    let owner = if owner.is_empty() {
+        "the root package"
+    } else {
+        owner
+    };
+    Err(format!(
+        "{owner} declares a dependency whose name is not a package name"
+    ))
+}
+
+/// Checks overrides or resolutions. A string redirects the package it is keyed by, and an object
+/// nests more redirects. A key may be a selector rather than a package name, so a refusal names it
+/// only when it is a package name.
+fn check_redirects(owner: &str, value: &Value) -> Result<(), String> {
+    let map = value
+        .as_object()
+        .ok_or_else(|| format!("{owner} has redirects that are not an object"))?;
+    for (key, redirect) in map {
+        match redirect {
+            Value::Object(_) => check_redirects(owner, redirect)?,
+            spec => {
+                if let Some(refusal) = refused_spec(owner, key, spec) {
+                    return Err(refusal);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `key` names a map of package specs: a manifest's or a lockfile node's dependencies. A
+/// version 1 lockfile lists a node's dependencies under `requires` as well, so only a lockfile
+/// reads that key.
+fn is_spec_map(key: &str, lock: bool) -> bool {
+    matches!(
+        key,
+        "dependencies" | "devDependencies" | "optionalDependencies" | "peerDependencies"
+    ) || (lock && key == "requires")
+}
+
+/// Whether `key` names a map of redirects, which npm reads as dependencies to fetch instead.
+fn is_redirect_map(key: &str) -> bool {
+    matches!(key, "overrides" | "resolutions")
+}
+
+/// The reason a dependency's spec is refused, or `None` when npm may fetch it. The reason names
+/// the owner, and the dependency only when its name is a package name. It never names the spec,
+/// which may carry a URL or a credential.
+fn refused_spec(owner: &str, dep: &str, spec: &Value) -> Option<String> {
+    if spec.as_str().is_some_and(admitted_spec) {
+        return None;
+    }
+    let owner = if owner.is_empty() {
+        "the root package"
+    } else {
+        owner
+    };
+    let dep = if is_package_name(dep) {
+        dep
+    } else {
+        "a dependency"
+    };
+    Some(format!(
+        "{owner} declares {dep} with a spec the install may not fetch; only a version range, a \
+         tag or an npm alias is admitted"
+    ))
+}
+
+/// Whether npm may fetch a spec from the registry: a version range or a tag, or an npm alias of
+/// one. A URL, a git or hosted shorthand, a path, a tarball and a `file:` spec name another source.
+fn admitted_spec(spec: &str) -> bool {
+    let spec = spec.trim();
+    match spec.strip_prefix("npm:") {
+        Some(alias) => match alias.rfind('@') {
+            Some(at) if at > 0 => is_package_name(&alias[..at]) && admitted_range(&alias[at + 1..]),
+            _ => is_package_name(alias),
+        },
+        None => admitted_range(spec),
+    }
+}
+
+/// Whether a version range or a tag holds only the characters of a semver range. A path, a
+/// relative name, and a tarball name fall outside that grammar.
+fn admitted_range(range: &str) -> bool {
+    let range = range.trim();
+    let lower = range.to_ascii_lowercase();
+    !range.starts_with('.')
+        && !lower.ends_with(".tgz")
+        && !lower.ends_with(".tar")
+        && !lower.ends_with(".tar.gz")
+        && range
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || " .-+*<>=|~^".contains(c))
+}
+
+/// Whether `name` is a package name: an optional scope and a name, each of the URL-safe characters
+/// npm allows in a name, and neither starting with a dot. A name with any other character, such
+/// as a colon, a slash or a credential, is not a package name.
+fn is_package_name(name: &str) -> bool {
+    let (scope, bare) = match name.strip_prefix('@') {
+        Some(scoped) => match scoped.split_once('/') {
+            Some((scope, bare)) => (Some(scope), bare),
+            None => return false,
+        },
+        None => (None, name),
+    };
+    let segment = |part: &str| {
+        !part.is_empty()
+            && !part.starts_with('.')
+            && part.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '-' | '.' | '_' | '~' | '!' | '*' | '\'' | '(' | ')')
+            })
+    };
+    scope.is_none_or(segment) && segment(bare)
+}
+
+/// Checks one lockfile node's `resolved` source and its `version`. `name` is the node's key.
+fn check_entry(name: &str, entry: &Map<String, Value>) -> Result<(), String> {
     if let Some(resolved) = entry.get("resolved").and_then(Value::as_str) {
         if entry.get("link") == Some(&Value::Bool(true)) {
             if !is_tree_path(resolved) {
-                return Err(DepsError::Lockfile {
-                    role,
-                    detail: format!("{name} links to a path outside the tree"),
-                });
+                return Err(format!("{name} links to a path outside the tree"));
             }
         } else if !resolved.starts_with(NPM_REGISTRY) {
-            return Err(DepsError::Lockfile {
-                role,
-                detail: format!(
-                    "{name} names a source other than {NPM_REGISTRY}, and the install fetches \
-                     only from that registry"
-                ),
-            });
+            return Err(format!(
+                "{name} names a source other than {NPM_REGISTRY}, and the install fetches only \
+                 from that registry"
+            ));
         }
     }
     if let Some(version) = entry.get("version").and_then(Value::as_str)
         && version.contains([':', '/', '#'])
     {
-        return Err(DepsError::Lockfile {
-            role,
-            detail: format!("{name} names a source where a version belongs"),
-        });
+        return Err(format!("{name} names a source where a version belongs"));
     }
     Ok(())
 }
@@ -826,6 +1030,178 @@ mod tests {
     #[test]
     fn a_lockfile_that_is_not_json_is_refused() {
         assert!(refusal("{not json").expect("refused").contains("not JSON"));
+    }
+
+    /// Specs that name a source other than the registry, in the forms a manifest or a lockfile can
+    /// hold them.
+    const OTHER_SOURCES: [&str; 9] = [
+        "https://evil.example.test/left-pad.tgz",
+        "http://169.254.169.254/latest/meta-data.tgz",
+        "git+ssh://git@github.com/x/y.git#abc",
+        "github:x/y",
+        "x/y",
+        "file:../../outside",
+        "./left-pad",
+        "left-pad.tgz",
+        "npm:left-pad@https://evil.example.test/left-pad.tgz",
+    ];
+
+    /// The refusal a manifest gets, as its text, or `None` when it is admitted.
+    fn manifest_refusal(manifest: &str) -> Option<String> {
+        check_manifest("package.json", manifest.as_bytes()).err()
+    }
+
+    #[test]
+    fn a_manifest_spec_that_names_another_source_is_refused_and_no_url_is_named() {
+        for source in OTHER_SOURCES {
+            for key in [
+                "dependencies",
+                "devDependencies",
+                "optionalDependencies",
+                "peerDependencies",
+            ] {
+                let manifest = format!(r#"{{"name": "app", "{key}": {{"left-pad": "{source}"}}}}"#);
+                let text = manifest_refusal(&manifest).expect("the spec is refused");
+                assert!(
+                    text.contains("package.json") && text.contains("left-pad"),
+                    "{text}"
+                );
+                assert!(!text.contains(source), "the spec is not echoed: {text}");
+            }
+            for redirect in [
+                format!(r#"{{"overrides": {{"left-pad": "{source}"}}}}"#),
+                format!(r#"{{"overrides": {{"left-pad": {{"right-pad": "{source}"}}}}}}"#),
+                format!(r#"{{"resolutions": {{"left-pad": "{source}"}}}}"#),
+            ] {
+                let text = manifest_refusal(&redirect).expect("the redirect is refused");
+                assert!(!text.contains(source), "the redirect is not echoed: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_manifest_spec_that_is_a_range_a_tag_or_an_alias_is_admitted() {
+        for spec in [
+            "",
+            "*",
+            "latest",
+            "^1.2.3",
+            "~1.0",
+            "1.x",
+            ">=1.0.0 <2",
+            "1.0.0 || 2.0.0",
+            "1.0.0-rc.1+build.5",
+            "npm:left-pad@^1.3.0",
+            "npm:@scope/left-pad@1.3.0",
+            "npm:left-pad",
+        ] {
+            let manifest = format!(r#"{{"dependencies": {{"left-pad": "{spec}"}}}}"#);
+            assert_eq!(manifest_refusal(&manifest), None, "{spec:?} is admitted");
+        }
+    }
+
+    #[test]
+    fn a_dependency_name_that_is_not_a_package_name_is_refused_and_not_echoed() {
+        let manifest = r#"{"dependencies": {"https://user:secret@evil.example.test/x": "1.0.0"}}"#;
+        let text = manifest_refusal(manifest).expect("the name is refused");
+        assert!(!text.contains("secret") && !text.contains("evil"), "{text}");
+    }
+
+    #[test]
+    fn a_manifest_that_is_not_json_or_not_an_object_is_refused() {
+        assert!(
+            manifest_refusal("{not json")
+                .expect("refused")
+                .contains("not JSON")
+        );
+        assert!(
+            manifest_refusal("[]")
+                .expect("refused")
+                .contains("not a JSON object")
+        );
+    }
+
+    #[test]
+    fn a_lockfile_spec_that_names_another_source_is_refused_even_when_the_node_has_no_resolved() {
+        // An incomplete lockfile: the node names no `resolved`, so only its maps name a source.
+        for source in OTHER_SOURCES {
+            for lock in [
+                format!(
+                    r#"{{"lockfileVersion": 3, "packages": {{"": {{"dependencies": {{"left-pad": "{source}"}}}}}}}}"#
+                ),
+                format!(
+                    r#"{{"lockfileVersion": 3, "packages": {{"node_modules/a": {{"version": "1.0.0", "optionalDependencies": {{"left-pad": "{source}"}}}}}}}}"#
+                ),
+                format!(
+                    r#"{{"lockfileVersion": 3, "packages": {{"node_modules/a": {{"version": "1.0.0", "peerDependencies": {{"left-pad": "{source}"}}}}}}}}"#
+                ),
+                format!(
+                    r#"{{"lockfileVersion": 3, "packages": {{"": {{"overrides": {{"left-pad": "{source}"}}}}}}}}"#
+                ),
+                format!(
+                    r#"{{"lockfileVersion": 1, "dependencies": {{"a": {{"version": "1.0.0", "requires": {{"left-pad": "{source}"}}}}}}}}"#
+                ),
+            ] {
+                let text = refusal(&lock).expect("the spec is refused");
+                assert!(!text.contains(source), "the spec is not echoed: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_lockfile_with_a_registry_spec_in_its_maps_is_admitted() {
+        let lock = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": {"dependencies": {"left-pad": "^1.3.0", "alias": "npm:right-pad@1.0.0"}},
+                "node_modules/left-pad": {"version": "1.3.0", "dependencies": {"x": "~1"}}
+            }
+        }"#;
+        assert_eq!(refusal(lock), None);
+    }
+
+    #[tokio::test]
+    async fn a_manifest_that_names_another_source_is_refused_before_any_install_or_cache_entry() {
+        let manifest = r#"{"name": "app", "version": "1.0.0", "dependencies": {"left-pad": "https://evil.example.test/left-pad.tgz"}}"#;
+        let (clone, head) = clone_with(&[("package.json", manifest), ("package-lock.json", LOCK)]);
+        let repo = Repo::open(clone.path()).await.expect("the clone opens");
+        let PrepareOutcome::Prepared(prepared) = repo
+            .prepare(&head, &ProtectedPaths::default())
+            .await
+            .expect("the commit prepares")
+        else {
+            panic!("the commit merges without conflict");
+        };
+        let app: AppContract = serde_json::from_str(NODE_APP).expect("the app contract decodes");
+        let cache_parent = tempfile::tempdir().expect("a cache parent");
+        let cache = cache_parent.path().join("deps");
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        // No docker runs here, so an install that got past the check would fail differently.
+        let config = RunnerConfig::new("acan-no-such-docker", 3000);
+        let slots = Semaphore::new(1);
+        let installer = Installer {
+            repo: &repo,
+            config: &config,
+            slots: &slots,
+            cache: &cache,
+            scratch: scratch.path(),
+        };
+        let me = process_identity().expect("this process's identity");
+
+        let refused = installer
+            .install_as(&prepared, Role::Base, &app, me)
+            .await
+            .expect_err("the manifest names a source the install may not fetch");
+
+        assert!(
+            matches!(&refused, DepsError::Manifest { detail, .. } if detail.contains("package.json")),
+            "{refused}"
+        );
+        assert!(
+            !refused.to_string().contains("evil.example.test"),
+            "{refused}"
+        );
+        assert!(!cache.exists(), "nothing was stored in the cache");
     }
 
     #[test]
