@@ -21,7 +21,7 @@ use std::process::Stdio;
 use std::str::FromStr;
 use std::time::Duration;
 
-use acan_git::{Preparation, PrepareOutcome, ProtectedPaths, Repo};
+use acan_git::{Preparation, PrepareOutcome, ProtectedPaths, Repo, git_env};
 use acan_intent::fold::fold;
 use acan_intent::{
     CanonicalError, CommitSha, GateState, HumanRef, ImageName, OrderRef, Receipt, RepairBudget,
@@ -36,7 +36,6 @@ use tokio::sync::Semaphore;
 
 use crate::DEFAULT_WITNESS_CONCURRENCY;
 use crate::deps::{self, InstallRecord, Installer, Role};
-use crate::git_env;
 use crate::init;
 use crate::jobs::{APP_PORT, RUNNER_PROGRAM};
 use crate::observe::{self, Judged, ObserveError, Order, Plan};

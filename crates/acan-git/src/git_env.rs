@@ -1,17 +1,19 @@
-//! The environment of the git calls that read a contract.
+//! The environment of the git calls that read a repository.
 //!
 //! Git takes its repository, index, object store, configuration and transport from its
 //! environment, and a partial clone fetches a missing object from its promisor remote while it
-//! reads. A contract is read from the clone it is given and from nothing else, and nothing is
-//! fetched. So every call removes each `GIT_` variable from its environment, and sets
-//! `GIT_NO_LAZY_FETCH`, which makes git fail on a missing object instead of fetching it.
+//! reads. A read is made against the clone it is given and from nothing else, and nothing is
+//! fetched. An outer git process, such as one running a hook, can set these variables for us. So
+//! every call removes each `GIT_` variable from its environment, and sets `GIT_NO_LAZY_FETCH`,
+//! which makes git fail on a missing object instead of fetching it. A caller that needs a
+//! variable sets it after [`prepare`].
 
 use std::ffi::{OsStr, OsString};
 use std::process::Command;
 
 /// Prepares a git call. Every `GIT_` variable this process has is removed from the call's
 /// environment, then `GIT_NO_LAZY_FETCH=1` is set. The caller sets its own variables after this.
-pub(crate) fn prepare(command: &mut Command) {
+pub fn prepare(command: &mut Command) {
     prepare_with(command, &inherited_git_variables());
 }
 

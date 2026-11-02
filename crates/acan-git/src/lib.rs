@@ -16,6 +16,7 @@
 mod checkout;
 mod error;
 mod git;
+pub mod git_env;
 mod prepare;
 mod protected;
 mod repo;

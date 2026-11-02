@@ -14,10 +14,10 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use acan_git::git_env;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 
-use crate::git_env;
 use crate::init::{self, FILES, Options, Plan, Snapshot};
 
 /// The branch the contract is committed to, unless `--branch` names another.

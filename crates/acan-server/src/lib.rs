@@ -11,7 +11,6 @@ pub mod deps;
 mod e2e;
 mod examples;
 mod git;
-mod git_env;
 mod host;
 mod http;
 mod index;
