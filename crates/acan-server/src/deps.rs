@@ -296,6 +296,7 @@ impl Installer<'_> {
             network: NETWORK,
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         };
+        check_platform(self.cache)?;
         prepare_root(self.cache)?;
         check_root(self.cache, me)?;
         if read_entry(&entry, me)? == Entry::Complete {
@@ -711,6 +712,43 @@ fn check_root(cache: &Path, me: Identity) -> Result<(), DepsError> {
         return Err(tampered(cache, "the cache root belongs to another user"));
     }
     Ok(())
+}
+
+/// Refuses a cache this platform cannot check. Unix checks the owner and the mode of every path the
+/// cache reaches. Other platforms have no owner or mode to read here, so only a cache under the
+/// user's profile, which holds this user's files, is trusted.
+fn check_platform(cache: &Path) -> Result<(), DepsError> {
+    let profile = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    if platform_trusts(cfg!(unix), cache, profile.as_deref()) {
+        return Ok(());
+    }
+    Err(tampered(
+        cache,
+        "this platform cannot check who owns a file, so the cache must sit under this user's \
+         profile; pass --cache-dir there",
+    ))
+}
+
+/// Whether a cache at `cache` may be used. `unix` says the platform has owner and mode checks.
+fn platform_trusts(unix: bool, cache: &Path, profile: Option<&Path>) -> bool {
+    unix || profile.is_some_and(|profile| under(cache, profile))
+}
+
+/// Whether `path` is `dir` or lies under it. Components are compared without case, as Windows
+/// compares them, and a path with a `..` is never under anything, since it may leave `dir`.
+fn under(path: &Path, dir: &Path) -> bool {
+    if path
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    let fold =
+        |part: std::path::Component<'_>| part.as_os_str().to_string_lossy().to_ascii_lowercase();
+    let mut parts = path.components().map(fold);
+    dir.components()
+        .map(fold)
+        .all(|wanted| parts.next().as_deref() == Some(wanted.as_str()))
 }
 
 /// Who this process runs as. A file it creates in the system temporary directory is owned by it,
@@ -1589,6 +1627,43 @@ mod tests {
             matches!(&refused, DepsError::Tampered { detail, .. } if detail.contains("another user")),
             "{refused}"
         );
+    }
+
+    #[test]
+    fn a_platform_without_owner_checks_trusts_only_a_cache_under_the_profile() {
+        let profile = Path::new("C:/Users/Me");
+        let cache = Path::new("C:/Users/Me/AppData/Local/acan/deps");
+        assert!(
+            platform_trusts(true, Path::new("/anywhere/deps"), None),
+            "unix checks owners and modes"
+        );
+        assert!(platform_trusts(false, cache, Some(profile)));
+        assert!(
+            platform_trusts(false, Path::new("c:/users/ME/deps"), Some(profile)),
+            "case does not matter on Windows"
+        );
+        assert!(!platform_trusts(
+            false,
+            Path::new("D:/cache"),
+            Some(profile)
+        ));
+        assert!(!platform_trusts(false, cache, None), "no profile, no trust");
+        assert!(
+            !platform_trusts(false, Path::new("C:/Users/Me/../Other/deps"), Some(profile)),
+            "a .. can leave the profile"
+        );
+    }
+
+    #[test]
+    fn under_compares_whole_components_without_case() {
+        assert!(under(Path::new("/home/me/cache"), Path::new("/home/me")));
+        assert!(under(Path::new("/home/me"), Path::new("/home/me")));
+        assert!(under(Path::new("/HOME/Me/cache"), Path::new("/home/me")));
+        assert!(
+            !under(Path::new("/home/meg/cache"), Path::new("/home/me")),
+            "a prefix of a name is not the name"
+        );
+        assert!(!under(Path::new("/home/me/../you"), Path::new("/home/me")));
     }
 
     #[test]
