@@ -138,13 +138,16 @@ function Show-Plan {
     Write-Output '     The injected candidate of a drawn order runs after that order, on its control task (a split task the worker did not build; the task worktree HEAD).'
     Write-Output '     After the order and its controls, its tasks that did not land end through cancel_order (member route), so no later worker takes them.'
     Write-Output '  5. Controls after o-1: m-overfit and m-harmless-difference. m-broad-scope: a separate order with the'
-    Write-Output '     o-1 sentence, revised with one broad item (ANY on /api/*), confirmation tried with no broad'
+    Write-Output '     o-1 sentence, revised with broad items (method ANY on each link route the draft names), confirmation tried with no broad'
     Write-Output '     acknowledgement. m-missing-fixture: the f-accounts copy without f5 and its static prediction;'
     Write-Output '     the gate is not run on the copy, so that control stays not_run.'
     Write-Output '  6. summary.json (complete, incomplete with reasons, or paused), results.jsonl, secret scan.'
     Write-Output ''
     Write-Output 'Not shown: which orders the seeded draw picks. It is decided at live start.'
 }
+
+# echoed into the console log of every invocation, so the run record shows how the replay was called
+Write-Output ("arguments: label={0} only=[{1}] resume=[{2}] dry={3} port={4}" -f $Label, ($Only -join ','), $ResumeRun, [bool]$DryRun, $Port)
 
 if ($DryRun) {
     Show-Plan
@@ -883,7 +886,8 @@ function Get-ControlExpectation {
 }
 
 function Invoke-BroadScopeControl {
-    # m-broad-scope: a scope draft whose may-change item is method ANY on route /api/*. The control is
+    # m-broad-scope: a scope draft whose may-change items are method ANY on each link route it names (/api/links,
+    # /api/links/:code; mutants.json says /api/*, which the route grammar refuses). The control is
     # posted as its own order with o-1's sentence, so o-1's run is not touched. Its draft is revised with
     # the broad item, then confirmation is tried with no broad acknowledgement. The expected outcome is a
     # refusal that names the item, no scope_confirmed event, and no claim or build on the control's tasks.
@@ -914,27 +918,44 @@ function Invoke-BroadScopeControl {
         $view = Wait-Until -What 'the foreman draft of the control order' -Probe { Invoke-Api404Tolerant -Path "/api/orders/$oid/scope-draft" } -Terminal { $null }
         if ($view.state -ne 'drafted') { throw "draft_not_ready: the draft state is $($view.state)" }
 
-        # the o-1 choice rules answer the same open choices; the broad item is the only scope edit
+        # The o-1 choice rules answer the same open choices. The broad items are copies of the draft's own link
+        # items with method ANY, one per route template under the link API that the draft names. A route template
+        # has no wildcard, so the mutant's /api/* is not a valid template (crates/acan-intent/src/types.rs:332).
+        # Each copy keeps the draft item's selector, acceptance and example, with new ids, so it is a complete item.
         $o1Edits = Read-JsonFile -Path (Join-Path $intentDir 'o-1-edits.json')
         $editsFile = Join-Path $dir 'edits.json'
-        $controlEdits = [ordered]@{
-            schema      = 'acan-demo-intent-edits/2'
-            order       = $controlOrder
-            decided_by  = 'control (m-broad-scope), not a decision'
-            note        = 'Control edits for m-broad-scope: the o-1 choice rules and one broad may-change item. Nothing here is a human decision.'
-            choice_rules = @($o1Edits.choice_rules)
-            scope_edits = @([ordered]@{
+        $linkItems = @($view.draft.draft.proposal.may | Where-Object { [string]$_.selector.route_template -like '/api/links*' })
+        if ($linkItems.Count -eq 0) { throw 'setup_failed: the control draft has no may item on the link API (/api/links*)' }
+        $seenRoutes = @{}
+        $broadEdits = [System.Collections.Generic.List[object]]::new()
+        foreach ($item in $linkItems) {
+            $route = [string]$item.selector.route_template
+            if ($seenRoutes.ContainsKey($route)) { continue }
+            $seenRoutes[$route] = $true
+            $n = $seenRoutes.Count
+            $copy = ConvertFrom-Json (ConvertTo-Json -Depth 60 -Compress $item)
+            $copy.id = "i-broad-control-$n"
+            $copy.selector.method = 'ANY'
+            $k = 0
+            foreach ($a in @($copy.acceptance)) { $k++; $a.obligation_id = "obl-broad-control-$n-$k" }
+            $broadEdits.Add([ordered]@{
                     op     = 'add_may'
-                    reason = 'The broad selector of m-broad-scope: every method on every route under /api/.'
-                    item   = [ordered]@{
-                        id        = 'i-broad-control'
-                        selector  = [ordered]@{ surface = 'http'; method = 'ANY'; route_template = '/api/*'; step_context = [ordered]@{ kind = 'any' }; principal = [ordered]@{ kind = 'any' }; channel = 'any' }
-                        change    = 'modify'
-                    }
+                    reason = "The broad selector of m-broad-scope: method ANY on $route, a copy of the draft's item $($item.id)."
+                    item   = $copy
                 })
-            answers     = @()
+        }
+        $controlEdits = [ordered]@{
+            schema       = 'acan-demo-intent-edits/2'
+            order        = $controlOrder
+            decided_by   = 'control (m-broad-scope), not a decision'
+            note         = 'Control edits for m-broad-scope: the o-1 choice rules and broad may-change items (method ANY on each link route the draft names). Nothing here is a human decision.'
+            choice_rules = @($o1Edits.choice_rules)
+            scope_edits  = @($broadEdits)
+            answers      = @()
         }
         Write-JsonFile -Path $editsFile -Object $controlEdits
+        $line['broad_items'] = @($broadEdits | ForEach-Object { [string]$_.item.id })
+        $line['broad_routes'] = @($seenRoutes.Keys | Sort-Object)
 
         $scope = $null
         try {
@@ -1054,7 +1075,12 @@ if (-not $DryRun) {
     if (-not (Select-String -LiteralPath $TakeScript -Pattern '\[switch\]\$LibraryOnly' -Quiet)) {
         throw 'take.ps1 has no -LibraryOnly guard; a live replay refuses to dot-source the take as a script'
     }
-    . $TakeScript -LibraryOnly -Label $Label -Port $Port -RunsRoot $RunsRoot -DemoRepo $DemoRepo -Pin $Pin -AcanRepo $AcanRepo -AcanExe $AcanExe -WorkerExe $WorkerExe -LlmSource $LlmSource -EnvSource $EnvSource -MaxEpisodes $MaxEpisodes -HealthWaitSec $HealthWaitSec -StepWaitSec $StepWaitSec -WorkerWaitSec $WorkerWaitSec -ControlWaitSec $ControlWaitSec -RulingWaitSec $RulingWaitSec -WorkerMaxSteps $WorkerMaxSteps -ClaimWaitSec $ClaimWaitSec
+    # Dot-sourcing runs take.ps1's param block in this scope, so every take parameter that is not passed takes
+    # its default here. -ResumeRun was not passed, so the take's '' replaced this script's value: every
+    # -ResumeRun invocation then started a new run. It is passed now, and the value is checked after the load.
+    $replayResumeRun = $ResumeRun
+    . $TakeScript -LibraryOnly -Label $Label -Port $Port -RunsRoot $RunsRoot -DemoRepo $DemoRepo -Pin $Pin -AcanRepo $AcanRepo -AcanExe $AcanExe -WorkerExe $WorkerExe -LlmSource $LlmSource -EnvSource $EnvSource -MaxEpisodes $MaxEpisodes -HealthWaitSec $HealthWaitSec -StepWaitSec $StepWaitSec -WorkerWaitSec $WorkerWaitSec -ControlWaitSec $ControlWaitSec -RulingWaitSec $RulingWaitSec -WorkerMaxSteps $WorkerMaxSteps -ClaimWaitSec $ClaimWaitSec -ResumeRun $ResumeRun
+    if ($ResumeRun -ne $replayResumeRun) { throw 'dot-sourcing take.ps1 changed -ResumeRun; the replay would not resume its run' }
     Test-TakeFunctions
 
     # ---- preflight: no writes until every check passes ---------------------------------------
