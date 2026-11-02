@@ -4,7 +4,14 @@
 // asks for no frames. Other modules import `requestRender` from here; the cycle is safe
 // because no module runs code from another at load time.
 import init, { App } from "./pkg/acan_render_web.js";
-import { openCard, settleByKey, toggleCard } from "./cards.js";
+import {
+  closeQuestionCard,
+  openCard,
+  pressDigit,
+  questionOpen,
+  toggleCard,
+  toggleQuestionCard,
+} from "./cards.js";
 import { clickMachine, closeCompose, composeOpen, orderHere } from "./compose.js";
 import { paintMarks, pinAt, placeLabels } from "./marks.js";
 import { paintOrderLine, paintRide, paintStale, paintUsage } from "./panels.js";
@@ -267,13 +274,17 @@ function bindKeys() {
       return;
     }
     if (/^[1-3]$/.test(event.key)) {
-      settleByKey(Number(event.key));
+      pressDigit(Number(event.key));
       return;
     }
     switch (event.key) {
       case "c":
       case "C":
         if (!event.repeat) toggleCard();
+        break;
+      case "a":
+      case "A":
+        if (!event.repeat) toggleQuestionCard();
         break;
       case "o":
       case "O":
@@ -309,6 +320,8 @@ function bindKeys() {
       case "Escape":
         if (composeOpen()) {
           closeCompose();
+        } else if (questionOpen()) {
+          closeQuestionCard();
         } else if (state.ridden !== "") {
           state.app.leave();
           requestRender();

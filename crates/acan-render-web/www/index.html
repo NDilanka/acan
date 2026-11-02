@@ -205,6 +205,25 @@
   @keyframes order-pulse { from { transform: scale(0.5); opacity: 0.9; } to { transform: scale(3.4); opacity: 0; } }
   @keyframes order-still { 0%, 60% { opacity: 1; } to { opacity: 0; } }
   @media (prefers-reduced-motion: reduce) { .pulse.sent { animation: order-still 1900ms ease-out; } }
+  /* The question card: the clash card's twin, beside the question's pin. */
+  #question { width: 300px; box-sizing: border-box; padding: 12px 14px; transition: opacity 0.4s ease; }
+  #question.fading { opacity: 0; }
+  #question .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  #question h2 { margin: 0 0 6px; font: 600 13px/1.3 var(--mono); }
+  #question p { margin: 6px 0; }
+  #question .ask { font: 13px/1.4 var(--sans); }
+  #question .sub { color: var(--muted); font-size: 11px; }
+  #question .resolved { font-family: var(--mono); color: var(--muted); }
+  #question .note { font: 11px/1.4 var(--mono); color: var(--red); }
+  #question ol.options { list-style: none; margin: 8px 0 0; padding: 0; border-top: 1px solid var(--rule); }
+  #question ol.options li { margin: 0; border-bottom: 1px solid var(--rule); }
+  #question button.option { display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box; padding: 7px 2px;
+    background: none; border: none; color: var(--ink); font: 12px/1.3 var(--sans); text-align: left; cursor: pointer; }
+  #question button.option:hover span { text-decoration: underline; }
+  #question button.option:disabled { color: var(--muted); cursor: default; }
+  #question button.option kbd { min-width: 16px; text-align: center; background: var(--card); border-color: var(--rule); border-radius: 3px; }
+  #question button.close { flex: none; font: 11px var(--mono); color: var(--muted); border: none; background: none; padding: 0; cursor: pointer; }
+  .flag.question { pointer-events: auto; cursor: pointer; }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   #gate { position: fixed; inset: 0; display: grid; place-items: center; }
   #gate form { background: var(--card); border: 1px solid var(--rule); border-radius: 6px; padding: 16px; display: flex; gap: 8px; align-items: center; }
@@ -382,7 +401,7 @@
   <p id="setup-blocked" class="muted" hidden></p>
 </dialog>
 <div class="island" id="order" hidden><span id="order-line" class="muted"></span></div>
-<div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle&nbsp;&nbsp;<kbd>O</kbd> order here</div>
+<div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle&nbsp;&nbsp;<kbd>A</kbd> answer&nbsp;&nbsp;<kbd>O</kbd> order here</div>
 <aside id="card" class="island" hidden></aside>
 <div id="pulses" aria-hidden="true"><div class="pulse target" id="compose-target" hidden></div></div>
 <aside id="compose" class="island" role="dialog" aria-labelledby="compose-title" hidden>
@@ -395,6 +414,7 @@
     <p class="note" id="compose-note" role="status" aria-live="polite"></p>
   </form>
 </aside>
+<aside id="question" class="island" role="dialog" aria-labelledby="question-title" hidden></aside>
 <p id="direct-live" class="sr" role="status" aria-live="polite"></p>
 <aside id="slip" class="island" hidden></aside>
 <aside id="receipt" class="island" hidden aria-label="receipt">
