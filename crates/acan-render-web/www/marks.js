@@ -2,6 +2,7 @@
 // drone, the machine labels and the clash pins. Positions come from the wasm side; this file
 // only places the elements.
 import { openCard, paintCard } from "./cards.js";
+import { placeCompose, syncCompose } from "./compose.js";
 import { canvas, flagsEl, labelsEl, leadersEl, state } from "./state.js";
 import { boxAt, clearOf, inView, placeOverlays } from "./place.js";
 
@@ -89,12 +90,13 @@ export function placeLabels() {
       state.labels.delete(index);
     }
   }
+  placeCompose();
 }
 
 // The page's fixed panels: the shell, the order card, the key bar, the clash card, the usage
-// panel, the notice and the scope note. A flag or a name never sits under one. A panel that is
+// panel, the notice, the scope note and the compose panel. A flag or a name never sits under one. A panel that is
 // hidden has no box, so it blocks nothing.
-const HUD_SELECTORS = "#shell, #order, #hint, #card, #usage, #notice, #pov-chip, #slip, .flag.unplaced";
+const HUD_SELECTORS = "#shell, #order, #hint, #card, #usage, #notice, #pov-chip, #slip, #compose, .flag.unplaced";
 
 // Each shown panel's box in canvas coordinates, as `{ left, right, top, bottom }`.
 function hudBoxes() {
@@ -147,6 +149,7 @@ export function paintMarks() {
     flagsEl.append(note);
   }
   paintCard();
+  syncCompose();
 }
 
 function flagElement(flag) {

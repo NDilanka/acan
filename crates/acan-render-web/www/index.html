@@ -179,6 +179,33 @@
   #card button:disabled { color: var(--muted); cursor: default; }
   #card .key { font-family: var(--mono); color: var(--muted); min-width: 10px; }
   #card .note { font-family: var(--mono); font-size: 11px; color: var(--red); }
+  /* The compose panel opens beside the machine an order is written for, and a dashed ring marks
+     the spot. A posted order's ring spreads out from its machine once the view carries it. */
+  #compose { width: 300px; box-sizing: border-box; padding: 10px 12px; font: 12px/1.4 var(--sans); }
+  #compose .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  #compose h2 { margin: 0; font: 600 13px/1.3 var(--mono); overflow-wrap: anywhere; }
+  #compose .sub { margin: 2px 0 8px; color: var(--muted); font-size: 11px; }
+  #compose input { display: block; width: 100%; box-sizing: border-box; padding: 6px 8px; font: 13px/1.3 var(--sans);
+    color: var(--ink); background: var(--face); border: 1px solid var(--rule); border-radius: 4px; }
+  #compose input:focus { outline: none; border-color: var(--ink); }
+  #compose .actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  #compose .actions .muted { margin-left: auto; font-size: 11px; }
+  #compose button { font: 12px/1.3 var(--mono); padding: 3px 10px; border-radius: 4px; border: 1px solid var(--ink);
+    background: var(--ink); color: #ffffff; cursor: pointer; }
+  #compose button:disabled { opacity: 0.6; cursor: default; }
+  #compose button.close { background: none; border: none; color: var(--muted); padding: 0; font-size: 11px; }
+  #compose .note { margin: 6px 0 0; font: 11px/1.4 var(--mono); color: var(--ink); }
+  #compose .note.bad { color: var(--red); }
+  #compose .note:empty { display: none; }
+  #pulses { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+  .pulse { position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px; box-sizing: border-box;
+    border-radius: 50%; border: 2px solid var(--ink); }
+  .pulse.target { border-style: dashed; background: rgba(255, 255, 255, 0.55); }
+  .pulse.sent { opacity: 0; animation: order-pulse 950ms var(--pov-ease) 2; }
+  @keyframes order-pulse { from { transform: scale(0.5); opacity: 0.9; } to { transform: scale(3.4); opacity: 0; } }
+  @keyframes order-still { 0%, 60% { opacity: 1; } to { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .pulse.sent { animation: order-still 1900ms ease-out; } }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   #gate { position: fixed; inset: 0; display: grid; place-items: center; }
   #gate form { background: var(--card); border: 1px solid var(--rule); border-radius: 6px; padding: 16px; display: flex; gap: 8px; align-items: center; }
   #gate input { font: 12px var(--mono); padding: 4px 6px; width: 280px; }
@@ -355,8 +382,20 @@
   <p id="setup-blocked" class="muted" hidden></p>
 </dialog>
 <div class="island" id="order" hidden><span id="order-line" class="muted"></span></div>
-<div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle</div>
+<div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle&nbsp;&nbsp;<kbd>O</kbd> order here</div>
 <aside id="card" class="island" hidden></aside>
+<div id="pulses" aria-hidden="true"><div class="pulse target" id="compose-target" hidden></div></div>
+<aside id="compose" class="island" role="dialog" aria-labelledby="compose-title" hidden>
+  <form id="compose-form" autocomplete="off">
+    <div class="head"><h2 id="compose-title"></h2><button type="button" class="close" id="compose-close" aria-label="Close the order panel">close</button></div>
+    <p class="sub" id="compose-context"></p>
+    <label class="sr" for="compose-sentence">The order, in one sentence</label>
+    <input id="compose-sentence" type="text" maxlength="500" spellcheck="true" enterkeyhint="send" placeholder="One sentence: what should change here?">
+    <div class="actions"><button type="submit" id="compose-send">Send</button><span class="muted"><kbd>Enter</kbd> send · <kbd>Esc</kbd> close</span></div>
+    <p class="note" id="compose-note" role="status" aria-live="polite"></p>
+  </form>
+</aside>
+<p id="direct-live" class="sr" role="status" aria-live="polite"></p>
 <aside id="slip" class="island" hidden></aside>
 <aside id="receipt" class="island" hidden aria-label="receipt">
   <h2><span id="receipt-title"></span><span id="receipt-fixture" class="fixture" hidden>FIXTURE</span></h2>
