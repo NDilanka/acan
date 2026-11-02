@@ -6,14 +6,24 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
+  LAST_PLOT,
+  STOPPED_LINE,
   askRoute,
   budgetWords,
   confirmationFor,
+  forgetSeal,
   leaseWords,
+  markSealAccepted,
+  missingWords,
   picksFor,
+  refusalWords,
+  retryDelay,
+  sealCommand,
   sealKey,
   sealOf,
+  sealPanel,
   strikeScope,
+  strikeWords,
   syncSeals,
 } from "../../www/seal.js";
 
@@ -98,8 +108,10 @@ function lane(overrides = {}) {
 // A page state with the given lanes and route answers. `check` is what the wasm side answers.
 function pageState(lanes, { check = { verdict: "match" }, fail = false, views = new Map() } = {}) {
   return {
+    token: "owner-token",
     view: { lanes },
     sealViews: views,
+    sealSent: new Map(),
     sealPicks: { hash: null, choices: new Map(), acks: new Set() },
     app: {
       seal_check(order, text) {
@@ -214,12 +226,52 @@ test("the sync asks for each lane's route once per key and repaints when an answ
 
 test("a route that does not answer is kept as a failure, so the Seal stays hidden", async () => {
   const state = pageState([lane()], { fail: true });
+  const timers = [];
   await quietly(async () => {
-    syncSeals(state, async () => routeText(), () => {});
+    syncSeals(state, async () => routeText(), () => {}, (fn, wait) => timers.push(wait));
     await settle();
   });
   assert.equal(sealOf(state, lane()).kind, "hidden");
+  assert.equal(sealOf(state, lane()).retrying, true, "the slip says the route is being retried");
   assert.equal(state.sealViews.get(ORDER).error, "the page holds no scope for this order");
+  assert.deepEqual(timers, [2000], "the first retry waits 2 s");
+});
+
+test("a failed route waits 2 s, 5 s, 15 s, then every 30 s before it is asked again", () => {
+  assert.deepEqual([1, 2, 3, 4, 5].map(retryDelay), [2000, 5000, 15000, 30000, 30000]);
+});
+
+test("a failed route is asked again when its retry is due, and a kept answer ends the retries", async () => {
+  const state = pageState([lane()]);
+  const asked = [];
+  const timers = [];
+  const schedule = (fn, wait) => timers.push({ fn, wait });
+  const fetchText = async (path) => {
+    asked.push(path);
+    if (asked.length <= 2) throw new Error("network down");
+    return routeText();
+  };
+  await quietly(async () => {
+    syncSeals(state, fetchText, () => {}, schedule);
+    await settle();
+    assert.equal(asked.length, 1);
+    assert.equal(sealOf(state, lane()).retrying, true);
+
+    syncSeals(state, fetchText, () => {}, schedule);
+    await settle();
+    assert.equal(asked.length, 1, "nothing is asked before the retry is due");
+
+    timers[0].fn();
+    await settle();
+    assert.equal(asked.length, 2, "the retry asks again");
+    assert.deepEqual(timers.map((timer) => timer.wait), [2000, 5000]);
+
+    timers[1].fn();
+    await settle();
+  });
+  assert.equal(asked.length, 3);
+  assert.equal(sealOf(state, lane()).kind, "unsealed", "the kept answer shows the Seal");
+  assert.equal(timers.length, 2, "a kept answer schedules no further retry");
 });
 
 test("askRoute returns the body and the wasm check of it", async () => {
@@ -285,4 +337,129 @@ test("the lease count reads as the Strike warns it", () => {
   assert.equal(leaseWords(0), "ends no live leases");
   assert.equal(leaseWords(1), "ends 1 live lease");
   assert.equal(leaseWords(3), "ends 3 live leases");
+});
+
+test("a Strike on the last plot is allowed, and its warning says what the order is left with", () => {
+  const only = lane({ may: [mayView("i-limit", false)] });
+  const scope = { ...only.scope, body: { ...only.scope.body, may: [{ id: "i-limit", change: "add" }] } };
+  const struck = strikeScope(scope, "i-limit");
+  assert.deepEqual(struck.body.may, [], "the scope may name no plot");
+  assert.equal(struck.rev, 3);
+  assert.deepEqual(struck.body.must_keep, scope.body.must_keep, "the constraints stay");
+
+  assert.equal(strikeWords(only, only.may[0]).last, LAST_PLOT);
+  assert.equal(LAST_PLOT, "This removes the last plot: the order will have nothing it may change.");
+  assert.equal(strikeWords(lane(), lane().may[0]).last, null, "another plot is left, so no last-plot line");
+  assert.match(strikeWords(lane(), lane().may[0]).removes, /^Strike removes plot i-limit \(POST \/api\/login, 2 obligations\)\. It ends no live leases\. Rev 3 waits for a seal\.$/);
+});
+
+test("a repeat Seal sends the same body, with the same time, and a new revision builds a new one", async () => {
+  const state = pageState([lane()]);
+  state.sealViews.set(ORDER, { key: sealKey(lane()), body: ROUTE, check: { verdict: "match" }, error: null, failures: 0, retryAt: 0 });
+  const picks = picksFor(state, lane());
+  picks.choices.set("c-window", "client");
+  picks.acks.add("i-every-step");
+
+  const first = await sealCommand(state, async () => routeText(), lane(), picks, 1000);
+  assert.equal(first.command.confirmation.at, 1000);
+
+  const again = await sealCommand(
+    state,
+    async () => {
+      throw new Error("a repeat Seal does not ask the route again");
+    },
+    lane(),
+    picks,
+    9000,
+  );
+  assert.equal(JSON.stringify(again.command), JSON.stringify(first.command), "the body is byte-identical");
+  assert.equal(again.command.confirmation.at, 1000, "the time of the first send is kept");
+
+  let asked = 0;
+  const next = await sealCommand(state, async () => {
+    asked += 1;
+    return routeText();
+  }, lane({ rev: 3, scope_hash: "sha256:cc" }), picks, 5000);
+  assert.equal(asked, 1, "a new revision asks the route");
+  assert.equal(next.command.confirmation.at, 5000, "a new revision is a new confirmation");
+});
+
+test("a Seal the server refused is built again, and one it did not answer is kept", async () => {
+  const state = pageState([lane()]);
+  state.sealViews.set(ORDER, { key: sealKey(lane()), body: ROUTE, check: { verdict: "match" }, error: null, failures: 0, retryAt: 0 });
+  const picks = picksFor(state, lane());
+  picks.choices.set("c-window", "client");
+  picks.acks.add("i-every-step");
+
+  await sealCommand(state, async () => routeText(), lane(), picks, 1000);
+  forgetSeal(state, lane());
+  const built = await sealCommand(state, async () => routeText(), lane(), picks, 2000);
+  assert.equal(built.command.confirmation.at, 2000, "a refused send is built again");
+
+  const panel = sealPanel(state, lane(), picks, 3000);
+  assert.equal(panel.sent, true);
+  assert.equal(panel.accepted, false, "an unanswered send is not shown as accepted");
+  markSealAccepted(state, lane());
+  assert.equal(sealPanel(state, lane(), picks, 3000).accepted, true);
+  const kept = await sealCommand(state, async () => {
+    throw new Error("no route ask");
+  }, lane(), picks, 4000);
+  assert.equal(kept.command.confirmation.at, 2000, "an accepted send is sent again as it was");
+});
+
+test("a stopped order takes no Seal and says why, even when the route matches", () => {
+  const stopped = lane({ stopped: true });
+  const state = pageState([stopped]);
+  state.sealViews.set(ORDER, { key: sealKey(stopped), body: ROUTE, check: { verdict: "match" }, error: null, failures: 0, retryAt: 0 });
+  const picks = picksFor(state, stopped);
+  picks.choices.set("c-window", "client");
+  picks.acks.add("i-every-step");
+
+  const panel = sealPanel(state, stopped, picks, 5);
+  assert.equal(panel.kind, "unsealed");
+  assert.equal(panel.halt, STOPPED_LINE);
+  assert.equal(panel.offer, false, "no Seal is offered");
+  assert.equal(panel.canSend, false);
+
+  const running = sealPanel(state, lane(), picks, 5);
+  assert.equal(running.halt, null);
+  assert.equal(running.offer, true);
+  assert.equal(running.canSend, true);
+});
+
+test("a stopped sealed order keeps its stamp and the stop line", () => {
+  const stopped = lane({ stopped: true, state: "confirmed", confirmation: ROUTE });
+  const state = pageState([stopped]);
+  state.sealViews.set(ORDER, { key: sealKey(stopped), body: ROUTE, check: { verdict: "match" }, error: null, failures: 0, retryAt: 0 });
+  const panel = sealPanel(state, stopped, picksFor(state, stopped), 5);
+  assert.equal(panel.kind, "sealed");
+  assert.equal(panel.halt, STOPPED_LINE);
+});
+
+test("a missing answer is named in words a human reads, and a refused command reads as a sentence", () => {
+  assert.equal(missingWords({ kind: "choice", id: "c-window" }, lane()), 'an answer to "Which window?"');
+  assert.equal(missingWords({ kind: "broad", id: "i-every-step" }, lane()), "an acknowledgement that plot i-every-step is broad");
+
+  const sentences = [
+    refusalWords(409, '{"reason":"forbidden","why":"only the poster or an owner confirms an order\'s scope"}'),
+    refusalWords(409, '{"reason":"stale_scope","current_rev":3,"current_hash":"sha256:cc"}'),
+    refusalWords(409, '{"reason":"budget_exhausted","order":"o-3"}'),
+    refusalWords(409, '{"reason":"wrong_state","what":"scope","found":"confirmed"}'),
+    refusalWords(409, '{"reason":"wrong_state","what":"order","found":"cancelled"}'),
+    refusalWords(409, '{"reason":"invalid","why":"broad item i-every-step needs its own acknowledgement"}'),
+    refusalWords(404, '{"error":"not_found","what":"order"}'),
+    refusalWords(500, "internal"),
+    refusalWords(400, "<html>"),
+  ];
+  assert.equal(
+    sentences[0],
+    "Only the order's poster or an owner can seal or strike this scope. Nothing was recorded.",
+    "a non-decider reads a plain sentence",
+  );
+  assert.equal(sentences[3], "This revision already has a different seal on the server. Nothing was recorded.");
+  assert.equal(sentences[5], "The server did not accept it: broad item i-every-step needs its own acknowledgement. Nothing was recorded.");
+  assert.equal(sentences[7], "The server failed to take it. Try again.");
+  for (const sentence of sentences) {
+    assert.doesNotMatch(sentence, /[{}"]/, `no JSON in: ${sentence}`);
+  }
 });

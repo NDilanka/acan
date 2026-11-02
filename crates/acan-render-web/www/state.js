@@ -100,6 +100,8 @@ export const state = {
   hasSlip: false,
   // The origin's confirmation route for each order with a scope, as `seal.js` keeps it.
   sealViews: new Map(),
+  // The ConfirmScope last sent for each order, with the revision it was built on. See `seal.js`.
+  sealSent: new Map(),
   // The open-choice answers and broad acknowledgements given on the scope shown, by `hash`.
   sealPicks: { hash: null, choices: new Map(), acks: new Set() },
   // The plot whose Strike waits for its confirm, or null.

@@ -4,7 +4,22 @@
 // Seal paints solid only once the view carries the origin's confirmation, never on the click.
 import { requestRender } from "./main.js";
 import { shownOrder } from "./panels.js";
-import { askRoute, budgetWords, confirmationFor, leaseWords, picksFor, sealOf, strikeScope } from "./seal.js";
+import {
+  RETRY_LINE,
+  SENT_LINE,
+  UNSENT_LINE,
+  budgetWords,
+  forgetSeal,
+  markSealAccepted,
+  missingWords,
+  picksFor,
+  refusalWords,
+  sealCommand,
+  sealPanel,
+  sentSeal,
+  strikeScope,
+  strikeWords,
+} from "./seal.js";
 import { freeze, slipEl, state } from "./state.js";
 import { forgetToken, get } from "./stream.js";
 
@@ -50,24 +65,31 @@ function head(lane) {
 }
 
 // The Seal's block: nothing until the route has answered for this revision, then the state the
-// route and the view give. The Seal button is the only control that sends ConfirmScope.
+// route and the view give. A stopped order takes no Seal. The Seal button is the only control that
+// sends ConfirmScope.
 function sealBlock(lane, picks) {
-  const sealState = sealOf(state, lane);
-  if (sealState.kind === "hidden") return [];
-  if (sealState.kind === "withheld") return [withheld(sealState)];
-  if (sealState.kind === "sealed") return [sealedStamp(sealState.confirmation)];
+  const panel = sealPanel(state, lane, picks, Date.now());
+  const halt = panel.halt === null ? [] : [el("p", "warn", panel.halt)];
+  if (panel.kind === "hidden") {
+    return [...halt, ...(panel.retrying ? [el("p", "sub", RETRY_LINE)] : [])];
+  }
+  if (panel.kind === "withheld") return [...halt, withheld(panel)];
+  if (panel.kind === "sealed") return [...halt, sealedStamp(panel.confirmation)];
 
-  const built = confirmationFor(sealState.body, lane, picks, Date.now());
   const stamp = el("div", "stamp", `UNSEALED rev ${lane.rev}`);
   stamp.append(el("span", null, "No human has sealed this revision."));
+  const children = [...halt, stamp];
+  if (!panel.offer) return children;
+
   const send = el("button", null, state.slipPending ? "sending…" : `Seal rev ${lane.rev}`);
   send.type = "button";
   send.dataset.focusKey = "seal";
-  send.disabled = state.slipPending || !built.ok;
+  send.disabled = state.slipPending || !panel.canSend;
   send.addEventListener("click", () => seal(lane));
-  const children = [stamp];
-  if (!built.ok) {
-    children.push(el("p", "sub", `Needs ${built.missing.map((missing) => missingWords(missing, lane)).join("; ")}.`));
+  if (panel.accepted) children.push(el("p", "sub", SENT_LINE));
+  else if (panel.sent) children.push(el("p", "sub", UNSENT_LINE));
+  else if (panel.missing.length > 0) {
+    children.push(el("p", "sub", `Needs ${panel.missing.map((missing) => missingWords(missing, lane)).join("; ")}.`));
   }
   children.push(send);
   return children;
@@ -104,6 +126,7 @@ function sealedStamp(confirmation) {
 function plotsBlock(lane) {
   const box = el("div", "block");
   box.append(el("h3", null, `may change · ${lane.may.length}`));
+  if (lane.may.length === 0) box.append(el("p", "sub", "The order has no plots, so it may change nothing."));
   const list = el("ul");
   for (const item of lane.may) {
     const row = el("li");
@@ -135,12 +158,9 @@ function plotsBlock(lane) {
 // tasks that hold a lease now, which a newer revision ends.
 function strikeWarning(lane, item) {
   const box = el("div", "warn");
-  const obligations = item.obligations.length;
-  box.append(el(
-    "p",
-    null,
-    `Strike removes plot ${item.id} (${item.selector}, ${obligations} ${plural(obligations, "obligation")}). It ${leaseWords(lane.live_leases)}. Rev ${lane.rev + 1} waits for a seal.`,
-  ));
+  const words = strikeWords(lane, item);
+  box.append(el("p", null, words.removes));
+  if (words.last !== null) box.append(el("p", "mismatch", words.last));
   box.append(el(
     "p",
     "sub",
@@ -191,7 +211,7 @@ function choicesBlock(lane, picks) {
       button.type = "button";
       button.dataset.focusKey = `pick-${choice.id}-${option.key}`;
       button.setAttribute("aria-pressed", String(picks.choices.get(choice.id) === option.key));
-      button.disabled = state.slipPending;
+      button.disabled = state.slipPending || sentSeal(state, lane) !== null;
       button.addEventListener("click", () => {
         picks.choices.set(choice.id, option.key);
         paintSlip();
@@ -215,7 +235,7 @@ function broadBlock(lane, picks) {
     check.type = "checkbox";
     check.dataset.focusKey = `ack-${item.id}`;
     check.checked = picks.acks.has(item.id);
-    check.disabled = state.slipPending;
+    check.disabled = state.slipPending || sentSeal(state, lane) !== null;
     check.addEventListener("change", () => {
       if (check.checked) picks.acks.add(item.id);
       else picks.acks.delete(item.id);
@@ -227,27 +247,29 @@ function broadBlock(lane, picks) {
   return box;
 }
 
-// Fetches the route again, checks it, and sends ConfirmScope with the human's answers. Nothing is
-// sent when the route names another scope or when an answer or acknowledgement is missing.
+// Sends the Seal: the ConfirmScope sent last for this revision, sent again as it was, or else one
+// built from a fresh route answer and the human's answers. Nothing is sent for a stopped order, for
+// a route that names another scope, or while an answer or acknowledgement is missing.
 async function seal(lane) {
-  if (!state.token || state.slipPending) return;
+  if (!state.token || state.slipPending || lane.stopped) return;
   state.slipPending = true;
   state.slipNote = "";
   paintSlip();
   try {
-    const { body, check } = await askRoute(state, get, lane.order);
-    if (check.verdict !== "match") {
+    const built = await sealCommand(state, get, lane, picksFor(state, lane), Date.now());
+    if (built.mismatch) {
       state.slipNote = "The server's scope no longer matches this page. Nothing was sent.";
-      return;
-    }
-    const built = confirmationFor(body, lane, picksFor(state, lane), Date.now());
-    if (!built.ok) {
+    } else if (built.missing) {
       state.slipNote = `Not sent: needs ${built.missing.map((missing) => missingWords(missing, lane)).join("; ")}.`;
-      return;
+    } else {
+      const outcome = await post(built.command);
+      if (outcome === "accepted") markSealAccepted(state, lane);
+      else if (outcome === "refused") forgetSeal(state, lane);
     }
-    await post({ cmd: "confirm_scope", order: lane.order, confirmation: built.confirmation });
-  } catch (err) {
-    state.slipNote = `the seal did not reach the server: ${err?.message ?? err}`;
+  } catch {
+    state.slipNote = sentSeal(state, lane) !== null
+      ? "The server did not answer, so the seal may not be recorded. Seal sends the same confirmation again."
+      : "The server did not answer. Nothing was sent.";
   } finally {
     state.slipPending = false;
     paintSlip();
@@ -262,17 +284,19 @@ async function strike(lane, item) {
   paintSlip();
   try {
     const scope = strikeScope(lane.scope, item.id);
-    if (await post({ cmd: "revise_scope", order: lane.order, scope })) state.strikeArmed = null;
-  } catch (err) {
-    state.slipNote = `the strike did not reach the server: ${err?.message ?? err}`;
+    if ((await post({ cmd: "revise_scope", order: lane.order, scope })) === "accepted") state.strikeArmed = null;
+  } catch {
+    state.slipNote = "The server did not answer, so the strike may not be recorded. Try again.";
   } finally {
     state.slipPending = false;
     paintSlip();
   }
 }
 
-// Posts one command. Returns whether the origin accepted it. In a frozen page the stream is not
-// heard, so the command's own events are folded here, as the clash card's settle does.
+// Posts one command. Returns "accepted" when the server took it, "refused" when it answered no
+// (nothing was recorded), or "unsent" when it failed, so the same command may be sent again. A
+// refusal is shown as a plain sentence, never as the server's JSON. In a frozen page the stream is
+// not heard, so the command's own events are folded here, as the clash card's settle does.
 async function post(command) {
   const res = await fetch("/api/commands", {
     method: "POST",
@@ -281,26 +305,17 @@ async function post(command) {
   });
   if (res.status === 401 || res.status === 403) {
     forgetToken();
-    return false;
+    return "refused";
   }
   if (!res.ok) {
-    state.slipNote = `the server refused: ${(await res.text()).slice(0, 160)}`;
-    return false;
+    state.slipNote = refusalWords(res.status, await res.text());
+    return res.status >= 500 ? "unsent" : "refused";
   }
   if (freeze) {
     for (const event of await res.json()) state.app.ingest(JSON.stringify(event));
     requestRender();
   }
-  return true;
-}
-
-// The missing answer or acknowledgement in words a human reads: the choice's question, the plot.
-function missingWords(missing, lane) {
-  if (missing.kind === "choice") {
-    const choice = lane.open.find((open) => open.id === missing.id);
-    return `an answer to "${choice.question}"`;
-  }
-  return `an acknowledgement that plot ${missing.id} is broad`;
+  return "accepted";
 }
 
 function short(hash) {
@@ -309,10 +324,6 @@ function short(hash) {
 
 function when(ms) {
   return `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;
-}
-
-function plural(count, word) {
-  return count === 1 ? word : `${word}s`;
 }
 
 function el(tag, className, text) {

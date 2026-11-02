@@ -306,7 +306,7 @@ mod tests {
     fn usage_rows_decode_and_ignore_latency() {
         let text = r#"[{
             "role": "split",
-            "provider": "Meta Model API",
+            "provider": "meta",
             "model": "muse-spark-1.3",
             "calls": 3,
             "prompt_tokens": 6604,
@@ -315,7 +315,7 @@ mod tests {
         }]"#;
         let rows = usage(text).expect("the usage rows decode");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].provider, "Meta Model API");
+        assert_eq!(rows[0].provider, "meta");
         assert_eq!(rows[0].prompt_tokens, 6604);
     }
 }

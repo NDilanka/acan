@@ -1988,6 +1988,7 @@ mod tests {
                 "open",
                 "confirmation",
                 "live_leases",
+                "stopped",
             ])
         );
         assert_eq!(

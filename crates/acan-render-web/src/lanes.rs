@@ -38,6 +38,9 @@ pub struct LaneView {
     /// The tasks of the order that hold a lease now. A newer revision ends each one as
     /// `Superseded`. A lease shows that the agent's authority is valid, not that its work is safe.
     pub live_leases: u32,
+    /// Whether the repair budget ran out. A stopped lane takes no claim or build, and no seal or
+    /// newer revision lifts the stop.
+    pub stopped: bool,
 }
 
 /// One may-change item.
@@ -138,6 +141,7 @@ fn lane_view(world: &World, lane: &ScopeLane) -> LaneView {
         open: body.open.iter().map(choice_view).collect(),
         confirmation: lane.confirmation.clone(),
         live_leases: live_leases(world, lane.order),
+        stopped: lane.stopped,
     }
 }
 
