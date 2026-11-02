@@ -23,6 +23,7 @@ import {
 } from "./state.js";
 import { playOf, syncPlantViews } from "./plant.js";
 import { bindPlate, paintPlate, stepBy, toggleMode, togglePlay } from "./plate.js";
+import { bindShell, startShell } from "./shell.js";
 import { get, setLink, start } from "./stream.js";
 import { requestUsage } from "./usage.js";
 
@@ -340,6 +341,7 @@ function bindKeys() {
     sessionStorage.setItem(TOKEN_KEY, value);
     state.token = value;
     gate.hidden = true;
+    startShell();
     start().catch((err) => {
       console.error(err);
       setLink("failed");
@@ -373,6 +375,8 @@ async function createApp() {
 // plant for the benchmark. `?plant=fixture` loads the demo plant with no log. Otherwise the
 // page reads the live origin, which needs the owner token.
 async function loadPlant() {
+  // The token is adopted in every mode, so the shell's calls can use it, even over a fixture.
+  state.token = adoptToken();
   const source = params.get("plant");
   if (source === "stress") {
     const machines = Number(params.get("machines") || 2000);
@@ -384,7 +388,6 @@ async function loadPlant() {
     if (!response.ok) throw new Error(`fixture HTTP ${response.status}`);
     state.app.set_plant(await response.text());
   } else {
-    state.token = adoptToken();
     if (!state.token) {
       gate.hidden = false;
       setLink("sign in");
@@ -442,6 +445,8 @@ async function boot() {
   reducedMotion.addEventListener("change", followReducedMotion);
   await loadPlant();
   bindPlate();
+  bindShell();
+  startShell();
   // `?plate=fixture` or `?plate=plain` shows the receipt plate over a fixture plant view, without
   // the origin. The plate is watermarked FIXTURE.
   if (params.has("plate")) await loadPlateFixture(params.get("plate"));

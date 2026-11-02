@@ -77,6 +77,16 @@
   #order { top: 52px; left: 12px; max-width: 56vw; font: 12px/1.4 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #link { font: 11px var(--mono); }
   .stale { font: 11px var(--mono); color: var(--red); }
+  .version { font: 11px var(--mono); color: var(--muted); }
+  #alpha { top: 12px; right: 12px; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; max-width: 320px; }
+  #alpha[hidden] { display: none; }
+  .update { font: 11px var(--sans); color: var(--muted); }
+  .update a { color: var(--muted); text-decoration: underline; }
+  #report-bug, #bug-copy { font: 11px var(--mono); padding: 2px 8px; background: var(--face); color: var(--ink);
+    border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+  #report-bug:disabled { color: var(--muted); cursor: default; }
+  #bug-note { font: 11px/1.4 var(--sans); max-width: 300px; white-space: normal; }
+  #bug-note a { color: var(--ink); }
   #hint { top: 12px; left: 50%; transform: translateX(-50%); color: #57575a; white-space: nowrap; }
   kbd { font: 11px ui-monospace, Consolas, monospace; color: var(--ink); background: var(--face);
     border: 1px solid #e5e5e2; border-radius: 4px; padding: 0 4px; }
@@ -225,7 +235,8 @@
 <div id="pov-frame" hidden></div>
 <svg id="pov-reticle" hidden aria-hidden="true"><path id="pov-bracket" d=""></path></svg>
 <div class="island" id="pov-chip" hidden><span class="dot" id="pov-dot"></span><span class="inside">inside</span><b id="pov-agent"></b><span class="line" id="pov-line"></span><kbd>Esc</kbd><span class="alt" id="pov-alt" hidden></span></div>
-<div class="island" id="shell"><span class="brand">Acan</span><span class="repo" id="repo"></span><span id="link" class="muted">starting</span><span id="stale" class="stale" hidden></span></div>
+<div class="island" id="shell"><span class="brand">Acan</span><span class="repo" id="repo"></span><span id="link" class="muted">starting</span><span id="stale" class="stale" hidden></span><span id="version" class="version" hidden></span></div>
+<div class="island" id="alpha" hidden><span id="update" class="update" hidden><span id="update-text"></span> <a id="update-link" target="_blank" rel="noopener">open release</a></span><button id="report-bug" type="button">Report a bug</button><span id="bug-note" class="muted" hidden></span><button id="bug-copy" type="button" hidden>Copy full report</button></div>
 <div class="island" id="order" hidden><span id="order-line" class="muted"></span></div>
 <div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle</div>
 <aside id="card" class="island" hidden></aside>
