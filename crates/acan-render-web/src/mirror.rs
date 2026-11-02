@@ -764,6 +764,7 @@ fn step_key(step: Step) -> &'static str {
         Step::Review => "review",
         Step::Explain => "explain",
         Step::Screenshot => "screenshot",
+        Step::Vision => "vision",
     }
 }
 

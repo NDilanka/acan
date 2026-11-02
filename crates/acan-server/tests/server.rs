@@ -50,6 +50,7 @@ fn config(repo: &Path, addr: SocketAddr, team: bool) -> ServerConfig {
         protected_branch: None,
         witness_http_base_url: None,
         witness_concurrency: acan_server::DEFAULT_WITNESS_CONCURRENCY,
+        vision: None,
     }
 }
 

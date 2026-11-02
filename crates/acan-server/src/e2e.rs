@@ -1505,6 +1505,7 @@ async fn start_with<C: ModelClient + 'static>(
         protected_branch: Some("main".to_owned()),
         witness_http_base_url: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
+        vision: None,
     };
     start(config, client, ledger)
         .await

@@ -46,6 +46,7 @@ mod store;
 mod stream;
 #[allow(dead_code, reason = "the guided tour has no caller in the server yet")]
 mod tour;
+mod vision;
 mod writer;
 
 use std::fs;
@@ -71,6 +72,10 @@ pub use index::{IndexError, Scan, code_index, scan};
 pub use jobs::spawn as spawn_jobs;
 pub use models::Models;
 pub use store::EventStore;
+pub use vision::{
+    CHROME, Comparison, EDGE, MustKeepItem, Verdict, Vision, VisionCheck, VisionConfig,
+    VisionWitness, WitnessStatus, default_browser, default_data_dir,
+};
 
 use crate::public::PublicRoot;
 use crate::writer::Writer;
@@ -115,6 +120,9 @@ pub struct ServerConfig {
     pub witness_http_base_url: Option<String>,
     /// How many witness runs may run at once. Must be at least 1.
     pub witness_concurrency: usize,
+    /// The advisory vision witness. `None` runs no vision checks, and the vision route then
+    /// serves a `failed` record for every gate run.
+    pub vision: Option<VisionConfig>,
 }
 
 /// A server that is listening. Dropping it does not stop the server.
@@ -187,7 +195,8 @@ impl Running {
 ///
 /// Returns an error when the bind address is non-loopback without `team`, the state directory,
 /// tokens or database cannot be opened, the stored log does not replay, the scan fails, the web
-/// directory is not a dedicated public directory, or the address cannot be bound.
+/// directory is not a dedicated public directory, the vision data directory cannot be created or
+/// is inside the repository, or the address cannot be bound.
 pub async fn start<C: ModelClient + 'static>(
     config: ServerConfig,
     client: C,
@@ -210,6 +219,11 @@ pub async fn start<C: ModelClient + 'static>(
         .transpose()?;
     let state_dir = config.repo.join(STATE_DIR);
     prepare_state_dir(&state_dir)?;
+    let vision = config
+        .vision
+        .as_ref()
+        .map(|vision| Vision::open(vision, &config.repo))
+        .transpose()?;
     let founder = MemberId::from_str(OWNER)?;
     let (tokens, owner_token) = Tokens::load_or_create(&state_dir, &founder)?;
     let store = EventStore::open(&state_dir.join(DB_FILE)).await?;
@@ -249,6 +263,7 @@ pub async fn start<C: ModelClient + 'static>(
         witness_http_base_url: config.witness_http_base_url.clone(),
         witness_concurrency: config.witness_concurrency,
         probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
+        vision,
     });
     if let Err(err) = host.submit(Command::System(SystemCmd::IndexUpdated)).await {
         let _ = host.shutdown().await;
