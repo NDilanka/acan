@@ -121,6 +121,35 @@
   td { color: #3c3c3a; }
   th.num, td.num { text-align: right; padding-right: 0; padding-left: 16px; font-variant-numeric: tabular-nums; }
   #notice { top: 50%; left: 50%; transform: translate(-50%, -50%); color: #57575a; }
+  /* The slip: the scope of the order the order island shows. Its plots, keeps and open choices
+     say what the order may change and must keep. The Seal and the Strike act on them. */
+  #slip { right: 16px; bottom: 16px; width: 340px; max-height: calc(100vh - 120px); overflow-y: auto;
+    box-sizing: border-box; padding: 10px 14px; color: var(--ink); font: 12px/1.4 var(--sans); }
+  #slip h2 { margin: 0; font: 600 13px/1.3 var(--mono); }
+  #slip h3 { margin: 10px 0 4px; font: 600 10px/1.2 var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  #slip p { margin: 4px 0; }
+  #slip ul { list-style: none; margin: 0; padding: 0; }
+  #slip li { padding: 5px 0; border-top: 1px solid var(--rule); }
+  #slip .block { margin-top: 6px; }
+  #slip .sub { color: var(--muted); font-size: 11px; }
+  #slip .selector, #slip .mono { font-family: var(--mono); font-size: 11px; }
+  #slip .obl { border-top: none; padding: 1px 0 1px 12px; color: #3c3c3a; }
+  #slip .choice { border-top: 1px solid var(--rule); padding: 5px 0; }
+  #slip .ack { display: block; margin: 4px 0; font-size: 12px; }
+  #slip .stamp { border: 1.5px dashed var(--muted); border-radius: 4px; padding: 6px 8px; margin: 8px 0 4px; }
+  #slip .stamp span { display: block; font-size: 11px; color: var(--muted); }
+  #slip .stamp.sealed { background: var(--ink); color: #ffffff; border: 1.5px solid var(--ink); }
+  #slip .stamp.sealed span { color: #e5e5e2; }
+  #slip .stamp b { font: 600 12px var(--mono); letter-spacing: 0.04em; }
+  #slip button { font: 12px/1.3 var(--mono); background: var(--face); color: var(--ink); border: 1px solid var(--rule);
+    border-radius: 4px; padding: 3px 8px; margin: 2px 0; cursor: pointer; }
+  #slip button:hover { border-color: var(--ink); }
+  #slip button:disabled { color: var(--muted); cursor: default; border-color: var(--rule); }
+  #slip button[aria-pressed="true"] { background: var(--ink); color: #ffffff; border-color: var(--ink); }
+  #slip button.danger { color: var(--red); border-color: var(--red); }
+  #slip .warn { border-left: 2px solid var(--red); padding: 4px 0 4px 8px; margin-top: 6px; }
+  #slip .mismatch, #slip .note { font-family: var(--mono); font-size: 11px; color: var(--red); }
+  #slip .foot { color: var(--muted); font-size: 11px; border-top: 1px solid var(--rule); margin-top: 10px; padding-top: 6px; }
   /* The point of view. Riding shows these, and the order island fades out with them; each fades
      over --pov-fade. */
   #order, #pov-vignette, #pov-frame, #pov-reticle, #pov-chip { opacity: 0; transition: opacity var(--pov-fade) var(--pov-ease); }
@@ -155,6 +184,7 @@
 <div class="island" id="order" hidden><span id="order-line" class="muted"></span></div>
 <div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle</div>
 <aside id="card" class="island" hidden></aside>
+<aside id="slip" class="island" hidden></aside>
 <div id="gate" hidden>
   <form id="token-form">
     <label for="token" class="muted">owner token</label>

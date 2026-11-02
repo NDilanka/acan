@@ -792,7 +792,8 @@ mod tests {
     use acan_core::{
         AgentCmd, Belt, Check, CodeIndex, CodeRev, Command, CommitId, Ctx, FilePath, HumanCmd,
         IndexedFile, IndexedSymbol, MachineKey, MemberId, Origin, Scope, ScopeBinding,
-        ScopeConfirmation, Seq, Step, SystemCmd, Timestamp, WitnessSpec, WorldId, WorldRef,
+        ScopeConfirmation, Seq, Step, SystemCmd, TaskSpec, Timestamp, WitnessSpec, WorldId,
+        WorldRef,
     };
     use serde_json::json;
 
@@ -800,6 +801,7 @@ mod tests {
     use crate::feed;
     use crate::plant::from_scan_json;
     use crate::scenario::{self, Target};
+    use crate::seal;
     use crate::slices;
 
     const PLANT: &str = r#"{
@@ -1774,6 +1776,188 @@ mod tests {
             "another order's scope does not cover this clash"
         );
     }
+
+    /// Opens a lane on an order with two tasks, confirms it, and has agent A claim the first task
+    /// through a readback at the confirmed hash. Returns the fixture with the claim in its log,
+    /// the order's first task, and the scope.
+    fn claimed_lane() -> (LaneFixture, TaskId, Scope) {
+        let index = index();
+        let (mut origin, opened) = open_world();
+        let mut log = vec![opened];
+        let (order, posted) = post_order(&mut origin, &index, "Limit failed logins");
+        log.extend(posted);
+        let rev = origin.world().order(order).expect("the order").rev;
+        let machine = MachineKey::from_str("src/api").expect("a machine key");
+        let tasks = vec![
+            TaskSpec {
+                title: "Limit the login".to_owned(),
+                brief: "Add the 429.".to_owned(),
+                scope: vec![machine.clone()],
+            },
+            TaskSpec {
+                title: "Keep the session".to_owned(),
+                brief: "Keep the session.".to_owned(),
+                scope: vec![machine],
+            },
+        ];
+        log.extend(accepted(
+            &mut origin,
+            &index,
+            Command::System(SystemCmd::SplitReady { order, rev, tasks }),
+        ));
+        let task = origin.world().tasks_of(order).next().expect("a task").id;
+        let agent = AgentId::from_str(scenario::AGENTS[0]).expect("an agent id");
+        log.extend(accepted(
+            &mut origin,
+            &index,
+            Command::Human {
+                member: founder(),
+                cmd: HumanCmd::RegisterAgent {
+                    agent: agent.clone(),
+                },
+            },
+        ));
+        let scope = scope_for(order, vec![narrow_item()]);
+        log.extend(accepted(
+            &mut origin,
+            &index,
+            Command::Human {
+                member: founder(),
+                cmd: HumanCmd::ReviseScope {
+                    order,
+                    scope: Box::new(scope.clone()),
+                },
+            },
+        ));
+        let confirmation = confirmation_for(&origin, &scope);
+        log.extend(accepted(
+            &mut origin,
+            &index,
+            Command::Human {
+                member: founder(),
+                cmd: HumanCmd::ConfirmScope {
+                    order,
+                    confirmation: Box::new(confirmation),
+                },
+            },
+        ));
+        log.extend(accepted(
+            &mut origin,
+            &index,
+            Command::Agent {
+                agent: agent.clone(),
+                cmd: AgentCmd::PostScopedReadback {
+                    task,
+                    scope_rev: scope.rev,
+                    scope_hash: scope.scope_hash().expect("the scope hashes"),
+                    summary: "add the 429".to_owned(),
+                    predictions: Vec::new(),
+                },
+            },
+        ));
+        log.extend(accepted(
+            &mut origin,
+            &index,
+            Command::Agent {
+                agent,
+                cmd: AgentCmd::Claim { task },
+            },
+        ));
+        let fixture = LaneFixture {
+            origin,
+            log,
+            index,
+            order,
+            scope: scope.clone(),
+        };
+        (fixture, task, scope)
+    }
+
+    #[test]
+    fn a_lane_counts_its_live_leases_and_a_newer_revision_ends_them() {
+        let (mut fx, _task, scope) = claimed_lane();
+        let before = Mirror::from_log(fx.log.clone())
+            .expect("the log replays")
+            .view(&plan());
+        assert_eq!(
+            before.lanes[0].live_leases, 1,
+            "the claimed task holds a lease"
+        );
+
+        // A Strike sends the same scope one revision on, with its one plot removed.
+        let mut struck = serde_json::to_value(&scope).expect("a scope serializes");
+        struck["rev"] = json!(2);
+        struck["body"]["may"] = json!([]);
+        let revised = accepted(
+            &mut fx.origin,
+            &fx.index,
+            Command::Human {
+                member: founder(),
+                cmd: HumanCmd::ReviseScope {
+                    order: fx.order,
+                    scope: Box::new(serde_json::from_value(struck).expect("a scope decodes")),
+                },
+            },
+        );
+        let ended = revised
+            .iter()
+            .filter(|stamped| matches!(stamped.event, Event::LeaseEnded { .. }))
+            .count();
+        assert_eq!(ended, 1, "the revision ends the one live lease");
+        fx.log.extend(revised);
+
+        let after = Mirror::from_log(fx.log)
+            .expect("the log replays")
+            .view(&plan());
+        let [lane] = after.lanes.as_slice() else {
+            panic!("the order keeps its lane");
+        };
+        assert_eq!(serde_json::to_value(lane.rev).expect("a rev"), json!(2));
+        assert_eq!(lane.live_leases, 0);
+        assert!(lane.may.is_empty(), "the struck plot is gone");
+    }
+
+    #[test]
+    fn the_origin_route_names_the_page_scope_and_a_different_hash_or_revision_does_not() {
+        let fx = lane_fixture(vec![narrow_item()]);
+        let route = acan_core::confirmation_body(
+            fx.origin.world(),
+            fx.order,
+            &founder(),
+            Timestamp::from_millis(3_000),
+        )
+        .expect("the route body");
+        let view = Mirror::from_log(fx.log)
+            .expect("the log replays")
+            .view(&plan());
+        let [lane] = view.lanes.as_slice() else {
+            panic!("the one order with a scope has one lane");
+        };
+
+        let same = seal::check(lane, &route);
+        assert_eq!(same.verdict, "match");
+        assert_eq!(same.page_hash, Some(lane.scope_hash));
+        assert_eq!(same.origin_hash, lane.scope_hash);
+
+        let mut other_hash = serde_json::to_value(&route).expect("a body serializes");
+        other_hash["scope_hash"] = json!(format!("sha256:{}", "0".repeat(64)));
+        let other_hash: ScopeConfirmation =
+            serde_json::from_value(other_hash).expect("a body decodes");
+        assert_eq!(seal::check(lane, &other_hash).verdict, "mismatch");
+
+        let mut other_rev = serde_json::to_value(&route).expect("a body serializes");
+        other_rev["scope_rev"] = json!(2);
+        let other_rev: ScopeConfirmation =
+            serde_json::from_value(other_rev).expect("a body decodes");
+        let shown = seal::check(lane, &other_rev);
+        assert_eq!(shown.verdict, "mismatch");
+        assert_eq!(
+            serde_json::to_value(shown.origin_rev).expect("a rev"),
+            json!(2)
+        );
+        assert_eq!(shown.page_rev, lane.rev);
+    }
+
     fn keys(value: &serde_json::Value) -> BTreeSet<&str> {
         value
             .as_object()
@@ -1803,6 +1987,7 @@ mod tests {
                 "must_keep",
                 "open",
                 "confirmation",
+                "live_leases",
             ])
         );
         assert_eq!(
@@ -1810,6 +1995,7 @@ mod tests {
             BTreeSet::from([
                 "id",
                 "label",
+                "obligations",
                 "selector",
                 "change",
                 "provenance",
@@ -1837,6 +2023,7 @@ mod tests {
         assert_eq!(lane["rev"], 1);
         assert_eq!(lane["state"], "unconfirmed");
         assert!(lane["confirmation"].is_null());
+        assert_eq!(lane["live_leases"], 0);
         assert_eq!(
             lane["scope"],
             serde_json::to_value(&fx.scope).expect("a scope serializes")
@@ -1846,6 +2033,10 @@ mod tests {
             json!({
                 "id": "i-limit",
                 "label": "the sixth failed login gets a 429",
+                "obligations": [
+                    "the sixth failed login gets a 429",
+                    "the 429 says when to retry"
+                ],
                 "selector": "POST /api/login",
                 "change": "add",
                 "provenance": "user",

@@ -94,7 +94,7 @@ export function placeLabels() {
 // The page's fixed panels: the shell, the order card, the key bar, the clash card, the usage
 // panel, the notice and the scope note. A flag or a name never sits under one. A panel that is
 // hidden has no box, so it blocks nothing.
-const HUD_SELECTORS = "#shell, #order, #hint, #card, #usage, #notice, #pov-chip, .flag.unplaced";
+const HUD_SELECTORS = "#shell, #order, #hint, #card, #usage, #notice, #pov-chip, #slip, .flag.unplaced";
 
 // Each shown panel's box in canvas coordinates, as `{ left, right, top, bottom }`.
 function hudBoxes() {

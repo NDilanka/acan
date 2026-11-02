@@ -12,6 +12,7 @@ use acan_render::{Aabb, Camera, Lod, Model, Renderer, Scene, wgpu};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
+use crate::api;
 use crate::feed;
 use crate::kind::{self, ALL, PlanFootprint};
 use crate::labels::{self, LabelSpot};
@@ -23,6 +24,7 @@ use crate::plant::{Plant, PlantMachine, from_scan_json, rest_labels, stress};
 use crate::plant_view;
 use crate::pov::{self, Ride};
 use crate::scene;
+use crate::seal;
 use crate::stand;
 
 /// Space around the plant at fit, in CSS pixels.
@@ -216,6 +218,28 @@ impl App {
     pub fn plant_view_summary(&self, json: &str) -> Result<String, JsError> {
         let view = plant_view::decode(json).map_err(js_err)?;
         Ok(plant_view::summarize(&view).to_string())
+    }
+
+    /// Checks the origin's `scope/confirmation` body for `order` (`o-N`) against the scope this
+    /// page holds, and returns the check as JSON. The page shows a Seal only when the verdict is
+    /// `match`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON is not the confirmation body, or when the page holds no
+    /// scope for the order.
+    pub fn seal_check(&self, order: &str, json: &str) -> Result<String, JsError> {
+        let route = api::confirmation(json).map_err(js_err)?;
+        let lane = self
+            .view
+            .as_ref()
+            .and_then(|view| {
+                view.lanes
+                    .iter()
+                    .find(|lane| lane.order.to_string() == order)
+            })
+            .ok_or_else(|| JsError::new("the page holds no scope for this order"))?;
+        serde_json::to_string(&seal::check(lane, &route)).map_err(js_err)
     }
 
     /// Holds the marks still, as `?freeze=1` asks. Call it before the plant loads: every ease then
