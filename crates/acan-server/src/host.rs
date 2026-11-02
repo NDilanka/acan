@@ -274,6 +274,22 @@ impl<C: ModelClient> Host<C> {
         self.inner.writer.submit(command).await
     }
 
+    /// Sends an advisory command (`VisionChecked`, `ModelUsed`) to the writer, which decides it
+    /// without expiring leases or barriers or clearing builds, so a vision report never moves
+    /// gate state. Neither command can invalidate a land, so no landing fence is taken.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubmitError::Rejected`] when the origin refuses the command, which it does for
+    /// any command that is not advisory, and [`SubmitError::Internal`] when the events cannot be
+    /// stored or the writer is gone.
+    pub(crate) async fn submit_advisory(
+        &self,
+        command: Command,
+    ) -> Result<Vec<Stamped>, SubmitError> {
+        self.inner.writer.submit_advisory(command).await
+    }
+
     /// Holds the landing fence until the guard drops. A land takes it before it checks the
     /// queued delivery and keeps it through the install, so no invalidating command writes in
     /// between.

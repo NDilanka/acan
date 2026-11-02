@@ -1502,6 +1502,33 @@ impl Origin {
         Ok(batch)
     }
 
+    /// Decides an advisory command and applies its events, and nothing else.
+    ///
+    /// An advisory command (`VisionChecked`, `ModelUsed`) reports what a check or a model call
+    /// saw; it never moves gate state. So this path skips lease expiry, barrier expiry, orphan
+    /// dissolution and build clearing on purpose: a lease or barrier already due stays in place
+    /// until the next ordinary command expires it.
+    ///
+    /// # Errors
+    /// Returns [`Rejection::Invalid`] for any command that is not advisory, and [`Rejection`]
+    /// when the advisory command is not allowed in the current state. Either way nothing changes.
+    pub fn execute_advisory(
+        &mut self,
+        ctx: &Ctx<'_>,
+        cmd: Command,
+    ) -> Result<Vec<Stamped>, Rejection> {
+        if !matches!(
+            cmd,
+            Command::System(SystemCmd::VisionChecked { .. } | SystemCmd::ModelUsed { .. })
+        ) {
+            return Err(Rejection::invalid("not an advisory command"));
+        }
+        let (actor, decided) = decide(&self.world, ctx, cmd)?;
+        let mut batch = Vec::new();
+        self.world.record(ctx.now, &actor, decided, &mut batch);
+        Ok(batch)
+    }
+
     /// The current state.
     #[must_use]
     pub fn world(&self) -> &World {

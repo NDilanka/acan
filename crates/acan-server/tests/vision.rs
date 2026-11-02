@@ -159,7 +159,9 @@ async fn a_vision_directory_inside_the_repository_stops_the_server_from_starting
     let repo = temp_repo();
     let inside = repo.path().join("screenshots");
     let refused = boot(config(repo.path(), inside.clone())).await;
-    let err = refused.err().expect("the server refuses to start");
+    let Err(err) = refused else {
+        panic!("the server refuses to start");
+    };
     assert!(
         format!("{err:#}").contains("inside the repository"),
         "{err:#}"

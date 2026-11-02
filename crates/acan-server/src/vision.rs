@@ -409,7 +409,7 @@ pub(crate) async fn witness<C: ModelClient>(
         counts,
         human_questions: counts.inconsistent.saturating_add(counts.unclear),
     };
-    if let Err(err) = host.submit(Command::System(command)).await {
+    if let Err(err) = host.submit_advisory(Command::System(command)).await {
         tracing::warn!(%task, %run, error = %err, "recording the vision verdicts failed");
     }
 }
@@ -615,7 +615,7 @@ async fn record_usage<C: ModelClient>(
         input_tokens: call.usage.prompt_tokens,
         output_tokens: call.usage.completion_tokens,
     };
-    if let Err(err) = host.submit(Command::System(command)).await {
+    if let Err(err) = host.submit_advisory(Command::System(command)).await {
         tracing::warn!(%task, %run, error = %err, "recording the vision call's usage failed");
     }
 }
