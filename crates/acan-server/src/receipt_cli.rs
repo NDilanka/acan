@@ -10,8 +10,9 @@
 //! contract that cannot be read, a Docker that cannot run the pinned image, a head that does not
 //! merge onto the base, or a contrast whose runs did not complete. Nothing runs unisolated.
 //!
-//! The clone is only read. Git objects of the prepared merges are written to its object store,
-//! and every run writes into a temporary directory that is removed when the command ends.
+//! No ref of the clone moves and its working tree is not touched. Git objects of the prepared
+//! merges are written to its object store, and every run writes into a temporary directory that
+//! is removed when the command ends.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,12 +20,12 @@ use std::process::Stdio;
 use std::str::FromStr;
 use std::time::Duration;
 
-use acan_git::{PrepareOutcome, Preparation, ProtectedPaths, Repo};
+use acan_git::{Preparation, PrepareOutcome, ProtectedPaths, Repo};
 use acan_intent::fold::fold;
 use acan_intent::{
-    CanonicalError, CommitSha, HumanRef, ImageName, OrderRef, Receipt, RepairBudget, RepairRounds,
-    RunOutcome, Scope, ScopeBody, ScopeConfirmation, ScopeRev, ScopeV1, ScopeConfirmationV1,
-    UnixMillis,
+    CanonicalError, CommitSha, GateState, HumanRef, ImageName, OrderRef, Receipt, RepairBudget,
+    RepairRounds, RunOutcome, Scope, ScopeBody, ScopeConfirmation, ScopeConfirmationV1, ScopeRev,
+    ScopeV1, UnixMillis,
 };
 use acan_witness::RunnerConfig;
 use clap::ValueEnum;
@@ -39,17 +40,26 @@ use crate::receipt::render_markdown;
 
 /// The version of the JSON envelope.
 const SHADOW_VERSION: &str = "acan-shadow/1";
-/// The order id a shadow receipt carries. No order of the workstream has this name.
+/// The order id a shadow receipt carries. It lives only in the record. No order has this name.
 const SHADOW_ORDER: &str = "shadow";
-/// The member id that stands in for the confirmer. No human confirmed a scope, so no person is
-/// named. The receipt says so instead.
+/// The member id that stands in for the confirmer. It lives only in the internal record, and no
+/// person is named. Prose never says anyone confirmed or ruled.
 const SHADOW_CONFIRMER: &str = "shadow";
-/// What every shadow receipt says about its scope.
-const SCOPE_NOTE: &str = "none confirmed; every observed difference is unclaimed";
+/// What every shadow receipt says about its scope and rulings, in the header and in the JSON.
+const SCOPE_SENTENCE: &str = "Shadow receipt. No scope was confirmed, so no difference is in scope and nothing was ruled by a person.";
 /// The text a redacted value is replaced with.
 const REDACTED: &str = "<redacted>";
 /// The shortest `.env` value treated as a secret. Shorter values are too common to replace.
 const SECRET_MIN_LEN: usize = 8;
+/// Provider key prefixes. A word with one of these and enough characters after it is a key,
+/// whatever key name holds it.
+const KEY_PREFIXES: [&str; 4] = ["sk-", "ghp_", "github_pat_", "xoxb-"];
+/// The characters after a key prefix that make a word a key.
+const KEY_BODY_MIN_LEN: usize = 16;
+/// The shortest word after `key`, `token` or `secret` that is redacted as a token.
+const TOKEN_MIN_LEN: usize = 20;
+/// The words that put a following long, digit-bearing word in the secret class.
+const SECRET_WORDS: [&str; 3] = ["key", "token", "secret"];
 /// Key names, in lowercase, whose string values are redacted.
 const SENSITIVE_KEYS: [&str; 9] = [
     "authorization",
@@ -92,7 +102,9 @@ pub enum ShadowError {
     #[error("the protected app contract cannot be read: {0}")]
     Contract(String),
     /// Docker cannot run the pinned image. There is no unisolated fallback.
-    #[error("docker cannot run the pinned container image, and there is no unisolated fallback: {0}")]
+    #[error(
+        "docker cannot run the pinned container image, and there is no unisolated fallback: {0}"
+    )]
     Docker(String),
     /// The head cannot be merged onto the protected head, so there is nothing to test.
     #[error("head {head} conflicts with the protected head: {}", files.join(", "))]
@@ -119,7 +131,8 @@ pub struct ShadowArgs {
     /// The clone to run. Its `.acan/app.json` is the protected app contract.
     #[arg(long)]
     pub repo: PathBuf,
-    /// The base ref: a local branch, whose head is the protected head.
+    /// The base ref: a local branch, whose head is the protected head. Create one with
+    /// `git branch <name> <sha>` when the base is a commit.
     #[arg(long)]
     pub base: String,
     /// The head ref, observed against the base.
@@ -167,6 +180,12 @@ impl ShadowReceipt {
             shell_word(&self.args.head),
         )
     }
+
+    /// Whether the receipt blocks a land. A blocked receipt is still a receipt.
+    #[must_use]
+    pub fn blocked(&self) -> bool {
+        matches!(self.receipt.gate_state, GateState::Blocked)
+    }
 }
 
 /// Runs the contrast between `args.base` and `args.head` and builds the receipt.
@@ -189,10 +208,11 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
             repo: args.repo.clone(),
             detail: err.to_string(),
         })?;
-    let base_head = repo.protected_head().await.map_err(|err| ShadowError::Ref {
+    let base_head = repo.protected_head().await.map_err(|_| ShadowError::Ref {
         flag: "--base",
         name: args.base.clone(),
-        detail: format!("it is not a local branch of the clone ({err})"),
+        detail: "--base must be a local branch; create one with `git branch <name> <sha>`"
+            .to_owned(),
     })?;
     let base_commit = commit_sha(&base_head.to_string())?;
     let head_commit = resolve_commit(repo.root(), &args.head)
@@ -226,9 +246,8 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
 
     let scope = shadow_scope(&base_commit)?;
     let confirmation = shadow_confirmation(&scope)?;
-    let ledger = fold(&[]).map_err(|err| {
-        ShadowError::Observe(format!("the ruling log cannot be folded: {err}"))
-    })?;
+    let ledger = fold(&[])
+        .map_err(|err| ShadowError::Observe(format!("the ruling log cannot be folded: {err}")))?;
     let order = Order {
         scope: &scope,
         confirmation: &confirmation,
@@ -271,7 +290,11 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
         base_commit: base_commit.to_string(),
         head_commit: head_commit.to_string(),
         merged_commit: candidate.merged_commit().to_string(),
-        discarded: candidate.discarded().iter().map(ToString::to_string).collect(),
+        discarded: candidate
+            .discarded()
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
         receipt_hash,
         receipt: judged.receipt,
     })
@@ -346,8 +369,12 @@ async fn prepare(
 /// Checks that Docker answers and holds the pinned image. The runner never pulls, so a missing
 /// image is a refusal here rather than a failed run later.
 async fn preflight(docker: &Path, image: &ImageName) -> Result<(), ShadowError> {
-    if let Err(detail) = docker_command(docker, &["version", "--format", "{{.Server.Version}}"]).await {
-        return Err(ShadowError::Docker(format!("`docker version` failed: {detail}")));
+    if let Err(detail) =
+        docker_command(docker, &["version", "--format", "{{.Server.Version}}"]).await
+    {
+        return Err(ShadowError::Docker(format!(
+            "`docker version` failed: {detail}"
+        )));
     }
     if let Err(detail) = docker_command(docker, &["image", "inspect", image.as_str()]).await {
         return Err(ShadowError::Docker(format!(
@@ -375,10 +402,10 @@ async fn docker_command(docker: &Path, args: &[&str]) -> Result<(), String> {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(stderr
-        .lines()
-        .next()
-        .map_or_else(|| "it failed without output".to_owned(), |line| line.trim().to_owned()))
+    Err(stderr.lines().next().map_or_else(
+        || "it failed without output".to_owned(),
+        |line| line.trim().to_owned(),
+    ))
 }
 
 /// The scope of a shadow run: no items, no must-keep rules, no open choices. Every difference is
@@ -492,10 +519,14 @@ pub fn write_out(report: &ShadowReceipt, dir: &Path) -> Result<(), ShadowError> 
         .map_err(|err| ShadowError::Output(format!("cannot create {}: {err}", dir.display())))?;
     let json = json_text(report)?;
     let markdown = markdown_text(report)?;
-    for (name, text) in [("shadow-receipt.json", json), ("shadow-receipt.md", markdown)] {
+    for (name, text) in [
+        ("shadow-receipt.json", json),
+        ("shadow-receipt.md", markdown),
+    ] {
         let path = dir.join(name);
-        fs::write(&path, text)
-            .map_err(|err| ShadowError::Output(format!("cannot write {}: {err}", path.display())))?;
+        fs::write(&path, text).map_err(|err| {
+            ShadowError::Output(format!("cannot write {}: {err}", path.display()))
+        })?;
     }
     Ok(())
 }
@@ -516,7 +547,7 @@ pub fn json_text(report: &ShadowReceipt) -> Result<String, ShadowError> {
         "head": { "ref": report.args.head, "commit": report.head_commit },
         "merged_commit": report.merged_commit,
         "discarded_protected_paths": report.discarded,
-        "scope": { "confirmed": false, "note": SCOPE_NOTE },
+        "scope": { "confirmed": false, "note": SCOPE_SENTENCE },
         "receipt_hash": report.receipt_hash,
         "receipt": receipt,
     });
@@ -551,6 +582,8 @@ fn markdown_header(report: &ShadowReceipt) -> String {
     [
         "# Acan shadow receipt".to_owned(),
         String::new(),
+        SCOPE_SENTENCE.to_owned(),
+        String::new(),
         format!("- Command: {}", code(&report.command())),
         format!(
             "- Base: {} at {}",
@@ -564,7 +597,6 @@ fn markdown_header(report: &ShadowReceipt) -> String {
         ),
         format!("- Merged commit tested: {}", code(&report.merged_commit)),
         format!("- Receipt hash: {}", code(&report.receipt_hash)),
-        format!("- Scope: {SCOPE_NOTE}"),
         format!("- Protected paths the head changed and the gate discarded: {discarded}"),
         String::new(),
     ]
@@ -630,13 +662,57 @@ fn redact_value(value: &mut Value, secrets: &[String]) {
     }
 }
 
-/// Replaces each known secret and each bearer token in `text`.
+/// Replaces each known secret, each bearer token and each key-shaped word in `text`.
 fn redact_text(text: &str, secrets: &[String]) -> String {
     let mut out = text.to_owned();
     for secret in secrets {
         out = out.replace(secret.as_str(), REDACTED);
     }
-    redact_bearer(&out)
+    redact_keys(&redact_bearer(&out))
+}
+
+/// Whether a word with the word before it is a secret: a provider key by its prefix, or a long
+/// word with digits and letters right after `key`, `token` or `secret`.
+fn is_key_shape(word: &str, previous: &str) -> bool {
+    let prefixed = KEY_PREFIXES.iter().any(|prefix| {
+        word.strip_prefix(prefix)
+            .is_some_and(|body| body.len() >= KEY_BODY_MIN_LEN)
+    });
+    let names_secret = previous
+        .split(['_', '-'])
+        .any(|part| SECRET_WORDS.contains(&part.to_ascii_lowercase().as_str()));
+    let token = word.len() >= TOKEN_MIN_LEN
+        && word.bytes().any(|byte| byte.is_ascii_digit())
+        && word.bytes().any(|byte| byte.is_ascii_alphabetic());
+    prefixed || (names_secret && token)
+}
+
+/// Replaces every word that is a secret by [`is_key_shape`]. Each word is judged with the word
+/// before it, so a value after `api_key:` is caught whatever the key is called.
+fn redact_keys(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut previous = "";
+    let mut rest = text;
+    while let Some(start) = rest.find(is_word_char) {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let end = rest.find(|c: char| !is_word_char(c)).unwrap_or(rest.len());
+        let word = &rest[..end];
+        if is_key_shape(word, previous) {
+            out.push_str(REDACTED);
+        } else {
+            out.push_str(word);
+        }
+        previous = word;
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The characters a word is made of: letters, digits, and the marks keys and encoded tokens use.
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '/')
 }
 
 /// Replaces the token after every `Bearer ` in `text`, matched without regard to case.
@@ -916,11 +992,32 @@ mod tests {
     fn the_markdown_names_the_run_before_the_receipt() {
         let report = report_for(Path::new("clone"), fixture_receipt());
         let text = markdown_text(&report).expect("the markdown renders");
-        assert!(text.starts_with("# Acan shadow receipt\n"), "header: {text}");
+        assert!(
+            text.starts_with("# Acan shadow receipt\n"),
+            "header: {text}"
+        );
         assert!(text.contains("- Command: `acan receipt --repo clone --base main --head feature`"));
         assert!(text.contains("- Receipt hash: `abc123`"));
-        assert!(text.contains("- Scope: none confirmed"));
+        assert!(text.contains(SCOPE_SENTENCE), "scope sentence: {text}");
         assert!(text.contains("`.acan/app.json`"), "discarded path listed");
+    }
+
+    #[test]
+    fn a_shadow_run_never_says_a_person_confirmed_or_ruled() {
+        let report = report_for(Path::new("clone"), fixture_receipt());
+        let markdown = markdown_text(&report).expect("the markdown renders");
+        let json = json_text(&report).expect("the envelope serializes");
+        // The one sentence that says nothing was ruled is the negation this run is labelled with.
+        for text in [
+            markdown.replace(SCOPE_SENTENCE, ""),
+            json.replace(SCOPE_SENTENCE, ""),
+        ] {
+            assert!(!text.contains("confirmed by"), "confirmed by: {text}");
+            assert!(
+                !text.to_ascii_lowercase().contains("ruled"),
+                "ruled: {text}"
+            );
+        }
     }
 
     #[test]
@@ -928,10 +1025,36 @@ mod tests {
         let secrets = vec!["sk-live-0123456789".to_owned()];
         let text = "Authorization: Bearer abc.def.ghi and key sk-live-0123456789 done";
         let redacted = redact_text(text, &secrets);
-        assert!(!redacted.contains("abc.def.ghi"), "bearer token: {redacted}");
-        assert!(!redacted.contains("sk-live-0123456789"), "known secret: {redacted}");
+        assert!(
+            !redacted.contains("abc.def.ghi"),
+            "bearer token: {redacted}"
+        );
+        assert!(
+            !redacted.contains("sk-live-0123456789"),
+            "known secret: {redacted}"
+        );
         assert!(redacted.contains("Bearer <redacted>"));
         assert!(redacted.ends_with("done"), "text after the secret is kept");
+    }
+
+    #[test]
+    fn key_shaped_words_are_redacted_under_any_key_name() {
+        let mut value = json!({
+            "note": concat!("a pasted ", "ghp_", "fake0123456789abcdef", " was seen"),
+            "label": concat!("sk-", "fake-0123456789abcdef"),
+            "detail": "api_key 0123456789abcdefghij0 and done",
+            "short": "token 0123456789 is short",
+            "count": 4,
+        });
+        redact_value(&mut value, &[]);
+        assert_eq!(value["note"], "a pasted <redacted> was seen");
+        assert_eq!(value["label"], REDACTED);
+        assert_eq!(value["detail"], "api_key <redacted> and done");
+        assert_eq!(
+            value["short"], "token 0123456789 is short",
+            "a short word is kept"
+        );
+        assert_eq!(value["count"], 4);
     }
 
     #[test]
@@ -945,7 +1068,10 @@ mod tests {
         redact_value(&mut value, &[]);
         assert_eq!(value["set_cookie"], REDACTED);
         assert_eq!(value["headers"]["Authorization"], REDACTED);
-        assert_eq!(value["tokens"], 12, "a count under a sensitive word is kept");
+        assert_eq!(
+            value["tokens"], 12,
+            "a count under a sensitive word is kept"
+        );
         assert_eq!(value["items"][0]["note"], "fine");
     }
 

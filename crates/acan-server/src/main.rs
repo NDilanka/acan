@@ -25,8 +25,17 @@ enum Command {
     /// Serves the world of one repository.
     Serve(ServeArgs),
     /// Runs the contrast between two refs of a clone and prints its shadow receipt.
+    ///
+    /// The contrast writes the objects of the prepared merges into the clone's object store.
+    /// No ref moves, and the clone's working tree is not touched.
+    ///
+    /// Exit status: 0 when a receipt is printed, even one that blocks; 2 when it blocks and
+    /// --fail-on-block is given; 1 when the run is refused, with no receipt.
     Receipt(ReceiptArgs),
 }
+
+/// The exit status of a blocked receipt when `--fail-on-block` is given.
+const BLOCKED_EXIT: i32 = 2;
 
 #[derive(Debug, Args)]
 struct ReceiptArgs {
@@ -38,6 +47,9 @@ struct ReceiptArgs {
     /// A directory that also receives `shadow-receipt.json` and `shadow-receipt.md`.
     #[arg(long)]
     out: Option<PathBuf>,
+    /// Exits with status 2 when the receipt blocks a land. Without it, a blocked receipt exits 0.
+    #[arg(long)]
+    fail_on_block: bool,
 }
 
 #[derive(Debug, Args)]
@@ -105,6 +117,9 @@ async fn receipt(args: ReceiptArgs) -> Result<()> {
         Format::Markdown => receipt_cli::markdown_text(&report)?,
     };
     println!("{text}");
+    if args.fail_on_block && report.blocked() {
+        std::process::exit(BLOCKED_EXIT);
+    }
     Ok(())
 }
 
