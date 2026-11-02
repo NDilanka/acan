@@ -96,9 +96,9 @@ export function placeLabels() {
 }
 
 // The page's fixed panels: the shell, the order card, the key bar, the clash card, the usage
-// panel, the notice, the scope note, the compose panel and the question card. A flag or a name never sits under one. A panel that is
-// hidden has no box, so it blocks nothing.
-const HUD_SELECTORS = "#shell, #order, #hint, #card, #usage, #notice, #pov-chip, #slip, #compose, #question, .flag.unplaced";
+// panel, the notice, the scope note, the compose panel, the question card and the command bar. A
+// flag or a name never sits under one. A panel that is hidden has no box, so it blocks nothing.
+const HUD_SELECTORS = "#shell, #order, #hint, #card, #usage, #notice, #pov-chip, #slip, #compose, #question, #command, .flag.unplaced";
 
 // Each shown panel's box in canvas coordinates, as `{ left, right, top, bottom }`.
 function hudBoxes() {

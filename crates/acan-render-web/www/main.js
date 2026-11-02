@@ -12,6 +12,7 @@ import {
   toggleCard,
   toggleQuestionCard,
 } from "./cards.js";
+import { openCommand } from "./commandbar.js";
 import { clickMachine, closeCompose, composeOpen, orderHere } from "./compose.js";
 import { paintMarks, pinAt, placeLabels } from "./marks.js";
 import { paintOrderLine, paintRide, paintStale, paintUsage } from "./panels.js";
@@ -281,6 +282,11 @@ function bindKeys() {
       case "c":
       case "C":
         if (!event.repeat) toggleCard();
+        break;
+      case "/":
+        // The key is not typed into the bar's field, which takes the focus.
+        event.preventDefault();
+        if (!event.repeat) openCommand();
         break;
       case "a":
       case "A":

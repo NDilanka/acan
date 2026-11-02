@@ -224,6 +224,23 @@
   #question button.option kbd { min-width: 16px; text-align: center; background: var(--card); border-color: var(--rule); border-radius: 3px; }
   #question button.close { flex: none; font: 11px var(--mono); color: var(--muted); border: none; background: none; padding: 0; cursor: pointer; }
   .flag.question { pointer-events: auto; cursor: pointer; }
+  /* The command bar on "/": a field and its results, under the key bar. */
+  #command { top: 52px; left: 50%; transform: translateX(-50%); width: min(540px, calc(100vw - 32px)); box-sizing: border-box; padding: 8px; }
+  #command input { display: block; width: 100%; box-sizing: border-box; padding: 7px 10px; font: 14px/1.3 var(--mono); color: var(--ink);
+    background: var(--face); border: 1px solid var(--ink); border-radius: 6px; outline: none; }
+  #command ul { list-style: none; margin: 6px 0 0; padding: 0; max-height: 50vh; overflow-y: auto; }
+  #command ul:empty { display: none; }
+  #command li { display: grid; grid-template-columns: 5.5em minmax(0, 1fr) auto; column-gap: 8px; padding: 5px 8px; border-radius: 4px; cursor: pointer; }
+  #command li .kind { grid-row: 1 / span 2; font: 10px/1.7 var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  #command li .label { font: 12px/1.4 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #command li .detail { grid-column: 2; font: 11px/1.3 var(--sans); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #command li .verb { grid-column: 3; grid-row: 1; font: 11px var(--mono); color: var(--muted); }
+  #command li.question .kind, #command li.clash .kind { color: var(--amber); }
+  #command li[aria-selected="true"] { background: var(--ink); color: #ffffff; }
+  #command li[aria-selected="true"] .kind, #command li[aria-selected="true"] .detail, #command li[aria-selected="true"] .verb { color: #d5d5d0; }
+  #command .note { margin: 6px 4px 0; font: 11px/1.4 var(--mono); color: var(--muted); }
+  #command .note:empty { display: none; }
+  #command .foot { margin: 6px 4px 0; font: 11px var(--sans); color: var(--muted); }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   #gate { position: fixed; inset: 0; display: grid; place-items: center; }
   #gate form { background: var(--card); border: 1px solid var(--rule); border-radius: 6px; padding: 16px; display: flex; gap: 8px; align-items: center; }
@@ -401,7 +418,7 @@
   <p id="setup-blocked" class="muted" hidden></p>
 </dialog>
 <div class="island" id="order" hidden><span id="order-line" class="muted"></span></div>
-<div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle&nbsp;&nbsp;<kbd>A</kbd> answer&nbsp;&nbsp;<kbd>O</kbd> order here</div>
+<div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle&nbsp;&nbsp;<kbd>A</kbd> answer&nbsp;&nbsp;<kbd>O</kbd> order here&nbsp;&nbsp;<kbd>/</kbd> command</div>
 <aside id="card" class="island" hidden></aside>
 <div id="pulses" aria-hidden="true"><div class="pulse target" id="compose-target" hidden></div></div>
 <aside id="compose" class="island" role="dialog" aria-labelledby="compose-title" hidden>
@@ -415,6 +432,14 @@
   </form>
 </aside>
 <aside id="question" class="island" role="dialog" aria-labelledby="question-title" hidden></aside>
+<div id="command" class="island" role="dialog" aria-label="Command bar" hidden>
+  <input id="command-input" type="text" role="combobox" aria-expanded="false" aria-controls="command-list" aria-autocomplete="list"
+    aria-label="Command: a name, an order id, agent, touched, go, ride, order here or seal" autocomplete="off" spellcheck="false"
+    placeholder="auth · o-3 · agent w2 · touched auth · order here · seal">
+  <ul id="command-list" role="listbox" aria-label="Results"></ul>
+  <p class="note" id="command-note" role="status" aria-live="polite"></p>
+  <p class="foot"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Enter</kbd> run · <kbd>Tab</kbd> fill a verb · <kbd>Esc</kbd> close</p>
+</div>
 <p id="direct-live" class="sr" role="status" aria-live="polite"></p>
 <aside id="slip" class="island" hidden></aside>
 <aside id="receipt" class="island" hidden aria-label="receipt">
