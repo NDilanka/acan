@@ -420,7 +420,8 @@ fn built_step(
 }
 
 /// The template of an item's caption, by class first, so an unknown class never takes a template
-/// of another state.
+/// of another state. Each template says only what its item is: an item the catalog has no fitting
+/// template for is `None`, and the built order is refused rather than captioned untruthfully.
 fn template_for(item: &PlantItem) -> Option<&'static str> {
     match (item.state, item.class) {
         (ItemState::Residue, _) => Some("residue.changed_value"),
@@ -428,9 +429,11 @@ fn template_for(item: &PlantItem) -> Option<&'static str> {
         (_, ItemClass::UnstableBase) => Some("unknown.unstable_base"),
         (_, ItemClass::Incomparable) => Some("unknown.incomparable"),
         (_, ItemClass::Error) => Some("unknown.error"),
-        (ItemState::Stopped, _) => Some("stopped.out_of_scope"),
-        (ItemState::Bounced, _) => Some("bounced.obligation_failed"),
+        (ItemState::Stopped, ItemClass::OutOfScope) => Some("stopped.out_of_scope"),
+        (_, ItemClass::OutOfScope) => Some("residue.changed_value"),
+        (_, ItemClass::ObligationFailed) => Some("bounced.obligation_failed"),
         (_, ItemClass::ObligationFulfilled) => Some("fulfilled.obligations"),
+        (ItemState::Bounced, _) => Some("bounced.obligation_failed"),
         _ => None,
     }
 }
@@ -863,5 +866,49 @@ mod tests {
         let plain = serde_json::to_value(plain).expect("the plain play serializes");
         assert_eq!(plain["mode"], "deterministic");
         assert!(plain["model"].is_null());
+    }
+
+    /// The plain fixture's JSON with `edit` applied, for the tests of the built order.
+    fn plain_edited(edit: impl FnOnce(&mut Value)) -> String {
+        let mut value: Value = serde_json::from_str(PLAIN).expect("the fixture is JSON");
+        edit(&mut value);
+        value.to_string()
+    }
+
+    /// The item of the plain fixture named `item_id`, for editing.
+    fn plain_item<'a>(value: &'a mut Value, item_id: &str) -> &'a mut Value {
+        value["items"]
+            .as_array_mut()
+            .expect("the fixture has items")
+            .iter_mut()
+            .find(|item| item["item_id"] == item_id)
+            .expect("the fixture has the item")
+    }
+
+    #[test]
+    fn an_open_out_of_scope_item_with_a_number_base_is_refused_not_captioned_as_stopped() {
+        let json = plain_edited(|value| {
+            plain_item(value, "d-links-clicks")["state"] = "open".into();
+        });
+        let err = play(&json).expect_err("no text caption fits a number base");
+        assert!(matches!(err, PlayError::NoTour(_)), "{err}");
+        assert!(err.to_string().contains("no row for slot base"), "{err}");
+    }
+
+    #[test]
+    fn a_class_the_catalog_has_no_caption_for_refuses_the_built_order() {
+        let json = plain_edited(|value| {
+            plain_item(value, "d-links-clicks")["class"] = "authorized_but_unspecified".into();
+            let by_class = &mut value["counts"]["by_class"];
+            let out = by_class["out_of_scope"].as_u64().expect("a count");
+            by_class["out_of_scope"] = (out - 1).into();
+            let authorized = by_class["authorized_but_unspecified"]
+                .as_u64()
+                .expect("a count");
+            by_class["authorized_but_unspecified"] = (authorized + 1).into();
+        });
+        let err = play(&json).expect_err("no caption fits the item");
+        assert!(matches!(err, PlayError::NoTour(_)), "{err}");
+        assert!(err.to_string().contains("d-links-clicks"), "{err}");
     }
 }

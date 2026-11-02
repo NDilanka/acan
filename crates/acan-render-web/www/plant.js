@@ -20,13 +20,13 @@ async function fetchPlantView(state, fetchText, order, recorded, onChange) {
   try {
     const text = await fetchText(`/api/orders/${order}/plant-view`);
     const summary = JSON.parse(state.app.plant_view_summary(text));
-    const { play, playError } = playOf(state.app, text);
-    state.plantViews.set(order, { recorded, summary, error: null, play, playError });
+    const { play, playError, items } = playOf(state.app, text);
+    state.plantViews.set(order, { recorded, summary, error: null, play, playError, items });
     onChange();
   } catch (err) {
     const error = String(err?.message ?? err);
     console.error(`the plant view of ${order} was not kept: ${error}`);
-    state.plantViews.set(order, { recorded, summary: null, error, play: null, playError: null });
+    state.plantViews.set(order, { recorded, summary: null, error, play: null, playError: null, items: [] });
     onChange();
   } finally {
     inFlight.delete(order);
@@ -36,13 +36,28 @@ async function fetchPlantView(state, fetchText, order, recorded, onChange) {
 }
 
 // What the page plays over one view: the admitted play, or why none plays. The plain card
-// still shows, so a refused tour is never a missing receipt.
+// still shows, so a refused tour is never a missing receipt: without a play, its items come from
+// the view itself, with no `must reach` mark, which only the admitted play sets.
 export function playOf(app, text) {
   try {
-    return { play: JSON.parse(app.tour_load(text)), playError: null };
+    return { play: JSON.parse(app.tour_load(text)), playError: null, items: [] };
   } catch (err) {
     const playError = String(err?.message ?? err);
     console.error(`the tour of this view cannot be played: ${playError}`);
-    return { play: null, playError };
+    return { play: null, playError, items: viewItems(text) };
+  }
+}
+
+// The items of a view, as the plate lists them without a play. Empty when the text is not a view.
+function viewItems(text) {
+  try {
+    return JSON.parse(text).items.map(({ item_id, machine_id, class: itemClass, state }) => ({
+      item_id,
+      machine_id,
+      class: itemClass,
+      state,
+    }));
+  } catch {
+    return [];
   }
 }

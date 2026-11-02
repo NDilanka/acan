@@ -147,7 +147,7 @@ export function paintPlate() {
   $("receipt-fixture").hidden = !entry.fixture;
   $("receipt-meta").textContent = play
     ? `${play.order} · gate ${play.gate_state}`
-    : `${entry.order} · the plant view was not kept`;
+    : `${entry.order} · ${entry.error ? "the plant view was not kept" : "no tour plays"}`;
   $("receipt-shas").textContent = play ? `base ${shortSha(play.base_sha)} → merged ${shortSha(play.merged_sha)}` : "";
 
   const counts = $("receipt-counts");
@@ -178,7 +178,7 @@ export function paintPlate() {
   $("receipt-note").hidden = note === "";
 
   const items = $("receipt-items");
-  const rows = play ? play.items : [];
+  const rows = play ? play.items : (entry.items ?? []);
   items.replaceChildren(
     ...rows.map((item) => {
       const row = element("li", undefined, `item tone-${itemTone(item)}`);
