@@ -111,9 +111,12 @@ export const state = {
   slipNote: "",
   labelGeneration: 0,
   labels: new Map(),
-  // The plant view summary of each order that has receipts, as the wasm side checked it. See
-  // `plant.js`.
+  // The plant view summary of each order that has receipts, as the wasm side checked it, with the
+  // play it admitted. See `plant.js`.
   plantViews: new Map(),
+  // The receipt plate: the mode the toggle shows ("plain" or "directed"), the step playing, whether
+  // the walk runs and its timer, and the order it follows. See `plate.js`.
+  plate: { mode: "plain", index: 0, playing: false, timer: null, order: null },
   // The origin's usage answer, `{ rows, error }`, or null until the first one. See `usage.js`.
   serverUsage: null,
   usageInFlight: false,

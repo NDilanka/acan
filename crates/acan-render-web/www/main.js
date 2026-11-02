@@ -21,7 +21,8 @@ import {
   repoEl,
   state,
 } from "./state.js";
-import { syncPlantViews } from "./plant.js";
+import { playOf, syncPlantViews } from "./plant.js";
+import { bindPlate, paintPlate, stepBy, toggleMode, togglePlay } from "./plate.js";
 import { get, setLink, start } from "./stream.js";
 import { requestUsage } from "./usage.js";
 
@@ -93,7 +94,8 @@ function paint() {
   paintMarks();
   paintUsage();
   paintStale();
-  syncPlantViews(state, get);
+  syncPlantViews(state, get, paintPlate);
+  paintPlate();
   syncSeals(state, get, paintSlip);
   paintSlip();
   requestUsage(state, get, paintUsage);
@@ -307,6 +309,20 @@ function bindKeys() {
       case "E":
         if (!event.repeat) turn(TURN_DEG);
         break;
+      case "p":
+      case "P":
+        if (!event.repeat) togglePlay();
+        break;
+      case "t":
+      case "T":
+        if (!event.repeat) toggleMode();
+        break;
+      case "[":
+        if (!event.repeat) stepBy(-1);
+        break;
+      case "]":
+        if (!event.repeat) stepBy(1);
+        break;
       default:
     }
   });
@@ -389,6 +405,25 @@ function followReducedMotion() {
   requestRender();
 }
 
+const PLATE_FIXTURES = {
+  fixture: "fixtures/plant-view-v1.json",
+  plain: "fixtures/plant-view-v1-plain.json",
+};
+
+// Shows the receipt plate over a fixture plant view, marked FIXTURE, as if the origin had served it.
+async function loadPlateFixture(name) {
+  const file = PLATE_FIXTURES[name];
+  if (!file) throw new Error(`no plate fixture named ${name}`);
+  const response = await fetch(file);
+  if (!response.ok) throw new Error(`fixture HTTP ${response.status}`);
+  const text = await response.text();
+  const order = JSON.parse(text).order.id;
+  const { play, playError } = playOf(state.app, text);
+  const summary = JSON.parse(state.app.plant_view_summary(text));
+  state.plantViews.set(order, { recorded: -1, summary, error: null, play, playError, fixture: true });
+  paintPlate();
+}
+
 async function boot() {
   const started = performance.now();
   await init();
@@ -406,6 +441,10 @@ async function boot() {
   followReducedMotion();
   reducedMotion.addEventListener("change", followReducedMotion);
   await loadPlant();
+  bindPlate();
+  // `?plate=fixture` or `?plate=plain` shows the receipt plate over a fixture plant view, without
+  // the origin. The plate is watermarked FIXTURE.
+  if (params.has("plate")) await loadPlateFixture(params.get("plate"));
   // `?view=azimuth,elevation` turns to a camera angle in degrees, such as a low tilt.
   if (params.has("view")) {
     const [azimuth, elevation] = params.get("view").split(",").map(Number);

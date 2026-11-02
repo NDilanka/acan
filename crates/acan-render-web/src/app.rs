@@ -26,6 +26,7 @@ use crate::pov::{self, Ride};
 use crate::scene;
 use crate::seal;
 use crate::stand;
+use crate::tour;
 
 /// Space around the plant at fit, in CSS pixels.
 const FIT_MARGIN_CSS: f32 = 24.0;
@@ -56,6 +57,8 @@ pub struct App {
     kind_spots: Vec<Vec<[f32; 2]>>,
     dpr: f32,
     turn: Option<Turn>,
+    /// The camera's move to the tour step on screen, while one runs.
+    tour_move: Option<TourMove>,
     plant: Option<Loaded>,
     plan: Option<Plan>,
     mirror: Option<Mirror>,
@@ -91,6 +94,14 @@ pub struct App {
 struct Turn {
     from: f32,
     to: f32,
+    elapsed_ms: f32,
+}
+
+/// An eased move of the camera's pivot and zoom to a tour step, from where it was when the step
+/// began. See [`tour::progress`].
+struct TourMove {
+    from: tour::Pose,
+    to: tour::Pose,
     elapsed_ms: f32,
 }
 
@@ -164,6 +175,7 @@ impl App {
             kind_spots,
             dpr: 1.0,
             turn: None,
+            tour_move: None,
             plant: None,
             plan: None,
             mirror: None,
@@ -218,6 +230,51 @@ impl App {
     pub fn plant_view_summary(&self, json: &str) -> Result<String, JsError> {
         let view = plant_view::decode(json).map_err(js_err)?;
         Ok(plant_view::summarize(&view).to_string())
+    }
+
+    /// Checks one `plant-view/1` view and returns what the page plays over it, as JSON: the view's
+    /// own counts and items, the mode, the chip's model, why the order plays, and each step's
+    /// camera, staged marks and caption. Every caption is filled from bound evidence. The view's
+    /// tour is admitted or the deterministic order is built and admitted, and the page says which.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON is not a `plant-view/1` view, its counts do not match its
+    /// items, or no order can be admitted.
+    pub fn tour_load(&self, json: &str) -> Result<String, JsError> {
+        let play = tour::play(json).map_err(js_err)?;
+        serde_json::to_string(&play).map_err(js_err)
+    }
+
+    /// Eases the camera to the pivot and zoom of a tour step: the machine `machine_id` (its name in
+    /// the plant) at the zoom `zoom` (`fit`, `machine` or `close`). With `reduced`, or on a still
+    /// page, the camera jumps. Returns false when the page cannot go there: no plant, no such
+    /// machine, a ride on, or an unknown zoom. A step replaces the move in progress.
+    pub fn tour_go(&mut self, machine_id: &str, zoom: &str, reduced: bool) -> bool {
+        if self.ride.is_some() {
+            return false;
+        }
+        let Some(to) = self.tour_pose(machine_id, zoom) else {
+            return false;
+        };
+        if reduced || self.still {
+            self.tour_move = None;
+            self.camera.set_pivot(to.0);
+            self.camera.set_zoom(to.1);
+        } else {
+            let from = (self.camera.pivot(), self.camera.zoom());
+            self.tour_move = Some(TourMove {
+                from,
+                to,
+                elapsed_ms: 0.0,
+            });
+        }
+        true
+    }
+
+    /// Stops the move to a tour step in progress, where the camera stands. Does nothing without one.
+    pub fn tour_stop(&mut self) {
+        self.tour_move = None;
     }
 
     /// Checks the origin's `scope/confirmation` body for `order` (`o-N`) against the scope this
@@ -348,6 +405,7 @@ impl App {
         if self.ride.is_some() {
             return;
         }
+        self.tour_move = None;
         self.camera.drag_ground(
             [x0 * self.dpr, y0 * self.dpr],
             [x1 * self.dpr, y1 * self.dpr],
@@ -360,6 +418,7 @@ impl App {
         if self.ride.is_some() {
             return;
         }
+        self.tour_move = None;
         let [vw, vh] = self.camera.viewport();
         let from = [vw * 0.5, vh * 0.5];
         self.camera
@@ -386,6 +445,7 @@ impl App {
             return;
         }
         self.turn = None;
+        self.tour_move = None;
         self.camera
             .orbit(dx * ORBIT_DEG_PER_PX, -dy * TILT_DEG_PER_PX);
     }
@@ -410,6 +470,7 @@ impl App {
     /// still moving, so the page asks for another frame only then.
     pub fn advance(&mut self, dt_ms: f32) -> bool {
         let turning = self.advance_turn(dt_ms);
+        let touring = self.advance_tour_move(dt_ms);
         let moving = self.motion.advance(dt_ms);
         // The frame an ease ends on still uploads, so the marks land on their final places.
         if moving || self.moving {
@@ -417,7 +478,7 @@ impl App {
         }
         self.moving = moving;
         let riding = self.advance_ride(dt_ms);
-        turning || moving || riding
+        turning || touring || moving || riding
     }
 
     /// Follows the ride's drone, moves the ride's ease on, and leaves the ride once its drone has
@@ -473,17 +534,56 @@ impl App {
         true
     }
 
+    /// Moves the camera's pivot and zoom toward a tour step's target, by the ease of the step. The
+    /// move lands exactly on its target, then clears.
+    fn advance_tour_move(&mut self, dt_ms: f32) -> bool {
+        let Some(movement) = self.tour_move.as_mut() else {
+            return false;
+        };
+        movement.elapsed_ms += dt_ms.max(0.0);
+        let (pivot, zoom) = tour::progress(movement.from, movement.to, movement.elapsed_ms);
+        self.camera.set_pivot(pivot);
+        self.camera.set_zoom(zoom);
+        if movement.elapsed_ms >= tour::MOVE_MS {
+            self.tour_move = None;
+            return false;
+        }
+        true
+    }
+
+    /// The pose a tour step goes to: the fit pose for `fit`, otherwise the pivot over the machine
+    /// named `machine_id` at its zoom. `None` for an unknown zoom or a machine the plant lacks.
+    fn tour_pose(&self, machine_id: &str, zoom: &str) -> Option<tour::Pose> {
+        let zoom = tour::zoom_named(zoom)?;
+        let Some(ratio) = tour::zoom_ratio(zoom) else {
+            return self.fit_pose();
+        };
+        let loaded = self.plant.as_ref()?;
+        let index = loaded
+            .machines
+            .iter()
+            .position(|machine| machine.name == machine_id)?;
+        let placed = loaded.layout.machines.get(index)?;
+        let (w, d) = placed.kind.footprint();
+        Some((
+            [placed.x + w / 2.0, placed.y + d / 2.0],
+            ratio * self.fit_zoom(),
+        ))
+    }
+
     /// Zooms by `factor` around the CSS point `(x, y)`, which stays under the pointer.
     pub fn zoom_at(&mut self, x: f32, y: f32, factor: f32) {
         if self.ride.is_some() {
             return;
         }
+        self.tour_move = None;
         self.camera.zoom_at([x * self.dpr, y * self.dpr], factor);
     }
 
     /// Turns to the given angles in degrees and fits the plant there, centred on screen.
     pub fn view(&mut self, azimuth: f32, elevation: f32) {
         self.turn = None;
+        self.tour_move = None;
         self.camera.set_angles(azimuth, elevation);
         if let Some(loaded) = &self.plant {
             self.camera
@@ -513,6 +613,7 @@ impl App {
             return false;
         };
         self.turn = None;
+        self.tour_move = None;
         self.fit_after_leave = false;
         if let Some(ride) = self.ride.as_mut().filter(|ride| ride.is_leaving()) {
             ride.resume(snapshot, self.camera);
@@ -596,6 +697,7 @@ impl App {
     /// Returns to the default angles and fits the plant.
     fn fit_view(&mut self) {
         self.turn = None;
+        self.tour_move = None;
         if let Some(loaded) = &self.plant {
             self.camera.set_angles(DEFAULT_AZIMUTH, DEFAULT_ELEVATION);
             self.camera
@@ -944,6 +1046,7 @@ impl App {
         self.marks = Marks::default();
         self.motion = Motion::new(self.still);
         self.card_clash = None;
+        self.tour_move = None;
         self.ride = None;
         self.fit_after_leave = false;
         self.dirty = true;
@@ -1054,15 +1157,16 @@ impl App {
     /// projection. Level of detail is measured against this, so orbiting never changes the
     /// detail.
     fn fit_zoom(&self) -> f32 {
-        match &self.plant {
-            Some(loaded) => {
-                let mut probe = self.camera;
-                probe.set_angles(DEFAULT_AZIMUTH, DEFAULT_ELEVATION);
-                probe.fit_boxes_room(&loaded.framing, FIT_MARGIN_CSS * self.dpr, self.fit_room());
-                probe.zoom()
-            }
-            None => 1.0,
-        }
+        self.fit_pose().map_or(1.0, |(_, zoom)| zoom)
+    }
+
+    /// The pivot and zoom of the fit at the default angles, or `None` before a plant loads.
+    fn fit_pose(&self) -> Option<tour::Pose> {
+        let loaded = self.plant.as_ref()?;
+        let mut probe = self.camera;
+        probe.set_angles(DEFAULT_AZIMUTH, DEFAULT_ELEVATION);
+        probe.fit_boxes_room(&loaded.framing, FIT_MARGIN_CSS * self.dpr, self.fit_room());
+        Some((probe.pivot(), probe.zoom()))
     }
 
     fn lod(&self) -> Lod {
