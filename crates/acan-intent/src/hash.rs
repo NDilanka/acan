@@ -84,7 +84,7 @@ impl FromStr for ContentHash {
             return Err(malformed());
         }
         let mut digest = [0u8; 32];
-        for (byte, pair) in digest.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+        for (byte, pair) in digest.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
             let pair = std::str::from_utf8(pair).map_err(|_| malformed())?;
             *byte = u8::from_str_radix(pair, 16).map_err(|_| malformed())?;
         }

@@ -4,7 +4,10 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
-use acan_server::{DEFAULT_WITNESS_CONCURRENCY, Models, ServerConfig, start};
+use acan_server::{
+    DEFAULT_WITNESS_CONCURRENCY, Models, ServerConfig, VisionConfig, default_browser,
+    default_data_dir, start,
+};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
@@ -52,6 +55,16 @@ struct ServeArgs {
     /// How many witness runs may run at once.
     #[arg(long, default_value_t = DEFAULT_WITNESS_CONCURRENCY)]
     witness_concurrency: usize,
+    /// The headless browser the vision witness renders pages with. Defaults to Edge, then Chrome.
+    #[arg(long)]
+    vision_browser: Option<PathBuf>,
+    /// Where vision records and screenshots are kept. Defaults to the per-user data directory,
+    /// and must not be inside the repository.
+    #[arg(long)]
+    vision_dir: Option<PathBuf>,
+    /// Runs no advisory vision checks.
+    #[arg(long)]
+    no_vision: bool,
 }
 
 #[tokio::main]
@@ -86,6 +99,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
         protected_branch: args.protected_branch,
         witness_http_base_url: args.witness_http_base_url,
         witness_concurrency: args.witness_concurrency,
+        vision: (!args.no_vision).then(|| VisionConfig {
+            browser: args.vision_browser.unwrap_or_else(default_browser),
+            data_dir: args.vision_dir.unwrap_or_else(default_data_dir),
+        }),
     };
     let mut running = start(config, models, ledger).await?;
     if let Some(token) = &running.owner_token {

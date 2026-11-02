@@ -2222,6 +2222,11 @@ mod tests {
                     | Message::User { content }
                     | Message::Tool { content, .. } => content.clone(),
                     Message::Assistant { content, .. } => content.clone().unwrap_or_default(),
+                    Message::UserParts { content } => content
+                        .iter()
+                        .find_map(acan_llm::ContentPart::as_text)
+                        .unwrap_or_default()
+                        .to_owned(),
                 })
                 .unwrap_or_default();
             self.seen

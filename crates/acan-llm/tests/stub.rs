@@ -128,3 +128,15 @@ async fn snapshot_totals_group_calls_by_role_and_model() {
     assert_eq!(totals[1].role, Role::Worker);
     assert_eq!(totals[1].calls, 1);
 }
+
+#[tokio::test]
+async fn a_stub_reply_has_no_trace_fields() {
+    let stub = Stub::default().when(Role::Foreman, |_| true, Reply::text("ok"));
+    let traced = stub
+        .chat_traced(Role::Foreman, clash_question("ping"))
+        .await
+        .expect("scripted reply");
+    assert_eq!(traced.value.content.as_deref(), Some("ok"));
+    assert_eq!(traced.request_id, None);
+    assert_eq!(traced.reply_model, None);
+}

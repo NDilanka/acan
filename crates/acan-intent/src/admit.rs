@@ -479,6 +479,13 @@ pub enum StepFault {
         /// How the row does not fit.
         mismatch: SlotMismatch,
     },
+    /// A comparative slot names another step or field than the caption's other comparative
+    /// slots, so the caption compares two values that are not one difference.
+    #[error("slot {slot} names another step or field than the caption's comparative slots")]
+    MismatchedAddress {
+        /// The slot.
+        slot: SlotName,
+    },
 }
 
 /// Admits a proposed `tour` over `view` and binds every caption against `catalog`, by the rule
@@ -636,6 +643,17 @@ fn bind_step(
             Ok((slot.clone(), value))
         })
         .collect::<Result<_, StepFault>>()?;
+    let mut comparisons = template
+        .slots
+        .iter()
+        .zip(step.caption.slots.values())
+        .filter(|((_, spec), _)| spec.column.compares())
+        .map(|((slot, _), reference)| (slot, (&reference.step, &reference.field)));
+    if let Some((_, first)) = comparisons.next()
+        && let Some((slot, _)) = comparisons.find(|(_, address)| *address != first)
+    {
+        return Err(StepFault::MismatchedAddress { slot: slot.clone() });
+    }
     Ok(BoundItemView {
         receipt_hash: view.receipt_hash,
         item_id: item.item_id.clone(),

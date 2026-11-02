@@ -11,7 +11,7 @@ use std::path::Path;
 
 use acan_llm::{
     ApiKeys, ChatRequest, ChatResponse, ConfigError, LlmConfig, LlmError, ModelClient,
-    OpenAiCompatible, Role, Structured, UsageLedger,
+    OpenAiCompatible, Role, Structured, Traced, UsageLedger,
 };
 use anyhow::Context;
 use schemars::JsonSchema;
@@ -27,7 +27,7 @@ use crate::offline::Offline;
 )]
 pub enum Models {
     /// Calls the configured OpenAI-compatible providers. A failed call for a role other than the
-    /// foreman is answered by `offline`. A failed foreman call returns its error.
+    /// foreman or vision is answered by `offline`. A failed foreman or vision call returns its error.
     Live {
         client: OpenAiCompatible,
         offline: Offline,
@@ -58,8 +58,8 @@ impl Models {
         Ok(Self::live(config, keys)?)
     }
 
-    /// Builds the live client for `config` with `keys`. A failed non-foreman call is answered
-    /// offline.
+    /// Builds the live client for `config` with `keys`. A failed call for a role other than the
+    /// foreman or vision is answered offline.
     ///
     /// # Errors
     ///
@@ -83,9 +83,9 @@ impl Models {
     }
 }
 
-/// Whether a failed call for `role` may be answered offline. A foreman call never is.
+/// Whether a failed call for `role` may be answered offline. Foreman and vision calls never are.
 fn answers_offline(role: Role) -> bool {
-    role != Role::Foreman
+    !matches!(role, Role::Foreman | Role::Vision)
 }
 
 /// Whether `request` is a review. The server no longer sends review to any model.
@@ -164,6 +164,31 @@ impl ModelClient for Models {
                 offline.chat_json::<T>(role, request).await
             }
             Self::Offline(offline) => offline.chat_json::<T>(role, request).await,
+        }
+    }
+
+    async fn chat_traced(
+        &self,
+        role: Role,
+        request: ChatRequest,
+    ) -> Result<Traced<ChatResponse>, LlmError> {
+        if is_retired(&request) {
+            return Err(refuse_review(role));
+        }
+        match self {
+            Self::Live { client, offline } => {
+                let err = match client.chat_traced(role, request.clone()).await {
+                    Ok(traced) => return Ok(traced),
+                    Err(err) => err,
+                };
+                if !answers_offline(role) {
+                    warn_failed(role, &err, "the job fails with this error");
+                    return Err(err);
+                }
+                warn_failed(role, &err, "answering with the offline reply");
+                offline.chat_traced(role, request).await
+            }
+            Self::Offline(offline) => offline.chat_traced(role, request).await,
         }
     }
 }

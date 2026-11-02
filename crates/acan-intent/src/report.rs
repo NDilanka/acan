@@ -132,6 +132,13 @@ pub enum EvidenceSlot {
 }
 
 impl EvidenceSlot {
+    /// Whether a caption slot in this column compares runs: the two base runs and the candidate.
+    /// The comparative slots of one caption must name the same step and field.
+    #[must_use]
+    pub fn compares(self) -> bool {
+        matches!(self, Self::BaseA | Self::BaseB | Self::Candidate)
+    }
+
     /// Whether a value in this slot may carry `provenance`. Run columns hold observed or
     /// core-derived values, the target holds a human spec, and the prediction a model proposal,
     /// so nothing hypothetical is shown as observed.
