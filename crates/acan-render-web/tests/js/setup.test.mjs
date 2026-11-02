@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import {
   bannerText,
+  focusAfterRemove,
   keyRows,
   pickChoices,
   providerChoices,
@@ -174,6 +175,18 @@ test("a pick the server holds stays in the picker, even for a provider with no k
   assert.ok(wonder.options.some((option) => option.value === "meta" && option.label === "Meta Model API"));
 });
 
+test("with a routing file, a role's provider is said to come from the routing file", () => {
+  assert.equal(roleRows(ROUTING)[0].now, "Baseten, from the routing file");
+  const picked = { ...ROUTING, roles: [{ role: "worker", provider: "meta", picked: true, off_reason: null, meta_only: false }] };
+  assert.equal(roleRows(picked)[0].now, "Meta Model API, from the routing file");
+  assert.equal(roleRows(SET)[0].now, "Baseten, by default");
+});
+
+test("after a key is removed, focus goes to the result sentence; otherwise it stays put", () => {
+  assert.equal(focusAfterRemove(200), "setup-changes");
+  for (const status of [400, 401, 403, 409, 500, 0]) assert.equal(focusAfterRemove(status), null, String(status));
+});
+
 test("the status line names the providers in use, and no key says so in one sentence", () => {
   assert.deepEqual(statusText(SET), {
     text: "Model calls use Baseten and Fireworks. Each role's provider is below.",
@@ -242,7 +255,11 @@ test("a remove names the provider, and says when there was nothing to remove", (
 
 test("a remove that the environment blocks shows the server's own words, as one sentence", () => {
   const outcome = removeOutcome(409, { error: "conflict", what: "this key comes from the environment" }, "fireworks");
-  assert.deepEqual(outcome, { tone: "bad", text: "This key comes from the environment." });
+  assert.deepEqual(outcome, { tone: "bad", text: "This key comes from the environment, so it can't be removed here." });
+  assert.equal(
+    removeOutcome(409, { error: "conflict", what: "this key is held by another session" }, "fireworks").text,
+    "This key is held by another session.",
+  );
 });
 
 test("a remove refused for another reason is one plain sentence, never a code", () => {
@@ -333,10 +350,12 @@ test("a meta_only role with no Meta key gets one sentence and no picker", () => 
   const vision = roleRows(MARKED).find((row) => row.role === "vision");
   assert.equal(vision.picker, false);
   assert.deepEqual(vision.options, []);
-  assert.equal(vision.note, "Vision needs a Meta key.");
   assert.equal(vision.now, "Off: it needs a Meta key");
-  const director = roleRows({ ...MARKED, roles: [{ role: "director", provider: null, picked: false, off_reason: "it needs a Meta key", meta_only: true }] })[0];
-  assert.equal(director.note, "Director needs a Meta key.");
+  assert.equal(vision.note, null);
+  const quiet = roleRows({ ...MARKED, roles: [{ role: "director", provider: null, picked: false, off_reason: null, meta_only: true }] })[0];
+  assert.equal(quiet.now, "Director needs a Meta key.");
+  assert.equal(quiet.note, null);
+  assert.equal(quiet.off, true);
 });
 
 test("a role that is not meta_only is offered every provider with a key", () => {

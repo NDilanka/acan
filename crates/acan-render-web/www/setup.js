@@ -73,15 +73,19 @@ export function pickChoices(status) {
 export function roleRows(status) {
   const choices = pickChoices(status);
   const meta = choices.find((choice) => choice.value === "meta") ?? null;
+  const routed = status?.source === "routing_file";
   return rolesOf(status).map(({ role, provider, picked, off_reason: offReason, meta_only: metaOnly }) => {
     const value = picked === true && typeof provider === "string" ? provider : "";
     let now;
     if (typeof offReason === "string" && offReason !== "") now = `Off: ${offReason}`;
     else if (typeof provider !== "string") now = "Off";
+    else if (routed) now = `${providerLabel(provider)}, from the routing file`;
     else now = picked === true ? `${providerLabel(provider)}, picked` : `${providerLabel(provider)}, by default`;
     const off = typeof provider !== "string" || (typeof offReason === "string" && offReason !== "");
     if (metaOnly === true && meta === null) {
-      return { role, value: "", options: [], now, off, picker: false, note: `${capital(role)} needs a Meta key.` };
+      // One sentence: the server's off reason when it gives one, which already says this.
+      const said = typeof offReason === "string" && offReason !== "";
+      return { role, value: "", options: [], now: said ? now : `${capital(role)} needs a Meta key.`, off: true, picker: false, note: null };
     }
     const own = metaOnly === true ? [meta] : choices;
     const options = [{ value: "", label: "Default" }, ...own];
@@ -155,6 +159,10 @@ export function saveOutcome(httpStatus, body) {
   return { tone: "bad", text: "Something went wrong. Nothing was saved." };
 }
 
+// The 409 a remove gets when the environment sets the key, as the server words it. A page drawn
+// before the environment set the key still offers Remove, so this answer can reach it.
+const ENVIRONMENT_KEY = "this key comes from the environment";
+
 // The server's own words for a refused remove, as one sentence. The 409 codes `routing_file` and
 // `unavailable` are not words, and anything that is not a short plain phrase is not shown.
 function serverWords(what) {
@@ -177,6 +185,9 @@ export function removeOutcome(httpStatus, body, provider) {
   if (httpStatus === 409 && body?.what === "routing_file") {
     return { tone: "bad", text: "This repository's .acan/llm.toml chooses the providers, so keys cannot be removed here." };
   }
+  if (httpStatus === 409 && typeof body?.what === "string" && body.what.trim().toLowerCase() === ENVIRONMENT_KEY) {
+    return { tone: "bad", text: "This key comes from the environment, so it can't be removed here." };
+  }
   if (httpStatus === 409) {
     const words = serverWords(body?.what);
     return { tone: "bad", text: words ?? "This acan cannot remove a key from this page." };
@@ -191,6 +202,12 @@ export function removeOutcome(httpStatus, body, provider) {
     return { tone: "bad", text: "Only members can remove a key, so this session cannot." };
   }
   return { tone: "bad", text: "Something went wrong. Nothing was removed." };
+}
+
+// Where focus goes after a remove answer: to the result sentence when the key went, because its
+// Remove button is gone with it, or null to return to the control that had focus.
+export function focusAfterRemove(httpStatus) {
+  return httpStatus === 200 ? "setup-changes" : null;
 }
 
 // What a role pick answer says. `role` is the name the API lists for the role, and `requested` is
