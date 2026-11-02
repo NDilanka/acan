@@ -117,6 +117,8 @@ export function setMode(mode) {
     state.app?.tour_stop();
   }
   state.plate.mode = mode;
+  // Directed mode shows the step it is on, so the camera goes there as well.
+  if (mode === DIRECTED && state.app && plateEntry()?.play) go(state.plate.index);
   requestRender();
   paintPlate();
 }
@@ -173,9 +175,12 @@ export function paintPlate() {
   $("tour-caption").textContent = step ? step.caption : "";
   $("tour-stage").replaceChildren(...(step ? step.stage.map((stage) => element("li", stage.label)) : []));
 
+  // A note says why the order plays; only a plant view that was not kept, or a tour that could
+  // not be played at all, is an error.
   const note = play?.note || entry.playError || "";
   $("receipt-note").textContent = note;
   $("receipt-note").hidden = note === "";
+  $("receipt-note").classList.toggle("error", !play && note !== "");
 
   const items = $("receipt-items");
   const rows = play ? play.items : (entry.items ?? []);
@@ -194,6 +199,7 @@ export function paintPlate() {
   );
   if (entry.error) {
     $("receipt-note").hidden = false;
+    $("receipt-note").classList.add("error");
     $("receipt-note").textContent = `The plant view was not kept: ${entry.error}`;
   }
 }
