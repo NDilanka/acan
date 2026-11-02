@@ -766,6 +766,8 @@ function Invoke-O1Controls {
 
     # m-overfit: the control must fail s12 (bob keeps his own quota) while the gate is blocked
     $mo = Join-Path $script:CtrlDir 'm-overfit.json'
+    # take.ps1 stops o-1 unless the gate blocked m-overfit with an obligation_failed item (take.ps1:850).
+    $moBlocked = $false; $moGate = ''; $moObl = 0; $moErr = ''
     $watch = [Diagnostics.Stopwatch]::StartNew()
     try {
         # As take.ps1 (its step 1): the task must be open for the claim, and the first control on the order
@@ -773,17 +775,31 @@ function Invoke-O1Controls {
         $null = Wait-TaskClaimable -Task $t0 -Token $script:Tokens['control-seeded'] -Seconds $ClaimWaitSec
         & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $script:Tokens['control-seeded'] -Repo $script:Repo -Task $t0 -Bundle (Join-Path $intentDir 'controls\m-overfit.json') -Out $mo -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -RedeclareOnce
         $r = Read-ControlResult -Path $mo
+        $moGate = [string]$r.gate_state
+        $moObl = @($r.items | Where-Object { $_.class -eq 'obligation_failed' }).Count
+        $moBlocked = ($moGate -eq 'blocked' -and $moObl -ge 1)
         $s12 = @($r.items | Where-Object { $_.class -eq 'obligation_failed' -and ((ConvertTo-Json -Depth 20 -Compress $_) -match '"s12"') })
         $observed = if ([string]$r.gate_state -eq 'blocked' -and $s12.Count -ge 1) { 'as_expected' } else { 'not_as_expected' }
         $line = New-ControlLine -Id 'm-overfit' -AppliesTo 'o-1' -Expected $expectedOf['m-overfit'] -Outcome $observed -Result $r -Reason ''
         $line['s12_failed'] = $s12.Count
     } catch {
+        $moErr = [string]$_.Exception.Message
         $line = New-ControlLine -Id 'm-overfit' -AppliesTo 'o-1' -Expected $expectedOf['m-overfit'] -Outcome 'error' -Result $null -Reason ''
         $line['errors'] = @($_.Exception.Message)
     }
     $watch.Stop()
     $line['wall_seconds'] = [math]::Round($watch.Elapsed.TotalSeconds, 1)
     Add-ResultLine -Record $line
+
+    # As take.ps1 (take.ps1:850), o-1 stops when m-overfit was not blocked with an obligation_failed item, so
+    # m-harmless-difference is not run. Its line is written as not_run with the reason, and the run goes on to
+    # the next order.
+    if (-not $moBlocked) {
+        $why = if ($moErr) { "m-overfit ended in an error ($moErr)" } else { "m-overfit was not blocked with an obligation_failed item (gate_state '$moGate', obligation_failed $moObl)" }
+        $skip = New-ControlLine -Id 'm-harmless-difference' -AppliesTo 'o-1' -Expected $expectedOf['m-harmless-difference'] -Outcome 'not_run' -Result $null -Reason "o-1 stopped before m-harmless-difference: $why. take.ps1 stops o-1 here too (take.ps1:850)."
+        Add-ResultLine -Record $skip
+        return
+    }
 
     # m-harmless-difference: out of scope at first, not a regression once the owner's rules accept it
     $mh = Join-Path $script:CtrlDir 'm-harmless-difference.json'
@@ -956,9 +972,11 @@ function Invoke-MissingFixtureControl {
     # The product gap: the gate reads the corpus only from the protected-head snapshot (observe.rs:54 names
     # the file, observe.rs:284-296 writes the snapshot from the protected head, observe.rs:305-308 reads it),
     # so a copy in a run repository cannot be gated without a product change.
+    # The reason every line of this control states, with the product gap at file:line.
+    $gapReason = 'not_run: the gate reads the probe corpus only from the protected-head snapshot, so a copy in a run repository cannot be gated without a product change (crates/acan-server/src/observe.rs:54 names probes/core.json; observe.rs:284-296 writes the snapshot from the protected head; observe.rs:305-308 reads it).'
     $dir = Join-Path $script:CtrlDir 'm-missing-fixture'
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    $line = New-ControlLine -Id 'm-missing-fixture' -AppliesTo 'f-accounts' -Expected (Get-ControlExpectation -Id 'm-missing-fixture') -Outcome 'not_run' -Result $null -Reason 'the copy and its static prediction are written; no gate run exists for the copy'
+    $line = New-ControlLine -Id 'm-missing-fixture' -AppliesTo 'f-accounts' -Expected (Get-ControlExpectation -Id 'm-missing-fixture') -Outcome 'not_run' -Result $null -Reason $gapReason
     try {
         $pinnedLines = & git -C $DemoRepo show "${Pin}:.acan/probes/core.json"
         if ($LASTEXITCODE -ne 0) { throw "git show ${Pin}:.acan/probes/core.json failed" }
@@ -974,10 +992,10 @@ function Invoke-MissingFixtureControl {
         $line['copy_sha256'] = Get-FileSha256 -Path $copy
         $line['omitted_steps'] = @('f5')
         $line['static_prediction'] = Get-MissingFixturePrediction -Recipe $fixtures[0].recipe
-        $line['reason'] = 'the copy and its static prediction are written; the gate was not run on the copy, so no receipt exists and nothing here is a pass'
+        $line['reason'] = "$gapReason The copy and its static prediction are written; nothing here is a pass."
     } catch {
         $line['errors'] = @($_.Exception.Message)
-        $line['reason'] = 'the copy could not be written, so there is no static prediction either'
+        $line['reason'] = "$gapReason The copy could not be written, so there is no static prediction either."
     }
     Add-ResultLine -Record $line
 }
