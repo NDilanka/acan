@@ -335,6 +335,62 @@ async fn json_schema_reply_parses_into_typed_struct() {
 }
 
 #[tokio::test]
+async fn an_unrouted_director_answers_on_the_foreman_route() {
+    let meta = MockServer::start().await;
+    let baseten = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(text_reply(r#"{"clash":false,"files":[]}"#))
+        .expect(1)
+        .mount(&meta)
+        .await;
+
+    let out = client(&meta, &baseten, "baseten")
+        .chat_json::<Verdict>(
+            Role::Director,
+            ChatRequest {
+                messages: vec![Message::user("Order the tour.")],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("the director answers on the foreman's route");
+
+    assert_eq!(out.call.role, Role::Director);
+    assert_eq!(out.call.provider, "meta");
+}
+
+#[tokio::test]
+async fn a_routed_director_answers_on_its_own_provider() {
+    let meta = MockServer::start().await;
+    let baseten = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(text_reply(r#"{"clash":false,"files":[]}"#))
+        .expect(1)
+        .mount(&baseten)
+        .await;
+
+    let mut config = test_config(&meta, &baseten, "baseten");
+    config
+        .route_to(Role::Director, "baseten")
+        .expect("baseten is defined");
+    let out = client_for(config)
+        .chat_json::<Verdict>(
+            Role::Director,
+            ChatRequest {
+                messages: vec![Message::user("Order the tour.")],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("the director answers on its own route");
+
+    assert_eq!(out.call.provider, "baseten");
+    assert!(meta.received_requests().await.unwrap_or_default().is_empty());
+}
+
+#[tokio::test]
 async fn schema_invalid_reply_is_a_validation_error_and_still_metered() {
     let meta = MockServer::start().await;
     let baseten = MockServer::start().await;

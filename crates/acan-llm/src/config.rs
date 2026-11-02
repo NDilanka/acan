@@ -60,7 +60,7 @@ pub struct Route {
 }
 
 /// One route per role. Foreman, worker and fast must be routed, so a missing one fails at load
-/// time. Vision is optional: without a vision route, vision calls use the foreman's route.
+/// time. Vision and director are optional: without a route, they use the foreman's route.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Routing {
@@ -69,6 +69,8 @@ pub struct Routing {
     pub fast: Route,
     #[serde(default)]
     pub vision: Option<Route>,
+    #[serde(default)]
+    pub director: Option<Route>,
 }
 
 impl Routing {
@@ -78,15 +80,17 @@ impl Routing {
             Role::Worker => &self.worker,
             Role::Fast => &self.fast,
             Role::Vision => self.vision.as_ref().unwrap_or(&self.foreman),
+            Role::Director => self.director.as_ref().unwrap_or(&self.foreman),
         }
     }
 
-    fn route_mut(&mut self, role: Role) -> &mut Route {
+    fn set(&mut self, role: Role, route: Route) {
         match role {
-            Role::Foreman => &mut self.foreman,
-            Role::Worker => &mut self.worker,
-            Role::Fast => &mut self.fast,
-            Role::Vision => self.vision.get_or_insert_with(|| self.foreman.clone()),
+            Role::Foreman => self.foreman = route,
+            Role::Worker => self.worker = route,
+            Role::Fast => self.fast = route,
+            Role::Vision => self.vision = Some(route),
+            Role::Director => self.director = Some(route),
         }
     }
 }
@@ -150,10 +154,13 @@ impl LlmConfig {
                 provider: provider.to_owned(),
             });
         }
-        *self.routing.route_mut(role) = Route {
-            provider: provider.to_owned(),
-            model: None,
-        };
+        self.routing.set(
+            role,
+            Route {
+                provider: provider.to_owned(),
+                model: None,
+            },
+        );
         Ok(())
     }
 
@@ -188,7 +195,13 @@ impl LlmConfig {
                 });
             }
         }
-        for role in [Role::Foreman, Role::Worker, Role::Fast, Role::Vision] {
+        for role in [
+            Role::Foreman,
+            Role::Worker,
+            Role::Fast,
+            Role::Vision,
+            Role::Director,
+        ] {
             self.resolve(role)?;
         }
         Ok(())

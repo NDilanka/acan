@@ -83,9 +83,10 @@ impl Models {
     }
 }
 
-/// Whether a failed call for `role` may be answered offline. Foreman and vision calls never are.
+/// Whether a failed call for `role` may be answered offline. A foreman, vision or director call
+/// never is: a tour the offline client made up would pass for a directed one.
 fn answers_offline(role: Role) -> bool {
-    !matches!(role, Role::Foreman | Role::Vision)
+    !matches!(role, Role::Foreman | Role::Vision | Role::Director)
 }
 
 /// Whether `request` is a review. The server no longer sends review to any model.

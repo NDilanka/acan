@@ -47,3 +47,7 @@ provider = "baseten"
 # the foreman's route.
 [routing.vision]
 provider = "meta"
+
+# The tour director orders the plant view. Optional: without this row it uses the foreman's route.
+[routing.director]
+provider = "meta"

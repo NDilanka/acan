@@ -128,3 +128,27 @@ fn debug_output_never_contains_the_key() {
     let client = OpenAiCompatible::new(config, keys).expect("client builds");
     assert!(!format!("{client:?}").contains(CANARY));
 }
+
+#[test]
+fn director_has_a_config_name_and_round_trips() {
+    assert_eq!(Role::Director.as_str(), "director");
+    assert_eq!("director".parse::<Role>(), Ok(Role::Director));
+}
+
+#[test]
+fn director_route_is_optional_and_checked_when_present() {
+    let config = LlmConfig::from_toml_str(CONFIG).expect("config without a director row is valid");
+    assert!(
+        format!("{config:?}").contains("director: None"),
+        "the director row is absent, so it falls back to the foreman"
+    );
+
+    let text = format!("{CONFIG}\n[routing.director]\nprovider = \"fireworks\"\n");
+    match LlmConfig::from_toml_str(&text).expect_err("fireworks is not defined") {
+        ConfigError::UnknownProvider { role, provider } => {
+            assert_eq!(role, Role::Director);
+            assert_eq!(provider, "fireworks");
+        }
+        other => panic!("expected UnknownProvider, got {other}"),
+    }
+}
