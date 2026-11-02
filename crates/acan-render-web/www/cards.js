@@ -1,7 +1,7 @@
 // The clash card: its rows, the settlement options with their keys, and the fade after a
 // settlement. Settling sends the command, and a frozen page folds the settle's own events.
 import { requestRender } from "./main.js";
-import { card, freeze, state } from "./state.js";
+import { card, freeze, replay, state } from "./state.js";
 import { forgetToken } from "./stream.js";
 
 // A settled card shows its one line this long, then fades out over FADE_MS.
@@ -156,6 +156,12 @@ export function settleByKey(key) {
 }
 
 async function settle(clash, option) {
+  // The replay holds no token and sends nothing. It says so rather than fail silently.
+  if (replay) {
+    state.note = "the replay is read-only";
+    paintCard();
+    return;
+  }
   if (!state.token || state.settling) return;
   state.settling = true;
   state.note = "";

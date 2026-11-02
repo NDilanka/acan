@@ -19,10 +19,12 @@ import {
   noticeEl,
   params,
   repoEl,
+  replay,
   state,
 } from "./state.js";
 import { playOf, syncPlantViews } from "./plant.js";
 import { bindPlate, paintPlate, stepBy, toggleMode, togglePlay } from "./plate.js";
+import { startReplay } from "./replay.js";
 import { bindShell, startShell } from "./shell.js";
 import { get, setLink, start } from "./stream.js";
 import { requestUsage } from "./usage.js";
@@ -371,14 +373,17 @@ async function createApp() {
   }
 }
 
-// The page loads its plant one of three ways. `?plant=stress&machines=N` builds a generated
-// plant for the benchmark. `?plant=fixture` loads the demo plant with no log. Otherwise the
-// page reads the live origin, which needs the owner token.
+// The page loads its plant one of four ways. `?replay=1` plays a recorded run from `replay/`,
+// with no server, and holds no token. `?plant=stress&machines=N` builds a generated plant for the
+// benchmark. `?plant=fixture` loads the demo plant with no log. Otherwise the page reads the live
+// origin, which needs the owner token.
 async function loadPlant() {
-  // The token is adopted in every mode, so the shell's calls can use it, even over a fixture.
-  state.token = adoptToken();
+  // The token is adopted in every other mode, so the shell's calls can use it, even over a fixture.
+  state.token = replay ? null : adoptToken();
   const source = params.get("plant");
-  if (source === "stress") {
+  if (replay) {
+    await startReplay();
+  } else if (source === "stress") {
     const machines = Number(params.get("machines") || 2000);
     const started = performance.now();
     state.app.set_stress(machines);
@@ -445,8 +450,11 @@ async function boot() {
   reducedMotion.addEventListener("change", followReducedMotion);
   await loadPlant();
   bindPlate();
-  bindShell();
-  startShell();
+  // The replay page makes no API call, so the shell (version, update, bug report, setup) stays off.
+  if (!replay) {
+    bindShell();
+    startShell();
+  }
   // `?plate=fixture` or `?plate=plain` shows the receipt plate over a fixture plant view, without
   // the origin. The plate is watermarked FIXTURE.
   if (params.has("plate")) await loadPlateFixture(params.get("plate"));

@@ -249,6 +249,10 @@
   #receipt ol.items li.tone-residue .class { color: var(--amber); font-weight: 600; }
   #receipt ol.items li.tone-unknown .class { color: var(--muted); font-style: italic; }
   #receipt .foot { color: var(--muted); font-size: 11px; border-top: 1px solid var(--rule); margin-top: 8px; padding-top: 6px; }
+  /* The replay panel shows on a recorded run only (`?replay=1`). */
+  #replay { right: 12px; bottom: 12px; display: flex; gap: 10px; align-items: center; font: 12px var(--mono); }
+  #replay button { font: 12px var(--mono); padding: 2px 8px; background: var(--face); color: var(--ink); border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+  #replay button:hover { border-color: var(--ink); }
 </style>
 </head>
 <body>
@@ -330,6 +334,13 @@
       <tbody id="history-body"></tbody>
     </table>
   </section>
+</div>
+<div class="island" id="replay" hidden>
+  <span>Replay of a recorded run</span>
+  <span id="replay-progress" class="muted"></span>
+  <button type="button" id="replay-toggle">Pause</button>
+  <button type="button" id="replay-restart">Restart</button>
+  <button type="button" id="replay-speed">1x</button>
 </div>
 <div class="island" id="notice" hidden></div>
 <script type="module" src="main.js"></script>
