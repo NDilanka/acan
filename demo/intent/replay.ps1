@@ -12,7 +12,7 @@ A live run refuses to start offline, writes the draw (seed and drawn orders) and
 first candidate exists, and writes one results.jsonl line per order and per control into a new run
 folder under -RunsRoot. The README section "Replay (X01)" describes the inputs and the counts.
 
-Scope and ruling decisions for o-2 onward are delegated by the owner to the coordinator (an AI). The
+Scope and ruling decisions for every order are delegated by the owner to the coordinator (an AI). The
 replay does not decide them and does not write them. When an order needs a scope decision or a ruling
 and its file is not there yet, the run pauses: it writes the draft (or the ruling draft) into the run
 folder, prints needs_scope_decision or needs_ruling with the path, stops the server, and exits with
@@ -47,6 +47,10 @@ param(
     [int]$WorkerWaitSec = 2700,
     [int]$ControlWaitSec = 1500,
     [int]$RulingWaitSec = 1200,
+    # The most model calls the worker's edit loop may make per build. take.ps1's value (200 since D02M).
+    [int]$WorkerMaxSteps = 200,
+    # How long a control waits for its task to be open for its claim. take.ps1's value.
+    [int]$ClaimWaitSec = 600,
     # A rehearsal runs only these orders. The draw still covers all 12, and the run is reported partial.
     [string[]]$Only = @(),
     # The folder of a run that paused for a decision. Its summary.json, draw.json and repo\ are reused.
@@ -65,8 +69,9 @@ $intentDir = Join-Path $AcanRepo 'demo\intent'
 $DelegatedDecider = 'coordinator, delegated by the owner'
 $DelegatedLabel = 'coordinator (delegated by the owner)'
 $HumanLabel = 'human (owner)'
-# Orders whose edits and rulings the human decided before this run. Their files may omit decided_by.
-$HumanDecidedOrders = @('o-1')
+# No decision file may omit decided_by, for any order. The o-1 files name the coordinator too (D02), so
+# no order is human-decided by default.
+$HumanDecidedOrders = @()
 
 function Read-JsonFile {
     param([string]$Path)
@@ -121,7 +126,7 @@ function Show-Plan {
     Write-Output '  1. Decisions: demo/intent/<id>-edits.json (acan-demo-intent-edits/2) and'
     Write-Output '     demo/intent/rulings/<id>-rulings.json (acan-demo-intent-rulings/1) are read where an order needs them.'
     Write-Output '     A missing file pauses the run (exit 3): needs_scope_decision or needs_ruling is printed with the'
-    Write-Output '     draft to read. A coordinator decision says so in decided_by; o-1 is the human''s own decision.'
+    Write-Output '     draft to read. Each file names its decider in decided_by (coordinator, delegated by the owner).'
     Write-Output '  2. Draw: a seed from the OS random source, then 4 of 12 by SHA-256 of "seed|id". The seed, the drawn'
     Write-Output '     list and one generated injected bundle per drawn order (a header on GET /health) go to draw.json,'
     Write-Output '     whose SHA-256 goes into summary.json, all before any clone.'
@@ -130,7 +135,7 @@ function Show-Plan {
     Write-Output '  4. Each order once: post, split, draft, scope edits and confirm, worker-r (model), receipts,'
     Write-Output '     rulings, and the injected candidate when the draw picked the order. Paused orders resume with'
     Write-Output '     -ResumeRun <run folder>; an order that finished in an earlier invocation is not run again.'
-    Write-Output '     The injected candidate of a drawn order runs after that order, on the pinned base.'
+    Write-Output '     The injected candidate of a drawn order runs after that order, on its worker candidate (the task worktree HEAD).'
     Write-Output '  5. Controls after o-1: m-overfit and m-harmless-difference. m-broad-scope: a separate order with the'
     Write-Output '     o-1 sentence, revised with one broad item (ANY on /api/*), confirmation tried with no broad'
     Write-Output '     acknowledgement. m-missing-fixture: the f-accounts copy without f5 and its static prediction;'
@@ -146,9 +151,8 @@ if ($DryRun) {
 }
 
 # ================================================================================================
-# Live path. The HTTP, wait, worker, receipt and git helpers come from take.ps1 through its
-# -LibraryOnly guard. Four take steps are called by name (see Test-TakeFunctions): they are the
-# take's inline blocks lifted into functions, and the replay uses them unchanged in behaviour.
+# Live path. The HTTP, wait, worker, receipt, scope, ruling and git helpers come from take.ps1 through
+# its -LibraryOnly guard. The take's own main body calls the same functions, so there is one copy of each.
 # ================================================================================================
 
 $script:KnownErrorClasses = @('setup_failed', 'draft_not_ready', 'draft_changed', 'needs_human_scope', 'ruling_refused', 'worker_timeout', 'worker_no_build')
@@ -350,16 +354,16 @@ function Test-LiveRoutes {
 }
 
 function Test-TakeFunctions {
-    # The helpers this file calls. Each one is either a take.ps1 helper that exists today, or one of
-    # the take steps that must be lifted into a function first (see the report of X01).
+    # The helpers this file calls. take.ps1 defines each of them when it is dot-sourced with -LibraryOnly.
     $needed = @(
         'Send-Command', 'Invoke-Api', 'Invoke-Api404Tolerant', 'Wait-Until', 'Get-OrderTasks', 'Start-Worker',
         'Get-AgentEvents', 'Read-ControlResult', 'Read-KeyFile', 'Read-Routing', 'Assert-OutsideGit', 'Get-DemoRefs',
-        'New-TakeClone', 'Start-TakeServer', 'Invoke-ScopeEdits', 'Invoke-ScopeConfirm', 'Invoke-ControlWithRuling'
+        'New-TakeClone', 'Start-TakeServer', 'Invoke-ScopeEdits', 'Invoke-ScopeConfirm', 'Invoke-ControlWithRuling',
+        'Wait-TaskClaimable', 'Get-TaskView'
     )
     $missing = @($needed | Where-Object { -not (Get-Command -Name $_ -CommandType Function -ErrorAction SilentlyContinue) })
     if ($missing.Count -gt 0) {
-        throw "take.ps1 does not define: $($missing -join ', '); the take steps are not lifted into functions yet"
+        throw "take.ps1 does not define: $($missing -join ', '); the library functions are missing (see take.ps1 -LibraryOnly)"
     }
 }
 
@@ -420,7 +424,7 @@ function New-InjectedChangeRecord {
     param([string]$OrderId)
     [ordered]@{
         injector = $script:InjectorId; route = $script:InjectorRoute; header = $script:InjectorHeader; value = $OrderId
-        placement = 'pinned base, through control.ps1; the worker-r head is not used'
+        placement = 'worker candidate: the task worktree HEAD of the first task, through control.ps1 -OnWorkerCandidate'
     }
 }
 
@@ -462,9 +466,10 @@ function New-SeededNotRun {
 
 function Invoke-SeededCandidate {
     # A drawn order gets one injected out-of-scope change, run as a control on the order's first task.
-    # control.ps1 writes the bundle onto the pinned base, not onto the worker-r head, so the candidate is
-    # the base with the injected header alone. The gate sees no ruling from the replay: an injected item
-    # that stays unruled is judged as blocked.
+    # control.ps1 -OnWorkerCandidate reads the task worktree's files, which hold worker-r's candidate at its
+    # HEAD, and commits the injected header on top of that HEAD. The gate sees no ruling from the replay, so
+    # an injected item that stays unruled is judged as blocked. If the gate has already landed the candidate,
+    # the task is closed and the claim is refused: that line is error, and it is not a catch.
     param([string]$OrderId, [string]$Task, [string]$RunId)
     $bundle = Join-Path $script:CtrlDir "injected-$OrderId.json"
     $out = Join-Path $script:CtrlDir "seeded-$OrderId.json"
@@ -481,13 +486,15 @@ function Invoke-SeededCandidate {
     $watch = [Diagnostics.Stopwatch]::StartNew()
     try {
         if (-not $Task) { throw 'not_run: the order split into no task, so there is no task to inject into' }
-        & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $script:Tokens['control-seeded'] -Repo $script:Repo -Task $Task -Bundle $bundle -Out $out -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec
+        & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $script:Tokens['control-seeded'] -Repo $script:Repo -Task $Task -Bundle $bundle -Out $out -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -OnWorkerCandidate
         $r = Read-ControlResult -Path $out
         if ($null -eq $r) { throw 'error: the seeded control wrote no result file' }
         if (-not $r.receipt_hash) { throw "error: the seeded control got no receipt; its error: $([string]$r.error)" }
         $gate = [string]$r.gate_state
         $blocking = @($r.items | Where-Object { $_.class -in @('out_of_scope', 'violates_ruling', 'obligation_failed') })
         $line['receipt_hash'] = [string]$r.receipt_hash
+        $line['base_source'] = [string]$r.base_source
+        $line['base_head'] = [string]$r.base_head
         $line['gate_state'] = $gate
         $line['catch_seeded'] = ($gate -ne 'landed' -and $blocking.Count -ge 1)
         $line['catch_base_only'] = ($gate -ne 'landed' -and @($r.items | Where-Object { $_.class -eq 'obligation_failed' }).Count -ge 1 -and @($r.items | Where-Object { $_.class -eq 'violates_ruling' }).Count -eq 0)
@@ -585,11 +592,11 @@ function Invoke-ReplayOrder {
             if ($edits.schema -ne 'acan-demo-intent-edits/2') { throw "setup_failed: $editsPath must have schema acan-demo-intent-edits/2" }
             $label = Get-DecisionLabel -Doc $edits -Order $id
             $scope = Invoke-ScopeEdits -Order $id -Raw $raw -Oid $oid -View $view -EditsFile $editsPath -OrderDir $dir -DecidedBy $label
-            # human_edits: any logged edit, any choice answered by a rule, or any explicit answer in the edits file
-            $humanCount = @($scope.human_edits | Where-Object { $null -ne $_ }).Count + @($scope.answers | Where-Object { $null -ne $_ }).Count + @($scope.edits.answers | Where-Object { $null -ne $_ }).Count
-            $confirmed = Invoke-ScopeConfirm -Order $id -Raw $raw -Oid $oid -Scope $scope -MaxEpisodes $MaxEpisodes -OrderDir $dir
+            # logged edits: any scope edit, any choice answered or removed by a rule, or any explicit answer in the edits file
+            $humanCount = @($scope.logged_edits | Where-Object { $null -ne $_ }).Count + @($scope.answers | Where-Object { $null -ne $_ }).Count + @($scope.edits.answers | Where-Object { $null -ne $_ }).Count
+            $confirmed = Invoke-ScopeConfirm -Order $id -Raw $raw -Oid $oid -Scope $scope -MaxEpisodes $MaxEpisodes
             $scopeLabel = if ($humanCount -eq 0) { 'drafted' } elseif ($label -eq $HumanLabel) { 'human_edits' } else { 'delegated_edits' }
-            $state.scope = [ordered]@{ decided_by = $label; edits_file = $editsPath; edits_sha256 = (Get-FileSha256 -Path $editsPath); edit_count = $humanCount; label = $scopeLabel; scope_hash = [string]$confirmed.scope_hash }
+            $state.scope = [ordered]@{ decided_by = $label; edits_file = $editsPath; edits_sha256 = (Get-FileSha256 -Path $editsPath); edit_count = $humanCount; label = $scopeLabel; scope_hash = [string]$confirmed.scope_hash; max_episodes = [int]$confirmed.budget.max_episodes }
             Save-OrderState -Dir $dir -State $state
         }
         $line['scope'] = [string]$state.scope.label
@@ -761,7 +768,10 @@ function Invoke-O1Controls {
     $mo = Join-Path $script:CtrlDir 'm-overfit.json'
     $watch = [Diagnostics.Stopwatch]::StartNew()
     try {
-        & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $script:Tokens['control-seeded'] -Repo $script:Repo -Task $t0 -Bundle (Join-Path $intentDir 'controls\m-overfit.json') -Out $mo -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec
+        # As take.ps1 (its step 1): the task must be open for the claim, and the first control on the order
+        # claims and declares again once if its claim ends before the build is cleared (-RedeclareOnce).
+        $null = Wait-TaskClaimable -Task $t0 -Token $script:Tokens['control-seeded'] -Seconds $ClaimWaitSec
+        & (Join-Path $intentDir 'control.ps1') -Server $script:Base -Token $script:Tokens['control-seeded'] -Repo $script:Repo -Task $t0 -Bundle (Join-Path $intentDir 'controls\m-overfit.json') -Out $mo -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -RedeclareOnce
         $r = Read-ControlResult -Path $mo
         $s12 = @($r.items | Where-Object { $_.class -eq 'obligation_failed' -and ((ConvertTo-Json -Depth 20 -Compress $_) -match '"s12"') })
         $observed = if ([string]$r.gate_state -eq 'blocked' -and $s12.Count -ge 1) { 'as_expected' } else { 'not_as_expected' }
@@ -779,7 +789,12 @@ function Invoke-O1Controls {
     $mh = Join-Path $script:CtrlDir 'm-harmless-difference.json'
     $watch = [Diagnostics.Stopwatch]::StartNew()
     try {
-        $ruled = Invoke-ControlWithRuling -Task $t0 -Bundle (Join-Path $intentDir 'controls\m-harmless-difference.json') -Out $mh -Order 'o-1' -OrderId $script:OidByOrder['o-1'] -RulesFile (Join-Path $intentDir 'rulings\o-1-rulings.json') -Run $run
+        # The task must be open for the m-harmless claim (take.ps1's step 2). The rulings on m-overfit's receipt
+        # come first, as take.ps1 does (D02Q); then the re-gate and the land.
+        $null = Wait-TaskClaimable -Task $t0 -Token $script:Tokens['control-seeded'] -Seconds $ClaimWaitSec
+        $ruled = Invoke-ControlWithRuling -Task $t0 -Bundle (Join-Path $intentDir 'controls\m-harmless-difference.json') -Out $mh -Order 'o-1' -OrderId $script:OidByOrder['o-1'] -RulesFile (Join-Path $intentDir 'rulings\o-1-rulings.json') -PriorReceipt "$mo.receipt.json" -PriorRulingsOut (Join-Path $script:CtrlDir 'rulings-o-1-moverfit.json') -FinalReceipt (Join-Path $script:CtrlDir 'm-harmless-final-receipt.json') -ControlWaitSec $ControlWaitSec -RulingWaitSec $RulingWaitSec
+        if ($ruled.no_receipt) { throw 'error: the m-harmless control produced no receipt to rule on' }
+        if ($ruled.ruling_error) { throw "ruling_refused: $($ruled.ruling_error)" }
         foreach ($rid in @($ruled.ruling_ids)) { $script:RulingOwners["$rid"] = 'control:m-harmless-difference' }
         $r = Read-ControlResult -Path $mh
         $xr = @($r.items | Where-Object { $_.class -eq 'out_of_scope' -and ((ConvertTo-Json -Depth 20 -Compress $_) -match 'x-request-id') })
@@ -787,7 +802,7 @@ function Invoke-O1Controls {
         $line = New-ControlLine -Id 'm-harmless-difference' -AppliesTo 'o-1' -Expected $expectedOf['m-harmless-difference'] -Outcome $observed -Result $r -Reason ''
         $line['x_request_id_out_of_scope'] = $xr.Count
         $line['ruling_ids'] = @($ruled.ruling_ids)
-        $line['ruling_decided_by'] = $HumanLabel
+        $line['ruling_decided_by'] = Get-DecisionLabel -Doc ([pscustomobject]@{ decided_by = [string]$ruled.rulings_decided_by }) -Order 'o-1'
         if ([string]$r.gate_state -eq 'landed') { $line['merged_sha'] = Get-LandedCommit -Task $t0 }
     } catch {
         $line = New-ControlLine -Id 'm-harmless-difference' -AppliesTo 'o-1' -Expected $expectedOf['m-harmless-difference'] -Outcome 'error' -Result $null -Reason ''
@@ -868,7 +883,7 @@ function Invoke-BroadScopeControl {
         if ($null -ne $scope) {
             $refusal = $null
             try {
-                $null = Invoke-ScopeConfirm -Order $controlOrder -Raw $raw -Oid $oid -Scope $scope -MaxEpisodes $MaxEpisodes -OrderDir $dir
+                $null = Invoke-ScopeConfirm -Order $controlOrder -Raw $raw -Oid $oid -Scope $scope -MaxEpisodes $MaxEpisodes
             } catch {
                 $refusal = $_.Exception.Message
             }
@@ -938,6 +953,9 @@ function Invoke-MissingFixtureControl {
     # copy into the run with its static prediction. The gate is not run on the copy: the probe corpus is
     # read from the protected snapshot of a run repository, and take.ps1 starts no run whose protected
     # head carries the copy. The control is reported not_run with that reason. It is never a pass.
+    # The product gap: the gate reads the corpus only from the protected-head snapshot (observe.rs:54 names
+    # the file, observe.rs:284-296 writes the snapshot from the protected head, observe.rs:305-308 reads it),
+    # so a copy in a run repository cannot be gated without a product change.
     $dir = Join-Path $script:CtrlDir 'm-missing-fixture'
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     $line = New-ControlLine -Id 'm-missing-fixture' -AppliesTo 'f-accounts' -Expected (Get-ControlExpectation -Id 'm-missing-fixture') -Outcome 'not_run' -Result $null -Reason 'the copy and its static prediction are written; no gate run exists for the copy'
@@ -970,7 +988,7 @@ if (-not $DryRun) {
     if (-not (Select-String -LiteralPath $TakeScript -Pattern '\[switch\]\$LibraryOnly' -Quiet)) {
         throw 'take.ps1 has no -LibraryOnly guard yet; a live replay refuses to dot-source the take as a script'
     }
-    . $TakeScript -LibraryOnly -Label $Label -Port $Port -RunsRoot $RunsRoot -DemoRepo $DemoRepo -Pin $Pin -AcanRepo $AcanRepo -AcanExe $AcanExe -WorkerExe $WorkerExe -LlmSource $LlmSource -EnvSource $EnvSource -MaxEpisodes $MaxEpisodes -HealthWaitSec $HealthWaitSec -StepWaitSec $StepWaitSec -WorkerWaitSec $WorkerWaitSec -ControlWaitSec $ControlWaitSec -RulingWaitSec $RulingWaitSec
+    . $TakeScript -LibraryOnly -Label $Label -Port $Port -RunsRoot $RunsRoot -DemoRepo $DemoRepo -Pin $Pin -AcanRepo $AcanRepo -AcanExe $AcanExe -WorkerExe $WorkerExe -LlmSource $LlmSource -EnvSource $EnvSource -MaxEpisodes $MaxEpisodes -HealthWaitSec $HealthWaitSec -StepWaitSec $StepWaitSec -WorkerWaitSec $WorkerWaitSec -ControlWaitSec $ControlWaitSec -RulingWaitSec $RulingWaitSec -WorkerMaxSteps $WorkerMaxSteps -ClaimWaitSec $ClaimWaitSec
     Test-TakeFunctions
 
     # ---- preflight: no writes until every check passes ---------------------------------------
@@ -1096,7 +1114,7 @@ if (-not $DryRun) {
                 schema = $DrawSchema; run_id = $script:RunId; drawn_at = (Get-Date).ToString('o')
                 algorithm = 'the orders with the smallest SHA-256 of "<seed>|<order id>", first 4, in orders.json order'
                 seed = $seed; pool = $orderIds; drawn = $drawn
-                injector = [ordered]@{ id = $script:InjectorId; route = $script:InjectorRoute; header = $script:InjectorHeader; file = $script:InjectorFile; anchor_sha256 = $script:AnchorSha; placement = 'pinned base, through control.ps1' }
+                injector = [ordered]@{ id = $script:InjectorId; route = $script:InjectorRoute; header = $script:InjectorHeader; file = $script:InjectorFile; anchor_sha256 = $script:AnchorSha; placement = 'worker candidate of the first task, through control.ps1 -OnWorkerCandidate' }
                 injected_bundles = $injectedRecord
                 orders_json_sha256 = Get-FileSha256 -Path (Join-Path $intentDir 'orders.json')
                 mutants_json_sha256 = Get-FileSha256 -Path (Join-Path $intentDir 'mutants.json')
