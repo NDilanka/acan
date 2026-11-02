@@ -4,6 +4,7 @@
 mod support;
 
 use std::future::pending;
+use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
 use acan_intent::{
@@ -148,20 +149,53 @@ async fn a_step_past_its_deadline_times_out_and_leaves_no_container() {
     assert_no_container(&run.id);
 }
 
+/// The ids of every container that carries a run label, in any state. Each run labels its
+/// container, so this lists the run's container whichever run id it has.
+async fn run_containers() -> Vec<String> {
+    let output = tokio::process::Command::new("docker")
+        .args(["ps", "--all", "--quiet", "--filter", "label=acan.witness"])
+        .output()
+        .await
+        .expect("docker can list containers");
+    assert!(
+        output.status.success(),
+        "docker ps failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Resolves once a container exists that is not in `before`. A run creates its container before
+/// its first step, so cancelling at this point cancels a run that has started.
+async fn once_a_run_container_exists(before: &[String]) {
+    loop {
+        if run_containers().await.iter().any(|id| !before.contains(id)) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn cancelling_a_run_removes_its_container() {
     let _docker = support::DOCKER.lock().await;
-    let setup = Setup::base();
+    // The app gets a twentieth of a core, so it cannot finish six requests before the cancel
+    // lands. The cancel waits for the container to exist, so it never races a fixed timer.
+    let mut setup = Setup::base();
+    setup.policy.cpus_milli = NonZeroU32::new(50).expect("a non-zero cap");
     let config = runner_config();
     let probe = setup.probe("links-create-list-delete");
     let input = setup.input(&probe, RunRole::BaseA, &config);
 
-    // Cancel while the container is starting or the app is becoming ready.
+    let before = run_containers().await;
     let started = Instant::now();
-    let observed = run_sequence(&input, tokio::time::sleep(Duration::from_millis(400)))
+    let observed = run_sequence(&input, once_a_run_container_exists(&before))
         .await
         .expect("the runner's record admits");
-    timing("cancelled at 400 ms", started);
+    timing("cancelled once the run's container exists", started);
 
     let run = observed.run();
     assert!(
