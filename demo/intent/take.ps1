@@ -78,7 +78,10 @@ param(
     [int]$ClaimWaitSec = 600,
     [switch]$DraftOnly,
     [string]$ResumeRun = '',
-    [switch]$SkipWorkers
+    [switch]$SkipWorkers,
+    # Defines the helper and step functions and returns, starting nothing. demo/intent/replay.ps1 dot-sources
+    # this file with it. The mandatory inputs must still be given.
+    [switch]$LibraryOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -121,7 +124,7 @@ function Add-Step {
             result   = $Result
             evidence = $Evidence
         })
-    Write-Output "[$Result] $Name"
+    Write-Host "[$Result] $Name"
 }
 
 function Save-State {
@@ -393,6 +396,266 @@ function Read-ControlResult {
     Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
 }
 
+function New-TakeClone {
+    # The clone of the demo repository at the pin, under the run folder. Sets $script:Repo, checks
+    # out the pin on main and records the clone as a step. Throws when the clone is not right.
+    param([string]$Run, [string]$DemoRepo, [string]$Pin)
+    $script:Repo = Join-Path $Run 'repo'
+    & git clone --no-hardlinks -q $DemoRepo $script:Repo
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $script:Repo '.git'))) {
+        throw 'the clone failed; the run folder has no repository and nothing else ran'
+    }
+    Assert-OwnRepo
+    Invoke-Git checkout -q -B main $Pin | Out-Null
+    $head = (Invoke-Git rev-parse HEAD | Out-String).Trim()
+    if ($head -ne $Pin) { throw "the clone's HEAD is $head, not the pin $Pin" }
+    Add-Step -Name 'clone the demo at the pin' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ repo = $script:Repo; head = $head }
+}
+
+function Start-TakeServer {
+    # acan serve on the clone, with the keys in its environment only, then /health. Sets $script:Base
+    # and $script:Proc, records the start as a step and returns the process. Throws when the server
+    # exits or does not answer within HealthWaitSec.
+    param([string]$Run, [string]$Repo, [int]$Port, [string]$AcanExe, [string]$LlmPath, [string]$EnvPath, [string]$LogTag, [int]$HealthWaitSec)
+    $keys = Read-KeyFile -Path $EnvPath
+    $script:Base = "http://127.0.0.1:$Port"
+    $serverArgs = @('serve', '--repo', $Repo, '--port', "$Port", '--bind', '127.0.0.1',
+        '--protected-branch', 'main', '--llm', $LlmPath)
+    foreach ($name in $keys.Keys) { Set-Item -Path "Env:$name" -Value $keys[$name] }
+    try {
+        $script:Proc = Start-Process -FilePath $AcanExe -ArgumentList $serverArgs `
+            -RedirectStandardOutput (Join-Path $Run "logs\server.$LogTag.out.log") `
+            -RedirectStandardError (Join-Path $Run "logs\server.$LogTag.err.log") -PassThru -WindowStyle Hidden
+    } finally {
+        foreach ($name in $keys.Keys) { Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue }
+    }
+    $up = $false
+    $healthEnd = (Get-Date).AddSeconds($HealthWaitSec)
+    while (-not $up) {
+        if ($script:Proc.HasExited) { throw "the server exited with code $($script:Proc.ExitCode); see the server logs in logs\" }
+        if ((Get-Date) -gt $healthEnd) { throw 'the server did not answer /health in time' }
+        try { $null = Invoke-RestMethod -Uri "$script:Base/health" -TimeoutSec 5; $up = $true } catch { Start-Sleep -Milliseconds 500 }
+    }
+    Add-Step -Name "start the server on the clone ($LogTag)" -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ port = $Port; pid = $script:Proc.Id }
+    $script:Proc
+}
+
+function Invoke-ScopeEdits {
+    # One order's scope edits, applied to the foreman's draft as one revise_scope. The edits file is
+    # read and checked here. Each scope edit, and each open choice that a choice rule answers or
+    # removes, is logged as a step. The decider is $DecidedBy, or the file's decided_by when it is
+    # empty. The file's explicit answers are left to Invoke-ScopeConfirm. Returns the revised scope,
+    # the proposal, the logged edits and the answers.
+    param([string]$Order, [string]$Raw, [string]$Oid, $View, [string]$EditsFile, [string]$OrderDir = '', [string]$DecidedBy = '')
+    $edits = Get-Content -LiteralPath $EditsFile -Raw | ConvertFrom-Json
+    if ($edits.schema -ne 'acan-demo-intent-edits/2') {
+        throw "the edits file must have schema acan-demo-intent-edits/2, found '$($edits.schema)'"
+    }
+    if ($edits.order -and $edits.order -ne $Order) { throw "the edits file is for $($edits.order), not $Order" }
+    $decider = if ($DecidedBy) { $DecidedBy } else { [string]$edits.decided_by }
+    if (-not $decider) { throw "$EditsFile names no decided_by; a decision file must say who decided it" }
+    $d = $View.draft
+    $proposal = $d.draft.proposal
+    $humanEdits = [System.Collections.Generic.List[object]]::new()
+    $humanAnswers = [System.Collections.Generic.List[object]]::new()
+    foreach ($edit in @($edits.scope_edits)) {
+        if ($edit.op -eq 'remove_may') {
+            if (@($proposal.may | Where-Object { $_.id -eq $edit.id }).Count -ne 1) {
+                throw "remove_may: may item $($edit.id) is not in the draft; the edits file must match the draft"
+            }
+            $proposal.may = @($proposal.may | Where-Object { $_.id -ne $edit.id })
+            $humanEdits.Add(@{ op = $edit.op; id = $edit.id; result = 'removed'; reason = $edit.reason })
+        } elseif ($edit.op -eq 'replace_must_keep') {
+            if (@($proposal.must_keep | Where-Object { $_.id -eq $edit.rule.id }).Count -ne 1) {
+                throw "replace_must_keep: must-keep $($edit.rule.id) is not in the draft; the edits file must match the draft"
+            }
+            $proposal.must_keep = @($proposal.must_keep | ForEach-Object { if ($_.id -eq $edit.rule.id) { $edit.rule } else { $_ } })
+            $humanEdits.Add(@{ op = $edit.op; id = $edit.rule.id; result = 'replaced'; reason = $edit.reason })
+        } elseif ($edit.op -eq 'add_must_keep') {
+            if (@($proposal.must_keep | Where-Object { $_.id -eq $edit.rule.id }).Count -gt 0) {
+                throw "must-keep $($edit.rule.id) is already in the draft"
+            }
+            $proposal.must_keep = @($proposal.must_keep) + @($edit.rule)
+            $humanEdits.Add(@{ op = $edit.op; id = $edit.rule.id; result = 'added'; reason = $edit.reason })
+        } elseif ($edit.op -eq 'add_may') {
+            if (@($proposal.may | Where-Object { $_.id -eq $edit.item.id }).Count -gt 0) {
+                throw "may item $($edit.item.id) is already in the draft"
+            }
+            $proposal.may = @($proposal.may) + @($edit.item)
+            $humanEdits.Add(@{ op = $edit.op; id = $edit.item.id; result = 'added'; reason = $edit.reason })
+        } else {
+            throw "unknown scope edit op '$($edit.op)' in $EditsFile"
+        }
+    }
+    # Choice rules match an open choice by its question text, because the foreman's question ids
+    # and wording change between drafts. A choice matched by no rule is left for an explicit answer.
+    foreach ($choice in @($proposal.open)) {
+        $matched = @($edits.choice_rules | Where-Object { $choice.question -match $_.question_match })
+        if ($matched.Count -eq 0) { continue }
+        if ($matched.Count -gt 1) { throw "more than one choice rule matches $($choice.id)" }
+        $rule = $matched[0]
+        $keep = @($choice.options | Where-Object { $_.label -match $rule.option_label_match })
+        if ($keep.Count -gt 1) { throw "choice rule $($rule.id) matches more than one option of $($choice.id)" }
+        if ($keep.Count -eq 1) {
+            $humanAnswers.Add(@{ choice_id = $choice.id; option = $keep[0].key })
+            $humanEdits.Add(@{ op = 'answer_choice'; id = $choice.id; rule = $rule.id; option_label = $keep[0].label; result = 'answered'; reason = $rule.reason })
+        } elseif ($rule.when_no_option_matches -eq 'remove') {
+            $proposal.open = @($proposal.open | Where-Object { $_.id -ne $choice.id })
+            $humanEdits.Add(@{ op = 'remove_open'; id = $choice.id; rule = $rule.id; question = $choice.question; result = 'removed'; reason = $rule.reason })
+        } else {
+            throw "choice $($choice.id) matches rule $($rule.id) but no option matches '$($rule.option_label_match)'"
+        }
+    }
+    $scope = @{ version = 'acan-scope/1'; order = $d.order; rev = $d.rev; base_commit = $d.base_commit; body = $proposal }
+    $null = Send-Command @{ cmd = 'revise_scope'; order = [int]$Raw; scope = $scope }
+    $leaf = Split-Path -Leaf $EditsFile
+    Add-Step -Name "${Order}: the owner revises the draft with the logged scope edits (revise_scope)" -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{ rev = $d.rev; decided_by = $decider; logged_edits = $humanEdits.Count; open_after = @($proposal.open).Count; may_after = @($proposal.may).Count; must_keep_after = @($proposal.must_keep).Count } -Human
+    foreach ($entry in $humanEdits) {
+        Add-Step -Name "$Order scope edit: $($entry.op) $($entry.id)" -Actor "$decider (edits file $leaf, applied by the owner through revise_scope)" -Provider 'none' -Result 'pass' -Evidence $entry -Human
+    }
+    if ($OrderDir) {
+        $record = [ordered]@{ order = $Order; decided_by = $decider; edits_file = $EditsFile; edits_sha256 = (Get-FileHash -LiteralPath $EditsFile -Algorithm SHA256).Hash; rev = $d.rev; logged_edits = @($humanEdits); answers = @($humanAnswers) }
+        ConvertTo-Json -Depth 40 $record | Set-Content -LiteralPath (Join-Path $OrderDir 'scope-edits.json') -Encoding utf8
+    }
+    [ordered]@{ scope = $scope; proposal = $proposal; edits = $edits; edits_file = $EditsFile; decided_by = $decider; logged_edits = @($humanEdits); answers = @($humanAnswers); rev = $d.rev }
+}
+
+function Invoke-ScopeConfirm {
+    # The owner's confirmation of a revised scope. The confirmation body is read from the origin, its
+    # episode cap is raised to at least MaxEpisodes, and its repair rounds are set when RepairRounds is
+    # above zero. Every open choice gets one answer: from a choice rule, or from the edits file. Sends
+    # confirm_scope and returns the scope hash, the budget and the answers. Throws when the origin
+    # refuses the confirmation or confirms no scope.
+    param($Scope, [string]$Order, [string]$Raw, [string]$Oid, [int]$MaxEpisodes, [int]$RepairRounds = 0)
+    $body = Invoke-Api -Path "/api/orders/$Oid/scope/confirmation"
+    $offeredCap = [int]$body.budget.max_episodes
+    $body.budget.max_episodes = [uint32]([math]::Max($MaxEpisodes, $offeredCap))
+    $offeredRounds = [int]$body.budget.repair_rounds
+    if ($RepairRounds -gt 0) { $body.budget.repair_rounds = [uint32]$RepairRounds }
+    $answers = @()
+    foreach ($choice in @($Scope.proposal.open)) {
+        $fromRule = @($Scope.answers | Where-Object { $_.choice_id -eq $choice.id })
+        if ($fromRule.Count -eq 1) {
+            $answers += @{ choice_id = $choice.id; option = $fromRule[0].option }
+            continue
+        }
+        $given = @($Scope.edits.answers | Where-Object { $_.choice_id -eq $choice.id })
+        if ($given.Count -ne 1) {
+            throw "open choice $($choice.id) needs exactly one answer in $($Scope.edits_file); options: $((@($choice.options) | ForEach-Object { $_.label }) -join ' | ')"
+        }
+        $option = @($choice.options | Where-Object { $_.label -eq $given[0].option_label })
+        if ($option.Count -ne 1) {
+            throw "answer '$($given[0].option_label)' for $($choice.id) matches no option label"
+        }
+        $answers += @{ choice_id = $choice.id; option = $option[0].key }
+    }
+    $body.answers = $answers
+    $confirmed = Send-Command @{ cmd = 'confirm_scope'; order = [int]$Raw; confirmation = $body }
+    $scopeConfirmed = @($confirmed | Where-Object { $_.event.type -eq 'scope_confirmed' }).Count
+    if ($scopeConfirmed -lt 1) { throw 'confirm_scope returned no scope_confirmed event' }
+    [ordered]@{
+        scope_confirmed = $scopeConfirmed; scope_hash = "$($body.scope_hash)"; budget = $body.budget; answers = $answers
+        offered_max_episodes = $offeredCap; offered_repair_rounds = $offeredRounds
+    }
+}
+
+function Invoke-ControlWithRuling {
+    # A seeded control whose receipt has out-of-scope differences that the owner's rules decide. The
+    # control runs as its own process with -AwaitRuling. Each receipt it saves is ruled from RulesFile
+    # through member HTTP (ruling.ps1) before the done flag lets it report again. An earlier control's
+    # receipt on the same task (PriorReceipt) is ruled first in the same way, so the re-gate is not
+    # blocked by that candidate's episodes (D02Q). Then the re-gate is waited for and, when it passes,
+    # the land. Returns a summary. A failed ruling is returned in ruling_error and is not thrown; the
+    # caller records it.
+    param(
+        [string]$Task, [string]$Bundle, [string]$Out, [string]$Order, [string]$OrderId, [string]$RulesFile,
+        [string]$PriorReceipt = '', [string]$PriorRulingsOut = '', [string]$FinalReceipt = '',
+        [int]$ControlWaitSec = 1500, [int]$RulingWaitSec = 1200, [int]$LandWaitSec = 900
+    )
+    $token = $script:Tokens['control-seeded']
+    $ctrlDir = Split-Path -Parent $Out
+    $done = Join-Path $ctrlDir 'rulings-done.flag'
+    $rulingsOut = Join-Path $ctrlDir "rulings-$Order.json"
+    if (-not $PriorRulingsOut) { $PriorRulingsOut = Join-Path $ctrlDir "rulings-$Order-prior.json" }
+    if (-not $FinalReceipt) { $FinalReceipt = Join-Path $ctrlDir 'm-harmless-final-receipt.json' }
+    if (Test-Path -LiteralPath $done) { Remove-Item -LiteralPath $done }
+    # An earlier attempt's receipt, result or rulings are not this control's. They move aside, so the
+    # ruling step waits for this control's own receipt; an old receipt would be ruled on as if new.
+    $staleStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    foreach ($stale in @($Out, "$Out.receipt.json", $FinalReceipt, $rulingsOut, $PriorRulingsOut)) {
+        if (Test-Path -LiteralPath $stale) { Move-Item -LiteralPath $stale -Destination "$stale.prev-$staleStamp" }
+    }
+    $ctlArgs = "-NoProfile -File `"$(Join-Path $intentDir 'control.ps1')`" -Server $script:Base -Token $token -Repo `"$script:Repo`" -Task $Task -Bundle `"$Bundle`" -Out `"$Out`" -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -AwaitRuling -RulingWaitSec $RulingWaitSec -RulingsDone `"$done`""
+    $ctl = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList $ctlArgs -RedirectStandardOutput "$Out.log" -RedirectStandardError "$Out.err.log" -PassThru -WindowStyle Hidden
+    $recEnd = (Get-Date).AddSeconds(300 + $ControlWaitSec)
+    while (-not (Test-Path -LiteralPath "$Out.receipt.json")) {
+        if ($ctl.HasExited) { break }
+        if ((Get-Date) -gt $recEnd) { break }
+        Start-Sleep -Seconds 3
+    }
+    $noReceipt = -not (Test-Path -LiteralPath "$Out.receipt.json")
+    $controlExited = $ctl.HasExited
+    $rulingErr = $null
+    $rulings = @()
+    $rulesDecidedBy = [string]((Get-Content -LiteralPath $RulesFile -Raw | ConvertFrom-Json).decided_by)
+    if (-not $noReceipt) {
+        # The control writes the receipt file in one call; give the write time to finish.
+        Start-Sleep -Seconds 5
+        try {
+            & (Join-Path $intentDir 'ruling.ps1') -Server $script:Base -OwnerToken $script:OwnerToken -Order $Order -OrderId $OrderId -ReceiptFile "$Out.receipt.json" -RulesFile $RulesFile -Out $rulingsOut
+            if ($PriorReceipt) {
+                & (Join-Path $intentDir 'ruling.ps1') -Server $script:Base -OwnerToken $script:OwnerToken -Order $Order -OrderId $OrderId -ReceiptFile $PriorReceipt -RulesFile $RulesFile -Out $PriorRulingsOut
+            }
+            $rulings = @((Get-Content -LiteralPath $rulingsOut -Raw | ConvertFrom-Json).rulings)
+            if ($PriorReceipt) {
+                $rulings = $rulings + @((Get-Content -LiteralPath $PriorRulingsOut -Raw | ConvertFrom-Json).rulings)
+            }
+        } catch {
+            $rulingErr = $_.Exception.Message
+        }
+    }
+    # The flag is set whether or not the rulings went through, so the control is released to report again.
+    Set-Content -LiteralPath $done -Value 'rulings finished' -Encoding utf8
+    $ctlKilled = $false
+    # After the flag the control waits for its re-gate's receipt for up to ControlWaitSec, so the wait
+    # here is that long plus a margin before a kill.
+    if (-not $ctl.WaitForExit(($ControlWaitSec + 300) * 1000)) {
+        # The control saves its result after every step, so its evidence survives the kill. A killed
+        # control runs no release, so its claim is not released by this run.
+        $ctlKilled = $true
+        Stop-Process -Id $ctl.Id -Force -ErrorAction SilentlyContinue
+        Write-Host "control $Task was killed at its wait; its result so far is $Out"
+    }
+    $r3 = Read-ControlResult -Path $Out
+    $rulingsOk = ($null -eq $rulingErr) -and (-not $noReceipt) -and (Test-Path -LiteralPath $rulingsOut) -and ((-not $PriorReceipt) -or (Test-Path -LiteralPath $PriorRulingsOut))
+    # The re-gate passes when the receipt after the rulings is not blocked: prepared when every item
+    # passes. A control that was killed at its wait does not pass.
+    $regatePassed = ($null -ne $r3) -and (-not $ctlKilled) -and $rulingsOk -and (@('prepared', 'landed') -contains [string]$r3.gate_state)
+    # A passing gate lands its candidate on its own, a moment after the receipt. The wait ends when the
+    # latest receipt shows landed, blocked or stopped; the merged commit is then checked against the head.
+    $landState = ''
+    if (-not $ctlKilled) {
+        # Saved whenever the control was not killed, so a blocked re-gate leaves its receipt too.
+        try { $landState = Wait-TaskLanded -Task $Task -Token $token -Path $FinalReceipt -Seconds $LandWaitSec }
+        catch { Write-Host "get_receipt: $($_.Exception.Message)" }
+    }
+    $landedNow = [bool]($regatePassed -and $landState -eq 'landed' -and (Test-Path -LiteralPath $FinalReceipt))
+    $land = $null
+    if ($landedNow) { $land = Get-LandCheck -ReceiptFile $FinalReceipt -What $Order }
+    [ordered]@{
+        ruling_error = $rulingErr; no_receipt = $noReceipt; control_exited = $controlExited
+        rulings = @($rulings); ruling_ids = @($rulings | ForEach-Object { $_.ruling_id }); rulings_ok = $rulingsOk
+        rulings_decided_by = $rulesDecidedBy; rulings_file = $rulingsOut
+        prior_rulings_file = $(if ($PriorReceipt) { $PriorRulingsOut } else { $null })
+        control_result = $r3; killed_at_wait = $ctlKilled; regate_passed = $regatePassed
+        final_receipt = $FinalReceipt; final_gate_state = $landState; landed = $landedNow; land = $land
+    }
+}
+
+# The helpers and step functions above are the take's library. With -LibraryOnly the script stops here:
+# demo/intent/replay.ps1 dot-sources this file for the functions and starts nothing.
+if ($LibraryOnly) { return }
+
 try {
     # ---- preflight -----------------------------------------------------------------------
     $freeGb = [math]::Round((Get-PSDrive C).Free / 1GB, 1)
@@ -431,16 +694,7 @@ try {
         foreach ($k in @('orders', 'workers', 'controls', 'rulings', 'lands')) { if (-not $script:Evidence.ContainsKey($k)) { $script:Evidence[$k] = @{} } }
     } else {
         New-Item -ItemType Directory -Path $run | Out-Null
-        $script:Repo = Join-Path $run 'repo'
-        & git clone --no-hardlinks -q $DemoRepo $script:Repo
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $script:Repo '.git'))) {
-            throw 'the clone failed; the run folder has no repository and nothing else ran'
-        }
-        Assert-OwnRepo
-        Invoke-Git checkout -q -B main $Pin | Out-Null
-        $head = (Invoke-Git rev-parse HEAD | Out-String).Trim()
-        if ($head -ne $Pin) { throw "the clone's HEAD is $head, not the pin $Pin" }
-        Add-Step -Name 'clone the demo at the pin' -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ repo = $script:Repo; head = $head }
+        New-TakeClone -Run $run -DemoRepo $DemoRepo -Pin $Pin
     }
 
     # ---- keys, routing and tokens: outside the repository except the ignored tokens file --
@@ -482,26 +736,8 @@ try {
     $script:EnvPath = Join-Path $keysDir '.env'
 
     # ---- server ----------------------------------------------------------------------------
-    $script:Base = "http://127.0.0.1:$Port"
-    $serverArgs = @('serve', '--repo', $script:Repo, '--port', "$Port", '--bind', '127.0.0.1',
-        '--protected-branch', 'main', '--llm', $script:LlmPath)
-    foreach ($name in $keys.Keys) { Set-Item -Path "Env:$name" -Value $keys[$name] }
     $logTag = if ($ResumeRun) { "resume-$Order-$(Get-Date -Format 'HHmmss')" } else { 'first' }
-    try {
-        $script:Proc = Start-Process -FilePath $AcanExe -ArgumentList $serverArgs `
-            -RedirectStandardOutput (Join-Path $run "logs\server.$logTag.out.log") `
-            -RedirectStandardError (Join-Path $run "logs\server.$logTag.err.log") -PassThru -WindowStyle Hidden
-    } finally {
-        foreach ($name in $keys.Keys) { Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue }
-    }
-    $up = $false
-    $healthEnd = (Get-Date).AddSeconds($HealthWaitSec)
-    while (-not $up) {
-        if ($script:Proc.HasExited) { throw "the server exited with code $($script:Proc.ExitCode); see the server logs in logs\" }
-        if ((Get-Date) -gt $healthEnd) { throw 'the server did not answer /health in time' }
-        try { $null = Invoke-RestMethod -Uri "$script:Base/health" -TimeoutSec 5; $up = $true } catch { Start-Sleep -Milliseconds 500 }
-    }
-    Add-Step -Name "start the server on the clone ($logTag)" -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ port = $Port; pid = $script:Proc.Id }
+    $null = Start-TakeServer -Run $run -Repo $script:Repo -Port $Port -AcanExe $AcanExe -LlmPath $script:LlmPath -EnvPath $script:EnvPath -LogTag $logTag -HealthWaitSec $HealthWaitSec
     for ($i = 0; $i -lt $priorSteps.Count; $i++) { $script:Steps.Insert($i, $priorSteps[$i]) }
 
     # ---- the order: post or read back, split, draft -----------------------------------------
@@ -546,103 +782,18 @@ try {
         }
 
         # ---- the human scope: edits, one revise_scope, then confirm ---------------------------
-        $edits = Get-Content -LiteralPath $EditsFile -Raw | ConvertFrom-Json
-        if ($edits.schema -ne 'acan-demo-intent-edits/2') {
-            throw "the edits file must have schema acan-demo-intent-edits/2, found '$($edits.schema)'"
-        }
-        if ($edits.order -and $edits.order -ne $Order) { throw "the edits file is for $($edits.order), not $Order" }
-        $humanEdits = [System.Collections.Generic.List[object]]::new()
-        $humanAnswers = [System.Collections.Generic.List[object]]::new()
-        foreach ($edit in @($edits.scope_edits)) {
-            if ($edit.op -eq 'remove_may') {
-                if (@($proposal.may | Where-Object { $_.id -eq $edit.id }).Count -ne 1) {
-                    throw "remove_may: may item $($edit.id) is not in the draft; the edits file must match the draft"
-                }
-                $proposal.may = @($proposal.may | Where-Object { $_.id -ne $edit.id })
-                $humanEdits.Add(@{ op = $edit.op; id = $edit.id; result = 'removed'; reason = $edit.reason })
-            } elseif ($edit.op -eq 'replace_must_keep') {
-                if (@($proposal.must_keep | Where-Object { $_.id -eq $edit.rule.id }).Count -ne 1) {
-                    throw "replace_must_keep: must-keep $($edit.rule.id) is not in the draft; the edits file must match the draft"
-                }
-                $proposal.must_keep = @($proposal.must_keep | ForEach-Object { if ($_.id -eq $edit.rule.id) { $edit.rule } else { $_ } })
-                $humanEdits.Add(@{ op = $edit.op; id = $edit.rule.id; result = 'replaced'; reason = $edit.reason })
-            } elseif ($edit.op -eq 'add_must_keep') {
-                if (@($proposal.must_keep | Where-Object { $_.id -eq $edit.rule.id }).Count -gt 0) {
-                    throw "must-keep $($edit.rule.id) is already in the draft"
-                }
-                $proposal.must_keep = @($proposal.must_keep) + @($edit.rule)
-                $humanEdits.Add(@{ op = $edit.op; id = $edit.rule.id; result = 'added'; reason = $edit.reason })
-            } elseif ($edit.op -eq 'add_may') {
-                if (@($proposal.may | Where-Object { $_.id -eq $edit.item.id }).Count -gt 0) {
-                    throw "may item $($edit.item.id) is already in the draft"
-                }
-                $proposal.may = @($proposal.may) + @($edit.item)
-                $humanEdits.Add(@{ op = $edit.op; id = $edit.item.id; result = 'added'; reason = $edit.reason })
-            } else {
-                throw "unknown scope edit op '$($edit.op)' in $EditsFile"
-            }
-        }
-        # Choice rules match an open choice by its question text, because the foreman's question ids
-        # and wording change between drafts. A choice matched by no rule is left for an explicit answer.
-        foreach ($choice in @($proposal.open)) {
-            $matched = @($edits.choice_rules | Where-Object { $choice.question -match $_.question_match })
-            if ($matched.Count -eq 0) { continue }
-            if ($matched.Count -gt 1) { throw "more than one choice rule matches $($choice.id)" }
-            $rule = $matched[0]
-            $keep = @($choice.options | Where-Object { $_.label -match $rule.option_label_match })
-            if ($keep.Count -gt 1) { throw "choice rule $($rule.id) matches more than one option of $($choice.id)" }
-            if ($keep.Count -eq 1) {
-                $humanAnswers.Add(@{ choice_id = $choice.id; option = $keep[0].key })
-                $humanEdits.Add(@{ op = 'answer_choice'; id = $choice.id; rule = $rule.id; option_label = $keep[0].label; result = 'answered'; reason = $rule.reason })
-            } elseif ($rule.when_no_option_matches -eq 'remove') {
-                $proposal.open = @($proposal.open | Where-Object { $_.id -ne $choice.id })
-                $humanEdits.Add(@{ op = 'remove_open'; id = $choice.id; rule = $rule.id; question = $choice.question; result = 'removed'; reason = $rule.reason })
-            } else {
-                throw "choice $($choice.id) matches rule $($rule.id) but no option matches '$($rule.option_label_match)'"
-            }
-        }
-        $scope = @{ version = 'acan-scope/1'; order = $d.order; rev = $d.rev; base_commit = $d.base_commit; body = $proposal }
-        $null = Send-Command @{ cmd = 'revise_scope'; order = [int]$raw; scope = $scope }
-        Add-Step -Name "${Order}: the owner revises the draft with the logged human edits (revise_scope)" -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{ rev = $d.rev; human_edits = $humanEdits.Count; open_after = @($proposal.open).Count; may_after = @($proposal.may).Count; must_keep_after = @($proposal.must_keep).Count } -Human
-        foreach ($entry in $humanEdits) {
-            Add-Step -Name "$Order human scope edit: $($entry.op) $($entry.id)" -Actor "human ($(Split-Path -Leaf $EditsFile), applied by the owner through revise_scope)" -Provider 'none' -Result 'pass' -Evidence $entry -Human
-        }
-
-        $body = Invoke-Api -Path "/api/orders/$oid/scope/confirmation"
-        $offeredCap = [int]$body.budget.max_episodes
-        $body.budget.max_episodes = [uint32]([math]::Max($MaxEpisodes, $offeredCap))
-        $offeredRounds = [int]$body.budget.repair_rounds
-        if ($RepairRounds -gt 0) { $body.budget.repair_rounds = [uint32]$RepairRounds }
-        $answers = @()
-        foreach ($choice in @($proposal.open)) {
-            $fromKeep = @($humanAnswers | Where-Object { $_.choice_id -eq $choice.id })
-            if ($fromKeep.Count -eq 1) {
-                $answers += @{ choice_id = $choice.id; option = $fromKeep[0].option }
-                continue
-            }
-            $given = @($edits.answers | Where-Object { $_.choice_id -eq $choice.id })
-            if ($given.Count -ne 1) {
-                throw "open choice $($choice.id) needs exactly one human answer in $EditsFile; options: $((@($choice.options) | ForEach-Object { $_.label }) -join ' | ')"
-            }
-            $option = @($choice.options | Where-Object { $_.label -eq $given[0].option_label })
-            if ($option.Count -ne 1) {
-                throw "answer '$($given[0].option_label)' for $($choice.id) matches no option label"
-            }
-            $answers += @{ choice_id = $choice.id; option = $option[0].key }
-        }
-        $body.answers = $answers
-        $confirmed = Send-Command @{ cmd = 'confirm_scope'; order = [int]$raw; confirmation = $body }
-        $scopeConfirmed = @($confirmed | Where-Object { $_.event.type -eq 'scope_confirmed' }).Count
-        if ($scopeConfirmed -lt 1) { throw 'confirm_scope returned no scope_confirmed event' }
+        # Invoke-ScopeEdits reads the edits file and sends revise_scope; the decider is the file's decided_by.
+        $scope = Invoke-ScopeEdits -Order $Order -Raw $raw -Oid $oid -View $view -EditsFile $EditsFile
+        $confirmed = Invoke-ScopeConfirm -Order $Order -Raw $raw -Oid $oid -Scope $scope -MaxEpisodes $MaxEpisodes -RepairRounds $RepairRounds
         Add-Step -Name "${Order}: the owner raises the repair budget's episode cap at confirmation" -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{
-            offered_max_episodes = $offeredCap; set_max_episodes = [int]$body.budget.max_episodes
-            offered_repair_rounds = $offeredRounds; set_repair_rounds = [int]$body.budget.repair_rounds
+            offered_max_episodes = $confirmed.offered_max_episodes; set_max_episodes = [int]$confirmed.budget.max_episodes
+            offered_repair_rounds = $confirmed.offered_repair_rounds; set_repair_rounds = [int]$confirmed.budget.repair_rounds
             reason = 'every differing field of a route is one discrepancy episode, and the offered cap of four stops the order at the first receipt with more; the owner sets the cap for this order'
         } -Human
         Add-Step -Name "${Order}: the owner confirms the scope (member HTTP)" -Actor 'owner (member HTTP)' -Provider 'none' -Result 'pass' -Evidence @{
-            scope_confirmed = $scopeConfirmed; answers = $answers; scope_hash = "$($body.scope_hash)"; budget = $body.budget
+            scope_confirmed = $confirmed.scope_confirmed; answers = $confirmed.answers; scope_hash = $confirmed.scope_hash; budget = $confirmed.budget
         } -Human
-        $script:Evidence.orders[$Order] = @{ oid = $oid; raw = $raw; confirmed = $true; scope_hash = "$($body.scope_hash)"; max_episodes = [int]$body.budget.max_episodes }
+        $script:Evidence.orders[$Order] = @{ oid = $oid; raw = $raw; confirmed = $true; scope_hash = $confirmed.scope_hash; max_episodes = [int]$confirmed.budget.max_episodes }
         Save-State
     } else {
         Add-Step -Name "${Order}: the scope was confirmed in an earlier invocation" -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ order = $oid }
@@ -707,84 +858,31 @@ try {
             throw
         }
         $mh = Join-Path $ctrlRoot 'm-harmless-difference.json'
-        $done = Join-Path $ctrlRoot 'rulings-done.flag'
+        $mhFinalPath = Join-Path $ctrlRoot 'm-harmless-final-receipt.json'
         $rulingsOut = Join-Path $ctrlRoot 'rulings-o-1.json'
         $moRulingsOut = Join-Path $ctrlRoot 'rulings-o-1-moverfit.json'
-        if (Test-Path -LiteralPath $done) { Remove-Item -LiteralPath $done }
-        # An earlier attempt's receipt, result or rulings are not this control's. They move aside, so the
-        # ruling step waits for this control's own receipt; an old receipt would be ruled on as if new.
-        $mhFinalPath = Join-Path $ctrlRoot 'm-harmless-final-receipt.json'
-        $staleStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-        foreach ($stale in @($mh, "$mh.receipt.json", $mhFinalPath, $rulingsOut, $moRulingsOut)) {
-            if (Test-Path -LiteralPath $stale) { Move-Item -LiteralPath $stale -Destination "$stale.prev-$staleStamp" }
-        }
-        $ctlArgs = "-NoProfile -File `"$(Join-Path $intentDir 'control.ps1')`" -Server $script:Base -Token $controlToken -Repo `"$script:Repo`" -Task $t0 -Bundle `"$(Join-Path $intentDir 'controls\m-harmless-difference.json')`" -Out `"$mh`" -StageWaitSec 300 -ReceiptWaitSec $ControlWaitSec -AwaitRuling -RulingWaitSec $RulingWaitSec -RulingsDone `"$done`""
-        $ctl = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList $ctlArgs -RedirectStandardOutput "$mh.log" -RedirectStandardError "$mh.err.log" -PassThru -WindowStyle Hidden
-        $recEnd = (Get-Date).AddSeconds(300 + $ControlWaitSec)
-        while (-not (Test-Path -LiteralPath "$mh.receipt.json")) {
-            if ($ctl.HasExited) { break }
-            if ((Get-Date) -gt $recEnd) { break }
-            Start-Sleep -Seconds 3
-        }
-        $rulingErr = $null
-        if (Test-Path -LiteralPath "$mh.receipt.json") {
-            # The control writes the receipt file in one call; give the write time to finish.
-            Start-Sleep -Seconds 5
-            try {
-                & (Join-Path $intentDir 'ruling.ps1') -Server $script:Base -OwnerToken $script:OwnerToken -Order $Order -OrderId $oid `
-                    -ReceiptFile "$mh.receipt.json" -RulesFile $RulesFile -Out $rulingsOut
-                # The seeded regression's receipt has out-of-scope episodes of its own (its 429
-                # body carries only the error). They are ruled in the same take, before the flag
-                # lets the harmless control re-report, so the re-gate is not blocked by the
-                # earlier candidate's episodes (D02Q).
-                & (Join-Path $intentDir 'ruling.ps1') -Server $script:Base -OwnerToken $script:OwnerToken -Order $Order -OrderId $oid `
-                    -ReceiptFile "$mo.receipt.json" -RulesFile $RulesFile -Out $moRulingsOut
-                $rl = Get-Content -LiteralPath $rulingsOut -Raw | ConvertFrom-Json
-                $rlMo = Get-Content -LiteralPath $moRulingsOut -Raw | ConvertFrom-Json
-                $allRulings = @($rl.rulings) + @($rlMo.rulings)
-                $script:Evidence.rulings[$Order] = @{ log = $rulingsOut; log_moverfit = $moRulingsOut; count = $allRulings.Count; ids = @($allRulings | ForEach-Object { $_.ruling_id }) }
-                Add-Step -Name 'o-1 rulings: the owner rules on the out-of-scope episodes of both control receipts (record_ruling, member HTTP)' -Actor 'owner (member HTTP; rules file applied by ruling.ps1)' -Provider 'none' -Result 'pass' -Evidence @{ rulings = @($allRulings | ForEach-Object { [ordered]@{ ruling_id = $_.ruling_id; episode_id = $_.episode_id; fields = $_.fields; result = $_.result; ledger_seq = $_.ledger_seq } }); log = $rulingsOut; log_moverfit = $moRulingsOut } -Human
-                Save-State
-            } catch {
-                $rulingErr = $_.Exception.Message
-                Add-Step -Name 'o-1 rulings: the owner rules on the out-of-scope episodes (record_ruling, member HTTP)' -Actor 'owner (member HTTP)' -Provider 'none' -Result 'fail' -Evidence @{ error = $rulingErr }
-            }
+        # The control, the rulings on both receipts, the re-gate and the land: Invoke-ControlWithRuling.
+        $mhRun = Invoke-ControlWithRuling -Task $t0 -Bundle (Join-Path $intentDir 'controls\m-harmless-difference.json') -Out $mh -Order $Order -OrderId $oid -RulesFile $RulesFile -PriorReceipt "$mo.receipt.json" -PriorRulingsOut $moRulingsOut -FinalReceipt $mhFinalPath -ControlWaitSec $ControlWaitSec -RulingWaitSec $RulingWaitSec -LandWaitSec $LandWaitSec
+        $rulingErr = $mhRun.ruling_error
+        if ($mhRun.no_receipt) {
+            Add-Step -Name 'o-1 rulings: the control produced no receipt to rule on' -Actor 'script' -Provider 'none' -Result 'fail' -Evidence @{ control_exited = $mhRun.control_exited }
+        } elseif ($rulingErr) {
+            Add-Step -Name 'o-1 rulings: the owner rules on the out-of-scope episodes (record_ruling, member HTTP)' -Actor 'owner (member HTTP)' -Provider 'none' -Result 'fail' -Evidence @{ error = $rulingErr }
         } else {
-            Add-Step -Name 'o-1 rulings: the control produced no receipt to rule on' -Actor 'script' -Provider 'none' -Result 'fail' -Evidence @{ control_exited = $ctl.HasExited }
+            $script:Evidence.rulings[$Order] = @{ log = $rulingsOut; log_moverfit = $moRulingsOut; count = @($mhRun.rulings).Count; ids = @($mhRun.ruling_ids) }
+            Add-Step -Name 'o-1 rulings: the owner rules on the out-of-scope episodes of both control receipts (record_ruling, member HTTP)' -Actor "owner (member HTTP; rules file decided by $($mhRun.rulings_decided_by), applied by ruling.ps1)" -Provider 'none' -Result 'pass' -Evidence @{ rulings = @($mhRun.rulings | ForEach-Object { [ordered]@{ ruling_id = $_.ruling_id; episode_id = $_.episode_id; fields = $_.fields; result = $_.result; ledger_seq = $_.ledger_seq } }); log = $rulingsOut; log_moverfit = $moRulingsOut } -Human
+            Save-State
         }
-        Set-Content -LiteralPath $done -Value 'rulings finished' -Encoding utf8
-        $ctlKilled = $false
-        # After the flag the control waits for its re-gate's receipt for up to ControlWaitSec (the
-        # receipt wait after the re-report), so the take waits that long plus a margin before a kill.
-        if (-not $ctl.WaitForExit(($ControlWaitSec + 300) * 1000)) {
-            # The control saves its result after every step, so its evidence survives the kill. A
-            # killed control runs no release, so its claim is not released by this run.
-            $ctlKilled = $true
-            Stop-Process -Id $ctl.Id -Force -ErrorAction SilentlyContinue
-            Write-Output "control m-harmless-difference was killed at its wait; its result so far is $mh"
-        }
-        $r3 = Read-ControlResult -Path $mh
-        $rulingsOk = ($null -eq $rulingErr) -and (Test-Path -LiteralPath $rulingsOut) -and (Test-Path -LiteralPath $moRulingsOut)
-        # The re-gate passes when the receipt after the rulings is not blocked: prepared when every
-        # item passes. A control that was killed at its wait does not pass.
-        $regatePassed = ($null -ne $r3) -and (-not $ctlKilled) -and $rulingsOk -and (@('prepared', 'landed') -contains [string]$r3.gate_state)
-        # A passing gate lands its candidate on its own, a moment after the receipt. The take waits
-        # for the latest receipt to show landed (or blocked or stopped), then checks the merged commit.
-        $mhFinal = Join-Path $ctrlRoot 'm-harmless-final-receipt.json'
-        $landState = ''
-        # Saved whenever the control was not killed, so a blocked re-gate leaves its receipt too.
-        # A blocked receipt returns at once; a passing one waits for the land.
-        if (-not $ctlKilled) {
-            try { $landState = Wait-TaskLanded -Task $t0 -Token $controlToken -Path $mhFinal -Seconds $LandWaitSec }
-            catch { Write-Output "get_receipt: $($_.Exception.Message)" }
-        }
-        $landedNow = [bool]($regatePassed -and $landState -eq 'landed' -and (Test-Path -LiteralPath $mhFinal))
-        if ($landedNow) {
-            $script:Evidence.lands['o-1'] = Get-LandCheck -ReceiptFile $mhFinal -What 'o-1'
-        }
-        $script:Evidence.controls['m-harmless-difference'] = @{ task = $t0; result = $mh; receipt_hash = $r3.receipt_hash; gate_state = $r3.gate_state; counts = $r3.counts; head = $r3.head; ruling_error = $rulingErr; rulings_ok = $rulingsOk; receipts_saved = $r3.receipts_saved; killed_at_wait = $ctlKilled; regate_passed = $regatePassed; final_receipt = $mhFinal; final_gate_state = $landState; landed = $landedNow; last_reply = $r3.last_reply; control_error = $r3.error }
+        $r3 = $mhRun.control_result
+        $ctlKilled = $mhRun.killed_at_wait
+        $rulingsOk = $mhRun.rulings_ok
+        $regatePassed = $mhRun.regate_passed
+        $landState = $mhRun.final_gate_state
+        $landedNow = $mhRun.landed
+        if ($landedNow) { $script:Evidence.lands['o-1'] = $mhRun.land }
+        $script:Evidence.controls['m-harmless-difference'] = @{ task = $t0; result = $mh; receipt_hash = $r3.receipt_hash; gate_state = $r3.gate_state; counts = $r3.counts; head = $r3.head; ruling_error = $rulingErr; rulings_ok = $rulingsOk; receipts_saved = $r3.receipts_saved; killed_at_wait = $ctlKilled; regate_passed = $regatePassed; final_receipt = $mhFinalPath; final_gate_state = $landState; landed = $landedNow; last_reply = $r3.last_reply; control_error = $r3.error }
         Save-State
-        Add-Step -Name 'o-1 step 2: seeded harmless difference m-harmless-difference (control): rulings recorded through member HTTP, the re-gate passes and the gate lands o-1' -Actor 'control-seeded (control identity, not a model)' -Provider 'none' -Result $(if ($landedNow) { 'pass' } else { 'fail' }) -Evidence @{ task = $t0; receipt_hash = $r3.receipt_hash; gate_state = $r3.gate_state; final_gate_state = $landState; counts = $r3.counts; rulings_ok = $rulingsOk; killed_at_wait = $ctlKilled; land = $script:Evidence.lands['o-1']; result_file = $mh; final_receipt = $mhFinal }
+        Add-Step -Name 'o-1 step 2: seeded harmless difference m-harmless-difference (control): rulings recorded through member HTTP, the re-gate passes and the gate lands o-1' -Actor 'control-seeded (control identity, not a model)' -Provider 'none' -Result $(if ($landedNow) { 'pass' } else { 'fail' }) -Evidence @{ task = $t0; receipt_hash = $r3.receipt_hash; gate_state = $r3.gate_state; final_gate_state = $landState; counts = $r3.counts; rulings_ok = $rulingsOk; killed_at_wait = $ctlKilled; land = $script:Evidence.lands['o-1']; result_file = $mh; final_receipt = $mhFinalPath }
 
         # Worker A is not in this take: the o-1 land is m-harmless-difference's, and worker B builds
         # and lands in o-8.
