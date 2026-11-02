@@ -57,6 +57,10 @@ try {
     $installDir = Join-Path $env:LOCALAPPDATA 'Programs\acan'
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
     Copy-Item -Path (Join-Path $stage 'acan.exe') -Destination (Join-Path $installDir 'acan.exe') -Force
+    $installedWorker = Test-Path (Join-Path $stage 'acan-worker.exe')
+    if ($installedWorker) {
+        Copy-Item -Path (Join-Path $stage 'acan-worker.exe') -Destination (Join-Path $installDir 'acan-worker.exe') -Force
+    }
     $web = Join-Path $installDir 'web'
     if (Test-Path $web) { Remove-Item -Recurse -Force $web }
     Copy-Item -Path (Join-Path $stage 'web') -Destination $web -Recurse
@@ -76,6 +80,9 @@ if ($entries -notcontains $installDir) {
 
 Write-Host ''
 Write-Host "Installed acan ${tag}: $(Join-Path $installDir 'acan.exe') (web UI in $web)"
+if ($installedWorker) {
+    Write-Host "Installed $(Join-Path $installDir 'acan-worker.exe') (optional): the built-in worker; agents can also connect over MCP."
+}
 Write-Host ''
 Write-Host 'Before you run it:'
 Write-Host "  - Git: 'git --version' must work, and your project must be a git repository with a commit."

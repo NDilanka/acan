@@ -10,6 +10,31 @@ use crate::setup::{KeyOutcome, KeyStatus, SetupError};
 use crate::trace::Traced;
 use crate::usage::CallRecord;
 
+/// The provider name Muse Spark is served under in routing.
+pub const MUSE_SPARK_PROVIDER: &str = "meta";
+
+/// The Muse Spark model ids a route may run. A route to any other model is not Muse Spark. A new
+/// Muse Spark release is one more entry here.
+pub const MUSE_SPARK_MODELS: &[&str] = &["muse-spark-1.3"];
+
+/// Where a role's calls go: the provider that answers them, and the model that provider runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Destination {
+    /// The provider's name in the routing file.
+    pub provider: String,
+    /// The model id the route runs.
+    pub model: String,
+}
+
+impl Destination {
+    /// Whether this destination is Muse Spark: the Meta provider running one of
+    /// [`MUSE_SPARK_MODELS`].
+    #[must_use]
+    pub fn is_muse_spark(&self) -> bool {
+        self.provider == MUSE_SPARK_PROVIDER && MUSE_SPARK_MODELS.contains(&self.model.as_str())
+    }
+}
+
 /// The one interface the rest of Acan uses for model calls.
 ///
 /// Use a concrete client or a `C: ModelClient` bound. The trait is not dyn-compatible,

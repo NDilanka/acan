@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::client::Destination;
 use crate::role::Role;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -141,6 +142,17 @@ impl LlmConfig {
     #[must_use]
     pub fn route_of(&self, role: Role) -> &str {
         &self.routing.route(role).provider
+    }
+
+    /// Where calls for `role` go: the provider its effective route names, explicit or inherited,
+    /// and the model that provider runs for the route. `None` only when the route names no
+    /// provider, which validation rules out.
+    #[must_use]
+    pub fn destination(&self, role: Role) -> Option<Destination> {
+        self.resolve(role).ok().map(|route| Destination {
+            provider: route.provider.name.clone(),
+            model: route.model.to_owned(),
+        })
     }
 
     /// Points `role` at `provider`, using that provider's default model.

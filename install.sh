@@ -86,11 +86,19 @@ bin_dir="${ACAN_BIN_DIR:-$HOME/.local/bin}"
 share_dir="${ACAN_SHARE_DIR:-$HOME/.local/share/acan}"
 mkdir -p "$bin_dir" "$share_dir"
 install -m 755 "$stage/acan" "$bin_dir/acan"
+installed_worker=""
+if [ -f "$stage/acan-worker" ]; then
+  install -m 755 "$stage/acan-worker" "$bin_dir/acan-worker"
+  installed_worker=1
+fi
 rm -rf "$share_dir/web"
 cp -R "$stage/web" "$share_dir/web"
 
 echo
 echo "Installed acan $tag: $bin_dir/acan (web UI in $share_dir/web)"
+if [ -n "$installed_worker" ]; then
+  echo "Installed $bin_dir/acan-worker (optional): the built-in worker; agents can also connect over MCP."
+fi
 case ":$PATH:" in
   *":$bin_dir:"*) ;;
   *)

@@ -107,6 +107,9 @@ pub enum SetupError {
     #[error("no key is set for that provider")]
     NoKey,
 
+    #[error("this key comes from the environment")]
+    FromEnvironment,
+
     #[error("cannot write the keys file")]
     Write(#[source] io::Error),
 

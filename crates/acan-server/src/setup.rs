@@ -140,6 +140,7 @@ fn setup_error(err: SetupError) -> ApiError {
         SetupError::RoutingFile => ApiError::Conflict("routing_file"),
         SetupError::Unavailable => ApiError::Conflict("unavailable"),
         SetupError::NoKey => ApiError::Conflict("no_key"),
+        SetupError::FromEnvironment => ApiError::Conflict("this key comes from the environment"),
         other => ApiError::Internal(other.into()),
     }
 }

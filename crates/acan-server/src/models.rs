@@ -2,12 +2,12 @@
 //! page, or the providers in a repository's routing file, with the offline replies behind them.
 //!
 //! A repository's routing file decides the providers, and its keys come from the environment or
-//! its `.env`. Without one, each provider with a key (saved from the setup page, or set in the
-//! environment) serves the roles it is picked for, or the default provider for each role. A role
-//! with no provider is off, and the setup page says why. A role that needs Meta is off without a
-//! Meta key: its calls are refused before any request is sent, to any provider. Until every other
-//! role has a provider, calls get the offline replies. A key or pick saved while the server runs
-//! takes effect at once.
+//! its `.env`. A role that needs Meta is off unless its route runs Muse Spark. Without a routing
+//! file, each provider with a key (saved from the setup page, or set in the environment) serves
+//! the roles it is picked for, or the default provider for each role. A role with no provider is
+//! off, and the setup page says why. A role that needs Meta is off without a Meta key. An off role
+//! is refused before any request is sent, to any provider. Until every other role has a provider,
+//! calls get the offline replies. A key or pick saved while the server runs takes effect at once.
 //!
 //! A foreman or vision call never falls back. When it fails, its job fails with the provider error,
 //! so no offline split or draft stands in for a live one. Other roles keep a labelled offline
@@ -18,10 +18,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use acan_llm::{
-    ApiKeys, ChatRequest, ChatResponse, ConfigError, KeyFile, KeyOutcome, KeySource, KeyStatus,
-    LlmConfig, LlmError, ModelClient, OpenAiCompatible, Plan, ProviderStatus, Role, RoleStatus,
+    ApiKeys, ChatRequest, ChatResponse, ConfigError, KeyFile, KeyOrigin, KeyOutcome, KeySource,
+    KeyStatus, LlmConfig, LlmError, ModelClient, OpenAiCompatible, Plan, ProviderStatus, Role,
     SavedSetup, SetupError, Structured, Traced, UsageLedger, catalog, environment_keys,
-    is_provider, resolve, save_checked,
+    is_provider, resolve, routing_roles, save_checked,
 };
 use anyhow::Context;
 use schemars::JsonSchema;
@@ -91,21 +91,9 @@ impl State {
         let providers = config
             .providers()
             .iter()
-            .map(|provider| ProviderStatus {
-                name: provider.name.clone(),
-                saved: false,
-                environment: keys.has(&provider.name),
-            })
+            .map(|provider| ProviderStatus::new(&provider.name, false, keys.has(&provider.name)))
             .collect();
-        let roles = Role::ALL
-            .iter()
-            .map(|&role| RoleStatus {
-                role,
-                provider: Some(config.route_of(role).to_owned()),
-                picked: false,
-                off_reason: None,
-            })
-            .collect();
+        let roles = routing_roles(&config);
         let status = KeyStatus {
             configured: !keys.is_empty(),
             source: Some(KeySource::RoutingFile),
@@ -391,6 +379,15 @@ impl ModelClient for Models {
         let file = self.writable()?;
         if !is_provider(provider) {
             return Err(SetupError::UnknownProvider);
+        }
+        // The key in use decides. The environment's key is not the page's to remove, and a saved
+        // key under it stays until the environment key is unset.
+        let from_environment =
+            self.current().status.providers.iter().any(|known| {
+                known.name == provider && known.source == Some(KeyOrigin::Environment)
+            });
+        if from_environment {
+            return Err(SetupError::FromEnvironment);
         }
         let removed = file.remove_key(provider)?;
         self.sync_from(file)?;
@@ -707,5 +704,115 @@ provider = "meta"
             })
         ));
         assert!(models.ledger().records().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_routed_vision_that_is_not_muse_spark_is_refused_and_never_sent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "foreman answer"}
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })))
+            .mount(&server)
+            .await;
+        // The foreman, worker and fast roles run on baseten. Vision inherits the foreman's route,
+        // which is not Muse Spark, so vision must be refused without a request to baseten.
+        let config = LlmConfig::from_toml_str(&format!(
+            r#"
+[[providers]]
+name = "baseten"
+base_url = "{}/v1"
+api_key_env = "BASETEN_API_KEY"
+default_model = "meta-models/muse-spark-open-1026"
+
+[routing.foreman]
+provider = "baseten"
+
+[routing.worker]
+provider = "baseten"
+
+[routing.fast]
+provider = "baseten"
+"#,
+            server.uri()
+        ))
+        .expect("the test config is valid");
+        let mut keys = ApiKeys::default();
+        keys.insert(
+            "baseten",
+            acan_llm::ApiKey::new("baseten-routed-key-0123456789"),
+        );
+        let models = Models::live(config, keys).expect("the models build");
+        let request = || ChatRequest {
+            messages: vec![acan_llm::Message::user("hello")],
+            ..ChatRequest::default()
+        };
+
+        let status = models.key_status();
+        assert_eq!(status.roles[3].provider, None);
+        assert_eq!(
+            status.roles[3].off_reason,
+            Some("it needs a Meta Muse Spark route")
+        );
+        assert!(matches!(
+            models.chat(Role::Vision, request()).await,
+            Err(LlmError::RoleOff {
+                role: Role::Vision,
+                reason: "it needs a Meta Muse Spark route",
+            })
+        ));
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "vision was not sent to baseten"
+        );
+
+        let answer = models
+            .chat(Role::Foreman, request())
+            .await
+            .expect("the foreman's route still answers");
+        assert_eq!(answer.content.as_deref(), Some("foreman answer"));
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_key_from_the_environment_cannot_be_removed_from_the_page() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = keys_file(&dir);
+        file.set_key("baseten", "baseten-saved-key-0123456789")
+            .expect("saves");
+        let models = models_with(&dir, &file);
+        let mut environment = ApiKeys::default();
+        environment.insert(
+            "meta",
+            acan_llm::ApiKey::new("environment-meta-key-0123456789"),
+        );
+        let plan = resolve(&SavedSetup::default(), &environment).expect("resolves");
+        models.replace(State::from_plan(plan, true, &models.ledger).expect("builds"));
+        assert_eq!(
+            models.key_status().providers[0].source,
+            Some(KeyOrigin::Environment)
+        );
+
+        assert!(matches!(
+            models.remove_key("meta"),
+            Err(SetupError::FromEnvironment)
+        ));
+        assert!(
+            matches!(models.remove_key("baseten"), Ok(true)),
+            "a saved key is still removed"
+        );
     }
 }

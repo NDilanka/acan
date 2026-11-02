@@ -7,6 +7,7 @@
 
 use serde::Serialize;
 
+use crate::client::Destination;
 use crate::config::{ConfigError, LlmConfig};
 use crate::key::ApiKeys;
 use crate::providers::{PROVIDERS, catalog, config_for};
@@ -17,8 +18,22 @@ use crate::setup::SavedSetup;
 /// Meta key".
 const NEEDS_META: &str = "it needs a Meta key";
 
+/// Why a role that needs Meta is off under a routing file whose route is not Muse Spark. Read the
+/// same way as [`NEEDS_META`].
+const NEEDS_MUSE_SPARK: &str = "it needs a Meta Muse Spark route";
+
 /// Why a role is off when no provider has a key.
 const NO_KEY: &str = "no model key is set";
+
+/// Where the key a provider uses came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyOrigin {
+    /// The environment or the repository's `.env` sets the key. The setup page cannot remove it.
+    Environment,
+    /// A key saved from the setup page.
+    Saved,
+}
 
 /// Whether a provider has a key, and where the key came from. Never the key itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -30,6 +45,24 @@ pub struct ProviderStatus {
     /// Whether the environment or the repository's `.env` sets a key. That key wins over a saved
     /// one.
     pub environment: bool,
+    /// The key in use: the environment's when it sets one, else the saved key. `None` when no key
+    /// is set.
+    pub source: Option<KeyOrigin>,
+}
+
+impl ProviderStatus {
+    /// The status of `name`, given whether a key is saved and whether the environment sets one.
+    #[must_use]
+    pub fn new(name: &str, saved: bool, environment: bool) -> Self {
+        Self {
+            name: name.to_owned(),
+            saved,
+            environment,
+            source: environment
+                .then_some(KeyOrigin::Environment)
+                .or(saved.then_some(KeyOrigin::Saved)),
+        }
+    }
 }
 
 /// The provider one role uses, or why the role is off.
@@ -87,10 +120,8 @@ pub fn environment_keys() -> Result<ApiKeys, ConfigError> {
 pub fn resolve(saved: &SavedSetup, environment: &ApiKeys) -> Result<Plan, ConfigError> {
     let providers: Vec<ProviderStatus> = PROVIDERS
         .iter()
-        .map(|&name| ProviderStatus {
-            name: name.to_owned(),
-            saved: saved.keys.contains_key(name),
-            environment: environment.has(name),
+        .map(|&name| {
+            ProviderStatus::new(name, saved.keys.contains_key(name), environment.has(name))
         })
         .collect();
     let available: Vec<&'static str> = PROVIDERS
@@ -148,6 +179,28 @@ fn preference(role: Role, needs_meta: bool) -> &'static [&'static str] {
         Role::Worker | Role::Fast => &["baseten", "fireworks", "meta"],
         Role::Vision => &["meta"],
     }
+}
+
+/// The roles under a routing file. The file routes every role, so each role names its provider.
+/// A role that needs Meta is off unless its effective route runs Muse Spark, and an off role is
+/// never sent to another provider. Its reason is "it needs a Meta Muse Spark route".
+#[must_use]
+pub fn routing_roles(config: &LlmConfig) -> Vec<RoleStatus> {
+    Role::ALL
+        .iter()
+        .map(|&role| {
+            let muse_spark = config
+                .destination(role)
+                .is_some_and(|destination: Destination| destination.is_muse_spark());
+            let off = role.needs_meta() && !muse_spark;
+            RoleStatus {
+                role,
+                provider: (!off).then(|| config.route_of(role).to_owned()),
+                picked: false,
+                off_reason: off.then_some(NEEDS_MUSE_SPARK),
+            }
+        })
+        .collect()
 }
 
 /// Picks the provider for one role. `available` lists the providers that have a key. A saved
@@ -347,5 +400,115 @@ mod tests {
         let picked = choose(Role::Worker, true, Some("baseten"), &["baseten", "meta"]);
         assert_eq!(picked.provider.as_deref(), Some("meta"));
         assert!(!picked.picked);
+    }
+
+    fn environment(names: &[&str]) -> ApiKeys {
+        let mut keys = ApiKeys::default();
+        for &name in names {
+            keys.insert(name, ApiKey::new("environment-key-0123456789"));
+        }
+        keys
+    }
+
+    #[test]
+    fn a_key_from_the_environment_is_shown_as_its_source() {
+        let plan = resolve(&saved(&[], &[]), &environment(&["meta"])).expect("resolves");
+        assert_eq!(plan.providers[0].source, Some(KeyOrigin::Environment));
+        assert_eq!(plan.providers[1].source, None);
+        let text = serde_json::to_value(&plan.providers[0]).expect("serializes");
+        assert_eq!(text["source"], "environment");
+    }
+
+    #[test]
+    fn a_saved_key_is_its_source_until_the_environment_sets_one() {
+        let plan = resolve(&saved(&["baseten"], &[]), &ApiKeys::default()).expect("resolves");
+        assert_eq!(plan.providers[1].source, Some(KeyOrigin::Saved));
+        let plan =
+            resolve(&saved(&["baseten"], &[]), &environment(&["baseten"])).expect("resolves");
+        assert_eq!(plan.providers[1].source, Some(KeyOrigin::Environment));
+    }
+
+    #[test]
+    fn a_picked_environment_key_serves_its_role() {
+        let plan = resolve(
+            &saved(&["baseten"], &[(Role::Worker, "meta")]),
+            &environment(&["meta"]),
+        )
+        .expect("resolves");
+        assert_eq!(served_by(&plan)[1], Some("meta"));
+        assert!(plan.roles[1].picked);
+    }
+
+    /// A routing file that routes the foreman to `foreman` and vision by `vision` (a `[routing.vision]`
+    /// block, or nothing so vision inherits the foreman's route).
+    fn routing(foreman: &str, vision: &str) -> LlmConfig {
+        LlmConfig::from_toml_str(&format!(
+            r#"
+[[providers]]
+name = "meta"
+base_url = "https://api.meta.ai/v1"
+api_key_env = "META_API_KEY"
+default_model = "muse-spark-1.3"
+
+[[providers]]
+name = "baseten"
+base_url = "https://inference.baseten.co/v1"
+api_key_env = "BASETEN_API_KEY"
+default_model = "meta-models/muse-spark-open-1026"
+
+[routing.foreman]
+provider = "{foreman}"
+
+[routing.worker]
+provider = "baseten"
+
+[routing.fast]
+provider = "baseten"
+{vision}
+"#
+        ))
+        .expect("the test config is valid")
+    }
+
+    #[test]
+    fn a_vision_route_to_muse_spark_on_meta_is_live() {
+        let inherits = routing_roles(&routing("meta", ""));
+        assert_eq!(inherits[3].provider.as_deref(), Some("meta"));
+        assert_eq!(inherits[3].off_reason, None);
+
+        let explicit = routing_roles(&routing("baseten", "[routing.vision]\nprovider = \"meta\""));
+        assert_eq!(explicit[3].provider.as_deref(), Some("meta"));
+        assert_eq!(explicit[3].off_reason, None);
+    }
+
+    #[test]
+    fn a_vision_route_that_inherits_a_non_meta_foreman_is_off_and_names_the_route() {
+        let roles = routing_roles(&routing("baseten", ""));
+        assert_eq!(roles[3].provider, None, "never sent to another provider");
+        assert_eq!(
+            roles[3].off_message().as_deref(),
+            Some("vision is off: it needs a Meta Muse Spark route")
+        );
+        assert!(
+            roles[..3].iter().all(|role| role.off_reason.is_none()),
+            "the other roles are live"
+        );
+    }
+
+    #[test]
+    fn a_vision_route_to_meta_with_another_model_is_off() {
+        let roles = routing_roles(&routing(
+            "meta",
+            "[routing.vision]\nprovider = \"meta\"\nmodel = \"muse-spark-open\"",
+        ));
+        assert_eq!(roles[3].provider, None);
+        assert_eq!(roles[3].off_reason, Some(NEEDS_MUSE_SPARK));
+    }
+
+    #[test]
+    fn an_explicit_vision_route_to_baseten_is_off_even_when_the_foreman_is_meta() {
+        let roles = routing_roles(&routing("meta", "[routing.vision]\nprovider = \"baseten\""));
+        assert_eq!(roles[3].provider, None);
+        assert_eq!(roles[3].off_reason, Some(NEEDS_MUSE_SPARK));
     }
 }
