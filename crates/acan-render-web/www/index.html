@@ -85,11 +85,26 @@
   #alpha[hidden] { display: none; }
   .update { font: 11px var(--sans); color: var(--muted); }
   .update a { color: var(--muted); text-decoration: underline; }
-  #report-bug, #bug-copy { font: 11px var(--mono); padding: 2px 8px; background: var(--face); color: var(--ink);
+  #report-bug { font: 11px var(--mono); padding: 2px 8px; background: var(--face); color: var(--ink);
     border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
   #report-bug:disabled { color: var(--muted); cursor: default; }
   #bug-note { font: 11px/1.4 var(--sans); max-width: 300px; white-space: normal; }
-  #bug-note a { color: var(--ink); }
+  /* The bug report dialog: the full pre-filled issue, shown before anything opens. */
+  dialog { width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 32px); box-sizing: border-box;
+    margin: auto; padding: 16px 18px; border: 1px solid var(--rule); border-radius: 10px; background: var(--face);
+    color: var(--ink); font: 13px/1.45 var(--sans); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12); }
+  dialog::backdrop { background: rgba(20, 20, 22, 0.25); }
+  dialog h2 { margin: 0 0 4px; font: 600 14px/1.3 var(--sans); }
+  dialog p { margin: 6px 0; }
+  dialog .bug-title { font: 600 12px/1.4 var(--mono); overflow-wrap: anywhere; }
+  dialog pre { margin: 8px 0 0; padding: 10px 12px; max-height: 46vh; overflow: auto; white-space: pre-wrap;
+    overflow-wrap: anywhere; font: 11px/1.45 var(--mono); background: #fafafa; border: 1px solid var(--rule); border-radius: 6px; }
+  .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 12px; }
+  .dialog-actions button, .dialog-actions a { font: 12px/1.3 var(--mono); padding: 4px 10px; border-radius: 4px;
+    border: 1px solid var(--rule); background: var(--face); color: var(--ink); cursor: pointer; text-decoration: none; }
+  .dialog-actions button:hover, .dialog-actions a:hover { border-color: var(--ink); }
+  .dialog-actions #bug-copy { margin-right: auto; }
+  .dialog-actions #bug-open { background: var(--ink); color: #ffffff; border-color: var(--ink); }
   #hint { top: 12px; left: 50%; transform: translateX(-50%); color: #57575a; white-space: nowrap; }
   kbd { font: 11px ui-monospace, Consolas, monospace; color: var(--ink); background: var(--face);
     border: 1px solid #e5e5e2; border-radius: 4px; padding: 0 4px; }
@@ -246,7 +261,20 @@
 <svg id="pov-reticle" hidden aria-hidden="true"><path id="pov-bracket" d=""></path></svg>
 <div class="island" id="pov-chip" hidden><span class="dot" id="pov-dot"></span><span class="inside">inside</span><b id="pov-agent"></b><span class="line" id="pov-line"></span><kbd>Esc</kbd><span class="alt" id="pov-alt" hidden></span></div>
 <div class="island" id="shell"><span class="brand">Acan</span><span class="repo" id="repo"></span><span id="link" class="muted">starting</span><span id="stale" class="stale" hidden></span><span id="version" class="version" hidden></span></div>
-<div class="island" id="alpha" hidden><span id="update" class="update" hidden><span id="update-text"></span> <a id="update-link" target="_blank" rel="noopener">open release</a></span><button id="report-bug" type="button">Report a bug</button><span id="bug-note" class="muted" hidden></span><button id="bug-copy" type="button" hidden>Copy full report</button></div>
+<div class="island" id="alpha" hidden><span id="update" class="update" hidden><span id="update-text"></span> <a id="update-link" target="_blank" rel="noopener">open release</a></span><button id="report-bug" type="button">Report a bug</button><span id="bug-note" class="muted" hidden></span></div>
+<dialog id="bug-dialog" aria-labelledby="bug-heading">
+  <h2 id="bug-heading">Bug report</h2>
+  <p class="muted">This is the report the page prepared, in full. Nothing is posted: you submit the issue on GitHub.</p>
+  <p id="bug-title" class="bug-title"></p>
+  <pre id="bug-body"></pre>
+  <p id="bug-truncated" class="muted" hidden>The link leaves out older log lines. Copy the full report and paste it into the issue.</p>
+  <p id="bug-copied" class="muted" hidden></p>
+  <div class="dialog-actions">
+    <button type="button" id="bug-copy" hidden>Copy full report</button>
+    <button type="button" id="bug-cancel">Cancel</button>
+    <a id="bug-open" target="_blank" rel="noopener">Open on GitHub</a>
+  </div>
+</dialog>
 <div class="island" id="order" hidden><span id="order-line" class="muted"></span></div>
 <div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle</div>
 <aside id="card" class="island" hidden></aside>

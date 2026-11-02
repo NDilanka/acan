@@ -43,15 +43,16 @@ export function versionLine(info) {
   return `acan ${info.version} · ${info.os} ${info.arch}${commit}`;
 }
 
-// What the bug button does with the answer to GET /api/bug-report. A report opens at its URL, and
-// `truncated` says the URL left log lines out, so the page offers the full body to copy. Any other
-// answer is one plain sentence.
+// What the bug button does with the answer to GET /api/bug-report. The report is shown in full
+// first, and its link opens only when the tester chooses it. `truncated` says the link left log
+// lines out, so the page offers the full body to copy. Any other answer is one plain sentence.
 export function bugReportOutcome(status, payload) {
   const url = status === 200 ? safeLink(payload?.url) : null;
   if (url !== null) {
     return {
       ok: true,
       url,
+      title: typeof payload.title === "string" ? payload.title : "",
       body: typeof payload.body === "string" ? payload.body : "",
       truncated: payload.truncated === true,
     };

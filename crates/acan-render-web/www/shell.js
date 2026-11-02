@@ -16,7 +16,9 @@ let reportBody = "";
 
 export function bindShell() {
   $("report-bug").addEventListener("click", reportBug);
+  $("bug-open").addEventListener("click", openReport);
   $("bug-copy").addEventListener("click", copyReport);
+  $("bug-cancel").addEventListener("click", () => $("bug-dialog").close());
 }
 
 // Shows what the page can show for the token it holds, and checks for a newer build. Called at
@@ -72,15 +74,12 @@ function paintUpdate(update) {
   $("update-link").href = notice.href;
 }
 
-// Opens the bug report in a new tab. The tab opens at once, because a browser blocks a tab that
-// opens only after the answer arrives. If the browser blocks it anyway, the note keeps the link.
+// Fetches the pre-filled report and shows it in full in a dialog. Nothing opens until the tester
+// chooses "Open on GitHub", and nothing is posted: the issue is submitted on GitHub.
 async function reportBug() {
   if (!state.token) return;
   const button = $("report-bug");
   button.disabled = true;
-  $("bug-copy").hidden = true;
-  const tab = window.open("about:blank", "_blank");
-  if (tab) tab.opener = null;
   showNote("Preparing the bug report...");
   let outcome;
   try {
@@ -94,36 +93,42 @@ async function reportBug() {
   }
   button.disabled = false;
   if (!outcome.ok) {
-    tab?.close();
     showNote(outcome.message);
     return;
   }
-  if (tab) tab.location.href = outcome.url;
+  showBugDialog(outcome);
+}
+
+function showBugDialog(outcome) {
   reportBody = outcome.body;
+  $("bug-note").hidden = true;
+  $("bug-title").textContent = outcome.title;
+  $("bug-body").textContent = outcome.body;
+  $("bug-open").href = outcome.url;
+  $("bug-truncated").hidden = !outcome.truncated;
   $("bug-copy").hidden = !outcome.truncated;
-  if (tab) showNote("The bug report opened in a new tab.");
-  else showNote("The browser blocked the new tab. Open the report here:", outcome.url);
+  $("bug-copied").hidden = true;
+  $("bug-dialog").showModal();
+}
+
+// The tester chose the link, so the browser opens it in a new tab. The dialog closes with it.
+function openReport() {
+  $("bug-dialog").close();
+  showNote("The bug report opened in a new tab. Submit the issue there.");
 }
 
 async function copyReport() {
   try {
     await navigator.clipboard.writeText(reportBody);
-    showNote("The full report is copied.");
+    $("bug-copied").textContent = "The full report is copied.";
   } catch {
-    showNote("The page could not copy the full report.");
+    $("bug-copied").textContent = "The page could not copy the full report.";
   }
+  $("bug-copied").hidden = false;
 }
 
-function showNote(text, href) {
+function showNote(text) {
   const note = $("bug-note");
-  note.replaceChildren(text);
-  if (href) {
-    const link = document.createElement("a");
-    link.href = href;
-    link.target = "_blank";
-    link.rel = "noopener";
-    link.textContent = "bug report";
-    note.append(" ", link);
-  }
+  note.textContent = text;
   note.hidden = false;
 }

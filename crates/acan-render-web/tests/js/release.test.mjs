@@ -102,15 +102,23 @@ test("the shell bar shows the short version, and nothing when there is no answer
   assert.equal(versionLabel({}), "");
 });
 
-test("a bug report that opens returns its link, its body, and whether the body is complete", () => {
+test("a bug report returns its title, link, full body, and whether the link left log lines out", () => {
   const url = "https://github.com/NDilanka/acan/issues/new?title=Alpha";
   assert.deepEqual(
     bugReportOutcome(200, { url, title: "t", body: "## What happened", truncated: false }),
-    { ok: true, url, body: "## What happened", truncated: false },
+    { ok: true, url, title: "t", body: "## What happened", truncated: false },
   );
   assert.deepEqual(
     bugReportOutcome(200, { url, title: "t", body: "full text", truncated: true }),
-    { ok: true, url, body: "full text", truncated: true },
+    { ok: true, url, title: "t", body: "full text", truncated: true },
+  );
+});
+
+test("a report with no title or body text still shows, with empty text", () => {
+  const url = "https://github.com/NDilanka/acan/issues/new";
+  assert.deepEqual(
+    bugReportOutcome(200, { url }),
+    { ok: true, url, title: "", body: "", truncated: false },
   );
 });
 
