@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use acan_intent::admit::TourRejection;
 use acan_intent::provenance::ModelProposal;
@@ -21,7 +21,7 @@ use acan_intent::{
 };
 use acan_llm::{ChatRequest, LlmError, Message, ModelClient, Role};
 use serde_json::{Value, json};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::host::Host;
 
@@ -32,16 +32,26 @@ const DIRECTOR_MAX_TOKENS: u32 = 2_000;
 /// keeps running after the wait, and its answer is cached for the receipt.
 pub(crate) const DIRECTOR_WAIT: Duration = Duration::from_secs(20);
 
-/// How long one director call may run. A call that is still running then is refused, and the
-/// refusal is cached for the receipt like any other.
+/// How long one director call may take, counted from when it is accepted, so the wait for a slot
+/// is part of it. A call still running then is refused, and the receipt is asked again after
+/// [`TRANSIENT_RETRY`].
 pub(crate) const DIRECTOR_DEADLINE: Duration = Duration::from_secs(90);
 
 /// How many director calls run at once. A call past these waits for a slot, so a burst of new
 /// receipts cannot open a call for each one.
 const DIRECTOR_CALLS_AT_ONCE: usize = 2;
 
+/// How many director calls may wait for a slot as well. A view that finds the running and the
+/// waiting calls all taken gets the deterministic tour, and no call is made for it.
+const DIRECTOR_CALLS_WAITING: usize = 8;
+
+/// How long a refusal that a later call may not repeat is kept before its receipt is asked again.
+/// A view in that window gets the deterministic tour and no call.
+const TRANSIENT_RETRY: Duration = Duration::from_secs(30);
+
 /// How many receipts keep their director answer. The least recently shown one leaves first, and a
-/// receipt that has left is asked again when it is shown.
+/// receipt that has left is asked again when it is shown. A call that has not answered yet is not
+/// left out.
 const RECEIPTS_KEPT: usize = 64;
 
 /// The director orders the walk and does not vary its answer.
@@ -76,6 +86,26 @@ pub(crate) enum TourError {
     /// The context or the catalog is not JSON.
     #[error("the tour's JSON does not parse or serialize: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl TourError {
+    /// Whether a later call may get a different answer: the provider timed out, failed or ran out
+    /// of quota, or the key is not saved yet. A reply that is not a tour, a view with nothing to
+    /// visit and a route that is not Muse Spark give the same answer again.
+    fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::Director(
+                LlmError::MissingKey { .. }
+                    | LlmError::PaymentRequired { .. }
+                    | LlmError::RateLimited { .. }
+                    | LlmError::ServerError { .. }
+                    | LlmError::Status { .. }
+                    | LlmError::Timeout { .. }
+                    | LlmError::Transport { .. }
+            )
+        )
+    }
 }
 
 /// Asks the director model for a tour of `view`. The call goes to the director's route, which
@@ -154,22 +184,41 @@ pub(crate) fn deterministic(view: &PlantView) -> Result<TourView, TourError> {
 pub(crate) enum DirectorAnswer {
     /// The tour the director proposed, with the model that proposed it.
     Proposal(ModelProposal<Tour>),
-    /// The call failed, ran past its deadline, or its reply is not a tour.
+    /// The call failed for a reason the receipt keeps: its reply is not a tour, or its route is
+    /// not Muse Spark on Meta.
     Refused(String),
+    /// The call timed out, or the provider failed. The receipt is asked again after
+    /// [`TRANSIENT_RETRY`] from `at`.
+    Transient { reason: String, at: Instant },
 }
 
-/// A receipt's answer, shared by the call that makes it and by every view that waits for it.
+impl DirectorAnswer {
+    fn transient(reason: String) -> Self {
+        Self::Transient {
+            reason,
+            at: Instant::now(),
+        }
+    }
+}
+
+/// A receipt's answer, shared by the call that makes it and by every view that waits for it. It
+/// is `None` until the call has ended.
 type Job = Arc<watch::Sender<Option<DirectorAnswer>>>;
 
 /// The director's answer for each receipt, kept for the life of the server up to
 /// [`RECEIPTS_KEPT`] receipts. A receipt is asked once while its answer is kept, so one receipt
-/// costs at most one director call.
+/// costs at most one director call at a time.
 pub(crate) struct TourCache {
     jobs: Mutex<Jobs>,
-    calls: Arc<Semaphore>,
+    /// One ticket per call that is accepted and has not ended, running or waiting for a slot.
+    /// A call that finds no ticket is not accepted.
+    accepted: Arc<Semaphore>,
+    /// One slot per call running against the model.
+    slots: Arc<Semaphore>,
 }
 
 /// The jobs by receipt, and the receipts in the order they were last shown, least recent first.
+/// `recent` holds exactly the keys of `by_receipt`.
 #[derive(Default)]
 struct Jobs {
     by_receipt: HashMap<ReceiptHash, Job>,
@@ -179,10 +228,67 @@ struct Jobs {
 impl Jobs {
     /// Marks `hash` as the most recently shown receipt.
     fn touch(&mut self, hash: &ReceiptHash) {
-        let before = self.recent.len();
         self.recent.retain(|known| known != hash);
-        if self.recent.len() < before {
-            self.recent.push_back(*hash);
+        self.recent.push_back(*hash);
+    }
+
+    /// Keeps `job` as the answer for `hash`, then leaves out the least recently shown answers that
+    /// have ended while more than [`RECEIPTS_KEPT`] receipts are kept.
+    fn insert(&mut self, hash: ReceiptHash, job: Job) {
+        self.by_receipt.insert(hash, job);
+        self.touch(&hash);
+        let mut oldest = 0;
+        while self.by_receipt.len() > RECEIPTS_KEPT && oldest < self.recent.len() {
+            let known = self.recent[oldest];
+            let running = self
+                .by_receipt
+                .get(&known)
+                .is_some_and(|job| job.borrow().is_none());
+            if running {
+                oldest += 1;
+            } else {
+                self.recent.remove(oldest);
+                self.by_receipt.remove(&known);
+            }
+        }
+    }
+}
+
+/// What a view gets for its receipt from the cache.
+enum Claim {
+    /// The receipt's answer is kept, or its call is still running. No call is made.
+    Shown(Job),
+    /// A call is accepted for the receipt. It must run with its job and its ticket.
+    Accepted(Job, OwnedSemaphorePermit),
+    /// Every ticket is taken. No call is made, and nothing is kept for the receipt.
+    Busy,
+}
+
+/// Whether `job` holds a refusal that a later call may not repeat, and whose retry interval has
+/// passed at `now`.
+fn retry_due(job: &Job, now: Instant) -> bool {
+    matches!(
+        &*job.borrow(),
+        Some(DirectorAnswer::Transient { at, .. }) if now.saturating_duration_since(*at) >= TRANSIENT_RETRY
+    )
+}
+
+/// Publishes a call's answer when the call ends. A call that ends without one, because its task
+/// was stopped, publishes a transient refusal, so no view waits on it for good.
+struct Settle(Job);
+
+impl Settle {
+    fn answer(&self, answer: DirectorAnswer) {
+        self.0.send_replace(Some(answer));
+    }
+}
+
+impl Drop for Settle {
+    fn drop(&mut self) {
+        if self.0.borrow().is_none() {
+            self.0.send_replace(Some(DirectorAnswer::transient(
+                "the server stopped before the director answered".to_owned(),
+            )));
         }
     }
 }
@@ -191,42 +297,43 @@ impl Default for TourCache {
     fn default() -> Self {
         Self {
             jobs: Mutex::new(Jobs::default()),
-            calls: Arc::new(Semaphore::new(DIRECTOR_CALLS_AT_ONCE)),
+            accepted: Arc::new(Semaphore::new(
+                DIRECTOR_CALLS_AT_ONCE + DIRECTOR_CALLS_WAITING,
+            )),
+            slots: Arc::new(Semaphore::new(DIRECTOR_CALLS_AT_ONCE)),
         }
     }
 }
 
 impl TourCache {
-    /// The job that answers for `hash`, and whether this call must start it. A receipt that is
-    /// kept is marked as shown; the least recently shown one leaves when the cache is full.
-    fn job(&self, hash: &ReceiptHash) -> (Job, bool) {
+    /// What `hash` gets at `now`: its kept answer or running call, a new accepted call, or none
+    /// when every ticket is taken.
+    fn claim(&self, hash: &ReceiptHash, now: Instant) -> Claim {
         let mut jobs = self
             .jobs
             .lock()
             .expect("the tour cache lock is not poisoned");
-        if let Some(job) = jobs.by_receipt.get(hash).cloned() {
+        if let Some(job) = jobs.by_receipt.get(hash).cloned()
+            && !retry_due(&job, now)
+        {
             jobs.touch(hash);
-            return (job, false);
+            return Claim::Shown(job);
         }
+        let Ok(ticket) = Arc::clone(&self.accepted).try_acquire_owned() else {
+            return Claim::Busy;
+        };
         let (answer, _) = watch::channel(None);
         let job = Arc::new(answer);
-        jobs.by_receipt.insert(*hash, Arc::clone(&job));
-        jobs.recent.push_back(*hash);
-        while jobs.by_receipt.len() > RECEIPTS_KEPT {
-            let Some(oldest) = jobs.recent.pop_front() else {
-                break;
-            };
-            jobs.by_receipt.remove(&oldest);
-        }
-        (job, true)
+        jobs.insert(*hash, Arc::clone(&job));
+        Claim::Accepted(job, ticket)
     }
 
     /// The slots a director call takes while it runs.
-    fn calls(&self) -> Arc<Semaphore> {
-        Arc::clone(&self.calls)
+    fn slots(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.slots)
     }
 
-    /// The director's answer for `hash`, once its call has finished.
+    /// The director's answer for `hash`, once its call has ended.
     #[cfg(test)]
     pub(crate) fn outcome(&self, hash: &ReceiptHash) -> Option<DirectorAnswer> {
         let jobs = self
@@ -236,6 +343,22 @@ impl TourCache {
         jobs.by_receipt
             .get(hash)
             .and_then(|job| job.borrow().clone())
+    }
+
+    /// Whether the cache keeps a job for `hash`, answered or not.
+    #[cfg(test)]
+    fn holds(&self, hash: &ReceiptHash) -> bool {
+        self.jobs
+            .lock()
+            .expect("the tour cache lock is not poisoned")
+            .by_receipt
+            .contains_key(hash)
+    }
+
+    /// How many calls are accepted and have not ended.
+    #[cfg(test)]
+    fn calls_accepted(&self) -> usize {
+        DIRECTOR_CALLS_AT_ONCE + DIRECTOR_CALLS_WAITING - self.accepted.available_permits()
     }
 }
 
@@ -264,7 +387,7 @@ pub(crate) async fn fill_within<C: ModelClient + 'static>(
                 None
             }
         },
-        Some(DirectorAnswer::Refused(_)) | None => None,
+        Some(DirectorAnswer::Refused(_) | DirectorAnswer::Transient { .. }) | None => None,
     };
     view.tour = match admitted {
         Some(tour) => Some(tour),
@@ -280,8 +403,8 @@ pub(crate) async fn fill_within<C: ModelClient + 'static>(
 }
 
 /// The director's answer for `view`, starting its call if none has started, or `None` when the
-/// call has not answered within `wait`. Once the server is shutting down no call starts, and the
-/// answer is `None`.
+/// call has not answered within `wait`. Once the server is shutting down, or when too many calls
+/// are waiting, no call starts and the answer is `None`.
 async fn directed<C: ModelClient + 'static>(
     host: &Host<C>,
     view: &PlantView,
@@ -290,10 +413,20 @@ async fn directed<C: ModelClient + 'static>(
     if *host.shutdown_signal().borrow() {
         return None;
     }
-    let (job, started) = host.tours().job(&view.receipt_hash);
-    if started {
-        spawn(host, view.clone(), job.clone());
-    }
+    let job = match host.tours().claim(&view.receipt_hash, Instant::now()) {
+        Claim::Shown(job) => job,
+        Claim::Accepted(job, ticket) => {
+            spawn(host, view.clone(), job.clone(), ticket);
+            job
+        }
+        Claim::Busy => {
+            tracing::warn!(
+                receipt = %view.receipt_hash,
+                "too many director calls are waiting; the plant view serves the deterministic tour"
+            );
+            return None;
+        }
+    };
     let mut answer = job.subscribe();
     match tokio::time::timeout(wait, answer.wait_for(Option::is_some)).await {
         Ok(Ok(ready)) => ready.clone(),
@@ -309,31 +442,36 @@ async fn directed<C: ModelClient + 'static>(
 }
 
 /// Runs the director's call for `view` in its own task and publishes its answer on `job`. The
-/// call is cancelled when the server shuts down, and then publishes nothing.
-fn spawn<C: ModelClient + 'static>(host: &Host<C>, view: PlantView, job: Job) {
+/// ticket is held until the task ends. Shutdown ends the task wherever it is, waiting for a slot
+/// or calling the model: a call that has not started makes no request, and a running one is
+/// cancelled. A stopped task publishes a transient refusal, so no view waits on it.
+fn spawn<C: ModelClient + 'static>(
+    host: &Host<C>,
+    view: PlantView,
+    job: Job,
+    ticket: OwnedSemaphorePermit,
+) {
     let shutdown = host.shutdown_signal();
-    let slots = host.tours().calls();
+    let slots = host.tours().slots();
     let host = host.clone();
     tokio::spawn(async move {
-        let mut call = tokio::spawn(async move {
-            answer_within(host.client(), &view, &slots, DIRECTOR_DEADLINE).await
-        });
+        let _ticket = ticket;
+        let settle = Settle(job);
         let answer = tokio::select! {
-            joined = &mut call => {
-                joined.unwrap_or_else(|err| DirectorAnswer::Refused(format!("the director task: {err}")))
-            }
-            () = stopped(shutdown) => {
-                call.abort();
-                return;
-            }
+            biased;
+            () = stopped(shutdown) => return,
+            answer = answer_within(host.client(), &view, &slots, DIRECTOR_DEADLINE) => answer,
         };
-        if let DirectorAnswer::Refused(reason) = &answer {
-            tracing::warn!(
-                reason = %reason,
-                "the director's tour was not served; the plant view serves the deterministic tour"
-            );
+        match &answer {
+            DirectorAnswer::Proposal(_) => {}
+            DirectorAnswer::Refused(reason) | DirectorAnswer::Transient { reason, .. } => {
+                tracing::warn!(
+                    reason = %reason,
+                    "the director's tour was not served; the plant view serves the deterministic tour"
+                );
+            }
         }
-        job.send_replace(Some(answer));
+        settle.answer(answer);
     });
 }
 
@@ -345,18 +483,22 @@ async fn stopped(mut shutdown: watch::Receiver<bool>) {
     }
 }
 
-/// One director call, after a free slot is taken, given at most `deadline`.
+/// One director call, given at most `deadline` from now. The wait for a free slot counts toward
+/// the deadline, so a call that waits for a slot for the whole deadline is refused without one.
 async fn answer_within<C: ModelClient>(
     client: &C,
     view: &PlantView,
     slots: &Semaphore,
     deadline: Duration,
 ) -> DirectorAnswer {
-    let _slot = slots.acquire().await.expect("the director slots stay open");
-    match tokio::time::timeout(deadline, ask(client, view)).await {
+    let call = async {
+        let _slot = slots.acquire().await.expect("the director slots stay open");
+        ask(client, view).await
+    };
+    match tokio::time::timeout(deadline, call).await {
         Ok(answer) => answer,
         Err(_) => {
-            DirectorAnswer::Refused(format!("the director did not answer within {deadline:?}"))
+            DirectorAnswer::transient(format!("the director did not answer within {deadline:?}"))
         }
     }
 }
@@ -365,6 +507,7 @@ async fn answer_within<C: ModelClient>(
 async fn ask<C: ModelClient>(client: &C, view: &PlantView) -> DirectorAnswer {
     match direct(client, view).await {
         Ok(proposal) => DirectorAnswer::Proposal(proposal),
+        Err(err) if err.is_transient() => DirectorAnswer::transient(err.to_string()),
         Err(err) => DirectorAnswer::Refused(err.to_string()),
     }
 }
@@ -922,10 +1065,141 @@ mod tests {
 
         let answer = answer_within(&stub, &untoured(VIEW), &slots, Duration::from_millis(50)).await;
 
-        let DirectorAnswer::Refused(reason) = answer else {
-            panic!("a call past its deadline is refused: {answer:?}");
+        let DirectorAnswer::Transient { reason, .. } = answer else {
+            panic!("a call past its deadline is refused for a later retry: {answer:?}");
         };
         assert_eq!(reason, "the director did not answer within 50ms");
+    }
+
+    #[tokio::test]
+    async fn a_call_waiting_for_a_slot_is_refused_at_its_deadline_without_getting_one() {
+        let cache = TourCache::default();
+        let slots = cache.slots();
+        let all = u32::try_from(DIRECTOR_CALLS_AT_ONCE).expect("a small count");
+        let _held = Arc::clone(&slots)
+            .acquire_many_owned(all)
+            .await
+            .expect("the slots are open");
+
+        let answer = tokio::time::timeout(
+            Duration::from_secs(5),
+            answer_within(
+                &Stalled::default(),
+                &untoured(VIEW),
+                &slots,
+                Duration::from_millis(50),
+            ),
+        )
+        .await
+        .expect("the deadline ends the wait for a slot");
+
+        let DirectorAnswer::Transient { reason, .. } = answer else {
+            panic!("a call still waiting at its deadline is refused: {answer:?}");
+        };
+        assert_eq!(reason, "the director did not answer within 50ms");
+    }
+
+    #[tokio::test]
+    async fn a_call_waiting_for_a_slot_when_shutdown_starts_makes_no_request() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (host, stop) = host_signalled(
+            dir.path(),
+            Counting {
+                inner: Stalled {
+                    cancelled: Arc::clone(&cancelled),
+                },
+                calls: Arc::clone(&calls),
+            },
+        )
+        .await;
+        // Two calls take the two slots, and the third waits for one.
+        for number in 1..=DIRECTOR_CALLS_AT_ONCE + 1 {
+            let mut view = untoured(VIEW);
+            view.receipt_hash = receipt_hash(number);
+            fill_within(&host, view, Duration::from_millis(10)).await;
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while calls.load(Ordering::SeqCst) < DIRECTOR_CALLS_AT_ONCE {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("two calls start");
+
+        let waiting = receipt_hash(DIRECTOR_CALLS_AT_ONCE + 1);
+        stop.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while cancelled.load(Ordering::SeqCst) < DIRECTOR_CALLS_AT_ONCE
+                || host.tours().outcome(&waiting).is_none()
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the running calls are cancelled and the waiting one ends");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert!(
+            matches!(
+                host.tours().outcome(&waiting),
+                Some(DirectorAnswer::Transient { .. })
+            ),
+            "the waiting call ends with a transient refusal"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            DIRECTOR_CALLS_AT_ONCE,
+            "the waiting call made no request"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_view_past_the_director_queue_gets_the_deterministic_tour_and_no_call() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let host = host_with(
+            dir.path(),
+            Counting {
+                inner: Stalled::default(),
+                calls: Arc::clone(&calls),
+            },
+        )
+        .await;
+        let accepted = DIRECTOR_CALLS_AT_ONCE + DIRECTOR_CALLS_WAITING;
+
+        for number in 1..=accepted + 3 {
+            let mut view = untoured(VIEW);
+            view.receipt_hash = receipt_hash(number);
+            let filled = fill_within(&host, view, Duration::from_millis(5)).await;
+            assert!(
+                matches!(filled.tour, Some(TourView::Deterministic { .. })),
+                "{:?}",
+                filled.tour
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert_eq!(
+            host.tours().calls_accepted(),
+            accepted,
+            "no more calls are accepted than the queue holds"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            DIRECTOR_CALLS_AT_ONCE,
+            "two calls run"
+        );
+        for number in 1..=accepted {
+            assert!(host.tours().holds(&receipt_hash(number)), "{number} waits");
+        }
+        for number in accepted + 1..=accepted + 3 {
+            assert!(
+                !host.tours().holds(&receipt_hash(number)),
+                "{number} is past the queue and is not kept"
+            );
+        }
     }
 
     #[tokio::test]
@@ -997,16 +1271,28 @@ mod tests {
         .expect("the running call is cancelled");
     }
 
+    /// Starts the call for `hash` and ends it at once, as a call that has answered does.
+    fn finish(cache: &TourCache, hash: &ReceiptHash) {
+        let Claim::Accepted(job, ticket) = cache.claim(hash, Instant::now()) else {
+            panic!("a receipt with no answer starts its call");
+        };
+        job.send_replace(Some(DirectorAnswer::Refused("finished".to_owned())));
+        drop(ticket);
+    }
+
     #[test]
     fn the_tour_cache_keeps_a_bounded_number_of_receipts_and_drops_the_least_recently_shown() {
         let cache = TourCache::default();
         let hashes: Vec<ReceiptHash> = (0..=RECEIPTS_KEPT).map(receipt_hash).collect();
         for hash in &hashes[..RECEIPTS_KEPT] {
-            assert!(cache.job(hash).1, "a new receipt starts its job");
+            finish(&cache, hash);
         }
-        assert!(!cache.job(&hashes[0]).1, "the first receipt is kept");
+        assert!(
+            matches!(cache.claim(&hashes[0], Instant::now()), Claim::Shown(_)),
+            "the first receipt is kept"
+        );
 
-        assert!(cache.job(&hashes[RECEIPTS_KEPT]).1);
+        finish(&cache, &hashes[RECEIPTS_KEPT]);
 
         let jobs = cache.jobs.lock().expect("the lock");
         assert_eq!(jobs.by_receipt.len(), RECEIPTS_KEPT);
@@ -1018,6 +1304,102 @@ mod tests {
             !jobs.by_receipt.contains_key(&hashes[1]),
             "the least recently shown receipt left"
         );
+    }
+
+    #[test]
+    fn a_call_in_flight_is_not_left_out_of_the_cache_and_its_receipt_is_not_asked_again() {
+        let cache = TourCache::default();
+        let running = receipt_hash(0);
+        let Claim::Accepted(job, _ticket) = cache.claim(&running, Instant::now()) else {
+            panic!("the first receipt starts its call");
+        };
+        for number in 1..=RECEIPTS_KEPT + 5 {
+            finish(&cache, &receipt_hash(number));
+        }
+
+        assert!(cache.holds(&running), "a call in flight is kept");
+        assert!(job.borrow().is_none(), "and it has not answered");
+        assert_eq!(
+            cache.jobs.lock().expect("the lock").by_receipt.len(),
+            RECEIPTS_KEPT,
+            "the cache keeps its bound around the call in flight"
+        );
+        assert!(
+            matches!(cache.claim(&running, Instant::now()), Claim::Shown(_)),
+            "the receipt shares its call and is not started again"
+        );
+        assert_eq!(cache.calls_accepted(), 1, "one call for the receipt");
+    }
+
+    #[test]
+    fn a_transient_refusal_is_asked_again_after_its_retry_interval_and_a_deterministic_one_is_kept()
+    {
+        let cache = TourCache::default();
+        let transient = receipt_hash(1);
+        let deterministic = receipt_hash(2);
+        let started = Instant::now();
+        let Claim::Accepted(job, _ticket) = cache.claim(&transient, started) else {
+            panic!("the transient receipt starts its call");
+        };
+        job.send_replace(Some(DirectorAnswer::Transient {
+            reason: "the director did not answer".to_owned(),
+            at: started,
+        }));
+        let Claim::Accepted(job, _ticket) = cache.claim(&deterministic, started) else {
+            panic!("the deterministic receipt starts its call");
+        };
+        job.send_replace(Some(DirectorAnswer::Refused("not a tour".to_owned())));
+
+        assert!(
+            matches!(
+                cache.claim(&transient, started + Duration::from_secs(1)),
+                Claim::Shown(_)
+            ),
+            "a recent transient refusal is served without a call"
+        );
+        assert!(
+            matches!(
+                cache.claim(&transient, started + TRANSIENT_RETRY),
+                Claim::Accepted(..)
+            ),
+            "a transient refusal is asked again once its interval has passed"
+        );
+        assert!(
+            matches!(
+                cache.claim(&deterministic, started + TRANSIENT_RETRY * 10),
+                Claim::Shown(_)
+            ),
+            "a refusal the receipt keeps stays, however long ago it came"
+        );
+    }
+
+    #[test]
+    fn a_provider_failure_may_change_and_a_reply_that_is_not_a_tour_does_not() {
+        let provider = MUSE_SPARK_PROVIDER.to_owned();
+        assert!(
+            TourError::Director(LlmError::Timeout {
+                provider: provider.clone(),
+            })
+            .is_transient()
+        );
+        assert!(
+            TourError::Director(LlmError::ServerError {
+                provider: provider.clone(),
+                status: 503,
+                attempts: 3,
+            })
+            .is_transient()
+        );
+        assert!(
+            !TourError::Director(LlmError::SchemaValidation {
+                provider,
+                detail: String::new(),
+                raw: String::new(),
+            })
+            .is_transient()
+        );
+        assert!(!TourError::NotMuseSpark.is_transient());
+        assert!(!TourError::NothingToVisit.is_transient());
     }
 
     #[tokio::test]
