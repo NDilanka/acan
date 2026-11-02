@@ -34,6 +34,7 @@ mod observations;
 mod observe;
 mod offline;
 mod plant_view;
+pub mod projects;
 mod public;
 #[allow(
     dead_code,
