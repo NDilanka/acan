@@ -2,8 +2,8 @@ name: Pages
 
 # Publishes the web UI and the recorded run to GitHub Pages. The recording lives in `replay/` on the
 # default branch. It is written by `acan export-replay`, which already removes keys, tokens and
-# private paths. This workflow checks the same text again before it uploads anything, and it
-# refuses to deploy a site without a recording, so the replay page never ships broken.
+# private paths. This workflow checks the same text again before it uploads anything. With no
+# recording it skips the build and the deploy, so nothing half-built goes out.
 
 on:
   push:
@@ -27,8 +27,29 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
+  recording:
+    name: look for the recording
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      present: ${{ steps.check.outputs.present }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Look for the recording
+        id: check
+        run: |
+          if [ -f replay/manifest.json ] && [ -f replay/plant.json ] && [ -f replay/events.json ]; then
+            echo "The recording is in replay/."
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=Pages skipped::replay/ has no recording, so there is no site to publish. Export one with: acan export-replay --repo <repo> --out replay"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: build the Pages site
+    needs: recording
+    if: needs.recording.outputs.present == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -53,12 +74,6 @@ jobs:
           wasm-bindgen --target web --no-typescript \
             --out-dir crates/acan-render-web/www/pkg \
             target/wasm32-unknown-unknown/release/acan_render_web.wasm
-      - name: Require the recording
-        run: |
-          if [ ! -f replay/manifest.json ] || [ ! -f replay/plant.json ] || [ ! -f replay/events.json ]; then
-            echo "replay/ has no recording. Export one with: acan export-replay --repo <repo> --out replay" >&2
-            exit 1
-          fi
       - name: Assemble the site
         run: |
           mkdir -p _site
