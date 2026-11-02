@@ -616,7 +616,18 @@ function Invoke-ReplayOrder {
             $edits = Read-JsonFile -Path $editsPath
             if ($edits.schema -ne 'acan-demo-intent-edits/2') { throw "setup_failed: $editsPath must have schema acan-demo-intent-edits/2" }
             $label = Get-DecisionLabel -Doc $edits -Order $id
-            $scope = Invoke-ScopeEdits -Order $id -Raw $raw -Oid $oid -View $view -EditsFile $editsPath -OrderDir $dir -DecidedBy $label
+            # An edits file written for another draft does not match this run's draft: the decision is for the
+            # coordinator to write again, so the run pauses here (resumable: the draft is pinned in state.json).
+            try {
+                $scope = Invoke-ScopeEdits -Order $id -Raw $raw -Oid $oid -View $view -EditsFile $editsPath -OrderDir $dir -DecidedBy $label
+            } catch {
+                $mismatch = [string]$_.Exception.Message
+                if ($mismatch -match 'is not in the draft|is already in the draft|must match the draft') {
+                    $pauseInfo = [ordered]@{ kind = 'needs_scope_decision'; order = $id; draft = $draftPath; edits_file = $editsPath; mismatch = $mismatch }
+                    throw "needs_scope_decision: $id's edits file $editsPath does not match this run's draft ($mismatch); the draft to read is $draftPath"
+                }
+                throw
+            }
             # logged edits: any scope edit, any choice answered or removed by a rule, or any explicit answer in the edits file
             $humanCount = @($scope.logged_edits | Where-Object { $null -ne $_ }).Count + @($scope.answers | Where-Object { $null -ne $_ }).Count + @($scope.edits.answers | Where-Object { $null -ne $_ }).Count
             $confirmed = Invoke-ScopeConfirm -Order $id -Raw $raw -Oid $oid -Scope $scope -MaxEpisodes $MaxEpisodes
