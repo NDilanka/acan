@@ -19,7 +19,9 @@ import {
   repoEl,
   state,
 } from "./state.js";
-import { setLink, start } from "./stream.js";
+import { syncPlantViews } from "./plant.js";
+import { get, setLink, start } from "./stream.js";
+import { requestUsage } from "./usage.js";
 
 const PAN_KEY_PX = 80;
 
@@ -89,6 +91,8 @@ function paint() {
   paintMarks();
   paintUsage();
   paintStale();
+  syncPlantViews(state, get);
+  requestUsage(state, get, paintUsage);
 }
 
 // Sets the drawing buffer to the CSS box times the device pixel ratio. The wasm side rounds

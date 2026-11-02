@@ -39,7 +39,13 @@ export const orderLine = $("order-line");
 
 export const usagePanel = $("usage");
 
-export const usageBody = $("usage-body");
+export const metaBody = $("meta-body");
+
+export const metaNote = $("meta-note");
+
+export const historyEl = $("usage-history");
+
+export const historyBody = $("history-body");
 
 export const repoEl = $("repo");
 
@@ -90,5 +96,12 @@ export const state = {
   hasOrder: false,
   labelGeneration: 0,
   labels: new Map(),
+  // The plant view summary of each order that has receipts, as the wasm side checked it. See
+  // `plant.js`.
+  plantViews: new Map(),
+  // The origin's usage answer, `{ rows, error }`, or null until the first one. See `usage.js`.
+  serverUsage: null,
+  usageInFlight: false,
+  usageDirty: false,
 };
 
