@@ -21,6 +21,7 @@ What main proves today:
 - The scope-first gate. Its contract is in `crates/acan-intent`. A worker's readback of its task is refused until a human confirms the scope.
 - Live with receipts: a Muse Spark scope draft (`receipts/m01-scope-draft.md`) and six provider calls on three hosts (`receipts/p00-provider-smoke.md`).
 - The vision witness, live on two hand-made candidates of the demo's dashboard page (`receipts/vision01-live-vision.md`). The vision witness is advisory. Its verdicts never set pass or fail.
+- Muse Wonder, the advisory second look, live on one hand-made candidate (`receipts/vision02-live-wonder.md`). The first look called the candidate inconsistent, so Wonder ran once and also called it inconsistent. Its verdicts never set pass or fail.
 
 In progress, with no numbers yet:
 
@@ -41,7 +42,7 @@ Every model role in the code is listed here. A role counts as live only when a r
 | Fast: clash explanations | Muse Spark Open | Baseten, `[routing.fast]` | none | Routed, not yet in a receipt |
 | Vision witness, advisory | Muse Spark, `muse-spark-1.3`, with images | Meta Model API, `[routing.vision]` | vision01 rows 1-2 | Live, pass on two hand-made candidates |
 | Director: proposes the receipt tour (T01) | Muse Spark, `muse-spark-1.3`, structured output | Meta Model API, `[routing.director]` or the foreman's route if unset | none | Built, not yet on main. Not verified live. |
-| Second look at vision (Muse Wonder) | Muse Wonder, `muse-wonder-1.0` | Meta Model API, `[routing.wonder]` | none | Not on main. Not called in any receipt. |
+| Second look at vision (Muse Wonder), advisory | Muse Wonder, `muse-wonder-1.0` | Meta Model API, `[routing.wonder]`, called only after an inconsistent or unclear first look | vision02 row 3 | Live, one call on one hand-made candidate. Its verdict matched the first look's. Not yet run on an unclear first look. |
 
 ## Architecture
 
