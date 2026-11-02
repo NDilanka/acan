@@ -104,7 +104,25 @@
     border: 1px solid var(--rule); background: var(--face); color: var(--ink); cursor: pointer; text-decoration: none; }
   .dialog-actions button:hover, .dialog-actions a:hover { border-color: var(--ink); }
   .dialog-actions #bug-copy { margin-right: auto; }
-  .dialog-actions #bug-open { background: var(--ink); color: #ffffff; border-color: var(--ink); }
+  .dialog-actions .primary { background: var(--ink); color: #ffffff; border-color: var(--ink); }
+  dialog fieldset { border: 0; margin: 10px 0 0; padding: 0; }
+  dialog legend { font: 600 12px/1.3 var(--sans); margin-bottom: 6px; padding: 0; }
+  dialog .choice { display: flex; gap: 8px; align-items: center; padding: 6px 10px; margin-bottom: 6px;
+    border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; font: 12px var(--sans); }
+  dialog .choice:has(input:checked) { border-color: var(--ink); }
+  dialog .field { display: block; margin-top: 10px; font: 600 12px var(--sans); }
+  dialog input[type=password] { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 6px 8px;
+    font: 12px var(--mono); color: var(--ink); background: var(--face); border: 1px solid var(--rule); border-radius: 4px; }
+  dialog .setup-status { font: 12px/1.4 var(--sans); color: var(--muted); padding: 6px 8px; background: #f5f5f4; border-radius: 4px; }
+  dialog .setup-status.set { color: #1f7a3d; background: #eef6f0; }
+  #setup-result { min-height: 1.4em; font: 12px/1.4 var(--sans); }
+  #setup-result.ok { color: #1f7a3d; }
+  #setup-result.warn { color: var(--amber); }
+  #setup-result.bad { color: var(--red); }
+  #setup-banner { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; align-items: center; color: var(--ink); }
+  #setup-open { font: 11px var(--mono); padding: 2px 8px; background: var(--ink); color: #ffffff; border: 1px solid var(--ink);
+    border-radius: 4px; cursor: pointer; }
+  #setup-banner[hidden] { display: none; }
   #hint { top: 12px; left: 50%; transform: translateX(-50%); color: #57575a; white-space: nowrap; }
   kbd { font: 11px ui-monospace, Consolas, monospace; color: var(--ink); background: var(--face);
     border: 1px solid #e5e5e2; border-radius: 4px; padding: 0 4px; }
@@ -265,7 +283,7 @@
 <svg id="pov-reticle" hidden aria-hidden="true"><path id="pov-bracket" d=""></path></svg>
 <div class="island" id="pov-chip" hidden><span class="dot" id="pov-dot"></span><span class="inside">inside</span><b id="pov-agent"></b><span class="line" id="pov-line"></span><kbd>Esc</kbd><span class="alt" id="pov-alt" hidden></span></div>
 <div class="island" id="shell"><span class="brand">Acan</span><span class="repo" id="repo"></span><span id="link" class="muted">starting</span><span id="stale" class="stale" hidden></span><span id="version" class="version" hidden></span></div>
-<div class="island" id="alpha" hidden><span id="update" class="update" hidden><span id="update-text"></span> <a id="update-link" target="_blank" rel="noopener">open release</a></span><button id="report-bug" type="button">Report a bug</button><span id="bug-note" class="muted" hidden></span></div>
+<div class="island" id="alpha" hidden><span id="setup-banner" hidden><span id="setup-banner-text"></span><button id="setup-open" type="button">Set a key</button></span><span id="update" class="update" hidden><span id="update-text"></span> <a id="update-link" target="_blank" rel="noopener">open release</a></span><button id="report-bug" type="button">Report a bug</button><span id="bug-note" class="muted" hidden></span></div>
 <dialog id="bug-dialog" aria-labelledby="bug-heading">
   <h2 id="bug-heading">Bug report</h2>
   <p class="muted">This is the report the page prepared, in full. Nothing is posted: you submit the issue on GitHub.</p>
@@ -276,8 +294,28 @@
   <div class="dialog-actions">
     <button type="button" id="bug-copy" hidden>Copy full report</button>
     <button type="button" id="bug-cancel">Cancel</button>
-    <a id="bug-open" target="_blank" rel="noopener">Open on GitHub</a>
+    <a id="bug-open" class="primary" target="_blank" rel="noopener">Open on GitHub</a>
   </div>
+</dialog>
+<dialog id="setup-dialog" aria-labelledby="setup-heading">
+  <h2 id="setup-heading">Model key</h2>
+  <p class="muted">acan calls your model provider with a key you give it. The key is checked with that provider only, and saved in acan's config folder for your user account. It is never shown again.</p>
+  <p id="setup-status" class="setup-status" role="status"></p>
+  <form id="setup-form" autocomplete="off" hidden>
+    <fieldset>
+      <legend>Provider</legend>
+      <div id="setup-choices"></div>
+    </fieldset>
+    <label class="field" for="setup-key">API key</label>
+    <input id="setup-key" type="password" spellcheck="false" autocapitalize="off" autocomplete="off"
+      name="model-key" data-lpignore="true" data-1p-ignore="true" required>
+    <p id="setup-result" role="alert"></p>
+    <div class="dialog-actions">
+      <button type="button" id="setup-cancel">Cancel</button>
+      <button type="submit" id="setup-save" class="primary">Check and save</button>
+    </div>
+  </form>
+  <p id="setup-blocked" class="muted" hidden></p>
 </dialog>
 <div class="island" id="order" hidden><span id="order-line" class="muted"></span></div>
 <div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle</div>
