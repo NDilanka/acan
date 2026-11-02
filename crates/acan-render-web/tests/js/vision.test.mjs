@@ -1,13 +1,15 @@
 // Node tests for the vision pins' page logic. Run with:
 //   node --test crates/acan-render-web/tests/js/vision.test.mjs
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
   ADVISORY,
   checkView,
+  compareLayout,
   countsLine,
+  escapeClosesViewer,
   hasPin,
   imagePaths,
   pinLabel,
@@ -16,6 +18,7 @@ import {
   summarize,
   verdictCounts,
   verdictInfo,
+  viewerPlacement,
   visionTasks,
   witnessOff,
 } from "../../www/vision.js";
@@ -178,4 +181,75 @@ test("the fixture record reads as inconsistent, with one page not checked and a 
   assert.equal(summary.verdict, "inconsistent");
   assert.equal(summary.counts, "3 pages: 1 consistent · 1 inconsistent · 1 not checked");
   assert.notEqual(secondLook(fixture.record.checks[1]), null);
+});
+
+test("the viewer opens right of its pin, and flips left when the right has no room", () => {
+  const right = viewerPlacement({ pin: { left: 100, top: 300, w: 120, h: 20 }, size: [440, 400], viewport: [1366, 768] });
+  assert.deepEqual(right, { left: 234, top: 276 });
+  const left = viewerPlacement({ pin: { left: 1100, top: 300, w: 120, h: 20 }, size: [440, 400], viewport: [1366, 768] });
+  assert.deepEqual(left, { left: 646, top: 276 });
+});
+
+test("a viewer with no room below flips up to end at its pin's foot, and never leaves the window", () => {
+  // The browser check: page 2 at top 290 ran to 946 in a 768 px window.
+  const flipped = viewerPlacement({ pin: { left: 100, top: 314, w: 120, h: 20 }, size: [440, 656], viewport: [1366, 768] });
+  assert.equal(flipped.top + 656 <= 768 - 12, true);
+  assert.equal(flipped.top >= 12, true);
+  const low = viewerPlacement({ pin: { left: 100, top: 700, w: 120, h: 20 }, size: [440, 300], viewport: [1366, 768] });
+  assert.deepEqual(low, { left: 234, top: 420 });
+  const tall = viewerPlacement({ pin: { left: 100, top: 40, w: 120, h: 20 }, size: [440, 744], viewport: [1366, 768] });
+  assert.equal(tall.top, 12);
+});
+
+test("with its pin off screen the viewer keeps its place inside the window, or docks before it has one", () => {
+  assert.equal(viewerPlacement({ pin: null, size: [440, 400], viewport: [1366, 768] }), null);
+  assert.deepEqual(
+    viewerPlacement({ pin: null, size: [440, 600], viewport: [1366, 768], last: { left: 1200, top: 400 } }),
+    { left: 914, top: 156 },
+  );
+});
+
+test("swipe needs both pages: without both the layout is side by side, and no pages gives one message", () => {
+  const both = { before: "b", after: "a" };
+  assert.deepEqual(compareLayout("swipe", both), { mode: "swipe", swipeable: true, empty: false, message: null });
+  assert.equal(compareLayout("side", both).mode, "side");
+  const afterOnly = compareLayout("swipe", { before: null, after: "a" });
+  assert.equal(afterOnly.mode, "side");
+  assert.equal(afterOnly.swipeable, false);
+  assert.equal(afterOnly.message, null);
+  const none = compareLayout("swipe", { before: null, after: null });
+  assert.equal(none.mode, "side");
+  assert.equal(none.empty, true);
+  assert.match(none.message, /^No page was captured/);
+});
+
+test("a window Escape closes the viewer, but not from a dialog or a text field outside it", () => {
+  assert.equal(escapeClosesViewer({ open: true, dialogOpen: false, typing: false, insideViewer: false }), true);
+  assert.equal(escapeClosesViewer({ open: true, dialogOpen: false, typing: true, insideViewer: true }), true);
+  assert.equal(escapeClosesViewer({ open: true, dialogOpen: false, typing: true, insideViewer: false }), false);
+  assert.equal(escapeClosesViewer({ open: true, dialogOpen: true, typing: false, insideViewer: true }), false);
+  assert.equal(escapeClosesViewer({ open: false, dialogOpen: false, typing: false, insideViewer: false }), false);
+});
+
+test("each fixture check's comparison matches its images, and each image it names exists", () => {
+  const root = new URL("../../www/fixtures/", import.meta.url);
+  const fixture = JSON.parse(readFileSync(new URL("vision-witness.json", root), "utf8"));
+  for (const check of fixture.record.checks) {
+    const before = check.baseline_image_sha256 !== null;
+    const after = check.candidate_image_sha256 !== null;
+    if (check.comparison === "baseline_vs_candidate") assert.equal(before && after, true, `check ${check.index}`);
+    if (check.comparison === "candidate_only") assert.equal(!before && after, true, `check ${check.index}`);
+    if (!after) assert.equal(check.verdict, "not_checked", `check ${check.index}`);
+    for (const [side, has] of [["before", before], ["after", after]]) {
+      assert.equal(existsSync(new URL(`vision/${check.index}-${side}.svg`, root)), has, `check ${check.index} ${side}`);
+    }
+  }
+});
+
+test("the fixture's log is a world's opening event at seq 0, so a fixture plant gets a view", () => {
+  const fixture = JSON.parse(readFileSync(new URL("../../www/fixtures/vision-witness.json", import.meta.url), "utf8"));
+  assert.equal(fixture.log.length, 1);
+  assert.equal(fixture.log[0].seq, 0);
+  assert.equal(fixture.log[0].event.type, "world_opened");
+  assert.deepEqual(Object.keys(fixture.log[0]).sort(), ["actor", "at", "event", "seq"]);
 });

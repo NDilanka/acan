@@ -8,6 +8,9 @@ import { $, canvas, params, state } from "./state.js";
 import {
   ADVISORY,
   checkView,
+  compareLayout,
+  escapeClosesViewer,
+  viewerPlacement,
   hasPin,
   imagePaths,
   pinLabel,
@@ -43,25 +46,48 @@ function authed(path) {
   return fetch(path, { headers: { Authorization: `Bearer ${state.token}` } });
 }
 
-// Starts the pins: the layer, the viewer's keys, and the fixture when the page asks for one.
+// Starts the pins: the layer, the viewer's keys, and the fixture when the page asks for one. It
+// never throws, so a broken fixture cannot stop the rest of the page from starting.
 export async function installVision() {
   document.body.insertBefore(layer, viewer);
-  viewer.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      event.stopPropagation();
-      closeViewer();
-    }
+  // Capture, so the open viewer takes Escape before the map's own Escape leaves a ride.
+  window.addEventListener("keydown", onEscape, true);
+  // An image arriving or a page turning changes the viewer's height, so it is placed again.
+  new ResizeObserver(() => placeViewer()).observe(viewer);
+  if (params.get("vision") !== "fixture") return;
+  try {
+    await loadFixture();
+  } catch (err) {
+    console.warn(`the vision fixture was not shown: ${err?.message ?? err}`);
+  }
+}
+
+function onEscape(event) {
+  if (event.key !== "Escape") return;
+  const target = event.target instanceof Element ? event.target : null;
+  const typing = target !== null && (target.matches("input, textarea, select") || target.isContentEditable);
+  const closes = escapeClosesViewer({
+    open: open !== null,
+    dialogOpen: document.querySelector("dialog[open]") !== null,
+    typing,
+    insideViewer: target !== null && viewer.contains(target),
   });
-  if (params.get("vision") === "fixture") await loadFixture();
+  if (!closes) return;
+  event.stopPropagation();
+  event.preventDefault();
+  closeViewer();
 }
 
 async function loadFixture() {
   const response = await fetch("fixtures/vision-witness.json");
   if (!response.ok) throw new Error(`fixture HTTP ${response.status}`);
-  fixture = await response.json();
-  // A fixture plant has no log, so it has no view to place a pin on. An empty log gives it one,
-  // as a new origin would.
-  if (state.view === null && params.get("plant") === "fixture") state.app.load_log("[]");
+  const loaded = await response.json();
+  // The fixture plant has no log, so it has no view, and the view is what gives each machine its
+  // footprint. The fixture carries the shortest log a world can have, its opening event, which
+  // folds into a view of the plant's machines with no orders.
+  if (state.view === null && params.get("plant") === "fixture") state.app.load_log(JSON.stringify(loaded.log));
+  fixture = loaded;
+  syncVision();
   requestRender();
 }
 
@@ -198,28 +224,27 @@ export function placeVisionPins() {
     pin.style.transform = `translate(${left}px, ${top}px)`;
     pin.at = inside ? { left, top, w, h } : null;
   }
-  placeViewer(width, height);
+  placeViewer();
 }
 
 // The viewer opens beside its pin, on the side with room, and stays inside the window. With no
-// pin on screen it keeps the place it had.
-function placeViewer(width, height) {
+// pin on screen it keeps the place it had, or docks at the top right before it has one.
+function placeViewer() {
   if (open === null) return;
-  const at = pins.get(open.task)?.at;
-  if (!at) {
-    if (!open.placed) viewer.classList.add("docked");
-    return;
-  }
-  viewer.classList.remove("docked");
-  const w = viewer.offsetWidth;
-  const h = viewer.offsetHeight;
-  let left = at.left + at.w + VIEWER_GAP_PX;
-  if (left + w > width - EDGE_PX) left = at.left - VIEWER_GAP_PX - w;
-  left = Math.min(Math.max(left, EDGE_PX), Math.max(EDGE_PX, width - w - EDGE_PX));
-  const top = Math.min(Math.max(at.top - 24, EDGE_PX), Math.max(EDGE_PX, height - h - EDGE_PX));
-  viewer.style.left = `${left}px`;
-  viewer.style.top = `${top}px`;
-  open.placed = true;
+  const at = pins.get(open.task)?.at ?? null;
+  const spot = viewerPlacement({
+    pin: at,
+    size: [viewer.offsetWidth, viewer.offsetHeight],
+    viewport: [canvas.clientWidth, canvas.clientHeight],
+    last: open.placed,
+    gap: VIEWER_GAP_PX,
+    edge: EDGE_PX,
+  });
+  viewer.classList.toggle("docked", spot === null);
+  if (spot === null) return;
+  viewer.style.left = `${spot.left}px`;
+  viewer.style.top = `${spot.top}px`;
+  open.placed = spot;
 }
 
 function openViewer(task) {
@@ -228,7 +253,7 @@ function openViewer(task) {
     return;
   }
   releaseImages();
-  open = { task, index: 0, mode: "side", swipe: 50, urls: new Map(), placed: false, opener: pins.get(task) ?? null };
+  open = { task, index: 0, mode: "side", swipe: 50, urls: new Map(), placed: null, opener: pins.get(task) ?? null };
   viewer.hidden = false;
   paintViewer();
   paintVisionPins();
@@ -300,6 +325,7 @@ function paintViewer() {
   viewer.replaceChildren(...parts);
   const again = focused && [...viewer.querySelectorAll("[data-focus]")].find((el) => el.dataset.focus === focused);
   if (again) (again.disabled ? title : again).focus();
+  placeViewer();
 }
 
 function checkParts(record, checks) {
@@ -345,7 +371,9 @@ function checkParts(record, checks) {
 // The before and after pages, side by side or as a swipe, with the toggle that switches them.
 function compare(task, check) {
   const paths = fixture !== null ? fixturePaths(check) : imagePaths(task, check);
-  const box = element("div", undefined, `vcompare mode-${open.mode}`);
+  const layout = compareLayout(open.mode, paths);
+  if (layout.empty) return element("p", layout.message, "vmissing");
+  const box = element("div", undefined, `vcompare mode-${layout.mode}`);
   box.style.setProperty("--swipe", `${open.swipe}%`);
   box.append(figure("before", paths.before, check, "No before page: this check looked at the after page only."));
   box.append(figure("after", paths.after, check, "No after page was captured."));
@@ -353,13 +381,13 @@ function compare(task, check) {
   const group = element("span", undefined, "modes");
   group.setAttribute("role", "group");
   group.setAttribute("aria-label", "compare");
-  const swipeable = paths.before !== null && paths.after !== null;
-  const side = button("side by side", () => { open.mode = "side"; paintViewer(); }, open.mode === "side");
-  const swipe = button("swipe", () => { open.mode = "swipe"; paintViewer(); }, open.mode === "swipe");
-  swipe.disabled = !swipeable;
+  const side = button("side by side", () => { open.mode = "side"; paintViewer(); }, layout.mode === "side");
+  const swipe = button("swipe", () => { open.mode = "swipe"; paintViewer(); }, layout.mode === "swipe");
+  swipe.disabled = !layout.swipeable;
+  if (!layout.swipeable) swipe.title = "Swipe needs both a before and an after page.";
   group.append(side, swipe);
   modes.append(group);
-  if (open.mode === "swipe" && swipeable) {
+  if (layout.mode === "swipe") {
     const range = element("input");
     range.type = "range";
     range.min = "0";

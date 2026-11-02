@@ -54,10 +54,11 @@ export function workersState(answer) {
   return { kind: list.every((worker) => worker?.state === "no_key") ? "no_key" : "none", running: 0 };
 }
 
-// The command that starts one outside worker against this origin. Its agent token comes from
-// ACAN_AGENT_TOKEN, so it never shows in the process list.
+// The command that starts one outside worker against this origin. Only a server without
+// GET /api/workers shows it, and the acan-worker those servers ship takes its agent token as
+// --token alone.
 export function workerCommand(origin) {
-  return `acan-worker --server ${origin} --repo <path to your repo>`;
+  return `acan-worker --server ${origin} --token <agent token from .acan/tokens.json> --repo <path to your repo>`;
 }
 
 function workerStep(workers, agents, origin) {
@@ -76,7 +77,7 @@ function workerStep(workers, agents, origin) {
   return {
     ...step,
     state: TODO,
-    detail: "Set `ACAN_AGENT_TOKEN` to an agent token from .acan/tokens.json, then start a worker. The demo's `pwsh demo/run.ps1` starts its own server and workers instead.",
+    detail: "Start a worker with an agent token from .acan/tokens.json. The demo's `pwsh demo/run.ps1` starts its own server and workers instead.",
     command: workerCommand(origin),
     action: { kind: "copy", label: "Copy command" },
   };

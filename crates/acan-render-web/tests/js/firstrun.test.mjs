@@ -137,9 +137,10 @@ test("a server without GET /api/workers falls back to the view's agents and the 
   const waiting = byId(steps({ token: true, setup: KEYED, contract: CONTRACT, workers: { status: 404, body: null }, view: view(), origin: ORIGIN })).worker;
   assert.equal(waiting.state, TODO);
   assert.equal(waiting.current, true);
-  assert.match(waiting.detail, /^Set `ACAN_AGENT_TOKEN` to an agent token from \.acan\/tokens\.json/);
-  assert.equal(waiting.command, "acan-worker --server http://127.0.0.1:7311 --repo <path to your repo>");
-  assert.doesNotMatch(waiting.command, /--token/);
+  assert.match(waiting.detail, /^Start a worker with an agent token from \.acan\/tokens\.json/);
+  assert.equal(waiting.command, "acan-worker --server http://127.0.0.1:7311 --token <agent token from .acan/tokens.json> --repo <path to your repo>");
+  // The acan-worker these servers ship has no environment variable for the token.
+  assert.doesNotMatch(waiting.detail + waiting.command, /ACAN_AGENT_TOKEN/);
   assert.equal(waiting.command, workerCommand(ORIGIN));
   assert.deepEqual(waiting.action, { kind: "copy", label: "Copy command" });
   const connected = byId(steps({ token: true, view: view({ agents: 2 }) })).worker;

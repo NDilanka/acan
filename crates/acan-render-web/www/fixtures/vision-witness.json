@@ -1,5 +1,22 @@
 {
   "note": "A fixture vision record for ?vision=fixture. Not a real check.",
+  "log": [
+    {
+      "seq": 0,
+      "at": 1000,
+      "actor": {
+        "kind": "system"
+      },
+      "event": {
+        "type": "world_opened",
+        "world": {
+          "id": "fixture",
+          "repo": "fixture"
+        },
+        "founder": "owner"
+      }
+    }
+  ],
   "machine": null,
   "record": {
     "version": "vision_witness/1",
@@ -85,9 +102,9 @@
           }
         ],
         "baseline_image_sha256": null,
-        "candidate_image_sha256": null,
-        "width": null,
-        "height": null,
+        "candidate_image_sha256": "sha256:fixture-2-after",
+        "width": 640,
+        "height": 400,
         "verdict": "not_checked",
         "reason": null,
         "raw_reply": null,
@@ -95,7 +112,7 @@
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "latency_ms": 0,
-        "not_checked_reason": "the after page did not render",
+        "not_checked_reason": "the model call timed out",
         "second_look": null
       }
     ]
