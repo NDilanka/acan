@@ -1,9 +1,36 @@
 // The origin's stream: the owner token, the plant and log loads, and the WebSocket that folds
 // each event into the view as it arrives. A stream that cannot be applied reloads the log.
 import { requestRender } from "./main.js";
-import { TOKEN_KEY, freeze, gate, link, state, upto } from "./state.js";
+import { createFeed, eventsBefore } from "./scrub.js";
+import { TOKEN_KEY, freeze, gate, link, replay, state, upto } from "./state.js";
 
 const RECONNECT_MS = 1000;
+
+// Every event the app holds, for the watch panels. See `installFeed`.
+export const feed = createFeed();
+
+// Makes the feed follow the app: each log the app loads and each event it ingests is kept, from
+// every path that folds one (the stream, the replay, and a frozen page's own commands). An event
+// the app refuses is not kept.
+export function installFeed(app) {
+  const load = app.load_log.bind(app);
+  const ingest = app.ingest.bind(app);
+  app.load_log = (json) => {
+    load(json);
+    feed.load(JSON.parse(json));
+  };
+  app.ingest = (json) => {
+    ingest(json);
+    feed.add(JSON.parse(json));
+  };
+}
+
+// The time the panels read "2m ago" against: now on a live page, and the newest event's time on
+// a frozen or replayed page, so a recorded run does not read as hours stale.
+export function clock() {
+  if (freeze || replay) return feed.lastAt() ?? Date.now();
+  return Date.now();
+}
 
 export function setLink(text) {
   link.textContent = text;
@@ -51,7 +78,7 @@ async function reload() {
 }
 
 function keepBefore(text, seq) {
-  return JSON.stringify(JSON.parse(text).filter((event) => event.seq < seq));
+  return JSON.stringify(eventsBefore(JSON.parse(text), seq));
 }
 
 function connect() {
