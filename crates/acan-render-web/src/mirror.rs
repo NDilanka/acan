@@ -23,6 +23,9 @@ const BODY_OFFSET: [f32; 2] = [14.0, 44.0];
 const BODY_STEP: f32 = 40.0;
 /// Size of an agent body, in world units.
 const BODY_SIZE: [f32; 2] = [30.0, 20.0];
+/// The most usage history rows the view carries. The usage panel's label room in `labels.rs` is
+/// measured with this many rows plus the "+N earlier" line, so more rows would run past it.
+pub const USAGE_HISTORY_ROWS: usize = 3;
 
 /// The origin's state, folded from its log.
 #[derive(Debug, Clone)]
@@ -36,6 +39,9 @@ pub struct Mirror {
     runs: BTreeMap<TaskId, GateRunId>,
     /// The word a task's change shows: the first symbol its last declaration named.
     changes: BTreeMap<TaskId, String>,
+    /// The seq of the last model call for each model and step, so the usage history reads newest
+    /// first.
+    last_used: BTreeMap<(String, Step), Seq>,
     /// Events passed over because this build cannot read them, or because the world refused one
     /// after such an event. Above zero, the page is older than the origin.
     not_shown: u32,
@@ -69,6 +75,7 @@ impl Mirror {
             holders: BTreeMap::new(),
             runs: BTreeMap::new(),
             changes: BTreeMap::new(),
+            last_used: BTreeMap::new(),
             not_shown: 0,
         };
         mirror.note(&first);
@@ -157,6 +164,9 @@ impl Mirror {
                     self.changes.insert(decl.task, word);
                 }
             }
+            Event::ModelUsed { model, step, .. } => {
+                self.last_used.insert((model.clone(), *step), stamped.seq);
+            }
             _ => {}
         }
     }
@@ -235,6 +245,7 @@ impl Mirror {
             .map(|clash| clash_view(plan, clash))
             .collect();
 
+        let (usage, usage_earlier) = self.usage_rows(world);
         View {
             next_seq: self.next_seq(),
             machines,
@@ -243,7 +254,8 @@ impl Mirror {
             agents,
             questions,
             clashes,
-            usage: usage_rows(world),
+            usage,
+            usage_earlier,
             lanes: lane_views(world),
             receipts: receipt_counts(world),
         }
@@ -369,8 +381,11 @@ pub struct View {
     pub questions: Vec<QuestionView>,
     /// Every clash the origin recorded, including resolved ones.
     pub clashes: Vec<ClashView>,
-    /// Model calls so far, one row per model and step. Empty until the first call.
+    /// Model calls so far, one row per model and step, newest call first, at most
+    /// [`USAGE_HISTORY_ROWS`] rows. Empty until the first call.
     pub usage: Vec<UsageRow>,
+    /// The rows left out of `usage` because they are older than the ones shown.
+    pub usage_earlier: usize,
     /// One scope lane per order whose scope has been set, in order id order.
     pub lanes: Vec<LaneView>,
     /// Orders with a recorded receipt, in order id order, and their receipt counts. The page
@@ -714,21 +729,33 @@ fn change_word(footprint: &DeclarationInput) -> Option<String> {
         })
 }
 
-fn usage_rows(world: &World) -> Vec<UsageRow> {
-    world
-        .usage()
-        .totals
-        .iter()
-        .flat_map(|(model, steps)| {
-            steps.iter().map(move |(step, count)| UsageRow {
-                role: step_key(*step),
-                model: model.clone(),
-                calls: count.calls,
-                input: count.input,
-                output: count.output,
+impl Mirror {
+    /// The usage history, newest call first and cut to [`USAGE_HISTORY_ROWS`], and how many older
+    /// rows were cut.
+    fn usage_rows(&self, world: &World) -> (Vec<UsageRow>, usize) {
+        let mut rows: Vec<(Option<Seq>, UsageRow)> = world
+            .usage()
+            .totals
+            .iter()
+            .flat_map(|(model, steps)| {
+                steps.iter().map(move |(step, count)| {
+                    let last = self.last_used.get(&(model.clone(), *step)).copied();
+                    let row = UsageRow {
+                        role: step_key(*step),
+                        model: model.clone(),
+                        calls: count.calls,
+                        input: count.input,
+                        output: count.output,
+                    };
+                    (last, row)
+                })
             })
-        })
-        .collect()
+            .collect();
+        rows.sort_by_key(|(last, _)| std::cmp::Reverse(*last));
+        let earlier = rows.len().saturating_sub(USAGE_HISTORY_ROWS);
+        rows.truncate(USAGE_HISTORY_ROWS);
+        (rows.into_iter().map(|(_, row)| row).collect(), earlier)
+    }
 }
 
 fn step_key(step: Step) -> &'static str {
@@ -1245,6 +1272,50 @@ mod tests {
         assert_eq!(row.role, "explain");
         assert_eq!(row.model, "test-model");
         assert_eq!((row.calls, row.input, row.output), (1, 30, 4));
+    }
+
+    #[test]
+    fn the_usage_history_keeps_the_latest_three_rows_and_counts_the_rest() {
+        let plan = plan();
+        let (mut origin, mut log, index) = scripted();
+        log.extend(
+            scenario::land_script(
+                &mut origin,
+                &index,
+                &founder(),
+                Timestamp::from_millis(2_000),
+            )
+            .expect("the story runs"),
+        );
+        let mut call = |log: &mut Vec<Stamped>, model: &str| {
+            log.extend(accepted(
+                &mut origin,
+                &index,
+                Command::System(SystemCmd::ModelUsed {
+                    model: model.to_owned(),
+                    step: Step::Explain,
+                    input_tokens: 10,
+                    output_tokens: 1,
+                }),
+            ));
+        };
+        for i in 0..10 {
+            call(&mut log, &format!("test-model-{i}"));
+        }
+        let view = Mirror::from_log(log.clone())
+            .expect("the log replays")
+            .view(&plan);
+        let models: Vec<&str> = view.usage.iter().map(|row| row.model.as_str()).collect();
+        assert_eq!(models, ["test-model-9", "test-model-8", "test-model-7"]);
+        assert_eq!(view.usage_earlier, 7, "ten rows show three and count seven");
+
+        // A second call to the oldest model makes its row the newest.
+        call(&mut log, "test-model-0");
+        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let models: Vec<&str> = view.usage.iter().map(|row| row.model.as_str()).collect();
+        assert_eq!(models, ["test-model-0", "test-model-9", "test-model-8"]);
+        assert_eq!(view.usage[0].calls, 2);
+        assert_eq!(view.usage_earlier, 7);
     }
 
     /// The commit the lane fixtures' scopes sit on.

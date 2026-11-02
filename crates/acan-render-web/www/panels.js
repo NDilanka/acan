@@ -152,8 +152,8 @@ function paintOrderShown() {
 // The usage panel has two sections. The first is the origin's count since its start, one row per
 // role, provider and model, with the legend that says what each provider name is. Alt also shows
 // the history of this log, which the page folds from the model calls in the log. The panel is
-// hidden until there is something to show. At rest each section shows its first few rows; Alt
-// shows every row.
+// hidden until there is something to show. At rest the first section shows its first few rows;
+// Alt shows every origin row and the newest history rows the view carries.
 export function paintUsage() {
   const served = state.serverUsage;
   const history = state.view === null ? [] : state.view.usage;
@@ -164,7 +164,19 @@ export function paintUsage() {
   metaBody.replaceChildren(...shown.map(metaRow));
   metaNote.textContent = metaNoteText(served, live.length, offline.length, total);
   historyEl.hidden = !state.altDown || history.length === 0;
-  historyBody.replaceChildren(...history.map(historyRow));
+  const earlier = state.view === null ? 0 : state.view.usage_earlier;
+  historyBody.replaceChildren(...history.map(historyRow), ...(earlier > 0 ? [earlierRow(earlier)] : []));
+}
+
+// The view carries only the newest few history rows; one line counts the older ones.
+function earlierRow(count) {
+  const tr = document.createElement("tr");
+  const td = document.createElement("td");
+  td.colSpan = 5;
+  td.className = "earlier";
+  td.textContent = `+${count} earlier`;
+  tr.append(td);
+  return tr;
 }
 
 function metaNoteText(served, liveRows, offlineRows, total) {
