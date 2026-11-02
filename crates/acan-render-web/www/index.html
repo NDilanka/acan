@@ -170,11 +170,13 @@
   #pov-chip .alt { flex-basis: 100%; max-width: 56vw; overflow: hidden; text-overflow: ellipsis;
     font: 11px var(--mono); color: var(--muted); }
   /* The receipt plate: the view's facts for the receipt the order island shows, and the admitted
-     tour over them. Every item is listed whatever the tour does. */
-  #receipt { top: 92px; left: 12px; width: 330px; max-height: calc(100vh - 320px); overflow-y: auto;
+     tour over them. Every item is listed whatever the tour does. Only the item list scrolls: the
+     head, with the step's caption, never moves out of the plate. */
+  #receipt { top: 92px; left: 12px; width: 330px; max-height: calc(100vh - 112px); overflow: hidden;
     box-sizing: border-box; padding: 10px 14px; color: var(--ink); font: 12px/1.4 var(--sans);
     display: flex; flex-direction: column; }
   #receipt[hidden] { display: none; }
+  #receipt > * { flex: none; }
   #receipt h2 { margin: 0; font: 600 13px/1.3 var(--mono); display: flex; gap: 8px; align-items: center; }
   #receipt .meta { margin: 3px 0; font: 11px/1.4 var(--mono); color: var(--muted); }
   #receipt ul.meta { list-style: none; padding: 0; margin: 4px 0; }
@@ -199,16 +201,21 @@
   #receipt .note { font: 11px/1.4 var(--mono); color: var(--muted); margin: 4px 0; }
   #receipt .note.error { color: var(--red); }
   #receipt ol.items { list-style: none; margin: 6px 0 0; padding: 0; border-top: 1px solid var(--rule);
-    position: relative; flex: 1 1 auto; min-height: 6em; overflow-y: auto; }
+    position: relative; flex: 1 1 auto; min-height: 4em; overflow-y: auto; }
   #receipt ol.items.fade { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
     mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent); }
   #receipt .more { font: 11px/1.4 var(--mono); color: var(--muted); margin: 4px 0 0; }
+  #receipt details.counts { margin: 4px 0 0; }
+  #receipt details.counts[hidden] { display: none; }
+  #receipt details.counts summary { font: 11px/1.4 var(--mono); color: var(--muted); cursor: pointer; }
+  #receipt details.counts ul.meta { margin: 2px 0 0; }
   #receipt ol.items li { display: grid; grid-template-columns: 1fr auto; gap: 0 8px; padding: 4px 0;
     border-bottom: 1px solid var(--rule); font: 11px/1.3 var(--mono); }
   #receipt ol.items li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #receipt ol.items li .state, #receipt ol.items li .must { text-align: right; color: var(--muted); }
   #receipt ol.items li .machine { color: var(--muted); }
   #receipt ol.items li .id { grid-column: 1; }
+  #receipt ol.items li .must { grid-column: 2; }
   #receipt ol.items li.tone-pass .class { color: var(--ink); }
   #receipt ol.items li.tone-fail .class { color: var(--red); font-weight: 600; }
   #receipt ol.items li.tone-residue .class { color: var(--amber); font-weight: 600; }
@@ -234,7 +241,6 @@
   <h2><span id="receipt-title"></span><span id="receipt-fixture" class="fixture" hidden>FIXTURE</span></h2>
   <p class="meta" id="receipt-meta"></p>
   <p class="meta" id="receipt-shas"></p>
-  <ul class="meta" id="receipt-counts"></ul>
   <div class="controls">
     <button type="button" id="tour-play">play</button>
     <button type="button" id="tour-prev" aria-label="previous step">&lsaquo;</button>
@@ -246,6 +252,10 @@
   <p class="caption" id="tour-caption"></p>
   <ul class="stage" id="tour-stage"></ul>
   <p class="note" id="receipt-note" hidden></p>
+  <details class="counts" id="receipt-counts-wrap" hidden>
+    <summary id="receipt-counts-summary">counts</summary>
+    <ul class="meta" id="receipt-counts"></ul>
+  </details>
   <ol class="items" id="receipt-items"></ol>
   <p class="more" id="receipt-more" hidden></p>
   <p class="foot">P play · [ ] step · T directed / plain · directed is off by default until it wins the comparison</p>

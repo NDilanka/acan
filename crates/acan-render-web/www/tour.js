@@ -85,3 +85,10 @@ export function countLines(play) {
     `${counts.masks_applied} masks applied`,
   ];
 }
+
+// The closed line over the count lines: the item total and the obligations that passed, each with
+// its denominator. The rest of the counts open beneath it.
+export function countSummary(play) {
+  const behavior = play.counts.behavior;
+  return `${play.items.length} items · obligations ${behavior.passed} of ${behavior.obligations_total} passed`;
+}
