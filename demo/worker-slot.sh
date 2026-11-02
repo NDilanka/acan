@@ -1,6 +1,7 @@
 #!/bin/sh
 # Runs one worker slot, as worker-slot.ps1 does. An acan-worker process builds one task and exits, so the slot
 # starts a new worker after each exit, up to -m runs. Each run writes its own log pair under the run's logs folder.
+# The token goes to acan-worker in ACAN_AGENT_TOKEN, not on its command line, so ps does not show it.
 #
 # Usage: worker-slot.sh -n name -a agent -d run_dir -b worker_binary -p port [-m max_runs] [-t wait_secs]
 
@@ -39,8 +40,7 @@ fi
 logs="$run_dir/logs"
 run=1
 while [ "$run" -le "$max_runs" ]; do
-  (cd "$run_dir" && "$worker" \
-    --token "$token" \
+  (cd "$run_dir" && ACAN_AGENT_TOKEN="$token" "$worker" \
     --server "http://127.0.0.1:$port" \
     --repo "$run_dir" \
     --llm "$run_dir/.acan/llm.toml" \

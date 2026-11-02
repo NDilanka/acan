@@ -19,9 +19,10 @@ struct Cli {
     /// The origin's base URL, such as `http://127.0.0.1:7311`.
     #[arg(long)]
     server: String,
-    /// The agent's bearer token.
+    /// The agent's bearer token. Without it, the `ACAN_AGENT_TOKEN` variable is used. The scripts
+    /// set the variable, because a flag shows in the process list.
     #[arg(long)]
-    token: String,
+    token: Option<String>,
     /// The repository the origin serves. Its tracked files ground each plan.
     #[arg(long)]
     repo: PathBuf,
@@ -80,6 +81,7 @@ async fn run_cli() -> Result<Exit> {
     match cli.role {
         Role::Worker => {}
     }
+    let token = agent_token(cli.token, std::env::var("ACAN_AGENT_TOKEN").ok())?;
     load_env(&cli.env)?;
     let config =
         LlmConfig::load(&cli.llm).with_context(|| format!("loading {}", cli.llm.display()))?;
@@ -87,7 +89,7 @@ async fn run_cli() -> Result<Exit> {
     let model = OpenAiCompatible::new(config, keys).context("building the model client")?;
     let worker = WorkerConfig {
         server: cli.server,
-        token: cli.token,
+        token,
         repo: cli.repo,
         test_command: cli.test_command,
         max_steps: cli.max_steps,
@@ -97,6 +99,14 @@ async fn run_cli() -> Result<Exit> {
         poll: Duration::from_millis(500),
     };
     Ok(run(&worker, &model).await.exit)
+}
+
+/// The agent token: the `--token` flag when it is set, else the `ACAN_AGENT_TOKEN` variable. An
+/// empty value counts as missing. The error names both sources and shows no value.
+fn agent_token(flag: Option<String>, variable: Option<String>) -> Result<String> {
+    flag.filter(|token| !token.is_empty())
+        .or_else(|| variable.filter(|token| !token.is_empty()))
+        .context("no agent token: pass --token or set ACAN_AGENT_TOKEN")
 }
 
 /// Loads the provider keys from `path`. A missing file is normal; a file that does not parse is
@@ -129,7 +139,58 @@ fn load_env(path: &Path) -> Result<()> {
 mod tests {
     use std::fs;
 
-    use super::load_env;
+    use clap::Parser;
+
+    use super::{Cli, agent_token, load_env};
+
+    #[test]
+    fn the_flag_wins_and_the_variable_fills_in() {
+        let flag = Some("acan_agent_flag".to_owned());
+        let variable = Some("acan_agent_variable".to_owned());
+        assert_eq!(
+            agent_token(flag.clone(), variable.clone()).expect("the flag is a token"),
+            "acan_agent_flag"
+        );
+        assert_eq!(
+            agent_token(None, variable).expect("the variable is a token"),
+            "acan_agent_variable"
+        );
+        assert_eq!(
+            agent_token(flag, None).expect("the flag alone is a token"),
+            "acan_agent_flag"
+        );
+    }
+
+    #[test]
+    fn an_empty_value_counts_as_missing() {
+        let token = agent_token(Some(String::new()), Some("acan_agent_variable".to_owned()))
+            .expect("the variable is used when the flag is empty");
+        assert_eq!(token, "acan_agent_variable");
+        agent_token(Some(String::new()), None).expect_err("an empty flag is no token");
+    }
+
+    #[test]
+    fn no_token_is_an_error_that_names_the_variable() {
+        let err = agent_token(None, None).expect_err("no token is an error");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("ACAN_AGENT_TOKEN"),
+            "the message does not name the variable: {text}"
+        );
+    }
+
+    #[test]
+    fn the_token_flag_is_optional() {
+        let cli = Cli::try_parse_from([
+            "acan-worker",
+            "--server",
+            "http://127.0.0.1:7311",
+            "--repo",
+            ".",
+        ])
+        .expect("the flags parse without --token");
+        assert!(cli.token.is_none());
+    }
 
     #[test]
     fn a_key_file_that_does_not_parse_is_reported_without_its_text() {

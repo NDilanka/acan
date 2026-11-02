@@ -20,8 +20,11 @@ $entry = Get-Content -LiteralPath (Join-Path $acanDir 'tokens.json') -Raw | Conv
     Where-Object { $_.principal.kind -eq 'agent' -and $_.principal.id -eq $Agent } | Select-Object -First 1
 if ($null -eq $entry) { throw "no agent token for $Agent in $acanDir\tokens.json" }
 
+# The token goes to acan-worker in ACAN_AGENT_TOKEN, not on its command line, so the process list does not show it.
+# Start-Process gives each worker run this process's environment.
+$env:ACAN_AGENT_TOKEN = $entry.token
+
 $arguments = @(
-    '--token', $entry.token,
     '--server', "http://127.0.0.1:$Port",
     '--repo', $RunDir,
     '--llm', (Join-Path $acanDir 'llm.toml'),
