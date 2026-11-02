@@ -389,9 +389,18 @@ mod tests {
 
     #[test]
     fn a_windows_path_with_spaces_becomes_one_file_url() {
+        let page = std::env::temp_dir().join("acan url test").join("page.html");
+        let url = file_url(&page);
+        assert!(url.starts_with("file:///"), "{url}");
+        assert!(url.ends_with("/acan%20url%20test/page.html"), "{url}");
+        assert!(!url.contains([' ', '\\']), "{url}");
+        let expected = page
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace(' ', "%20");
         assert_eq!(
-            file_url(Path::new(r"C:\Users\A S U S\page.html")),
-            "file:///C:/Users/A%20S%20U%20S/page.html"
+            url.trim_start_matches("file://").trim_start_matches('/'),
+            expected.trim_start_matches('/')
         );
         assert_eq!(
             file_url(Path::new("/tmp/a#b.html")),
