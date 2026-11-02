@@ -25,8 +25,15 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::host::Host;
 
-/// The most output one director reply may use.
-const DIRECTOR_MAX_TOKENS: u32 = 2_000;
+/// The most output one director reply may use. Muse Spark spends hidden reasoning tokens from this
+/// cap. A reply under the old 2000 cap stopped before its tour was written (receipt VIS02 director),
+/// and a live draft spent 5687 reasoning tokens, so the director gets the draft's 16000.
+const DIRECTOR_MAX_TOKENS: u32 = 16_000;
+
+const _: () = assert!(
+    DIRECTOR_MAX_TOKENS >= 8_000,
+    "a director reply needs room for hidden reasoning as well as the tour"
+);
 
 /// How long a plant view waits for the director before it serves the deterministic tour. The call
 /// keeps running after the wait, and its answer is cached for the receipt.
@@ -507,9 +514,37 @@ async fn answer_within<C: ModelClient>(
 async fn ask<C: ModelClient>(client: &C, view: &PlantView) -> DirectorAnswer {
     match direct(client, view).await {
         Ok(proposal) => DirectorAnswer::Proposal(proposal),
-        Err(err) if err.is_transient() => DirectorAnswer::transient(err.to_string()),
-        Err(err) => DirectorAnswer::Refused(err.to_string()),
+        Err(err) => {
+            log_unusable_reply(view, &err);
+            if err.is_transient() {
+                DirectorAnswer::transient(err.to_string())
+            } else {
+                DirectorAnswer::Refused(err.to_string())
+            }
+        }
     }
+}
+
+/// Logs the tokens, latency and request id of a director reply that could not be used, so the
+/// refusal keeps what the call cost. An error with no reply, such as a timeout, logs nothing here.
+fn log_unusable_reply(view: &PlantView, err: &TourError) {
+    let TourError::Director(llm) = err else {
+        return;
+    };
+    let Some(trace) = llm.reply_trace() else {
+        return;
+    };
+    let call = &trace.call;
+    tracing::warn!(
+        receipt = %view.receipt_hash,
+        model = %call.model,
+        request_id = ?trace.request_id,
+        prompt_tokens = call.usage.prompt_tokens,
+        completion_tokens = call.usage.completion_tokens,
+        latency = ?call.latency,
+        error = %err,
+        "the director's reply was not usable; the plant view serves the deterministic tour"
+    );
 }
 
 /// The director's context: the view without any tour, the mandatory item ids and the catalog.
@@ -673,7 +708,7 @@ mod tests {
                 Role::Director,
                 |request| {
                     request.temperature == Some(0.0)
-                        && request.max_tokens == Some(2_000)
+                        && request.max_tokens == Some(DIRECTOR_MAX_TOKENS)
                         && request
                             .response_format
                             .as_ref()
@@ -1392,9 +1427,19 @@ mod tests {
         );
         assert!(
             !TourError::Director(LlmError::SchemaValidation {
-                provider,
+                provider: provider.clone(),
                 detail: String::new(),
                 raw: String::new(),
+                trace: Box::new(acan_llm::ReplyTrace {
+                    call: acan_llm::CallRecord {
+                        role: Role::Director,
+                        provider,
+                        model: "muse-spark-1.3".to_owned(),
+                        usage: acan_llm::Usage::default(),
+                        latency: Duration::ZERO,
+                    },
+                    request_id: None,
+                }),
             })
             .is_transient()
         );

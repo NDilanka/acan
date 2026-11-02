@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 
 use crate::chat::{ChatRequest, ChatResponse, JsonSchemaFormat};
-use crate::error::LlmError;
+use crate::error::{LlmError, ReplyTrace};
 use crate::role::Role;
 use crate::setup::{KeyOutcome, KeyStatus, SetupError};
 use crate::trace::Traced;
@@ -77,7 +77,7 @@ pub trait ModelClient: Send + Sync {
         async move {
             let cap = request.max_tokens;
             let response = self.chat(role, with_schema::<T>(request)).await?;
-            parse_structured(response, cap, str::to_owned)
+            parse_structured(response, cap, None, str::to_owned)
         }
     }
 
@@ -161,17 +161,23 @@ pub(crate) fn with_schema<T: JsonSchema>(mut request: ChatRequest) -> ChatReques
 const FINISH_LENGTH: &str = "length";
 
 /// Parses a reply as `T`. `cap` is the output cap the request set. A reply that stopped at that
-/// cap is refused before it is parsed, because its text is cut short. `scrub` removes credentials
-/// from provider text before the text is kept in an error.
+/// cap is refused before it is parsed, because its text is cut short. `request_id` is the id the
+/// provider sent for the call, when it sent one. Both errors keep the call's trace. `scrub`
+/// removes credentials from provider text before the text is kept in an error.
 pub(crate) fn parse_structured<T: DeserializeOwned>(
     response: ChatResponse,
     cap: Option<u32>,
+    request_id: Option<String>,
     scrub: impl Fn(&str) -> String,
 ) -> Result<Structured<T>, LlmError> {
     if response.finish_reason.as_deref() == Some(FINISH_LENGTH) {
         return Err(LlmError::OutputCapped {
             provider: response.call.provider.clone(),
             max_tokens: cap,
+            trace: Box::new(ReplyTrace {
+                call: response.call,
+                request_id,
+            }),
         });
     }
     let raw = response.content.as_deref().unwrap_or_default();
@@ -185,6 +191,10 @@ pub(crate) fn parse_structured<T: DeserializeOwned>(
             provider: response.call.provider.clone(),
             detail: scrub(&err.to_string()),
             raw: scrub(raw),
+            trace: Box::new(ReplyTrace {
+                call: response.call,
+                request_id,
+            }),
         }),
     }
 }
