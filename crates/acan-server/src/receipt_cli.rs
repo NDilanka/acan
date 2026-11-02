@@ -750,14 +750,17 @@ fn redact_markdown(text: &str, secrets: &[String]) -> String {
 fn redact_line(line: &str, secrets: &[String]) -> String {
     let text = redact_text(line, secrets);
     let lower = text.to_ascii_lowercase();
-    for key in SENSITIVE_KEYS {
-        let Some(at) = lower.find(key) else {
-            continue;
-        };
-        let after = at + key.len();
-        if let Some(offset) = text[after..].find([':', '=']) {
-            return format!("{}{REDACTED}", &text[..after + offset + 1]);
-        }
+    // The leftmost key in the line wins, so a line that names two keys loses every value, not
+    // just the value of the key that comes first in the list.
+    let Some(after) = SENSITIVE_KEYS
+        .iter()
+        .filter_map(|key| lower.find(key).map(|at| at + key.len()))
+        .min()
+    else {
+        return text;
+    };
+    if let Some(offset) = text[after..].find([':', '=']) {
+        return format!("{}{REDACTED}", &text[..after + offset + 1]);
     }
     text
 }
@@ -1073,6 +1076,20 @@ mod tests {
             "a count under a sensitive word is kept"
         );
         assert_eq!(value["items"][0]["note"], "fine");
+    }
+
+    #[test]
+    fn a_line_with_two_sensitive_keys_loses_every_value() {
+        let text = "password: hunter2, token: abc123";
+        let redacted = redact_markdown(text, &[]);
+        assert!(
+            !redacted.contains("hunter2"),
+            "first key's value: {redacted}"
+        );
+        assert!(
+            !redacted.contains("abc123"),
+            "second key's value: {redacted}"
+        );
     }
 
     #[test]
