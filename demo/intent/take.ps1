@@ -199,7 +199,10 @@ function Read-Routing {
 
 function Invoke-Api {
     param([string]$Path)
-    Invoke-RestMethod -Uri "$script:Base$Path" -Headers @{ Authorization = "Bearer $script:OwnerToken" } -TimeoutSec 60
+    # Invoke-RestMethod writes a JSON array to the pipeline as one Object[] item, so `Invoke-Api ... | ForEach-Object`
+    # saw the whole list as one item. Each element is written on its own here; an empty answer writes nothing.
+    $reply = Invoke-RestMethod -Uri "$script:Base$Path" -Headers @{ Authorization = "Bearer $script:OwnerToken" } -TimeoutSec 60
+    if ($null -ne $reply) { foreach ($item in @($reply)) { $item } }
 }
 
 function Invoke-Api404Tolerant {

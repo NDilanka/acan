@@ -1245,8 +1245,13 @@ if (-not $DryRun) {
         }
     } catch {
         $script:Summary['failure'] = $_.Exception.Message
+        # where it stopped: the line and the call stack, so a harness failure can be found without a rerun
+        $script:Summary['failure_at'] = [string]$_.InvocationInfo.ScriptLineNumber + ': ' + ([string]$_.InvocationInfo.Line).Trim()
+        $script:Summary['failure_stack'] = [string]$_.ScriptStackTrace
         $script:ExitCode = 1
         Write-Output "FAILED: $($_.Exception.Message)"
+        Write-Output "failed at line $($script:Summary['failure_at'])"
+        Write-Output $_.ScriptStackTrace
     } finally {
         if ($script:Proc -and -not $script:Proc.HasExited) {
             Stop-Process -Id $script:Proc.Id -Force -ErrorAction SilentlyContinue
