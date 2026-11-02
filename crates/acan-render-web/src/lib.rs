@@ -18,6 +18,8 @@ pub mod plant_view;
 pub mod pov;
 pub mod scenario;
 pub mod scene;
+pub mod seal;
+pub mod slices;
 pub mod stand;
 
 #[cfg(target_arch = "wasm32")]

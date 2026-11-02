@@ -17,6 +17,9 @@ pub enum Role {
     Fast,
     /// Image input. Compares page screenshots in the advisory vision witness.
     Vision,
+    /// Muse Wonder. Takes the advisory second look at a vision check the first call found
+    /// inconsistent or unclear.
+    Wonder,
 }
 
 impl Role {
@@ -27,6 +30,7 @@ impl Role {
             Self::Worker => "worker",
             Self::Fast => "fast",
             Self::Vision => "vision",
+            Self::Wonder => "wonder",
         }
     }
 }
@@ -46,6 +50,7 @@ impl FromStr for Role {
             "worker" => Ok(Self::Worker),
             "fast" => Ok(Self::Fast),
             "vision" => Ok(Self::Vision),
+            "wonder" => Ok(Self::Wonder),
             other => Err(UnknownRole(other.to_owned())),
         }
     }

@@ -7,7 +7,7 @@ use crate::model::{Ink, Surface};
 /// Palette slots on the GPU.
 pub const PALETTE_LEN: usize = 21;
 /// Tint slots. Slot 0 is the identity; instances pick a slot to tint what they draw.
-pub const TINT_LEN: usize = 20;
+pub const TINT_LEN: usize = 24;
 /// Agent hues, as `#rrggbb`. An agent's hue comes from its id, so it is the same on every reload.
 pub const AGENT_HUES: [u32; AGENT_SLOTS] =
     [0x1f9e8f, 0x7a5cd6, 0x3d7fd1, 0xc0548c, 0x6a9a2e, 0x9b4d9b];
@@ -28,6 +28,17 @@ pub const TINT_FOOTPRINT0: u32 = 7;
 pub const TINT_SHARED: u32 = 13;
 /// Tint slot of each agent's drone shell mix: `TINT_SHELL0 + slot`.
 pub const TINT_SHELL0: u32 = 14;
+/// Tint slots of the scope lanes, in [`SCOPE_TINTS`] order: a draft plot, a confirmed plot, a
+/// draft keep and a confirmed keep. `TINT_SCOPE0 + i` is the i-th.
+pub const TINT_SCOPE0: u32 = 20;
+/// The scope tints as a hue and the share of it mixed into white. A plot is amber and a keep is
+/// brass; a draft takes less of its hue than a confirmed lane, so it reads as not yet in force.
+pub const SCOPE_TINTS: [(u32, f32); 4] = [
+    (0xd99a1e, 0.12),
+    (0xd99a1e, 0.28),
+    (0x9c7f2e, 0.16),
+    (0x9c7f2e, 0.36),
+];
 
 pub const SLOT_PAGE: u32 = 0;
 pub const SLOT_LIT: u32 = 1;
@@ -203,6 +214,9 @@ pub fn tints() -> [[f32; 4]; TINT_LEN] {
         table[TINT_FOOTPRINT0 as usize + slot] = footprint_mix(hue);
         table[TINT_SHELL0 as usize + slot] = shell_mix(hue);
     }
+    for (i, (hue, share)) in SCOPE_TINTS.into_iter().enumerate() {
+        table[TINT_SCOPE0 as usize + i] = mixed_into_white(rgb(hue, 1.0), share);
+    }
     table
 }
 
@@ -298,8 +312,9 @@ const _: () = assert!(
     TINT_BODY0 as usize + AGENT_SLOTS <= TINT_FOOTPRINT0 as usize
         && TINT_FOOTPRINT0 as usize + AGENT_SLOTS <= TINT_SHARED as usize
         && TINT_SHARED < TINT_SHELL0
-        && TINT_SHELL0 as usize + AGENT_SLOTS <= TINT_LEN,
-    "body, footprint, shared and shell tints do not overlap"
+        && TINT_SHELL0 as usize + AGENT_SLOTS <= TINT_SCOPE0 as usize
+        && TINT_SCOPE0 as usize + SCOPE_TINTS.len() <= TINT_LEN,
+    "body, footprint, shared, shell and scope tints do not overlap"
 );
 const _: () = assert!(GRID_MINOR_ALPHA < GRID_MAJOR_ALPHA);
 const _: () = assert!(PAPER_TOP > 0.0, "a top never matches the page");

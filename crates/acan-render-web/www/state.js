@@ -37,6 +37,8 @@ export const orderEl = $("order");
 
 export const orderLine = $("order-line");
 
+export const slipEl = $("slip");
+
 export const usagePanel = $("usage");
 
 export const metaBody = $("meta-body");
@@ -94,6 +96,19 @@ export const state = {
   ridden: "",
   // Whether the view holds an order to show in the order island.
   hasOrder: false,
+  // Whether the slip shows: the order island's order has a scope lane. See `slip.js`.
+  hasSlip: false,
+  // The origin's confirmation route for each order with a scope, as `seal.js` keeps it.
+  sealViews: new Map(),
+  // The ConfirmScope last sent for each order, with the revision it was built on. See `seal.js`.
+  sealSent: new Map(),
+  // The open-choice answers and broad acknowledgements given on the scope shown, by `hash`.
+  sealPicks: { hash: null, choices: new Map(), acks: new Set() },
+  // The plot whose Strike waits for its confirm, or null.
+  strikeArmed: null,
+  // Whether a Seal or a Strike is being sent, and the note the last one left.
+  slipPending: false,
+  slipNote: "",
   labelGeneration: 0,
   labels: new Map(),
   // The plant view summary of each order that has receipts, as the wasm side checked it. See

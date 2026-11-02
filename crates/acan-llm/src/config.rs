@@ -61,6 +61,7 @@ pub struct Route {
 
 /// One route per role. Foreman, worker and fast must be routed, so a missing one fails at load
 /// time. Vision is optional: without a vision route, vision calls use the foreman's route.
+/// Wonder is optional and has no fallback: without its route, no wonder call is sent.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Routing {
@@ -69,15 +70,18 @@ pub struct Routing {
     pub fast: Route,
     #[serde(default)]
     pub vision: Option<Route>,
+    #[serde(default)]
+    pub wonder: Option<Route>,
 }
 
 impl Routing {
-    fn route(&self, role: Role) -> &Route {
+    fn route(&self, role: Role) -> Option<&Route> {
         match role {
-            Role::Foreman => &self.foreman,
-            Role::Worker => &self.worker,
-            Role::Fast => &self.fast,
-            Role::Vision => self.vision.as_ref().unwrap_or(&self.foreman),
+            Role::Foreman => Some(&self.foreman),
+            Role::Worker => Some(&self.worker),
+            Role::Fast => Some(&self.fast),
+            Role::Vision => Some(self.vision.as_ref().unwrap_or(&self.foreman)),
+            Role::Wonder => self.wonder.as_ref(),
         }
     }
 
@@ -87,6 +91,7 @@ impl Routing {
             Role::Worker => &mut self.worker,
             Role::Fast => &mut self.fast,
             Role::Vision => self.vision.get_or_insert_with(|| self.foreman.clone()),
+            Role::Wonder => self.wonder.get_or_insert_with(|| self.foreman.clone()),
         }
     }
 }
@@ -158,7 +163,10 @@ impl LlmConfig {
     }
 
     pub(crate) fn resolve(&self, role: Role) -> Result<ResolvedRoute<'_>, ConfigError> {
-        let route = self.routing.route(role);
+        let route = self
+            .routing
+            .route(role)
+            .ok_or(ConfigError::Unrouted { role })?;
         let provider = self
             .providers
             .iter()
@@ -191,6 +199,9 @@ impl LlmConfig {
         for role in [Role::Foreman, Role::Worker, Role::Fast, Role::Vision] {
             self.resolve(role)?;
         }
+        if self.routing.wonder.is_some() {
+            self.resolve(Role::Wonder)?;
+        }
         Ok(())
     }
 }
@@ -217,6 +228,9 @@ pub enum ConfigError {
 
     #[error("{role} routes to unknown provider {provider}")]
     UnknownProvider { role: Role, provider: String },
+
+    #[error("{role} has no route; add a [routing.{role}] block to send its calls")]
+    Unrouted { role: Role },
 
     #[error("cannot build the HTTP client")]
     Client(#[from] reqwest::Error),

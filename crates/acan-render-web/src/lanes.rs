@@ -5,7 +5,7 @@
 //! the scope gives them, so the page resolves them against its own machines and can show a name
 //! the plan does not have.
 
-use acan_core::{OrderId, ScopeLane, World};
+use acan_core::{OrderId, ScopeLane, TaskState, World};
 use acan_intent::{
     Change, ChoiceId, ChoiceOption, ItemId, ItemProvenance, MachineId, MethodSelector, MustKeep,
     MustKeepId, NonEmpty, OpenChoice, RulingId, Scope, ScopeConfirmation, ScopeHash, ScopeItem,
@@ -35,6 +35,12 @@ pub struct LaneView {
     pub open: Vec<ChoiceView>,
     /// The confirmation of the current revision, as the human gave it.
     pub confirmation: Option<ScopeConfirmation>,
+    /// The tasks of the order that hold a lease now. A newer revision ends each one as
+    /// `Superseded`. A lease shows that the agent's authority is valid, not that its work is safe.
+    pub live_leases: u32,
+    /// Whether the repair budget ran out. A stopped lane takes no claim or build, and no seal or
+    /// newer revision lifts the stop.
+    pub stopped: bool,
 }
 
 /// One may-change item.
@@ -44,6 +50,8 @@ pub struct MayView {
     pub id: ItemId,
     /// The text of the item's first acceptance obligation.
     pub label: String,
+    /// The text of every acceptance obligation, in order. A Strike names them before it sends.
+    pub obligations: Vec<String>,
     /// The selector's method and route template, such as `POST /api/login`.
     pub selector: String,
     /// What kind of change.
@@ -95,7 +103,7 @@ pub struct ReceiptCount {
 /// Every scope lane of `world`, in order id order. An order without a scope has none.
 #[must_use]
 pub fn lane_views(world: &World) -> Vec<LaneView> {
-    world.lanes().map(lane_view).collect()
+    world.lanes().map(|lane| lane_view(world, lane)).collect()
 }
 
 /// The receipt count of each order with at least one recorded receipt, in order id order.
@@ -116,7 +124,7 @@ fn receipt_count(lane: &ScopeLane) -> Option<ReceiptCount> {
     })
 }
 
-fn lane_view(lane: &ScopeLane) -> LaneView {
+fn lane_view(world: &World, lane: &ScopeLane) -> LaneView {
     let body = &lane.scope.body;
     LaneView {
         order: lane.order,
@@ -132,13 +140,25 @@ fn lane_view(lane: &ScopeLane) -> LaneView {
         must_keep: body.must_keep.iter().map(keep_view).collect(),
         open: body.open.iter().map(choice_view).collect(),
         confirmation: lane.confirmation.clone(),
+        live_leases: live_leases(world, lane.order),
+        stopped: lane.stopped,
     }
+}
+
+/// The tasks of `order` that hold a lease: the ones a revision ends as `Superseded`.
+fn live_leases(world: &World, order: OrderId) -> u32 {
+    let held = world
+        .tasks_of(order)
+        .filter(|task| matches!(task.state, TaskState::Claimed { .. }))
+        .count();
+    u32::try_from(held).unwrap_or(u32::MAX)
 }
 
 fn may_view(item: &ScopeItem) -> MayView {
     MayView {
         id: item.id.clone(),
         label: item.acceptance.first().text.clone(),
+        obligations: item.acceptance.iter().map(|o| o.text.clone()).collect(),
         selector: selector_words(&item.selector),
         change: item.change,
         provenance: item.provenance,
