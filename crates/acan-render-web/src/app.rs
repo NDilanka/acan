@@ -59,6 +59,9 @@ pub struct App {
     turn: Option<Turn>,
     /// The camera's move to the tour step on screen, while one runs.
     tour_move: Option<TourMove>,
+    /// The machines the shown tour step stages, with the chip labels on each. Empty when no step
+    /// is shown, so every machine keeps its normal tint.
+    stage: Vec<tour::Spot>,
     plant: Option<Loaded>,
     plan: Option<Plan>,
     mirror: Option<Mirror>,
@@ -176,6 +179,7 @@ impl App {
             dpr: 1.0,
             turn: None,
             tour_move: None,
+            stage: Vec::new(),
             plant: None,
             plan: None,
             mirror: None,
@@ -275,6 +279,54 @@ impl App {
     /// Stops the move to a tour step in progress, where the camera stands. Does nothing without one.
     pub fn tour_stop(&mut self) {
         self.tour_move = None;
+    }
+
+    /// Stages a tour step from its `spots`, as JSON `[{"machine_id", "labels"}]`: each machine
+    /// they name keeps its tint, every other machine is dimmed, and each label shows as a chip on
+    /// its machine. An empty text clears the stage, as leaving the tour does.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the text is not a list of spots.
+    pub fn tour_stage(&mut self, spots_json: &str) -> Result<(), JsError> {
+        self.stage = if spots_json.trim().is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str(spots_json).map_err(js_err)?
+        };
+        self.sync_scene();
+        Ok(())
+    }
+
+    /// Which plan machines the shown tour step stages, in plan order, or `None` when no step is
+    /// shown or none of its machines is on the plant.
+    fn staged(&self) -> Option<Vec<bool>> {
+        if self.stage.is_empty() {
+            return None;
+        }
+        let plan = self.plan.as_ref()?;
+        let names: Vec<String> = plan
+            .machines
+            .iter()
+            .map(|machine| machine.name.clone())
+            .collect();
+        marks::staged_plan(&names, &self.stage)
+    }
+
+    /// The chips of the shown tour step, one per mark it stages.
+    fn stage_chips(&self) -> Vec<marks::Flag> {
+        match (&self.plan, &self.plant) {
+            (Some(plan), Some(loaded)) => marks::stage_flags(&self.stage, plan, &loaded.stands),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The flags the page labels: the marks' flags as the motion has them, then the chips of the
+    /// shown tour step. `marks_json` and `flag_layout` both list them in this order.
+    fn all_flags(&self) -> Vec<marks::Flag> {
+        let mut flags = self.motion.flags_now(&self.marks.flags);
+        flags.extend(self.stage_chips());
+        flags
     }
 
     /// Checks the origin's `scope/confirmation` body for `order` (`o-N`) against the scope this
@@ -879,7 +931,7 @@ impl App {
             marks::card(view, mirror.world(), index, &self.slots)
         });
         serde_json::to_string(&Out {
-            flags: self.motion.flags_now(&self.marks.flags),
+            flags: self.all_flags(),
             card,
             unplaced: &self.marks.unplaced,
         })
@@ -891,8 +943,7 @@ impl App {
     /// and -1 is a flag that stands alone. The anchors follow the bodies and diamonds while they
     /// move.
     pub fn flag_layout(&self) -> Vec<f32> {
-        self.motion
-            .flags_now(&self.marks.flags)
+        self.all_flags()
             .iter()
             .enumerate()
             .flat_map(|(index, flag)| {
@@ -1110,8 +1161,10 @@ impl App {
             return;
         };
         let mut scene = loaded.base.clone();
+        let staged = self.staged();
         for (plan_index, &instance) in loaded.plan_instance.iter().enumerate() {
-            scene.instances[instance].tint = self.marks.footprint_tint(plan_index);
+            scene.instances[instance].tint =
+                marks::machine_tint(&self.marks, plan_index, staged.as_deref());
         }
         let hues: Vec<(usize, u8)> = self
             .marks

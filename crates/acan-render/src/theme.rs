@@ -6,8 +6,18 @@ use crate::model::{Ink, Surface};
 
 /// Palette slots on the GPU.
 pub const PALETTE_LEN: usize = 21;
-/// Tint slots. Slot 0 is the identity; instances pick a slot to tint what they draw.
-pub const TINT_LEN: usize = 24;
+/// Tint slots. Slot 0 is the identity; instances pick a slot to tint what they draw. The slots from
+/// [`TINT_DIM0`] up are dimmed copies of the plain ones below it.
+pub const TINT_LEN: usize = 48;
+/// The first dimmed tint slot: `TINT_DIM0 + slot` is the plain slot `slot` darkened by
+/// [`DIM_SHARE`]. A machine a tour step does not stage takes its dimmed slot.
+pub const TINT_DIM0: u32 = 24;
+/// The share of its colour each dimmed slot keeps.
+pub const DIM_SHARE: f32 = 0.4;
+const _: () = assert!(
+    TINT_DIM0 as usize * 2 == TINT_LEN,
+    "every plain tint slot has a dimmed copy"
+);
 /// Agent hues, as `#rrggbb`. An agent's hue comes from its id, so it is the same on every reload.
 pub const AGENT_HUES: [u32; AGENT_SLOTS] =
     [0x1f9e8f, 0x7a5cd6, 0x3d7fd1, 0xc0548c, 0x6a9a2e, 0x9b4d9b];
@@ -217,7 +227,22 @@ pub fn tints() -> [[f32; 4]; TINT_LEN] {
     for (i, (hue, share)) in SCOPE_TINTS.into_iter().enumerate() {
         table[TINT_SCOPE0 as usize + i] = mixed_into_white(rgb(hue, 1.0), share);
     }
+    add_dim_slots(&mut table);
     table
+}
+
+/// Fills the dimmed slots from the plain ones: each keeps [`DIM_SHARE`] of its colour and its
+/// alpha. Call it once the plain slots hold their final values.
+pub fn add_dim_slots(table: &mut [[f32; 4]; TINT_LEN]) {
+    for slot in 0..TINT_DIM0 as usize {
+        let plain = table[slot];
+        table[TINT_DIM0 as usize + slot] = [
+            plain[0] * DIM_SHARE,
+            plain[1] * DIM_SHARE,
+            plain[2] * DIM_SHARE,
+            plain[3],
+        ];
+    }
 }
 
 /// An agent's hue in sRGB, for the slot it holds.
@@ -313,7 +338,7 @@ const _: () = assert!(
         && TINT_FOOTPRINT0 as usize + AGENT_SLOTS <= TINT_SHARED as usize
         && TINT_SHARED < TINT_SHELL0
         && TINT_SHELL0 as usize + AGENT_SLOTS <= TINT_SCOPE0 as usize
-        && TINT_SCOPE0 as usize + SCOPE_TINTS.len() <= TINT_LEN,
+        && TINT_SCOPE0 as usize + SCOPE_TINTS.len() <= TINT_DIM0 as usize,
     "body, footprint, shared, shell and scope tints do not overlap"
 );
 const _: () = assert!(GRID_MINOR_ALPHA < GRID_MAJOR_ALPHA);

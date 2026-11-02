@@ -115,8 +115,9 @@ export const state = {
   // play it admitted. See `plant.js`.
   plantViews: new Map(),
   // The receipt plate: the mode the toggle shows ("plain" or "directed"), the step playing, whether
-  // the walk runs and its timer, and the order it follows. See `plate.js`.
-  plate: { mode: "plain", index: 0, playing: false, timer: null, order: null },
+  // the walk runs and its timer, the order it follows, and the stage the plant shows (the argument
+  // last given to `tour_stage`). See `plate.js`.
+  plate: { mode: "plain", index: 0, playing: false, timer: null, order: null, stage: "" },
   // The origin's usage answer, `{ rows, error }`, or null until the first one. See `usage.js`.
   serverUsage: null,
   usageInFlight: false,

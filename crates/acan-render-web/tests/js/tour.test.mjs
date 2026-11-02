@@ -17,6 +17,7 @@ import {
   itemTone,
   shortHash,
   shortSha,
+  stageArgument,
   stepAt,
 } from "../../www/tour.js";
 
@@ -65,6 +66,15 @@ test("the chip names the director when its tour plays, and says deterministic wh
 
 test("directed mode with no play to show falls back to the plain chip", () => {
   assert.equal(chipText(DIRECTED, null), "plain");
+});
+
+test("directed mode stages the step's spots, and plain mode or no step stages none", () => {
+  const spots = [{ machine_id: "ratelimit", labels: ["bounced: i-retry-after"] }];
+  const step = { item_id: "i-retry-after", machine_id: "ratelimit", zoom: "machine", stage: [], spots, caption: "x" };
+  assert.deepEqual(JSON.parse(stageArgument(DIRECTED, step)), spots);
+  assert.equal(stageArgument(PLAIN, step), "");
+  assert.equal(stageArgument(DIRECTED, null), "");
+  assert.deepEqual(JSON.parse(stageArgument(DIRECTED, { ...step, spots: undefined })), []);
 });
 
 test("an index is kept inside the walk, and an empty walk stays at zero", () => {

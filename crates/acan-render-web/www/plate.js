@@ -4,6 +4,7 @@
 // item is listed in view order whatever the tour does, so a tour cannot hide a failure.
 import { shownOrder } from "./panels.js";
 import { requestRender } from "./main.js";
+import { paintMarks } from "./marks.js";
 import {
   DIRECTED,
   PLAIN,
@@ -16,6 +17,7 @@ import {
   itemTone,
   shortHash,
   shortSha,
+  stageArgument,
   stepAt,
 } from "./tour.js";
 import { $, state } from "./state.js";
@@ -128,6 +130,16 @@ export function toggleMode() {
   setMode(state.plate.mode === PLAIN ? DIRECTED : PLAIN);
 }
 
+// Stages the shown step on the plant: its machines keep their colour, the rest dim, and its marks
+// show as chips. Only a change is sent, and the marks are repainted with it.
+function syncStage(argument) {
+  if (state.plate.stage === argument) return;
+  state.plate.stage = argument;
+  state.app.tour_stage(argument);
+  paintMarks();
+  requestRender();
+}
+
 function element(tag, text, className) {
   const el = document.createElement(tag);
   if (text !== undefined) el.textContent = text;
@@ -145,6 +157,7 @@ export function paintPlate() {
   const mode = state.plate.mode;
   const count = play?.steps.length ?? 0;
   const step = mode === DIRECTED ? stepAt(play, state.plate.index) : null;
+  if (state.app) syncStage(stageArgument(mode, step));
 
   $("receipt-title").textContent = `Receipt ${play ? shortHash(play.receipt_hash) : ""}`.trim();
   $("receipt-fixture").hidden = !entry.fixture;

@@ -65,6 +65,9 @@
      each plot and keep under it. A plot is behavior the order may change, not a fence. */
   .flag.plot { font-size: 11px; color: #7a5a12; border-color: #d9a441; flex-direction: column; align-items: flex-start; gap: 2px; }
   .flag.plot.draft { border-style: dashed; }
+  /* A tour step's chip: one per mark the step stages, on the machine the mark sits on. The other
+     machines dim while the step shows. */
+  .flag.stage { font-size: 11px; border-color: var(--ink); border-style: dotted; }
   .flag .detail { display: flex; flex-direction: column; color: var(--muted); font-size: 11px; }
   .flag.clash .scope { font-size: 11px; color: #7a5a12; border: 1px solid #d9a441; border-radius: 3px; padding: 0 4px; }
   .flag.unplaced { position: fixed; left: 12px; top: 96px; font-size: 11px; color: var(--muted); border-style: dashed; }

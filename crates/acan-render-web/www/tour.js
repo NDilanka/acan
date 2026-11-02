@@ -30,6 +30,14 @@ export function chipText(mode, play) {
   return "deterministic";
 }
 
+// What the plant stages for a step, as the wasm side takes it: the spots of the step's marks in
+// directed mode, and nothing in plain mode, where every machine keeps its colour. An empty text
+// clears the stage.
+export function stageArgument(mode, step) {
+  if (mode !== DIRECTED || !step) return "";
+  return JSON.stringify(step.spots ?? []);
+}
+
 // The index kept inside a walk of `count` steps. An empty walk stays at 0.
 export function clampIndex(index, count) {
   if (count <= 0) return 0;
