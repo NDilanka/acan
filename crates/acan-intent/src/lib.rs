@@ -42,7 +42,8 @@ mod view;
 
 pub use container::{
     BUN_RUNTIME, ContainerImage, ContainerNetwork, ContainerPolicy, ContainerUser, Driver,
-    MissingProtected, MountPolicy, NODE_RUNTIME, Privileges, RootFilesystem,
+    MissingProtected, MountPolicy, NODE_RUNTIME, PLACEHOLDER_PREFIX, Privileges, RootFilesystem,
+    is_credential_name,
 };
 pub use episode::{
     CandidateAttempt, Contest, ContestKind, ContestStatus, DiscrepancyEpisode, EpisodeKey,

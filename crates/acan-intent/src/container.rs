@@ -296,6 +296,12 @@ pub(crate) fn environment_names<'de, D: Deserializer<'de>>(
     Ok(environment)
 }
 
+/// Whether a variable name carries a credential: it contains one of the credential fragments.
+#[must_use]
+pub fn is_credential_name(name: &str) -> bool {
+    CREDENTIAL_NAME_PARTS.iter().any(|part| name.contains(part))
+}
+
 /// Whether `value` is a placeholder: [`PLACEHOLDER_PREFIX`] and then letters, digits or hyphens.
 fn is_placeholder(value: &str) -> bool {
     value.strip_prefix(PLACEHOLDER_PREFIX).is_some_and(|tail| {
@@ -322,8 +328,7 @@ fn check_variable(name: &str, value: &str) -> Result<(), InvalidValue> {
             raw: name.to_owned(),
         });
     }
-    let credential = CREDENTIAL_NAME_PARTS.iter().any(|part| name.contains(part));
-    if credential && !is_placeholder(value) {
+    if is_credential_name(name) && !is_placeholder(value) {
         return Err(InvalidValue::Malformed {
             what: "credential-named environment variable, which no container may receive unless \
                    its value is a placeholder",

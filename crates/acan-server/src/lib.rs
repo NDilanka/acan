@@ -14,6 +14,8 @@ mod git;
 mod host;
 mod http;
 mod index;
+pub mod init;
+pub mod init_cli;
 mod intent_api;
 mod jobs;
 #[allow(
