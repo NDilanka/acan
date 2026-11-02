@@ -12,6 +12,7 @@ name = "acan"
 path = "src/main.rs"
 
 [dependencies]
+acan-agent = { path = "../acan-agent" }
 acan-core = { path = "../acan-core" }
 acan-git = { path = "../acan-git" }
 acan-intent = { path = "../acan-intent" }

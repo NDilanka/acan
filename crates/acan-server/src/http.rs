@@ -21,7 +21,7 @@ use acan_intent::{
 };
 use acan_llm::{ModelClient, UsageTotals};
 use acan_scan::Plant;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -39,6 +39,7 @@ use crate::mcp;
 use crate::public::{self, PublicRoot};
 use crate::release::{self, BugReport, UpdateStatus, VersionInfo};
 use crate::vision::{self, Side, VisionWitness};
+use crate::workers::{Board, WorkersView};
 use crate::{STATE_DIR, redact, setup, stream};
 
 /// Builds the router. The public files are served for every path the API does not claim.
@@ -52,6 +53,7 @@ pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<Public
         .route("/api/plant", get(get_plant::<C>))
         .route("/api/scan", post(post_scan::<C>))
         .route("/api/usage", get(get_usage::<C>))
+        .route("/api/workers", get(get_workers::<C>))
         .route("/api/update", get(get_update::<C>))
         .route("/api/bug-report", get(get_bug_report::<C>))
         .route("/setup", get(setup::page))
@@ -294,6 +296,17 @@ async fn get_usage<C: ModelClient + 'static>(
 ) -> Result<Json<Vec<UsageTotals>>, ApiError> {
     authenticate(&host, bearer(&headers))?;
     Ok(Json(host.ledger().snapshot()))
+}
+
+/// The local workers this server runs and what each is doing. Members only, since an agent token
+/// reads the origin through MCP, not through this route.
+async fn get_workers<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    Extension(board): Extension<Board>,
+    headers: HeaderMap,
+) -> Result<Json<WorkersView>, ApiError> {
+    member(&host, &headers)?;
+    Ok(Json(board.view()))
 }
 
 /// The update check's status. Any principal may read it.

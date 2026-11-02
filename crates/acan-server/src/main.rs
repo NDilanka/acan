@@ -9,7 +9,7 @@ use acan_server::release::{self, Redaction};
 use acan_server::replay;
 use acan_server::{
     DEFAULT_WITNESS_CONCURRENCY, Models, ServerConfig, VisionConfig, default_browser,
-    default_data_dir, start,
+    default_data_dir, start_with_workers,
 };
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -86,6 +86,10 @@ struct ServeArgs {
     /// Runs no advisory vision checks.
     #[arg(long)]
     no_vision: bool,
+    /// How many workers this server runs in its own process, each taking one task at a time.
+    /// Zero runs none. A worker waits, and is reported as having no model key, until a key is set.
+    #[arg(long, default_value_t = 1)]
+    workers: usize,
 }
 
 #[tokio::main]
@@ -158,7 +162,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
             data_dir: args.vision_dir.unwrap_or_else(default_data_dir),
         }),
     };
-    let mut running = start(config, models, ledger).await?;
+    let mut running = start_with_workers(config, models, ledger, args.workers).await?;
     if let Some(token) = &running.owner_token {
         println!(
             "owner token, shown once and saved in .acan/tokens.json: {}",

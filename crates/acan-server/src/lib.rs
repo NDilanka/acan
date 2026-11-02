@@ -50,6 +50,7 @@ mod stream;
 #[allow(dead_code, reason = "the guided tour has no caller in the server yet")]
 mod tour;
 mod vision;
+mod workers;
 mod writer;
 
 use std::fs;
@@ -60,9 +61,10 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use acan_core::{Command, MemberId, Origin, Seq, SystemCmd, WorldId, WorldRef};
+use acan_core::{Command, HumanCmd, MemberId, Origin, Seq, SystemCmd, WorldId, WorldRef};
 use acan_llm::{ModelClient, UsageLedger};
 use anyhow::{Context, bail};
+use axum::Extension;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
@@ -79,6 +81,7 @@ pub use vision::{
     CHROME, Comparison, EDGE, MustKeepItem, Verdict, Vision, VisionCheck, VisionConfig,
     VisionWitness, WitnessStatus, default_browser, default_data_dir,
 };
+pub use workers::{State as WorkerState, Status as WorkerStatus, WorkersView};
 
 use crate::public::PublicRoot;
 use crate::writer::Writer;
@@ -138,6 +141,7 @@ pub struct Running {
     shutdown: watch::Sender<bool>,
     server: Option<JoinHandle<io::Result<()>>>,
     jobs: JoinHandle<()>,
+    worker_loops: Vec<JoinHandle<()>>,
     writer: Writer,
     streams: Arc<Mutex<JoinSet<()>>>,
     #[cfg(test)]
@@ -175,6 +179,12 @@ impl Running {
     /// Panics when a stream task panicked while holding the stream set lock.
     pub async fn stop(mut self) -> anyhow::Result<()> {
         self.shutdown.send_replace(true);
+        // A local worker may be waiting on the origin for up to its wait limit, so its loop is
+        // aborted rather than awaited. Its lease then ends on its own after the origin's TTL.
+        for worker in std::mem::take(&mut self.worker_loops) {
+            worker.abort();
+            let _ = worker.await;
+        }
         let served = self.wait().await;
         self.jobs.abort();
         let _ = (&mut self.jobs).await;
@@ -192,7 +202,8 @@ impl Running {
     }
 }
 
-/// Opens the repository's world, replays it, scans the code, and starts listening.
+/// Opens the repository's world, replays it, scans the code, and starts listening. Runs no local
+/// workers; see [`start_with_workers`].
 ///
 /// # Errors
 ///
@@ -204,6 +215,23 @@ pub async fn start<C: ModelClient + 'static>(
     config: ServerConfig,
     client: C,
     ledger: UsageLedger,
+) -> anyhow::Result<Running> {
+    start_with_workers(config, client, ledger, 0).await
+}
+
+/// As [`start`], and runs `local_workers` worker loops in this process. Each loop has its own
+/// agent, `local-1` and so on, registered to the owner. Its token is kept in the state directory,
+/// so the same agent keeps its token across starts. Zero runs none.
+///
+/// # Errors
+///
+/// Returns the errors of [`start`], plus an error when an agent token cannot be written or a
+/// local worker cannot be registered.
+pub async fn start_with_workers<C: ModelClient + 'static>(
+    config: ServerConfig,
+    client: C,
+    ledger: UsageLedger,
+    local_workers: usize,
 ) -> anyhow::Result<Running> {
     if !config.addr.ip().is_loopback() && !config.team {
         bail!(
@@ -228,12 +256,17 @@ pub async fn start<C: ModelClient + 'static>(
         .map(|vision| Vision::open(vision, &config.repo))
         .transpose()?;
     let founder = MemberId::from_str(OWNER)?;
-    let (tokens, owner_token) = Tokens::load_or_create(&state_dir, &founder)?;
+    let (mut tokens, owner_token) = Tokens::load_or_create(&state_dir, &founder)?;
+    let mut worker_tokens = Vec::with_capacity(local_workers);
+    for index in 0..local_workers {
+        let token = tokens.agent_token(&state_dir, &workers::agent(index)?)?;
+        worker_tokens.push(token.as_str().to_owned());
+    }
     let store = EventStore::open(&state_dir.join(DB_FILE)).await?;
 
     let log = store.load_from(Seq::new(0)).await?;
     let origin = if log.is_empty() {
-        let (origin, opened) = Origin::open(world_ref(&config.repo)?, founder, host::now());
+        let (origin, opened) = Origin::open(world_ref(&config.repo)?, founder.clone(), host::now());
         store.append(&[opened]).await?;
         origin
     } else {
@@ -272,14 +305,34 @@ pub async fn start<C: ModelClient + 'static>(
         let _ = host.shutdown().await;
         return Err(err).context("recording the initial code index");
     }
+    for index in 0..local_workers {
+        let registration = Command::Human {
+            member: founder.clone(),
+            cmd: HumanCmd::RegisterAgent {
+                agent: workers::agent(index)?,
+            },
+        };
+        if let Err(err) = host.submit(registration).await {
+            let _ = host.shutdown().await;
+            return Err(err).context("registering a local worker");
+        }
+    }
 
     let jobs = jobs::spawn(host.clone());
     host.wake_jobs();
+    let board = workers::Board::new(local_workers);
+    let worker_loops = workers::spawn(
+        host.clone(),
+        board.clone(),
+        worker_tokens,
+        config.repo.clone(),
+        workers::origin_url(local_addr),
+    );
     let writer = host.writer();
     let streams = Arc::clone(host.streams());
     #[cfg(test)]
     let stream_hold = host.stream_hold().clone();
-    let app = http::router(host, web);
+    let app = http::router(host, web).layer(Extension(board));
     let mut shutdown_seen = shutdown.subscribe();
     let server = tokio::spawn(async move {
         axum::serve(listener, app)
@@ -294,6 +347,7 @@ pub async fn start<C: ModelClient + 'static>(
         shutdown,
         server: Some(server),
         jobs,
+        worker_loops,
         writer,
         streams,
         #[cfg(test)]
