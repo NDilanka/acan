@@ -1,6 +1,6 @@
 # Acan
 
-Acan is a scope-first behavior gate for coding agents. The developer approves what an agent may change, a scope with obligations, before any code exists. Acan then runs the old and new app side by side on the exact merged commit that would land. Differences outside the scope bounce back to the agent with a reproducer. The developer rules only on what is left, and each ruling is recorded and checked on later receipts.
+Acan is a scope-first behavior gate for coding agents. The developer approves what an agent may change, a scope with obligations, before any code exists. Acan then runs the old app twice and the new app once, side by side, on each probe. The old runs start from the protected head, and the new run uses the exact merged commit that would land. Differences outside the scope bounce back to the agent with a reproducer. The developer rules only on what is left. Each ruling is recorded, and every later receipt must report it or label it not enforced.
 
 The plant view shows where each agent went, what bounced, and any clash held before either worker writes. The developer decides on the anchored card.
 
