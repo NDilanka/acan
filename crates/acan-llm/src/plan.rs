@@ -76,6 +76,9 @@ pub struct RoleStatus {
     pub picked: bool,
     /// Why the role is off. `None` when a provider serves it.
     pub off_reason: Option<&'static str>,
+    /// Whether the role may use only Meta, so the setup page lists only Meta for it. Derived from
+    /// [`Role::needs_meta`].
+    pub meta_only: bool,
 }
 
 impl RoleStatus {
@@ -198,6 +201,7 @@ pub fn routing_roles(config: &LlmConfig) -> Vec<RoleStatus> {
                 provider: (!off).then(|| config.route_of(role).to_owned()),
                 picked: false,
                 off_reason: off.then_some(NEEDS_MUSE_SPARK),
+                meta_only: role.needs_meta(),
             }
         })
         .collect()
@@ -225,6 +229,7 @@ fn choose(
             provider: Some(provider.to_owned()),
             picked: true,
             off_reason: None,
+            meta_only: role.needs_meta(),
         };
     }
     let default = preference(role, needs_meta)
@@ -237,12 +242,14 @@ fn choose(
             provider: Some(provider.to_owned()),
             picked: false,
             off_reason: None,
+            meta_only: role.needs_meta(),
         },
         None => RoleStatus {
             role,
             provider: None,
             picked: false,
             off_reason: Some(if needs_meta { NEEDS_META } else { NO_KEY }),
+            meta_only: role.needs_meta(),
         },
     }
 }
@@ -400,6 +407,29 @@ mod tests {
         let picked = choose(Role::Worker, true, Some("baseten"), &["baseten", "meta"]);
         assert_eq!(picked.provider.as_deref(), Some("meta"));
         assert!(!picked.picked);
+    }
+
+    #[test]
+    fn only_the_roles_that_need_meta_are_meta_only_with_or_without_a_key() {
+        let with_keys =
+            resolve(&saved(&["meta", "baseten"], &[]), &ApiKeys::default()).expect("resolves");
+        let without_keys = resolve(&saved(&[], &[]), &ApiKeys::default()).expect("resolves");
+        for plan in [&with_keys, &without_keys] {
+            let meta_only: Vec<(Role, bool)> = plan
+                .roles
+                .iter()
+                .map(|status| (status.role, status.meta_only))
+                .collect();
+            assert_eq!(
+                meta_only,
+                [
+                    (Role::Foreman, false),
+                    (Role::Worker, false),
+                    (Role::Fast, false),
+                    (Role::Vision, true),
+                ]
+            );
+        }
     }
 
     fn environment(names: &[&str]) -> ApiKeys {

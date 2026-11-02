@@ -209,6 +209,7 @@ pub(crate) mod counting {
                     provider: None,
                     picked: false,
                     off_reason: Some("it needs a Meta key"),
+                    meta_only: true,
                 }
             } else {
                 RoleStatus {
@@ -216,6 +217,7 @@ pub(crate) mod counting {
                     provider: Some("meta".to_owned()),
                     picked: false,
                     off_reason: None,
+                    meta_only: true,
                 }
             };
             KeyStatus {

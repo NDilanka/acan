@@ -189,6 +189,49 @@ async fn the_status_lists_providers_and_roles_but_never_a_key() {
 }
 
 #[tokio::test]
+async fn the_status_marks_the_roles_that_need_meta_and_a_pick_of_another_provider_is_refused() {
+    let repo = temp_repo();
+    let running = boot(
+        repo.path(),
+        models_without_routing(repo.path(), Some(("baseten", SAVED_KEY))),
+    )
+    .await;
+
+    let status: Value = get_with(&running, "/api/setup", Some(OWNER_TOKEN))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let meta_only: Vec<(&str, bool)> = status["roles"]
+        .as_array()
+        .expect("roles")
+        .iter()
+        .map(|role| {
+            (
+                role["role"].as_str().expect("a role name"),
+                role["meta_only"].as_bool().expect("a meta_only flag"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        meta_only,
+        [
+            ("foreman", false),
+            ("worker", false),
+            ("fast", false),
+            ("vision", true),
+        ]
+    );
+
+    let refused = pick_role(&running, "vision", r#"{"provider": "baseten"}"#).await;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let body: Value = refused.json().await.expect("json");
+    assert_eq!(body["what"], "needs_meta");
+
+    running.stop().await.expect("the server stops");
+}
+
+#[tokio::test]
 async fn saving_a_key_is_for_members_and_refuses_bad_input_before_any_request() {
     let repo = temp_repo();
     let running = boot(repo.path(), models_without_routing(repo.path(), None)).await;
