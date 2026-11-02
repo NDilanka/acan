@@ -78,7 +78,7 @@ mod tests {
         ];
         let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
         let mut tones = Vec::new();
-        for tri in mesh.indices.chunks_exact(3) {
+        for tri in mesh.indices.as_chunks::<3>().0 {
             let p: Vec<[f32; 3]> = tri.iter().map(|&i| mesh.positions[i as usize]).collect();
             let (u, v) = (sub(p[1], p[0]), sub(p[2], p[0]));
             let facing = [

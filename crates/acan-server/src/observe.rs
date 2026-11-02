@@ -582,8 +582,8 @@ pub(crate) fn compare_runs<'a>(
             };
             let probe = runs.probe.spec.probe_hash()?;
             let compared = |source: CompareError| ObserveError::Compare { probe, source };
-            let masks = compare::derive_masks(&contrast).map_err(&compared)?;
-            let comparison = compare::compare(&contrast, &masks).map_err(&compared)?;
+            let masks = compare::derive_masks(&contrast).map_err(compared)?;
+            let comparison = compare::compare(&contrast, &masks).map_err(compared)?;
             Ok(Judgement {
                 contrast,
                 masks,
