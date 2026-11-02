@@ -294,7 +294,13 @@ fn a_saved_setup_resolves_each_role_to_the_provider_that_has_a_key() {
         .collect();
     assert_eq!(
         served,
-        [Some("meta"), Some("baseten"), Some("meta"), Some("meta")]
+        [
+            Some("meta"),
+            Some("baseten"),
+            Some("meta"),
+            Some("meta"),
+            Some("meta"),
+        ]
     );
     assert!(plan.config.is_some());
 }

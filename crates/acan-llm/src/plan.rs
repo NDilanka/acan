@@ -180,7 +180,7 @@ fn preference(role: Role, needs_meta: bool) -> &'static [&'static str] {
     match role {
         Role::Foreman => &["meta", "baseten", "fireworks"],
         Role::Worker | Role::Fast => &["baseten", "fireworks", "meta"],
-        Role::Vision => &["meta"],
+        Role::Vision | Role::Director => &["meta"],
     }
 }
 
@@ -284,18 +284,25 @@ mod tests {
     #[test]
     fn meta_alone_serves_every_role() {
         let plan = resolve(&saved(&["meta"], &[]), &ApiKeys::default()).expect("resolves");
-        assert_eq!(served_by(&plan), [Some("meta"); 4]);
+        assert_eq!(served_by(&plan), [Some("meta"); 5]);
         assert!(plan.config.is_some());
     }
 
     #[test]
-    fn baseten_alone_serves_every_role_but_vision_which_needs_meta() {
+    fn baseten_alone_serves_every_role_but_vision_and_director_which_need_meta() {
         let plan = resolve(&saved(&["baseten"], &[]), &ApiKeys::default()).expect("resolves");
         assert_eq!(
             served_by(&plan),
-            [Some("baseten"), Some("baseten"), Some("baseten"), None]
+            [
+                Some("baseten"),
+                Some("baseten"),
+                Some("baseten"),
+                None,
+                None
+            ]
         );
         assert_eq!(plan.roles[3].off_reason, Some(NEEDS_META));
+        assert_eq!(plan.roles[4].off_reason, Some(NEEDS_META));
         assert!(plan.config.is_some(), "the other roles still run live");
     }
 
@@ -306,12 +313,16 @@ mod tests {
             plan.roles[3].off_message().as_deref(),
             Some("vision is off: it needs a Meta key")
         );
+        assert_eq!(
+            plan.roles[4].off_message().as_deref(),
+            Some("director is off: it needs a Meta key")
+        );
         assert_eq!(plan.roles[0].off_message(), None);
         assert!(plan.config.is_some());
     }
 
     #[test]
-    fn fireworks_alone_serves_every_role_but_vision_which_needs_meta() {
+    fn fireworks_alone_serves_every_role_but_vision_and_director_which_need_meta() {
         let plan = resolve(&saved(&["fireworks"], &[]), &ApiKeys::default()).expect("resolves");
         assert_eq!(
             served_by(&plan),
@@ -319,6 +330,7 @@ mod tests {
                 Some("fireworks"),
                 Some("fireworks"),
                 Some("fireworks"),
+                None,
                 None
             ]
         );
@@ -330,7 +342,13 @@ mod tests {
             resolve(&saved(&["meta", "baseten"], &[]), &ApiKeys::default()).expect("resolves");
         assert_eq!(
             served_by(&plan),
-            [Some("meta"), Some("baseten"), Some("baseten"), Some("meta")]
+            [
+                Some("meta"),
+                Some("baseten"),
+                Some("baseten"),
+                Some("meta"),
+                Some("meta"),
+            ]
         );
         assert!(plan.roles.iter().all(|role| !role.picked));
     }
@@ -427,6 +445,7 @@ mod tests {
                     (Role::Worker, false),
                     (Role::Fast, false),
                     (Role::Vision, true),
+                    (Role::Director, true),
                 ]
             );
         }
@@ -519,6 +538,11 @@ provider = "baseten"
             roles[3].off_message().as_deref(),
             Some("vision is off: it needs a Meta Muse Spark route")
         );
+        assert_eq!(
+            roles[4].provider, None,
+            "the director inherits the foreman's route"
+        );
+        assert_eq!(roles[4].off_reason, Some(NEEDS_MUSE_SPARK));
         assert!(
             roles[..3].iter().all(|role| role.off_reason.is_none()),
             "the other roles are live"
