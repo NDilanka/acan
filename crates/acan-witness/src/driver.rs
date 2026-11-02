@@ -23,6 +23,9 @@ use tokio::time::{sleep, timeout};
 /// each run, so the container never runs code from the worktree.
 pub(crate) const DRIVER_SOURCE: &str = include_str!("harness/driver.ts");
 
+/// The Node driver's source, for node apps. It speaks the same protocol as [`DRIVER_SOURCE`].
+pub(crate) const NODE_DRIVER_SOURCE: &str = include_str!("harness/driver.mjs");
+
 /// How long a container may take to exit after its stdin closes before it is removed by force.
 const EXIT_GRACE: Duration = Duration::from_secs(5);
 
@@ -277,7 +280,7 @@ impl Drop for Container {
 }
 
 /// Reads a child's stderr to the end and keeps only its head.
-async fn keep_head(mut stderr: ChildStderr) -> String {
+pub(crate) async fn keep_head(mut stderr: ChildStderr) -> String {
     let mut head = Vec::new();
     let mut chunk = [0u8; 1024];
     while let Ok(read) = stderr.read(&mut chunk).await {

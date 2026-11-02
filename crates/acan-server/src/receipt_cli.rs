@@ -34,6 +34,7 @@ use tokio::process::Command as ProcessCommand;
 use tokio::sync::Semaphore;
 
 use crate::DEFAULT_WITNESS_CONCURRENCY;
+use crate::deps::{self, InstallRecord, Installer, Role};
 use crate::jobs::{APP_PORT, RUNNER_PROGRAM};
 use crate::observe::{self, Judged, ObserveError, Order, Plan};
 use crate::receipt::render_markdown;
@@ -138,6 +139,10 @@ pub struct ShadowArgs {
     /// The head ref, observed against the base.
     #[arg(long)]
     pub head: String,
+    /// Where a node app's installed dependencies are cached. Defaults to `$XDG_CACHE_HOME/acan/deps`,
+    /// or `~/.cache/acan/deps`.
+    #[arg(long)]
+    pub cache_dir: Option<PathBuf>,
 }
 
 /// The format `acan receipt` prints.
@@ -167,6 +172,9 @@ pub struct ShadowReceipt {
     pub receipt_hash: String,
     /// The receipt the core built.
     pub receipt: Receipt,
+    /// The installs the runs mounted, one per side of the contrast. Empty for an app with no
+    /// install, and then the envelope leaves the field out.
+    pub installs: Vec<InstallRecord>,
 }
 
 impl ShadowReceipt {
@@ -223,11 +231,9 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
             detail: "it does not name a commit of the clone".to_owned(),
         })?;
 
-    let policy = observe::runner_policy();
-    policy
-        .check_environment()
-        .map_err(|err| ShadowError::Observe(format!("the container policy is invalid: {err}")))?;
-    let protected = observe::protected_paths(&policy);
+    // The protected paths are the same for every app; the run policy depends on the app's runtime,
+    // which the protected contract names, so it is chosen once the contract is read.
+    let protected = observe::protected_paths(&observe::runner_policy());
     let base = prepare(&repo, &base_commit, &protected, "the base").await?;
 
     // The contract is read from the base's protected paths, never from the head, so a head
@@ -240,6 +246,10 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
         .map_err(|err| ShadowError::Observe(err.to_string()))?;
     let (app, corpus) =
         observe::read_protected(&snapshot).map_err(|err| ShadowError::Contract(err.to_string()))?;
+    let policy = observe::policy_for(&app).map_err(|err| ShadowError::Contract(err.to_string()))?;
+    policy
+        .check_environment()
+        .map_err(|err| ShadowError::Observe(format!("the container policy is invalid: {err}")))?;
 
     let candidate = prepare(&repo, &head_commit, &protected, "the head").await?;
     preflight(docker, &policy.image.name).await?;
@@ -259,6 +269,30 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
     let observations = scratch_root.path().join("observations");
     let slots = Semaphore::new(DEFAULT_WITNESS_CONCURRENCY);
     let runner = RunnerConfig::new(docker.to_path_buf(), APP_PORT);
+    let cache = deps::cache_dir(args.cache_dir.as_deref()).map_err(ShadowError::Observe)?;
+    let installer = Installer {
+        repo: &repo,
+        config: &runner,
+        slots: &slots,
+        cache: &cache,
+        scratch: &scratch_root.path().join("installs"),
+    };
+    let install = |err: deps::DepsError| {
+        ShadowError::Observe(format!("the dependencies cannot be installed: {err}"))
+    };
+    let base_installed = installer
+        .install(&base, Role::Base, &app)
+        .await
+        .map_err(install)?;
+    let candidate_installed = installer
+        .install(&candidate, Role::Candidate, &app)
+        .await
+        .map_err(install)?;
+    let installs: Vec<InstallRecord> = [base_installed.as_ref(), candidate_installed.as_ref()]
+        .into_iter()
+        .flatten()
+        .map(|installed| installed.record.clone())
+        .collect();
     let plan = Plan {
         repo: &repo,
         base: &base,
@@ -269,6 +303,12 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
         app: &app,
         corpus: &corpus,
         policy: &policy,
+        base_dependencies: base_installed
+            .as_ref()
+            .map(|installed| installed.modules.as_path()),
+        candidate_dependencies: candidate_installed
+            .as_ref()
+            .map(|installed| installed.modules.as_path()),
         runner: &runner,
         slots: &slots,
         probes_at_once: DEFAULT_WITNESS_CONCURRENCY,
@@ -297,6 +337,7 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
             .collect(),
         receipt_hash,
         receipt: judged.receipt,
+        installs,
     })
 }
 
@@ -551,6 +592,11 @@ pub fn json_text(report: &ShadowReceipt) -> Result<String, ShadowError> {
         "receipt_hash": report.receipt_hash,
         "receipt": receipt,
     });
+    if !report.installs.is_empty() {
+        envelope["installs"] = serde_json::to_value(&report.installs).map_err(|err| {
+            ShadowError::Output(format!("the installs cannot be serialized: {err}"))
+        })?;
+    }
     redact_value(&mut envelope, &env_secrets(&report.args.repo));
     serde_json::to_string_pretty(&envelope)
         .map_err(|err| ShadowError::Output(format!("the envelope cannot be serialized: {err}")))
@@ -814,6 +860,7 @@ mod tests {
             repo: repo.to_path_buf(),
             base: base.to_owned(),
             head: head.to_owned(),
+            cache_dir: None,
         }
     }
 
@@ -834,6 +881,7 @@ mod tests {
             discarded: vec![".acan/app.json".to_owned()],
             receipt_hash: "abc123".to_owned(),
             receipt,
+            installs: Vec::new(),
         }
     }
 

@@ -198,6 +198,7 @@ impl Setup {
             lockfile_hash: self.lockfile,
             worktree: &self.worktree,
             snapshot: &self.snapshot,
+            dependencies: None,
             config,
         }
     }

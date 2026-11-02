@@ -19,10 +19,12 @@ use acan_core::{Check, WitnessOutcome};
 mod docker;
 mod driver;
 mod http;
+mod install;
 mod process;
 mod record;
 mod sequence;
 
+pub use install::{InstallError, InstallReport, install_dependencies};
 pub use sequence::{KeptBody, RunnerConfig, SequenceInput, run_sequence, run_sequence_keeping};
 
 /// Bounds and endpoints for witness runs.

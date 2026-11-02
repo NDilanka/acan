@@ -12,6 +12,7 @@ use std::str::FromStr;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::container::{BUN_RUNTIME, NODE_RUNTIME};
 use crate::hash::{
     ArtifactHash, CanonicalError, ContentHash, EvidenceHash, FixtureHash, ProbeHash, RunnerHash,
 };
@@ -20,7 +21,7 @@ use crate::types::{
     ActorName, CaptureName, ClientName, CommitSha, FieldPath, FixtureId, HttpMethod, InvalidValue,
     MachineId, NonEmpty, RouteTemplate, RunId, RuntimeId, StepId, Surface, TrustedSink, UnixMillis,
 };
-use crate::version::{AppContractV1, ProbeCorpusV1, RunV1, RunnerContractV1};
+use crate::version::{ProbeCorpusV1, RunV1, RunnerContractV1};
 
 /// Text with `${capture}` placeholders the runner fills from run-local captures.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -488,6 +489,31 @@ pub struct RunLimits {
     pub sequence_timeout_ms: u64,
 }
 
+/// The version of the protected app contract. `acan-app/1` is the bun contract; `acan-app/2` adds
+/// the Node 24 runtime and the install phase. A v1 reader refuses a v2 file, so a node app can never
+/// run under bun by accident.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, JsonSchema)]
+pub enum AppContractVersion {
+    /// `acan-app/1`: a bun runtime and no install phase.
+    #[serde(rename = "acan-app/1")]
+    V1,
+    /// `acan-app/2`: a bun or Node 24 runtime, and an optional install phase for Node 24.
+    #[serde(rename = "acan-app/2")]
+    V2,
+}
+
+impl<'de> Deserialize<'de> for AppContractVersion {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match String::deserialize(deserializer)?.as_str() {
+            "acan-app/1" => Ok(Self::V1),
+            "acan-app/2" => Ok(Self::V2),
+            other => Err(serde::de::Error::custom(format_args!(
+                "unsupported version {other:?}, expected \"acan-app/1\" or \"acan-app/2\""
+            ))),
+        }
+    }
+}
+
 /// How to start the app for one run: the protected `.acan/app.json`. Only a human edits it.
 ///
 /// The boot command imports the app from the selected commit, uses a fresh store and the
@@ -495,14 +521,19 @@ pub struct RunLimits {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AppContract {
-    /// Always `acan-app/1`.
-    pub version: AppContractV1,
+    /// `acan-app/1` or `acan-app/2`.
+    pub version: AppContractVersion,
     /// The runner contract it is written against.
     pub runner_contract: RunnerContractV1,
-    /// The runtime.
+    /// The runtime: `bun-1.4.4`, or `node-24` with `acan-app/2`.
     pub runtime: RuntimeId,
     /// The boot command, as argv, run in the prepared worktree.
     pub boot: NonEmpty<String>,
+    /// The install phase, as argv: `npm ci --ignore-scripts ...` for a Node app with a lockfile.
+    /// It runs once per lockfile in a container with network, before any run, and its
+    /// `node_modules` is mounted read-only into every run. Omitted when the app has no install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<NonEmpty<String>>,
     /// The environment variable that carries the port.
     pub port_env: String,
     /// The readiness check.
@@ -513,10 +544,69 @@ pub struct AppContract {
     pub clock: ClockControl,
     /// The trusted sinks the boot fixture exposes.
     pub sinks: Vec<TrustedSink>,
-    /// Non-secret environment for the app.
+    /// The environment the app gets on top of the policy's. A credential-named variable may carry
+    /// only a placeholder, and an app cannot replace a variable the policy sets.
+    #[serde(deserialize_with = "crate::container::environment_names")]
     pub env: BTreeMap<String, String>,
     /// Per-sequence bounds.
     pub limits: RunLimits,
+}
+
+/// Install argv flags an `install` phase may carry. `--ignore-scripts` is required, so no
+/// package's install script runs.
+const INSTALL_FLAGS: [&str; 3] = ["--ignore-scripts", "--no-audit", "--no-fund"];
+
+impl AppContract {
+    /// Checks what decoding cannot: the runtime and the install phase agree with the version.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidValue`] when a v1 contract names a runtime other than bun or has an
+    /// install phase, when a v2 runtime is unknown, or when an install argv is not `npm ci` with
+    /// the allowed flags and `--ignore-scripts`.
+    pub fn check(&self) -> Result<(), InvalidValue> {
+        let runtime = self.runtime.as_str();
+        let refused = |what: &'static str| InvalidValue::Malformed {
+            what,
+            raw: runtime.to_owned(),
+        };
+        match (self.version, runtime, self.install.as_ref()) {
+            (AppContractVersion::V1, BUN_RUNTIME, None) => Ok(()),
+            (AppContractVersion::V1, BUN_RUNTIME, Some(_)) => {
+                Err(refused("install phase, which needs acan-app/2"))
+            }
+            (AppContractVersion::V1, _, _) => {
+                Err(refused("runtime for acan-app/1, which only runs bun-1.4.4"))
+            }
+            (AppContractVersion::V2, BUN_RUNTIME, None) => Ok(()),
+            (AppContractVersion::V2, BUN_RUNTIME, Some(_)) => {
+                Err(refused("install phase, which only node-24 has"))
+            }
+            (AppContractVersion::V2, NODE_RUNTIME, install) => {
+                install.map_or(Ok(()), |argv| check_install(argv.as_slice()))
+            }
+            (AppContractVersion::V2, _, _) => Err(refused("runtime, which acan does not know")),
+        }
+    }
+}
+
+/// Checks an install argv: `npm ci`, then only the allowed flags, with `--ignore-scripts`.
+fn check_install(argv: &[String]) -> Result<(), InvalidValue> {
+    let well_formed = argv.len() >= 3
+        && argv[0] == "npm"
+        && argv[1] == "ci"
+        && argv[2..]
+            .iter()
+            .all(|arg| INSTALL_FLAGS.contains(&arg.as_str()))
+        && argv.iter().any(|arg| arg == "--ignore-scripts");
+    if well_formed {
+        Ok(())
+    } else {
+        Err(InvalidValue::Malformed {
+            what: "install argv, which must be npm ci with --ignore-scripts and the allowed flags",
+            raw: argv.join(" "),
+        })
+    }
 }
 
 /// Input-only probe steps a model proposed. They carry no expected value.

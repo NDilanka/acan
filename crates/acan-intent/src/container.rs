@@ -15,7 +15,9 @@
 //!   output.
 //! - The container gets only the variables `environment` names, with the values it gives them.
 //!   No provider key, owner token or host secret enters it, and a name that could carry one is
-//!   refused when the policy is decoded.
+//!   refused when the policy is decoded, unless its value is a placeholder: a value that starts
+//!   with [`PLACEHOLDER_PREFIX`] and carries no secret. An app that reads a credential at boot
+//!   gets the placeholder, and the human who owns the app replaces the review marker.
 //! - A runner that cannot apply every field refuses the run. It never runs with less isolation.
 //!   The harness is a probe-run field: the worker's test command runs no probe and mounts none.
 //!
@@ -39,6 +41,22 @@ use crate::types::{ContainerPath, ImageName, InvalidValue, RepoPath};
 const PINNED_IMAGE_DIGEST: &str =
     "sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d";
 
+/// The runtime of a bun app. Its image is `oven/bun:1.4.4`, and its `node` is bun itself.
+pub const BUN_RUNTIME: &str = "bun-1.4.4";
+/// The runtime of a Node app, run in the pinned Node 24 image.
+pub const NODE_RUNTIME: &str = "node-24";
+/// The Node 24 image the node runtime runs in, pinned by digest. Verified on the acan machine:
+/// `node` v24.22.2 and npm 11.19.1, running as uid 1000 with no network.
+const NODE_IMAGE_NAME: &str = "node:24.22.2-bookworm-slim";
+/// The digest of `node:24.22.2-bookworm-slim`.
+const NODE_IMAGE_DIGEST: &str =
+    "sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c";
+/// The `PATH` the Node image gives its processes. The policy names it, so the controlled
+/// environment is the same on every run.
+const NODE_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+/// Where a run mounts the install phase's `node_modules`, inside the worktree.
+const DEPENDENCIES_TARGET: &str = "/work/node_modules";
+
 /// Fragments that mark a variable as a credential. No variable whose name contains one reaches a
 /// container.
 const CREDENTIAL_NAME_PARTS: [&str; 7] = [
@@ -50,6 +68,13 @@ const CREDENTIAL_NAME_PARTS: [&str; 7] = [
     "CREDENTIAL",
     "AUTH",
 ];
+/// The prefix of a placeholder value. A credential-named variable may carry a placeholder: this
+/// prefix, then one or more letters, digits or hyphens. It is never a secret, so an app that reads
+/// the variable at boot can start with it. Init writes one for each such variable, marked for a
+/// human to review.
+pub const PLACEHOLDER_PREFIX: &str = "acan-placeholder-";
+/// Longest placeholder text after [`PLACEHOLDER_PREFIX`].
+const PLACEHOLDER_TAIL_MAX: usize = 48;
 /// Longest variable name accepted.
 const ENVIRONMENT_NAME_MAX: usize = 64;
 /// Longest variable value accepted, in bytes.
@@ -144,6 +169,40 @@ impl JsonSchema for ContainerUser {
 pub enum ContainerNetwork {
     /// No network at all. Probes and the test command run this way.
     None {},
+    /// Outbound network through the Docker bridge. Only the install phase of a node app has it, to
+    /// fetch its dependencies. A probe run that names it is refused.
+    Egress {},
+}
+
+/// The program that runs the probe driver inside the container, with its file in the harness.
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Driver {
+    /// `bun` runs `driver.ts`. The default, with the pinned bun image.
+    #[default]
+    Bun,
+    /// `node` runs `driver.mjs`, with the pinned Node 24 image.
+    Node,
+}
+
+impl Driver {
+    /// Whether this is the default driver, which the policy's serialized form leaves out.
+    fn is_default(&self) -> bool {
+        *self == Self::Bun
+    }
 }
 
 /// The container's root filesystem. Only `/tmp` and the worktree are writable.
@@ -198,6 +257,10 @@ pub struct MountPolicy {
     /// container and the host drives it over standard input. Only probe runs mount it.
     #[serde(default = "harness_by_default")]
     pub harness: ContainerPath,
+    /// Where the install phase's `node_modules` is mounted read-only, for a node app with an
+    /// install. The host mounts the cache entry for the run's lockfile there. Omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<ContainerPath>,
 }
 
 /// The default for [`MountPolicy::readonly_git`]: `.git` is mounted read-only.
@@ -223,7 +286,7 @@ fn environment_by_default() -> BTreeMap<String, String> {
 }
 
 /// Decodes the environment and refuses any variable a container must not receive.
-fn environment_names<'de, D: Deserializer<'de>>(
+pub(crate) fn environment_names<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<BTreeMap<String, String>, D::Error> {
     let environment = BTreeMap::<String, String>::deserialize(deserializer)?;
@@ -233,9 +296,20 @@ fn environment_names<'de, D: Deserializer<'de>>(
     Ok(environment)
 }
 
+/// Whether `value` is a placeholder: [`PLACEHOLDER_PREFIX`] and then letters, digits or hyphens.
+fn is_placeholder(value: &str) -> bool {
+    value.strip_prefix(PLACEHOLDER_PREFIX).is_some_and(|tail| {
+        !tail.is_empty()
+            && tail.len() <= PLACEHOLDER_TAIL_MAX
+            && tail
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
+}
+
 /// Refuses a variable whose name is not `A-Z 0-9 _` from an uppercase letter, whose name could
-/// carry a credential, or whose value is not short printable text. The refusal names the
-/// variable and never its value.
+/// carry a credential unless its value is a placeholder, or whose value is not short printable
+/// text. The refusal names the variable and never its value.
 fn check_variable(name: &str, value: &str) -> Result<(), InvalidValue> {
     let well_formed = name.len() <= ENVIRONMENT_NAME_MAX
         && name.starts_with(|c: char| c.is_ascii_uppercase())
@@ -248,9 +322,11 @@ fn check_variable(name: &str, value: &str) -> Result<(), InvalidValue> {
             raw: name.to_owned(),
         });
     }
-    if CREDENTIAL_NAME_PARTS.iter().any(|part| name.contains(part)) {
+    let credential = CREDENTIAL_NAME_PARTS.iter().any(|part| name.contains(part));
+    if credential && !is_placeholder(value) {
         return Err(InvalidValue::Malformed {
-            what: "credential-named environment variable, which no container may receive",
+            what: "credential-named environment variable, which no container may receive unless \
+                   its value is a placeholder",
             raw: name.to_owned(),
         });
     }
@@ -301,6 +377,9 @@ pub struct ContainerPolicy {
     pub privileges: Privileges,
     /// The mounts.
     pub mounts: MountPolicy,
+    /// The program that runs the probe driver. Omitted when it is the default, `bun`.
+    #[serde(default, skip_serializing_if = "Driver::is_default")]
+    pub driver: Driver,
 }
 
 impl ContainerPolicy {
@@ -340,8 +419,83 @@ impl ContainerPolicy {
                 missing_protected: MissingProtected::Masked,
                 readonly_git: true,
                 harness: harness_by_default(),
+                dependencies: None,
             },
+            driver: Driver::Bun,
         }
+    }
+
+    /// The policy a Node 24 app's runs apply: the pinned Node image, the Node driver, and the
+    /// install's `node_modules` mounted read-only when `with_dependencies` is set. Network none.
+    #[must_use]
+    pub fn node_run(with_dependencies: bool) -> Self {
+        let mut policy = Self::node_base();
+        if with_dependencies {
+            policy.mounts.dependencies = Some(
+                DEPENDENCIES_TARGET
+                    .parse()
+                    .expect("the dependency target is a container path"),
+            );
+        }
+        policy
+    }
+
+    /// The policy of a node app's install phase: the pinned Node image with network egress, and
+    /// no protected paths, because the install reads manifests only. Install scripts never run.
+    #[must_use]
+    pub fn node_install() -> Self {
+        let mut policy = Self::node_base();
+        policy.network = ContainerNetwork::Egress {};
+        policy.timeout_ms = nonzero64(600_000);
+        policy.tmp_bytes = nonzero64(1 << 30);
+        policy.environment = BTreeMap::from([
+            ("HOME".to_owned(), "/tmp".to_owned()),
+            ("NPM_CONFIG_USERCONFIG".to_owned(), "/dev/null".to_owned()),
+            ("PATH".to_owned(), NODE_PATH.to_owned()),
+        ]);
+        policy.mounts.protected = BTreeSet::new();
+        policy
+    }
+
+    /// The policy every run of an app applies, chosen by its runtime and whether it has an install.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidValue`] when the runtime has no policy, or when a bun app names an install,
+    /// which only node apps have.
+    pub fn for_runtime(runtime: &str, install: bool) -> Result<Self, InvalidValue> {
+        match runtime {
+            BUN_RUNTIME if !install => Ok(Self::default_run()),
+            NODE_RUNTIME => Ok(Self::node_run(install)),
+            _ => Err(InvalidValue::Malformed {
+                what: "runtime, which has no run policy (or an install for a bun app)",
+                raw: runtime.to_owned(),
+            }),
+        }
+    }
+
+    /// The shared Node 24 base: the pinned image, the Node driver, and the environment with `PATH`
+    /// and the port named.
+    fn node_base() -> Self {
+        let mut policy = Self::default_run();
+        policy.image = ContainerImage {
+            name: NODE_IMAGE_NAME
+                .parse()
+                .expect("the pinned node image name is valid"),
+            digest: Some(
+                NODE_IMAGE_DIGEST
+                    .parse()
+                    .expect("the pinned node image digest is valid"),
+            ),
+        };
+        policy.memory_bytes = nonzero64(2 << 30);
+        policy.environment = BTreeMap::from([
+            ("HOME".to_owned(), "/tmp".to_owned()),
+            ("PATH".to_owned(), NODE_PATH.to_owned()),
+            ("PORT".to_owned(), "3000".to_owned()),
+        ]);
+        policy.driver = Driver::Node;
+        policy
     }
 
     /// Refuses an environment a container must not get. The decoder applies the same rule, so a
@@ -356,6 +510,31 @@ impl ContainerPolicy {
             .try_for_each(|(name, value)| check_variable(name, value))
     }
 
+    /// Adds the variables an app's contract names to the policy's environment, so every run gives
+    /// them to the app. The same rules apply, and a placeholder is the only secret-shaped value
+    /// allowed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidValue`] when a variable is refused, or when the policy already sets it. An
+    /// app cannot replace a variable the policy owns, such as `HOME`, `PATH` or the port.
+    pub fn with_app_environment(
+        &mut self,
+        app: &BTreeMap<String, String>,
+    ) -> Result<(), InvalidValue> {
+        check_app_environment(app)?;
+        for (name, value) in app {
+            if self.environment.contains_key(name) {
+                return Err(InvalidValue::Malformed {
+                    what: "app environment variable, which the policy already sets",
+                    raw: name.clone(),
+                });
+            }
+            self.environment.insert(name.clone(), value.clone());
+        }
+        self.check_environment()
+    }
+
     /// The policy's identity, carried in [`crate::GateContext::sandbox_policy_hash`].
     ///
     /// # Errors
@@ -364,6 +543,18 @@ impl ContainerPolicy {
     pub fn sandbox_policy_hash(&self) -> Result<SandboxPolicyHash, CanonicalError> {
         ContentHash::of(self).map(SandboxPolicyHash::from)
     }
+}
+
+/// Refuses an app's environment a container must not get. Each entry passes the rule a policy
+/// variable passes, so the decoder and the runners agree on it.
+///
+/// # Errors
+///
+/// Returns [`InvalidValue`] naming the first variable that fails.
+pub fn check_app_environment(environment: &BTreeMap<String, String>) -> Result<(), InvalidValue> {
+    environment
+        .iter()
+        .try_for_each(|(name, value)| check_variable(name, value))
 }
 
 fn nonzero32(n: u32) -> NonZeroU32 {
@@ -410,9 +601,10 @@ mod tests {
             root: _,
             privileges: _,
             mounts: _,
+            driver: _,
         } = &base;
         type Edit = fn(&mut ContainerPolicy);
-        let edits: [(&str, Edit); 17] = [
+        let edits: [(&str, Edit); 20] = [
             ("image name", |p| {
                 p.image.name = "oven/bun:2".parse().expect("a name");
             }),
@@ -447,6 +639,13 @@ mod tests {
             ("harness", |p| {
                 p.mounts.harness = "/sandbox".parse().expect("a path");
             }),
+            ("network egress", |p| {
+                p.network = ContainerNetwork::Egress {}
+            }),
+            ("dependencies", |p| {
+                p.mounts.dependencies = Some("/work/node_modules".parse().expect("a path"));
+            }),
+            ("driver", |p| p.driver = Driver::Node),
         ];
         let original = base.sandbox_policy_hash().expect("hashing");
         let mut seen = BTreeSet::from([original]);
@@ -629,6 +828,64 @@ mod tests {
             |v| v["network"] = json!({ "kind": "loopback_published", "port": 3000 })
         ));
         assert!(!with(|v| v["root"] = json!("read_write")));
+    }
+
+    #[test]
+    fn a_placeholder_may_carry_a_credential_name_and_nothing_else_may() {
+        assert!(with(|v| v["environment"] = json!({
+            "PAYPAL_CLIENT_SECRET": "acan-placeholder-paypal-client-secret",
+            "PAYPAL_CLIENT_ID": "acan-placeholder-paypal-client-id",
+        })));
+        for value in [
+            "live-value-without-the-marker",
+            "acan-placeholder-",
+            "acan-placeholder-has space",
+            "acan-placeholder-x_y",
+            "acan-placeholder-x\ny",
+            "placeholder",
+            "xacan-placeholder-x",
+        ] {
+            assert!(
+                !with(|v| v["environment"] = json!({ "DB_PASSWORD": value })),
+                "a credential-named value {value:?} decoded"
+            );
+        }
+        let placeholder = "acan-placeholder-x".to_owned();
+        assert!(
+            check_app_environment(&BTreeMap::from([(
+                "OPENAI_API_KEY".to_owned(),
+                placeholder,
+            )]))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_app_adds_its_environment_but_not_the_policys_own_variables() {
+        let mut policy = ContainerPolicy::default_run();
+        let app = BTreeMap::from([
+            ("ACQUIT_DEV".to_owned(), "1".to_owned()),
+            (
+                "PAYPAL_CLIENT_SECRET".to_owned(),
+                "acan-placeholder-paypal-client-secret".to_owned(),
+            ),
+        ]);
+        policy
+            .with_app_environment(&app)
+            .expect("the app adds its variables");
+        assert_eq!(
+            policy.environment.get("ACQUIT_DEV").map(String::as_str),
+            Some("1")
+        );
+        let mut replaces_home = ContainerPolicy::default_run();
+        let refused = BTreeMap::from([("HOME".to_owned(), "/srv/app".to_owned())]);
+        assert!(replaces_home.with_app_environment(&refused).is_err());
+        let mut leaks = ContainerPolicy::default_run();
+        let secret = BTreeMap::from([("GITHUB_TOKEN".to_owned(), "real-value".to_owned())]);
+        assert!(
+            leaks.with_app_environment(&secret).is_err(),
+            "a real token was added"
+        );
     }
 
     #[test]

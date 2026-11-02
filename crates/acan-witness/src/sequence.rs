@@ -16,18 +16,20 @@ use acan_intent::admit::{self, AdmitError};
 use acan_intent::{
     ActorName, AdvanceTimeStep, AppContract, ArtifactHash, CanonicalError, CaptureKind,
     CaptureName, CaptureOutcome, CaptureStep, Channels, ClientName, ClockControl, CommitSha,
-    Completeness, ContainerPolicy, ContentHash, CorpusProbe, EvidenceHash, Fixture, FixtureHash,
-    HttpStep, IncompleteReason, MissingCapture, NonEmpty, Observation, ObservationHash,
-    ObservationV1, ObservedRun, ProbeHash, RedirectPolicy, RequestRecord, RouteEntry, Run, RunEnv,
-    RunId, RunOutcome, RunRole, RunV1, RunnerBuild, RunnerHash, RunnerManifest, SideEffectStep,
-    Step, StepId, TrustedSink, UnixMillis,
+    Completeness, ContainerPolicy, ContentHash, CorpusProbe, Driver, EvidenceHash, Fixture,
+    FixtureHash, HttpStep, IncompleteReason, MissingCapture, NonEmpty, Observation,
+    ObservationHash, ObservationV1, ObservedRun, ProbeHash, RedirectPolicy, RequestRecord,
+    RouteEntry, Run, RunEnv, RunId, RunOutcome, RunRole, RunV1, RunnerBuild, RunnerHash,
+    RunnerManifest, SideEffectStep, Step, StepId, TrustedSink, UnixMillis,
 };
 use serde_json::Value;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 
 use crate::docker::{self, MountSources};
-use crate::driver::{self, CallError, Container, CreateError, DRIVER_SOURCE, Op, Ready, Reply};
+use crate::driver::{
+    self, CallError, Container, CreateError, DRIVER_SOURCE, NODE_DRIVER_SOURCE, Op, Ready, Reply,
+};
 use crate::record::{self, MAX_REDIRECTS, method_text, route_template, same_origin_path};
 
 /// Directory under the run's workspace that holds the harness mounted at `/harness`.
@@ -111,6 +113,9 @@ pub struct SequenceInput<'a> {
     pub worktree: &'a Path,
     /// The directory the protected paths are mounted from, read-only.
     pub snapshot: &'a Path,
+    /// The install phase's `node_modules` for this run's lockfile, mounted read-only at the
+    /// policy's dependency path. Present exactly when the app has an install.
+    pub dependencies: Option<&'a Path>,
     /// How the host reaches docker and the app.
     pub config: &'a RunnerConfig,
 }
@@ -265,11 +270,15 @@ struct Workspace {
 }
 
 impl Workspace {
-    fn create(run_id: &str) -> std::io::Result<Self> {
+    fn create(run_id: &str, driver: Driver) -> std::io::Result<Self> {
         let root = std::env::temp_dir().join(format!("acan-witness-{run_id}"));
         std::fs::create_dir_all(root.join(HARNESS_DIR))?;
         std::fs::create_dir_all(root.join(EMPTY_DIR))?;
-        std::fs::write(root.join(HARNESS_DIR).join("driver.ts"), DRIVER_SOURCE)?;
+        let (file, source) = match driver {
+            Driver::Bun => ("driver.ts", DRIVER_SOURCE),
+            Driver::Node => ("driver.mjs", NODE_DRIVER_SOURCE),
+        };
+        std::fs::write(root.join(HARNESS_DIR).join(file), source)?;
         Ok(Self { root })
     }
 
@@ -402,8 +411,10 @@ impl<'a> Sequence<'a> {
             }
         }
         let workspace =
-            Workspace::create(self.run_id.as_str()).map_err(|err| RunOutcome::Error {
-                detail: format!("cannot prepare the run directory: {err}"),
+            Workspace::create(self.run_id.as_str(), input.policy.driver).map_err(|err| {
+                RunOutcome::Error {
+                    detail: format!("cannot prepare the run directory: {err}"),
+                }
             })?;
         let mounts = docker::mount_values(
             input.policy,
@@ -412,6 +423,7 @@ impl<'a> Sequence<'a> {
                 snapshot: input.snapshot,
                 harness: &workspace.harness(),
                 empty: &workspace.empty(),
+                dependencies: input.dependencies,
             },
         )
         .map_err(setup_failed)?;

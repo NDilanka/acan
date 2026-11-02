@@ -9,7 +9,7 @@
 use std::num::NonZeroU32;
 use std::path::Path;
 
-use acan_intent::{ContainerNetwork, ContainerPolicy, MissingProtected};
+use acan_intent::{ContainerNetwork, ContainerPolicy, Driver, MissingProtected};
 
 /// The label key every container this runner starts carries. The value is the run id, so
 /// cleanup and tests can find the containers of one run.
@@ -25,6 +25,9 @@ pub(crate) struct MountSources<'a> {
     pub harness: &'a Path,
     /// An empty directory, mounted over a missing protected path when the policy masks it.
     pub empty: &'a Path,
+    /// The install phase's `node_modules` for this run's lockfile, mounted read-only at the
+    /// policy's `mounts.dependencies`. Must be present exactly when the policy names that mount.
+    pub dependencies: Option<&'a Path>,
 }
 
 /// Builds the `--mount` values of a container.
@@ -61,6 +64,19 @@ pub(crate) fn mount_values(
         }
     }
     mounts.push(bind(sources.harness, policy.mounts.harness.as_str(), true)?);
+    match (policy.mounts.dependencies.as_ref(), sources.dependencies) {
+        (Some(target), Some(source)) => mounts.push(bind(source, target.as_str(), true)?),
+        (None, None) => {}
+        (Some(target), None) => {
+            return Err(format!(
+                "the policy mounts dependencies at {}, but no install was given",
+                target.as_str()
+            ));
+        }
+        (None, Some(_)) => {
+            return Err("an install was given, but the policy mounts no dependencies".to_owned());
+        }
+    }
     Ok(mounts)
 }
 
@@ -96,33 +112,26 @@ fn bind(source: &Path, target: &str, readonly: bool) -> Result<String, String> {
 ///
 /// Returns the refusal reason when the policy names a variable a container must not get, or an
 /// image that is not pinned by digest.
-pub(crate) fn create_args(
+fn shared_args(
     name: &str,
     run_id: &str,
     policy: &ContainerPolicy,
     mounts: &[String],
+    interactive: bool,
 ) -> Result<Vec<String>, String> {
     policy
         .check_environment()
         .map_err(|err| format!("the container policy is refused: {err}"))?;
-    let Some(digest) = policy.image.digest.as_ref() else {
+    if policy.image.digest.is_none() {
         return Err("the image must be pinned by digest".to_owned());
-    };
-    let image = format!("{}@{digest}", policy.image.name.as_str());
+    }
     let memory = policy.memory_bytes.to_string();
 
-    let mut args: Vec<String> = Vec::new();
-    args.extend(
-        [
-            "create",
-            "--interactive",
-            "--rm",
-            "--pull",
-            "never",
-            "--name",
-        ]
-        .map(str::to_owned),
-    );
+    let mut args: Vec<String> = vec!["create".to_owned()];
+    if interactive {
+        args.push("--interactive".to_owned());
+    }
+    args.extend(["--rm", "--pull", "never", "--name"].map(str::to_owned));
     args.push(name.to_owned());
     args.push("--label".to_owned());
     args.push(format!("{LABEL_KEY}={run_id}"));
@@ -158,17 +167,81 @@ pub(crate) fn create_args(
         args.push("--mount".to_owned());
         args.push(mount.clone());
     }
-    args.extend(["--entrypoint", "bun"].map(str::to_owned));
-    args.push(image);
-    args.push(format!("{}/driver.ts", policy.mounts.harness.as_str()));
     Ok(args)
 }
 
-/// The `--network` arguments of the policy. The policy can name no other network: a container
-/// that publishes no port has no route to the host or to the rest of the network.
+/// The image reference a container starts from: the name and the digest the runner checks.
+fn image_ref(policy: &ContainerPolicy) -> Result<String, String> {
+    let Some(digest) = policy.image.digest.as_ref() else {
+        return Err("the image must be pinned by digest".to_owned());
+    };
+    Ok(format!("{}@{digest}", policy.image.name.as_str()))
+}
+
+/// The `docker create` arguments of one probe sequence container.
+///
+/// The program is the policy's driver: `bun driver.ts` or `node driver.mjs`, in the harness.
+///
+/// # Errors
+///
+/// Returns the refusal reason when the policy names a variable a container must not get, an
+/// image that is not pinned by digest, or network egress, which probe runs never get.
+pub(crate) fn create_args(
+    name: &str,
+    run_id: &str,
+    policy: &ContainerPolicy,
+    mounts: &[String],
+) -> Result<Vec<String>, String> {
+    if matches!(policy.network, ContainerNetwork::Egress {}) {
+        return Err("a probe run never gets network egress".to_owned());
+    }
+    let (program, script) = match policy.driver {
+        Driver::Bun => ("bun", "driver.ts"),
+        Driver::Node => ("node", "driver.mjs"),
+    };
+    let mut args = shared_args(name, run_id, policy, mounts, true)?;
+    args.extend(["--entrypoint".to_owned(), program.to_owned()]);
+    args.push(image_ref(policy)?);
+    args.push(format!("{}/{script}", policy.mounts.harness.as_str()));
+    Ok(args)
+}
+
+/// The `docker create` arguments of one install phase container: `argv[0]` is the entrypoint and
+/// the rest its arguments. The scratch directory is mounted read-write at the working directory,
+/// and the container has the policy's network egress and nothing else.
+///
+/// # Errors
+///
+/// Returns the refusal reason when the policy is not an egress policy, when the argv is empty, or
+/// when the policy fails the same checks as a run.
+pub(crate) fn install_args(
+    name: &str,
+    run_id: &str,
+    policy: &ContainerPolicy,
+    scratch: &Path,
+    argv: &[String],
+) -> Result<Vec<String>, String> {
+    if !matches!(policy.network, ContainerNetwork::Egress {}) {
+        return Err("the install phase runs with network egress only".to_owned());
+    }
+    let Some((program, rest)) = argv.split_first() else {
+        return Err("the install argv is empty".to_owned());
+    };
+    let scratch_mount = bind(scratch, policy.mounts.workdir.as_str(), false)?;
+    let mut args = shared_args(name, run_id, policy, &[scratch_mount], false)?;
+    args.extend(["--entrypoint".to_owned(), program.clone()]);
+    args.push(image_ref(policy)?);
+    args.extend(rest.iter().cloned());
+    Ok(args)
+}
+
+/// The `--network` arguments of the policy. A probe run's policy names `none`: a container that
+/// publishes no port has no route to the host or to the rest of the network. The install phase's
+/// policy names the Docker bridge, so its containers can fetch packages and nothing else.
 fn network_args(network: ContainerNetwork) -> Vec<String> {
     match network {
         ContainerNetwork::None {} => vec!["--network".to_owned(), "none".to_owned()],
+        ContainerNetwork::Egress {} => vec!["--network".to_owned(), "bridge".to_owned()],
     }
 }
 
@@ -288,6 +361,7 @@ mod tests {
             snapshot: dir.path(),
             harness: dir.path(),
             empty: dir.path(),
+            dependencies: None,
         };
         let mounts = mount_values(&policy, &sources).expect("the mounts build");
         let harness = format!(
@@ -327,6 +401,7 @@ mod tests {
             snapshot: &snapshot,
             harness: &harness,
             empty: &empty,
+            dependencies: None,
         };
         let refusal = mount_values(&pinned_policy("refused"), &sources)
             .expect_err("the snapshot lacks .acan");
@@ -348,6 +423,7 @@ mod tests {
             snapshot: &snapshot,
             harness: &harness,
             empty: &empty,
+            dependencies: None,
         };
         let mounts = mount_values(&pinned_policy("masked"), &sources).expect("masked mounts");
         let masked = format!(
