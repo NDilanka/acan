@@ -23,12 +23,13 @@ test("the names and flags avoid every new panel", () => {
     assert.ok(selectors.includes(wanted), `HUD_SELECTORS has ${wanted}`);
   }
   const html = www("index.html");
-  // The order strip under the shell is gone; the map's list may still name it until its owner
-  // drops it, and a selector with no element blocks nothing.
-  const retired = new Set(["#order"]);
-  for (const selector of selectors.filter((s) => /^#[\w-]+$/.test(s) && !retired.has(s))) {
+  for (const selector of selectors.filter((s) => /^#[\w-]+$/.test(s))) {
     assert.match(html, new RegExp(`id="${selector.slice(1)}"`), `${selector} is on the page`);
   }
+});
+
+test("the names and flags no longer avoid the retired order strip", () => {
+  assert.ok(!hudSelectors().includes("#order"), "HUD_SELECTORS has no #order");
 });
 
 test("the first-run checklist, the clash card and the slip sit in the right rail, before the watch panels", () => {

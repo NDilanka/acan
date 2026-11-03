@@ -155,14 +155,14 @@ function placeUnplacedNote() {
   note.style.top = `${UNPLACED_TOP_PX}px`;
 }
 
-// The page's fixed panels: the shell, the order line, the key bar, the usage panel, the notice,
+// The page's fixed panels: the shell, the key bar, the usage panel, the notice,
 // the ride chip, each panel of the right rail (the first-run checklist, the clash card, the slip,
 // the inbox, the lanes, the history and the timeline), the receipt plate, the compose panel, the
 // question card, the command bar, the vision viewer and its pins, the alpha banner and the replay
 // bar. A flag or a name never sits under one. A panel that is hidden has no box, so it blocks
 // nothing.
 export const HUD_SELECTORS = [
-  "#shell", "#order", "#hint", "#usage", "#notice", "#pov-chip", "#watch > .island", "#receipt",
+  "#shell", "#hint", "#usage", "#notice", "#pov-chip", "#watch > .island", "#receipt",
   "#compose", "#question", "#command", "#vision", ".vpin", "#alpha", "#replay", ".flag.unplaced",
 ].join(", ");
 
