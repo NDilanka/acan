@@ -1586,6 +1586,10 @@ fn a_new_probe_spelling_never_resets_the_budget() {
         .agent(&agent, AgentCmd::Claim { task: fx.task2 })
         .unwrap_err();
     assert_eq!(claim, Rejection::BudgetExhausted { order: fx.order });
+    let reclaim = fx
+        .agent(&agent, AgentCmd::Claim { task: fx.task1 })
+        .unwrap_err();
+    assert_eq!(reclaim, Rejection::BudgetExhausted { order: fx.order });
     assert!(
         fx.fence(fx.task1).is_none(),
         "the stop ends task1's lease, so no fence stands"
