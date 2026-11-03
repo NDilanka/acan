@@ -27,6 +27,10 @@ pub const EYE_DISTANCE: f32 = BODY_RADIUS;
 /// The shadow's radius on the plinth top when the drone is low. It is a soft halo, so it reads as
 /// light on the ground.
 pub const SHADOW_RADIUS: f32 = 0.9 * BODY_RADIUS;
+/// The glow under the body: a soft level disc in the agent's hue, this far below the centre and
+/// this wide, which the renderer draws. The body hides its middle, so it shows round the belly.
+pub const GLOW_DROP: f32 = 0.8 * BODY_RADIUS;
+pub const GLOW_RADIUS: f32 = 1.6 * BODY_RADIUS;
 /// The beacon's radius at its target. The renderer sets its on-screen size each frame.
 pub const BEACON_RADIUS: f32 = 0.07;
 /// The lens, as angles from the nose: the hue iris, the dark glass round it, and the hue ring that
@@ -43,6 +47,9 @@ const EAR_INNER: f32 = 0.78 * BODY_RADIUS;
 const EAR_OUTER: f32 = 1.1 * BODY_RADIUS;
 const EAR_RADIUS: f32 = 0.36 * BODY_RADIUS;
 const EAR_HUB: f32 = 0.2 * BODY_RADIUS;
+/// The hub is a short drum that stands this far off the ear's face. A disc laid on the face
+/// z-fights it at a distance, since the mesh pass biases both by their slope.
+const HUB_RISE: f32 = 0.03 * BODY_RADIUS;
 const EAR_SEGMENTS: usize = 20;
 /// The antenna: a thin stem from inside the crown, set back from the nose, and a hue tip.
 const ANTENNA_BACK: f32 = -0.2 * BODY_RADIUS;
@@ -156,8 +163,13 @@ fn accent() -> Model {
     let mut build = Build::default();
     sphere(&mut build, ORIGIN, BODY_RADIUS, &ACCENT_BANDS);
     for side in [1.0_f32, -1.0] {
-        let face = scale3(SIDE, side * (EAR_OUTER + PROUD));
-        disc(&mut build, face, scale3(SIDE, side), EAR_HUB, EAR_SEGMENTS);
+        drum(
+            &mut build,
+            scale3(SIDE, side * (EAR_OUTER - HUB_RISE)),
+            scale3(SIDE, side * (EAR_OUTER + HUB_RISE)),
+            EAR_HUB,
+            EAR_SEGMENTS,
+        );
     }
     sphere(
         &mut build,
@@ -639,7 +651,7 @@ mod tests {
             assert!(
                 positions
                     .iter()
-                    .any(|p| (p[1] - side * (EAR_OUTER + PROUD)).abs() < 1e-4),
+                    .any(|p| (p[1] - side * (EAR_OUTER + HUB_RISE)).abs() < 1e-4),
                 "a hub on the ear at side {side}"
             );
         }

@@ -1342,6 +1342,9 @@ impl App {
         scene.beams = marks::beams(&self.motion, &self.marks, self.dpr, riding, hovered);
         scene
             .beams
+            .extend(marks::spots(&self.motion, &self.marks, self.dpr, riding));
+        scene
+            .beams
             .extend(marks::trail_beams(&self.motion, self.dpr, riding));
         scene
             .beams

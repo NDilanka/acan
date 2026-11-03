@@ -409,6 +409,8 @@ struct StrokeOut {
     // the fog at the segment's middle.
     @location(1) @interpolate(flat) ink: vec4<f32>,
     @location(2) @interpolate(flat) half_px: f32,
+    // Where a spot's fragment lies in its disc, from -1 to 1 on each axis. Zero on a stroke.
+    @location(3) uv: vec2<f32>,
 }
 
 // A machine's size on screen, as the device px that `LOD_REFERENCE` plan units span at its origin.
@@ -637,18 +639,46 @@ struct HueIn {
 
 // A stroke's start is measured from its origin, turned and grown as a model is. A belt has no
 // origin, so its start is the world point. A beam from a drone's eye starts on the eye at any size.
+// A negative width marks a spot, whose radius in plan units is the width negated.
 @vertex
 fn vs_hue(v: HueIn) -> StrokeOut {
     let min_px = camera.view.w;
     var ink = theme.tints[v.tint];
     ink.a = v.alpha;
+    if (v.width < 0.0) {
+        return spot(v, ink);
+    }
     let half_px = 0.5 * max(v.width, min_px);
     let start = v.origin + turned(v.a, v.turn) * grown(v.origin, v.grow);
     return stroke(start, v.b, half_px, ink, v.corner, vec2<f32>(0.0));
 }
 
+// A spot is a level disc round its start, grown with the start, so a drone's glow and shadow keep
+// their size against the drone at the screen floor. It is lifted toward the eye like a dot, so a
+// shadow wins against the plinth top it lies on.
+fn spot(v: HueIn, ink: vec4<f32>) -> StrokeOut {
+    let k = grown(v.origin, v.grow);
+    let centre = v.origin + turned(v.a, v.turn) * k;
+    let uv = vec2<f32>(v.corner.x * 2.0 - 1.0, v.corner.y);
+    let p = centre + vec3<f32>(uv * (-v.width * k), 0.0) + camera.toward.xyz * LIFT;
+    var out: StrokeOut;
+    out.clip = to_clip(p);
+    out.ink = vec4<f32>(ink.rgb, ink.a * (1.0 - fog_at(centre)));
+    out.half_px = -1.0;
+    out.uv = uv;
+    return out;
+}
+
 @fragment
 fn fs_hue(v: StrokeOut) -> @location(0) vec4<f32> {
+    if (v.half_px < 0.0) {
+        let r = length(v.uv);
+        if (r >= 1.0) {
+            discard;
+        }
+        // Like a shadow dot, a spot fades to its rim, so it reads as light and not as a disc.
+        return vec4<f32>(v.ink.rgb, v.ink.a * (1.0 - smoothstep(0.0, 1.0, r)));
+    }
     return vec4<f32>(v.ink.rgb, v.ink.a * stroke_coverage(v));
 }
 

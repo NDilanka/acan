@@ -24,24 +24,19 @@ const _: () = assert!(
 pub const AGENT_HUES: [u32; AGENT_SLOTS] =
     [0x0f7a6e, 0x6a45c8, 0x2763c4, 0x9c3c86, 0x0b6f94, 0x5d6b12];
 pub const AGENT_SLOTS: usize = 6;
-/// The share of an agent's hue a drone's shell takes, mixed into white. The shell carries the hue
-/// at a glance, while the white glass and the dark line art still read over it.
-pub const SHELL_MIX: f32 = 0.65;
 /// The share of the clash red a machine with an open clash takes, mixed into white. It is the only
 /// colour a machine takes from the live work: a machine stays grey until it is abnormal.
 pub const CLASH_MIX: f32 = 0.14;
 /// The clash red, the diamond's colour.
 pub const CLASH_RED: u32 = 0xd0453a;
-/// The grey of a stale drone's shell, which has gone quiet while it holds a task.
+/// The grey of a stale drone's eye, which has gone quiet while it holds a task.
 pub const STALE_GREY: u32 = 0xc4c4c8;
 /// The grey of a ghost: the outline a landed machine keeps for a returning reader.
 pub const GHOST_GREY: u32 = 0x6e6e73;
-/// Tint slot of each agent's accent at full hue: `TINT_BODY0 + slot`. The drone's eye and lamp, its
-/// beam and its beacon draw with it.
+/// Tint slot of each agent's accent at full hue: `TINT_BODY0 + slot`. A working drone's eye, its
+/// glow, its beam and its beacon draw with it, and an idle drone's eye with its dimmed copy.
 pub const TINT_BODY0: u32 = 1;
-/// Tint slot of each agent's drone shell mix: `TINT_SHELL0 + slot`.
-pub const TINT_SHELL0: u32 = 7;
-/// Tint slot of a stale drone's shell.
+/// Tint slot of a stale drone's eye. The drone's body is white in every state.
 pub const TINT_STALE: u32 = 13;
 /// Tint slot of a ghost's outline.
 pub const TINT_GHOST: u32 = 14;
@@ -223,14 +218,13 @@ pub fn palette(srgb_surface: bool) -> [[f32; 4]; PALETTE_LEN] {
     PALETTE.map(|c| if srgb_surface { to_linear(c) } else { c })
 }
 
-/// The tint table in sRGB. Slot 0 is the identity, each agent has a body slot at full hue and a
-/// shell slot mixed into white, and the stale, ghost, clash and scope slots follow.
+/// The tint table in sRGB. Slot 0 is the identity, each agent has a body slot at full hue, and the
+/// stale, ghost, clash and scope slots follow.
 pub fn tints() -> [[f32; 4]; TINT_LEN] {
     let mut table = [[1.0; 4]; TINT_LEN];
     for slot in 0..AGENT_SLOTS {
         let hue = agent_colour(slot);
         table[TINT_BODY0 as usize + slot] = hue;
-        table[TINT_SHELL0 as usize + slot] = shell_mix(hue);
     }
     table[TINT_STALE as usize] = rgb(STALE_GREY, 1.0);
     table[TINT_GHOST as usize] = rgb(GHOST_GREY, 1.0);
@@ -259,11 +253,6 @@ pub fn add_dim_slots(table: &mut [[f32; 4]; TINT_LEN]) {
 /// An agent's hue in sRGB, for the slot it holds.
 pub fn agent_colour(slot: usize) -> [f32; 4] {
     rgb(AGENT_HUES[slot], 1.0)
-}
-
-/// A hue mixed into white by [`SHELL_MIX`], in sRGB.
-pub fn shell_mix(hue: [f32; 4]) -> [f32; 4] {
-    mixed_into_white(hue, SHELL_MIX)
 }
 
 fn mixed_into_white(hue: [f32; 4], share: f32) -> [f32; 4] {
@@ -340,13 +329,12 @@ const _: () = assert!(
     "agents do not run into the belt slots"
 );
 const _: () = assert!(
-    TINT_BODY0 as usize + AGENT_SLOTS <= TINT_SHELL0 as usize
-        && TINT_SHELL0 as usize + AGENT_SLOTS <= TINT_STALE as usize
+    TINT_BODY0 as usize + AGENT_SLOTS <= TINT_STALE as usize
         && TINT_STALE < TINT_GHOST
         && TINT_GHOST < TINT_CLASH
         && TINT_CLASH < TINT_SCOPE0
         && TINT_SCOPE0 as usize + SCOPE_TINTS.len() <= TINT_DIM0 as usize,
-    "body, shell, stale, ghost, clash and scope tints do not overlap"
+    "body, stale, ghost, clash and scope tints do not overlap"
 );
 const _: () = assert!(GRID_MINOR_ALPHA < GRID_MAJOR_ALPHA);
 const _: () = assert!(PAPER_TOP > 0.0, "a top never matches the page");
@@ -505,18 +493,18 @@ mod tests {
     }
 
     #[test]
-    fn a_shell_is_its_agents_hue_mixed_into_white() {
+    fn an_idle_eye_is_its_agents_hue_dimmed_and_a_stale_eye_grey() {
+        let table = tints();
         for slot in 0..AGENT_SLOTS {
-            let hue = agent_colour(slot);
-            let shell = tints()[TINT_SHELL0 as usize + slot];
+            let bright = table[TINT_BODY0 as usize + slot];
+            let dim = table[(TINT_DIM0 + TINT_BODY0) as usize + slot];
+            assert_eq!(bright, agent_colour(slot), "a working eye is the full hue");
             for channel in 0..3 {
-                let share = (1.0 - shell[channel]) / (1.0 - hue[channel]);
-                assert!(
-                    (share - SHELL_MIX).abs() < 1e-5,
-                    "slot {slot} channel {channel} mixes {share}, not {SHELL_MIX}"
-                );
+                assert!((dim[channel] - DIM_SHARE * bright[channel]).abs() < 1e-6);
             }
         }
+        let stale = table[TINT_STALE as usize];
+        assert!((stale[0] - stale[2]).abs() <= 6.0 / 255.0, "a stale eye is grey");
     }
 
     #[test]

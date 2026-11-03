@@ -86,7 +86,8 @@ pub fn plant_scene(layout: &Layout, models: &[Model]) -> Scene {
         instances,
         hue_lines: Vec::new(),
         beams: Vec::new(),
-        silhouettes: vec![mark_kinds().body],
+        // The body is white, so a hidden drone shows as its hue accent's outline.
+        silhouettes: vec![mark_kinds().accent],
         bounds: nonempty(bounds),
     }
 }

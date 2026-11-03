@@ -89,7 +89,8 @@ pub struct HueVertex {
     pub a: [f32; 3],
     pub b: [f32; 3],
     pub corner: [f32; 2],
-    /// The stroke's width in device px.
+    /// The stroke's width in device px. A spot's radius in plan units is here negated, so the
+    /// shader tells a spot from a stroke without another attribute.
     pub width: f32,
     /// The stroke's opacity, which fades toward a belt's ends.
     pub alpha: f32,
@@ -267,7 +268,7 @@ pub fn hue_vertices(lines: &[HueLine]) -> Vec<HueVertex> {
 }
 
 /// Four vertices per beam, one stroke from its `from` to its `to`, at the beam's own width and
-/// opacity.
+/// opacity, or one soft spot when the beam is a spot.
 pub fn beam_vertices(beams: &[Beam]) -> Vec<HueVertex> {
     beams
         .iter()
@@ -276,7 +277,11 @@ pub fn beam_vertices(beams: &[Beam]) -> Vec<HueVertex> {
                 a: beam.from,
                 b: beam.to,
                 corner,
-                width: beam.width_px,
+                width: if beam.spot > 0.0 {
+                    -beam.spot
+                } else {
+                    beam.width_px
+                },
                 alpha: beam.alpha,
                 tint: u32::from(beam.tint),
                 origin: beam.origin,
@@ -657,6 +662,7 @@ mod tests {
             tint: 2,
             alpha: 0.3,
             width_px: 1.5,
+            spot: 0.0,
         };
         let vertices = beam_vertices(&[beam]);
         assert_eq!(vertices.len(), QUAD_CORNERS as usize);
@@ -672,6 +678,28 @@ mod tests {
                 .all(|v| v.origin == beam.origin && v.grow == beam.grow && v.turn == beam.turn),
             "the start follows the drone it is measured from"
         );
+    }
+
+    #[test]
+    fn a_spot_carries_its_radius_as_a_negative_width() {
+        let spot = Beam {
+            from: [0.0, 0.0, -9.0],
+            to: [4.0, 5.0, 6.0],
+            origin: [7.0, 8.0, 9.0],
+            grow: [20.0, 24.0],
+            turn: 0.5,
+            tint: 2,
+            alpha: 0.4,
+            width_px: 1.5,
+            spot: 18.0,
+        };
+        let vertices = beam_vertices(&[spot]);
+        assert_eq!(vertices.len(), QUAD_CORNERS as usize);
+        assert!(
+            vertices.iter().all(|v| v.width == -18.0 && v.alpha == 0.4),
+            "the shader reads a negative width as a spot's radius"
+        );
+        assert!(vertices.iter().all(|v| v.a == spot.from && v.origin == spot.origin));
     }
 
     #[test]

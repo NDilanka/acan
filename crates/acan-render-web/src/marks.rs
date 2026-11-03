@@ -12,11 +12,11 @@ use std::f32::consts::{PI, TAU};
 
 use acan_core::{OrderId, TaskId, World};
 use acan_iso::{
-    BEACON_RADIUS, BODY_RADIUS, BOT_HEIGHT, EYE_DISTANCE, PIN_HEIGHT, PLINTH_TOP, STALK_HEIGHT,
+    BEACON_RADIUS, BODY_RADIUS, BOT_HEIGHT, EYE_DISTANCE, GLOW_DROP, GLOW_RADIUS, PIN_HEIGHT,
+    PLINTH_TOP, STALK_HEIGHT,
 };
 use acan_render::theme::{
-    AGENT_SLOTS, TINT_BODY0, TINT_CLASH, TINT_DIM0, TINT_GHOST, TINT_SCOPE0, TINT_SHELL0,
-    TINT_STALE,
+    AGENT_SLOTS, TINT_BODY0, TINT_CLASH, TINT_DIM0, TINT_GHOST, TINT_SCOPE0, TINT_STALE,
 };
 use acan_render::{Beam, Instance};
 use serde::Serialize;
@@ -182,17 +182,23 @@ pub fn hue_css(slot: usize) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
-/// The tint slot of an agent's accent: the agent's hue at full strength. The eye, the lamp, the
-/// beam and the beacon draw with it.
+/// The tint slot of an agent's hue at full strength. A working drone's eye, every drone's glow,
+/// the beam and the beacon draw with it.
 #[must_use]
 pub fn body_tint(slot: usize) -> u8 {
     u8::try_from(TINT_BODY0 as usize + slot).expect("tint slots fit in a byte")
 }
 
-/// The tint slot of an agent's shell: the agent's hue mixed toward white.
+/// The tint slot of a drone's accent, its iris, lens ring, ear hubs and antenna tip, in `state`:
+/// the full hue while it works, the hue dimmed while it idles or waits, and grey once stale.
 #[must_use]
-pub fn shell_tint(slot: usize) -> u8 {
-    u8::try_from(TINT_SHELL0 as usize + slot).expect("tint slots fit in a byte")
+pub fn eye_tint(state: DroneState, slot: usize) -> u8 {
+    let tint = match state {
+        DroneState::Working => u32::from(body_tint(slot)),
+        DroneState::Idle | DroneState::Waiting => u32::from(body_tint(slot)) + TINT_DIM0,
+        DroneState::Stale => TINT_STALE,
+    };
+    u8::try_from(tint).expect("tint slots fit in a byte")
 }
 
 /// A drone over a machine. It hovers on a spot beside the machine, its centre [`HOVER_LIFT`]
@@ -239,14 +245,14 @@ impl Body {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DroneState {
-    /// On a claimed task: it bobs and its beacon pulses.
+    /// On a claimed task: its eye is bright, its glow strong, it bobs and its beacon pulses.
     Working,
-    /// On an open, read-back, queued or landed task, or none: still, with its lamp off.
+    /// On an open, read-back, queued or landed task, or none: still, its eye dim and its glow faint.
     #[default]
     Idle,
-    /// Its task is in an open clash, or its order asks a question: still, with an amber ring.
+    /// Its task is in an open clash, or its order asks a question: as idle, with an amber ring.
     Waiting,
-    /// It holds a task but has been quiet for a while: grey, and lower.
+    /// It holds a task but has been quiet for a while: still and lower, its eye grey, no glow.
     Stale,
 }
 
@@ -274,6 +280,17 @@ impl DroneState {
             Self::Working | Self::Waiting => 0.9,
             Self::Idle => 0.3,
             Self::Stale => 0.2,
+        }
+    }
+
+    /// The opacity of the glow under the drone: strong while the agent works, faint while it idles
+    /// or waits, and none once it has gone stale.
+    #[must_use]
+    pub fn glow_alpha(self) -> f32 {
+        match self {
+            Self::Working => 0.5,
+            Self::Idle | Self::Waiting => 0.18,
+            Self::Stale => 0.0,
         }
     }
 
@@ -1664,33 +1681,22 @@ pub struct MarkKinds {
     pub beacon: u16,
 }
 
-/// A drone's instances: its shell and its accent at its centre, and its shadow on the plinth top
-/// under the centre. The shadow keeps its plan size, since it lies on the plinth.
-fn drone(kinds: MarkKinds, at: [f32; 3], slot: usize, turn: f32, bot: [f32; 2]) -> [Instance; 3] {
-    drone_shell(kinds, at, slot, shell_tint(slot), turn, bot)
-}
-
-/// A drone's instances with its shell in `shell`, which is its light hue unless it is stale.
-fn drone_shell(
-    kinds: MarkKinds,
-    at: [f32; 3],
-    slot: usize,
-    shell: u8,
-    turn: f32,
-    bot: [f32; 2],
-) -> [Instance; 3] {
+/// A drone's instances: its white body and its accent at its centre, the accent in `accent`,
+/// which [`eye_tint`] gives for the drone's state, and its shadow on the plinth top under the
+/// centre. The shadow keeps its plan size, since it lies on the plinth.
+fn drone(kinds: MarkKinds, at: [f32; 3], accent: u8, turn: f32, bot: [f32; 2]) -> [Instance; 3] {
     [
         Instance {
             offset: at,
             kind: kinds.body,
-            tint: shell,
+            tint: 0,
             grow: bot,
             turn,
         },
         Instance {
             offset: at,
             kind: kinds.accent,
-            tint: body_tint(slot),
+            tint: accent,
             grow: bot,
             turn,
         },
@@ -1714,8 +1720,8 @@ fn drone_grow(dpr: f32) -> [f32; 2] {
 /// body's height, each drone that is leaving, each working drone's beacon at its target, and each
 /// pin's stalk and diamond. A drone, its ring, a beacon and a diamond grow to their screen floor,
 /// which `dpr` turns from CSS px into device px. A stalk keeps its plan size. A working agent's
-/// beacon swells with its pulse. A stale drone's shell is grey. The riding agent's drone has no
-/// shell, accent or shadow, but its ring and beacon still draw.
+/// beacon swells with its pulse. A drone's accent takes its state's tint. The riding agent's drone
+/// has no body, accent or shadow, but its ring and beacon still draw.
 #[must_use]
 pub fn mark_instances(
     motion: &Motion,
@@ -1734,12 +1740,7 @@ pub fn mark_instances(
         let turn = motion.heading_of(&body.agent).unwrap_or(0.0);
         let at = bobbed(motion, body, at);
         if riding != Some(body.agent.as_str()) {
-            let shell = if body.state == DroneState::Stale {
-                u8::try_from(TINT_STALE).expect("tint slots fit in a byte")
-            } else {
-                shell_tint(body.slot)
-            };
-            out.extend(drone_shell(kinds, at, body.slot, shell, turn, bot));
+            out.extend(drone(kinds, at, eye_tint(body.state, body.slot), turn, bot));
         }
         if body.waiting() {
             out.push(Instance {
@@ -1767,7 +1768,8 @@ pub fn mark_instances(
             continue;
         }
         let leaving = leave.now();
-        out.extend(drone(kinds, leaving.at, leaving.slot, leaving.heading, bot));
+        let accent = eye_tint(DroneState::Idle, leaving.slot);
+        out.extend(drone(kinds, leaving.at, accent, leaving.heading, bot));
     }
     for (foot, head) in motion.pins_now() {
         out.push(Instance {
@@ -1829,8 +1831,49 @@ pub fn beams(
                     body.state.tether_alpha()
                 },
                 width_px: TETHER_PX * dpr,
+                spot: 0.0,
             })
         })
+        .collect()
+}
+
+/// The soft spots now: the glow under each drone, in its agent's hue at its state's strength. A
+/// glow hangs from the drone's centre in its own frame, so it bobs and grows with the drone. A
+/// stale drone has none, a leaving drone glows as an idle one does, and the riding agent's drone
+/// has none.
+#[must_use]
+pub fn spots(motion: &Motion, marks: &Marks, dpr: f32, riding: Option<&str>) -> Vec<Beam> {
+    let glow = |at: [f32; 3], slot: usize, alpha: f32| Beam {
+        from: [0.0, 0.0, -GLOW_DROP],
+        to: at,
+        origin: at,
+        grow: drone_grow(dpr),
+        turn: 0.0,
+        tint: body_tint(slot),
+        alpha,
+        width_px: 0.0,
+        spot: GLOW_RADIUS,
+    };
+    let bodies = marks
+        .bodies
+        .iter()
+        .filter(|body| riding != Some(body.agent.as_str()))
+        .filter_map(|body| {
+            let at = bobbed(motion, body, motion.body_at(&body.agent)?);
+            Some((at, body.slot, body.state.glow_alpha()))
+        });
+    let leaving = motion
+        .leaving
+        .iter()
+        .filter(|(agent, _)| riding != Some(agent.as_str()))
+        .map(|(_, leave)| {
+            let now = leave.now();
+            (now.at, now.slot, DroneState::Idle.glow_alpha())
+        });
+    bodies
+        .chain(leaving)
+        .filter(|&(_, _, alpha)| alpha > 0.0)
+        .map(|(at, slot, alpha)| glow(at, slot, alpha))
         .collect()
 }
 
@@ -1853,6 +1896,7 @@ pub fn trail_beams(motion: &Motion, dpr: f32, riding: Option<&str>) -> Vec<Beam>
                 tint,
                 alpha,
                 width_px: TRAIL_PX * dpr,
+                spot: 0.0,
             })
         })
         .collect()
@@ -1876,6 +1920,7 @@ pub fn ghost_beams(motion: &Motion, marks: &Marks, dpr: f32) -> Vec<Beam> {
                 tint,
                 alpha,
                 width_px: GHOST_PX * dpr,
+                spot: 0.0,
             })
         })
         .collect()
@@ -4097,7 +4142,7 @@ mod tests {
     }
 
     #[test]
-    fn each_state_sets_its_tether_and_a_stale_drone_is_grey_and_lower() {
+    fn each_state_sets_its_tether_eye_and_glow_and_a_stale_drone_sits_lower() {
         let at = [0.0, 0.0, 40.0];
         let target = [4.0, 0.0, 9.0];
         let with = |agent: &str, state: DroneState| Body {
@@ -4124,13 +4169,30 @@ mod tests {
             "the tether is 1.5 CSS px"
         );
         let instances = mark_instances(&motion, &marks, KINDS, 1.0, None);
-        let shells: Vec<u8> = instances
+        let tints = |kind: u16| -> Vec<u8> {
+            instances
+                .iter()
+                .filter(|i| i.kind == kind)
+                .map(|i| i.tint)
+                .collect()
+        };
+        assert_eq!(tints(KINDS.body), [0; 4], "the body is white in every state");
+        let dim = u8::try_from(TINT_DIM0 + TINT_BODY0).expect("fits");
+        assert_eq!(
+            tints(KINDS.accent),
+            [
+                body_tint(0),
+                dim,
+                dim,
+                u8::try_from(TINT_STALE).expect("fits")
+            ],
+            "the eye is bright at work, dim at idle and while waiting, and grey once stale"
+        );
+        let glows: Vec<f32> = spots(&motion, &marks, 1.0, None)
             .iter()
-            .filter(|i| i.kind == KINDS.body)
-            .map(|i| i.tint)
+            .map(|spot| spot.alpha)
             .collect();
-        assert_eq!(shells[3], u8::try_from(TINT_STALE).expect("fits"));
-        assert_eq!(shells[0], shell_tint(0));
+        assert_eq!(glows, [0.5, 0.18, 0.18], "a stale drone has no glow");
         let ring = instances
             .iter()
             .find(|i| i.kind == KINDS.ring)
@@ -4182,6 +4244,9 @@ mod tests {
         let ridden = beams(&motion, &marks, 1.0, Some("a"), None);
         assert_eq!(ridden.len(), 1, "the riding drone has no beam");
         assert_eq!(ridden[0].origin, [9.0, 3.0, 40.0]);
+        let glows = spots(&motion, &marks, 1.0, Some("a"));
+        assert_eq!(glows.len(), 1, "the riding drone has no glow");
+        assert_eq!(glows[0].origin, [9.0, 3.0, 40.0]);
     }
 
     /// The scripted view with tasks landed on src/api at `api` and on src/ui at `ui`.
