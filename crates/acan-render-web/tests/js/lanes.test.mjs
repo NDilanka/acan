@@ -138,7 +138,7 @@ test("the check reads as words for the row's label", () => {
 test("with no agent the strip names the worker command against this origin", () => {
   const { line, command } = emptyLines("http://127.0.0.1:7311");
   assert.equal(line, "No worker connected.");
-  assert.equal(command, "acan-worker --server http://127.0.0.1:7311 --token <agent token from .acan/tokens.json> --repo <path to your repo>");
+  assert.equal(command, "ACAN_AGENT_TOKEN=<agent token from .acan/tokens.json> acan-worker --server http://127.0.0.1:7311 --repo <path to your repo>");
   assert.equal(command, workerCommand("http://127.0.0.1:7311"), "the checklist offers the same command");
   assert.doesNotMatch(line + command, /\$|cost|token usage/i);
 });

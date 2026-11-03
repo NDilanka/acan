@@ -62,10 +62,10 @@ export function workersState(answer) {
 }
 
 // The command that starts one outside worker against this origin. Only a server without
-// GET /api/workers shows it, and the acan-worker those servers ship takes its agent token as
-// --token alone.
+// GET /api/workers shows it. The token goes in ACAN_AGENT_TOKEN, not a flag, so it stays out of
+// the process list.
 export function workerCommand(origin) {
-  return `acan-worker --server ${origin} --token <agent token from .acan/tokens.json> --repo <path to your repo>`;
+  return `ACAN_AGENT_TOKEN=<agent token from .acan/tokens.json> acan-worker --server ${origin} --repo <path to your repo>`;
 }
 
 // The workers in one summary, read by the worker step here and by the lanes strip's status and
@@ -153,7 +153,7 @@ export function steps({ token = false, setup = null, contract, workers = null, v
   const list = [
     token
       ? { id: "signin", title: "Sign in", state: DONE, detail: "Signed in with the owner token.", action: null }
-      : { id: "signin", title: "Sign in", state: TODO, detail: "Paste the owner token that `acan serve` printed.", action: { kind: "focus", target: "token", label: "Sign in" } },
+      : { id: "signin", title: "Sign in", state: TODO, detail: "Paste the owner token from the terminal, or from .acan/tokens.json.", action: { kind: "focus", target: "token", label: "Sign in" } },
     keyStep(token, setup),
     contractStep(token, contract),
     workerStep(workers, agents, origin),
