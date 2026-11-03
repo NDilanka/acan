@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { linkQuiet, metaBadgeText, shortLine } from "../../www/chrome.js";
+import { alphaShown, linkQuiet, metaBadgeText, shortLine } from "../../www/chrome.js";
 import { keyAction } from "../../www/keys.js";
 
 const www = (name) => readFileSync(new URL(`../../www/${name}`, import.meta.url), "utf8");
@@ -102,4 +102,22 @@ test("the clash card paints its options and rows through the short line, and key
   assert.match(js, /el\.append\(dot, shortText\(row\.text\)\)/);
   assert.match(js, /button\.addEventListener\("click", \(\) => settle\(clash, option\)\)/);
   assert.match(js, /const option = clash\.options\[key - 1\];/);
+});
+
+test("Report a bug sits in the ? menu, not as a pill at the bottom of the page", () => {
+  const html = www("index.html");
+  const alpha = html.match(/<div class="island" id="alpha"[^>]*>([\s\S]*?)<\/div>/)[1];
+  assert.doesNotMatch(alpha, /report-bug|Report a bug/, "no bottom-centre report pill");
+  const hint = html.match(/<div class="island" id="hint" hidden>([\s\S]*?)<\/div>/)[1];
+  assert.match(hint, /<button id="report-bug" type="button" hidden>Report a bug<\/button>/);
+  assert.equal(html.match(/id="report-bug"/g).length, 1, "one control, one id");
+  const shell = www("shell.js");
+  assert.match(shell, /\$\("report-bug"\)\.addEventListener\("click", reportBug\);/, "the same handler");
+  assert.match(shell, /\$\("report-bug"\)\.hidden = !state\.token;/);
+});
+
+test("the bottom island shows only while one of its parts shows", () => {
+  assert.equal(alphaShown(true, [true, true, true, true]), false, "nothing to say: no empty pill");
+  assert.equal(alphaShown(true, [true, false, true, true]), true, "an update notice");
+  assert.equal(alphaShown(false, [false, false, false, false]), false, "no token");
 });

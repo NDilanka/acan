@@ -16,6 +16,13 @@ export function metaBadgeText({ serverCalls = null, logCalls = 0, error = null }
   return `Meta · ${calls} ${calls === 1 ? "call" : "calls"}`;
 }
 
+// Whether the bottom alpha island shows: with a token, and only while one of its parts (the key
+// banner, the update notice, Model setup, the bug note) is showing. `partsHidden` is each part's
+// hidden flag.
+export function alphaShown(token, partsHidden) {
+  return token && partsHidden.some((hidden) => !hidden);
+}
+
 // One short line for a card line the map's model writes, such as a settlement option or a
 // declaration: the first clause, cut at a word near `max` characters. A leading id tag
 // ("t-0 · ") is kept, since the separator there is part of the name. `title` is the full text
