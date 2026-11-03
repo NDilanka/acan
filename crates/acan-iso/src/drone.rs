@@ -11,7 +11,9 @@
 //! state. The accent is the iris, the lens ring, the ear hubs and the antenna tip, and it takes the
 //! agent's hue, which the renderer brightens or dims for the drone's state. Both share one centre at
 //! the origin, so the renderer places the centre over the machine, turns the drone to face its
-//! target, and grows it about the centre. Every model is built at heading zero, nose toward +x.
+//! target, and grows it about the centre. Every model is built at heading zero, nose toward +x. The
+//! lens looks [`EYE_TILT_DEG`] below level, since a drone hovers a little above the machine top it
+//! works on, so the turn alone points the eye at the work.
 
 use std::f32::consts::TAU;
 
@@ -22,8 +24,18 @@ use crate::model::{Aabb, Detail, Dot3, Ink, Line3, Mesh, Model, Surface};
 pub const BODY_RADIUS: f32 = 12.0;
 /// The drone's full height, which is its body's diameter. The renderer's screen floor measures it.
 pub const BOT_HEIGHT: f32 = 2.0 * BODY_RADIUS;
-/// The eye sits this far from the centre, on the nose. A beam starts here, so it turns with the drone.
+/// The eye sits this far from the centre, on the nose. A beam starts at [`eye_point`], so it turns
+/// with the drone.
 pub const EYE_DISTANCE: f32 = BODY_RADIUS;
+/// How far below level the lens looks, in degrees. The instance turn only turns the drone about z,
+/// so the pitch toward the work is built in. A drone's target is on the machine top under its
+/// hovering centre, a few degrees to a few tens of degrees down, so this sits between.
+pub const EYE_TILT_DEG: f32 = 15.0;
+/// The unit direction the lens looks along, `EYE_TILT_DEG` below the nose, and the direction square
+/// to it and to the side, which leans back over the crown. `cos` is not `const`, so these are
+/// written out, and a test holds them to the tilt.
+const LOOK: V = [0.965_926, 0.0, -0.258_819];
+const LIFT: V = [0.258_819, 0.0, 0.965_926];
 /// The shadow's radius on the plinth top when the drone is low. It is a soft halo, so it reads as
 /// light on the ground.
 pub const SHADOW_RADIUS: f32 = 0.9 * BODY_RADIUS;
@@ -67,17 +79,19 @@ const ANTENNA_SEGMENTS: usize = 6;
 const RIVETS: usize = 9;
 const RIVET: f32 = 0.035 * BODY_RADIUS;
 const RIVET_CLEAR_DEG: f32 = 60.0;
-/// A seam that would cross the lens is cut where it passes this cosine from the nose, a little
+/// A seam that would cross the lens is cut where it passes this cosine from its axis, a little
 /// outside the ring.
 const NOSE_CLEAR: f32 = 0.74;
 const BODY_SEGMENTS: usize = 24;
 /// The body's bands from the lens to the tail, as (from, to, surface, steps) in degrees from the nose.
 /// The iris and the ring are the accent's, so the body leaves them open. A latitude falls at 90
-/// degrees, so the belly and the crown reach the full radius.
-const BODY_BANDS: [(f32, f32, Surface, usize); 3] = [
+/// The latitudes 90 degrees less and more the tilt hold the belly's and the crown's lowest and
+/// highest points, so the body reaches the full radius below and above.
+const BODY_BANDS: [(f32, f32, Surface, usize); 4] = [
     (IRIS_DEG, LENS_DEG, Surface::Ink(Ink::Hi), 2),
-    (RING_DEG, 90.0, Surface::Paper, 6),
-    (90.0, 180.0, Surface::Paper, 9),
+    (RING_DEG, 90.0 - EYE_TILT_DEG, Surface::Paper, 4),
+    (90.0 - EYE_TILT_DEG, 90.0 + EYE_TILT_DEG, Surface::Paper, 3),
+    (90.0 + EYE_TILT_DEG, 180.0, Surface::Paper, 8),
 ];
 /// The accent's bands on the body sphere. Their edges fall on the body's, so the two models meet
 /// without a gap.
@@ -85,7 +99,16 @@ const ACCENT_BANDS: [(f32, f32, Surface, usize); 2] = [
     (0.0, IRIS_DEG, Surface::Paper, 2),
     (LENS_DEG, RING_DEG, Surface::Paper, 1),
 ];
-const TIP_BANDS: [(f32, f32, Surface, usize); 1] = [(0.0, 180.0, Surface::Paper, 4)];
+/// A small sphere's bands. Every sphere is cut about the lens's axis, so latitudes fall where its
+/// box's faces touch it, and the antenna tip and the beacon reach their full radius each way.
+const SMALL_BANDS: [(f32, f32, Surface, usize); 6] = [
+    (0.0, EYE_TILT_DEG, Surface::Paper, 1),
+    (EYE_TILT_DEG, 90.0 - EYE_TILT_DEG, Surface::Paper, 2),
+    (90.0 - EYE_TILT_DEG, 90.0, Surface::Paper, 1),
+    (90.0, 90.0 + EYE_TILT_DEG, Surface::Paper, 1),
+    (90.0 + EYE_TILT_DEG, 180.0 - EYE_TILT_DEG, Surface::Paper, 2),
+    (180.0 - EYE_TILT_DEG, 180.0, Surface::Paper, 1),
+];
 /// A dot or a disc sits this far proud of the surface under it, so it never z-fights the surface.
 const PROUD: f32 = 0.004;
 /// The stroke weight of a painted line, in the kit's weight.
@@ -136,6 +159,13 @@ pub fn shadow_at(height: f32) -> (f32, f32) {
     )
 }
 
+/// The middle of the lens, in the drone's frame at heading zero. The beam to the drone's target
+/// starts here.
+#[must_use]
+pub fn eye_point() -> [f32; 3] {
+    scale3(LOOK, BODY_RADIUS)
+}
+
 /// The drone's body parts, counted as its model is built.
 #[must_use]
 pub fn drone_parts() -> DroneParts {
@@ -147,12 +177,7 @@ pub fn drone_parts() -> DroneParts {
 #[must_use]
 pub fn beacon() -> Model {
     let mut build = Build::default();
-    sphere(
-        &mut build,
-        ORIGIN,
-        BEACON_RADIUS,
-        &[(0.0, 180.0, Surface::Paper, 4)],
-    );
+    sphere(&mut build, ORIGIN, BEACON_RADIUS, &SMALL_BANDS);
     finish(build).0
 }
 
@@ -185,7 +210,7 @@ fn accent() -> Model {
         &mut build,
         [ANTENNA_BACK, 0.0, ANTENNA_TOP],
         ANTENNA_TIP,
-        &TIP_BANDS,
+        &SMALL_BANDS,
     );
     finish(build).0
 }
@@ -264,11 +289,11 @@ fn finish(build: Build) -> (Model, DroneParts) {
     (model, build.parts)
 }
 
-/// A unit direction from the body's centre, `degrees` from the nose and `phi` round the nose axis.
+/// A unit direction from a sphere's centre, `degrees` from the lens's axis and `phi` round it.
 fn sphere_dir(degrees: f32, phi: f32) -> V {
     let theta = degrees.to_radians();
-    let ring = add3(scale3(SIDE, phi.cos()), scale3(UP, phi.sin()));
-    add3(scale3(NOSE, theta.cos()), scale3(ring, theta.sin()))
+    let ring = add3(scale3(SIDE, phi.cos()), scale3(LIFT, phi.sin()));
+    add3(scale3(LOOK, theta.cos()), scale3(ring, theta.sin()))
 }
 
 /// The ring of points about `centre`, `count` of them, in the plane of `u` and `v`.
@@ -298,9 +323,9 @@ enum Rim {
 fn rim(build: &mut Build, centre: V, radius: f32, degrees: f32, surface: Surface) -> Rim {
     if degrees <= 0.0 || degrees >= 180.0 {
         let dir = if degrees <= 0.0 {
-            NOSE
+            LOOK
         } else {
-            scale3(NOSE, -1.0)
+            scale3(LOOK, -1.0)
         };
         let index = build.vertex(add3(centre, scale3(dir, radius)), dir, surface);
         return Rim::Pole(index);
@@ -413,8 +438,8 @@ fn antenna(build: &mut Build) {
 /// The pupil at the middle of the iris, and the glint on the glass above and left of it.
 fn eye(build: &mut Build) {
     build.dot(
-        scale3(NOSE, BODY_RADIUS + PROUD),
-        NOSE,
+        scale3(LOOK, BODY_RADIUS + PROUD),
+        LOOK,
         PUPIL,
         Ink::Hi,
         Detail::Always,
@@ -462,9 +487,9 @@ fn seams(build: &mut Build) {
 }
 
 /// One seam over the body, as unit directions from its centre. Where a sample lies within
-/// `NOSE_CLEAR` of the nose it is dropped, and the rest draw as open runs or one closed loop.
+/// `NOSE_CLEAR` of the lens's axis it is dropped, and the rest draw as open runs or one closed loop.
 fn seam(build: &mut Build, dirs: &[V]) {
-    let kept: Vec<bool> = dirs.iter().map(|&d| dot3(d, NOSE) <= NOSE_CLEAR).collect();
+    let kept: Vec<bool> = dirs.iter().map(|&d| dot3(d, LOOK) <= NOSE_CLEAR).collect();
     let point = |d: V| scale3(d, BODY_RADIUS);
     if kept.iter().all(|&k| k) {
         build.line(
@@ -582,7 +607,7 @@ mod tests {
             body.bounds
         );
         assert!(
-            (body.bounds.max[0] - BODY_RADIUS - PROUD).abs() < 1e-4,
+            body.bounds.max[0] <= BODY_RADIUS + PROUD + 1e-4,
             "nothing stands out past the lens: {:?}",
             body.bounds
         );
@@ -648,9 +673,10 @@ mod tests {
         let accent = agent_accent();
         let positions = &accent.meshes[0].positions;
         assert!(
-            (accent.bounds.max[0] - BODY_RADIUS).abs() < 1e-4,
-            "the iris reaches the nose radius: {:?}",
-            accent.bounds
+            positions
+                .iter()
+                .any(|&p| dot3(sub3(p, eye_point()), sub3(p, eye_point())) < 1e-8),
+            "the iris's middle is the eye point"
         );
         assert!(
             (accent.bounds.max[2] - (ANTENNA_TOP + ANTENNA_TIP)).abs() < 1e-4,
@@ -665,12 +691,29 @@ mod tests {
                 "a hub on the ear at side {side}"
             );
         }
-        let ring_edge = (RING_DEG.to_radians().cos() * BODY_RADIUS, 1e-3);
+        let ring_edge = RING_DEG.to_radians().cos() * BODY_RADIUS;
         assert!(
-            positions.iter().any(|p| (p[0] - ring_edge.0).abs() < ring_edge.1),
+            positions
+                .iter()
+                .any(|&p| (dot3(p, LOOK) - ring_edge).abs() < 1e-3),
             "the ring edges the lens"
         );
         assert!(winds_outward(&accent), "the accent faces outward");
+    }
+
+    #[test]
+    fn the_lens_looks_down_by_its_tilt_from_the_nose() {
+        let tilt = EYE_TILT_DEG.to_radians();
+        assert!((dot3(LOOK, LOOK) - 1.0).abs() < 1e-5 && (dot3(LIFT, LIFT) - 1.0).abs() < 1e-5);
+        assert!(dot3(LOOK, LIFT).abs() < 1e-5 && dot3(LOOK, SIDE) == 0.0);
+        assert!((LOOK[0] - tilt.cos()).abs() < 1e-5 && (LOOK[2] + tilt.sin()).abs() < 1e-5);
+        assert!(LIFT[2] > 0.0, "the lift leans back over the crown");
+        let eye = eye_point();
+        assert!(
+            (dot3(eye, eye).sqrt() - EYE_DISTANCE).abs() < 1e-4,
+            "the eye is on the body's surface"
+        );
+        assert!(eye[0] > 0.0 && eye[1] == 0.0 && eye[2] < 0.0, "ahead and below");
     }
 
     #[test]

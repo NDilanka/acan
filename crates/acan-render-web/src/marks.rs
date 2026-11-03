@@ -12,8 +12,8 @@ use std::f32::consts::{PI, TAU};
 
 use acan_core::{OrderId, TaskId, World};
 use acan_iso::{
-    BEACON_RADIUS, BODY_RADIUS, BOT_HEIGHT, EYE_DISTANCE, GLOW_DROP, GLOW_RADIUS, PIN_HEIGHT,
-    PLINTH_TOP, STALK_HEIGHT, shadow_at,
+    BEACON_RADIUS, BODY_RADIUS, BOT_HEIGHT, GLOW_DROP, GLOW_RADIUS, PIN_HEIGHT, PLINTH_TOP,
+    STALK_HEIGHT, eye_point, shadow_at,
 };
 use acan_render::theme::{
     AGENT_SLOTS, TINT_BODY0, TINT_CLASH, TINT_DIM0, TINT_GHOST, TINT_SCOPE0, TINT_SHADOW,
@@ -1792,8 +1792,9 @@ fn bobbed(motion: &Motion, body: &Body, at: [f32; 3]) -> [f32; 3] {
     }
 }
 
-/// The beams now run from each drone's eye to its target. The eye is on the nose, in the drone's
-/// own frame, so the beam turns and grows with the drone and starts on the eye at any size. A drone
+/// The beams now run from each drone's eye to its target. The eye is on the nose, looking a little
+/// down, in the drone's own frame, so the beam turns and grows with the drone and starts on the eye
+/// at any size. A drone
 /// that is leaving has none, and neither has the riding agent's drone. The hovered drone's tether
 /// inks in fully.
 #[must_use]
@@ -1812,7 +1813,7 @@ pub fn beams(
             let at = bobbed(motion, body, motion.body_at(&body.agent)?);
             let facing = motion.heading_of(&body.agent)?;
             Some(Beam {
-                from: [EYE_DISTANCE, 0.0, 0.0],
+                from: eye_point(),
                 to: body.target,
                 origin: at,
                 grow: drone_grow(dpr),
@@ -4099,8 +4100,8 @@ mod tests {
         assert_eq!(beam.turn, facing, "the beam turns as the drone does");
         assert_eq!(
             beam.from,
-            [EYE_DISTANCE, 0.0, 0.0],
-            "the eye is on the nose"
+            eye_point(),
+            "the beam starts on the lens"
         );
     }
 

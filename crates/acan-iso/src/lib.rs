@@ -16,7 +16,8 @@ mod shade;
 
 pub use drone::{
     BEACON_RADIUS, BODY_RADIUS, BOT_HEIGHT, DroneParts, EYE_DISTANCE, GLOW_DROP, GLOW_RADIUS,
-    SHADOW_RADIUS, SHADOW_RISE, agent_accent, agent_body, beacon, drone_parts, shadow_at,
+    EYE_TILT_DEG, SHADOW_RADIUS, SHADOW_RISE, agent_accent, agent_body, beacon, drone_parts,
+    eye_point, shadow_at,
 };
 pub use marks::{PIN_HEIGHT, PLINTH_TOP, STALK_HEIGHT, clash_pin, clash_stalk, waiting_ring};
 pub use model::{Aabb, Detail, Dot3, Ink, Line3, Mesh, Model, Surface};
