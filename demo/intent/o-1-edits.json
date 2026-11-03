@@ -2,23 +2,47 @@
   "schema": "acan-demo-intent-edits/2",
   "order": "o-1",
   "decided_by": "coordinator, delegated by the owner",
-  "note": "Written for the draft in run D:\\dev\\acan-takes\\d02t-fresh2-o1-20261031-230914 (scope-draft-o-1.json, rev 1). Each edit names the draft item it acts on by id; the draft_mapping block maps each drafted id to the coordinator decision it follows. take.ps1 applies scope_edits to the draft in order, then choice_rules to the open choices, then sends the result as one revise_scope through the owner's member HTTP route, and logs each edit as a human step. An op whose id is not in the draft stops the take (fail closed). keep-login (drafted must-keep, POST /api/login, step login-check, which is not a probe step) is re-anchored on login-over-quota s11 by coordinator decision 1. Nothing here is a verdict: the edits state the order's rules and the gate checks them.",
+  "note": "Written for the o-1 draft in replay run x01-r7-20261103-104241 (o-1/scope-draft.json, rev 1, base f919621), under the same decisions as o-1-edits-d02m7.json (coordinator, delegated by the owner). Only the draft ids and question wording differ; every answer is unchanged. The drafted window items (boundary inclusive) are removed; the kept window items state boundary exclusive, as decided before. Nothing here is a verdict: the edits state the order rules and the gate checks them.",
   "choice_rules": [
     {
       "id": "cr-bucket-scope",
-      "question_match": "(?i)shared across (the|all) link API",
-      "option_label_match": "(?i)^Shared\\b",
+      "question_match": "(?i)(shared across .*link (API )?routes|separate per route|or per route)",
+      "option_label_match": "(?i)^(Shared|Single 10 per 60s budget shared)",
       "when_no_option_matches": "fail",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "The order says ten requests per 60 seconds on the link API, one budget for the API, not one per route."
+      "reason": "The order says each signed-in user gets ten requests per 60 seconds on the link API, one budget for the API, not one per route. Recorded bucket-scope = shared (D19). The d02m-fresh7 draft words the question as \"Is the 10-request quota shared across GET, POST, DELETE link routes or separate per route?\" and the option as \"Shared across all link API routes\"; the answer is unchanged (shared). This run asks it as q-scope with the option \"Shared 10 across all link API routes\"; the answer is unchanged. The rule now matches the question by its shared-or-per-route wording, because each draft words it differently. This run asks it as link-budget-shared with the option \"Shared across all link routes\"; the answer is unchanged. This run asks it as q-quota-scope with the option \"Shared quota across link API\"; the answer is unchanged."
     },
     {
-      "id": "cr-retry-header",
-      "question_match": "(?i)Retry-After",
-      "option_label_match": "(?i)^No extra header",
+      "id": "cr-anon-auth-only",
+      "question_match": "(?i)(anonymous|unauthenticated|without a session)",
+      "option_label_match": "(?i)(remain unlimited|leave anonymous unchanged|no additional limit|without a session unlimited|^no limit for anonymous)",
       "when_no_option_matches": "fail",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "The order does not ask for a Retry-After header."
+      "reason": "q-anon: no. The order says each signed-in user (orders.json, the rate-limit sentence), so anonymous requests are not limited. The link API already answers anonymous callers 401. The d02m-fresh7 draft asks it as anon-limit with the option \"No additional limit for unauthenticated requests\"; the answer is unchanged. This run asks it as anon-handling with the option \"Leave requests without a session unlimited\"; the answer is unchanged. This run asks it as q-anon with the option \"Anonymous requests remain unlimited\"; the answer is unchanged. This run asks it as q-anon-scope with the option \"No limit for anonymous\"; the answer is unchanged."
+    },
+    {
+      "id": "cr-window-fixed",
+      "question_match": "(?i)(window reset|reset .*window|fixed or sliding|sliding window)",
+      "option_label_match": "(?i)^Fixed window",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The order says ten requests per 60 seconds. The window items in this file already state a fixed window anchored on the first request (anchor first_match), with the first request at or after 60 s allowed again (recovers), and the probe sends a request at 59999 ms that must still get 429. So the answer is fixed. This run asks it as window-reset with the option \"Fixed window from first request\"."
+    },
+    {
+      "id": "cr-window-boundary",
+      "question_match": "(?i)(boundary|exactly 60|at 60 ?s|old window|new window)",
+      "option_label_match": "(?i)(new window|allowed again|^allowed)",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The window items in this file state boundary exclusive with the recovers obligation: the first request at or after 60 s starts a new window and is allowed. So a request at the boundary is in the new window and allowed. The x01-r6 m-broad-scope draft asks it as window-boundary with the option \"In new window and allowed\"."
+    },
+    {
+      "id": "cr-redirect-api-only",
+      "question_match": "(?i)(redirect|dashboard)",
+      "option_label_match": "(?i)^Only /api/links",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The order limits the link API only. The public redirect GET /:code stays outside the limit (keep-redirect on s3). This run asks it as q-redirect-included with the option \"Only /api/links routes count\"."
     }
   ],
   "scope_edits": [
@@ -26,93 +50,195 @@
       "op": "remove_may",
       "id": "limit-get-links",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "The drafted item (limit-get-links) names no probe step. The over-limit GET /api/links is anchored on probe step s14 of login-over-quota by i-quota-get-links, which is kept."
+      "reason": "The drafted item covers every GET /api/links at any step and names no probe step. The over-limit GET /api/links is anchored on probe step s14 of login-over-quota by i-quota-get-links, which is kept. (drafted id in this run is limit-get-links)"
     },
     {
       "op": "remove_may",
       "id": "limit-post-links",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "The drafted item names a step that is not in the probe corpus; the same rule is anchored on the corpus steps that send the 11th request, a relogin, a request inside the window, and bob's own quota. Boundary is exclusive: a request at 60 s starts a new window."
+      "reason": "The drafted item covers every POST /api/links at any step, with boundary inclusive. The same rule is anchored on the corpus steps that send the 11th request, a relogin, a request inside the window, and bob's own quota (i-quota-window, i-quota-relogin, i-quota-inside-window, mk-bob-quota). Boundary is exclusive: a request at 60 s starts a new window. (drafted id in this run is limit-post-links)"
     },
     {
       "op": "remove_may",
-      "id": "limit-delete-links",
+      "id": "limit-delete-link",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "No probe sends more than ten DELETE requests, so this item cannot be judged; a DELETE status change stays out of scope and is reported."
+      "reason": "No probe sends more than ten DELETE requests, so this item cannot be judged; a DELETE status change stays out of scope and is reported. Coordinator decision 4: DELETE /api/links/:code is accepted as is and is named in the window items' text. (drafted id in this run is limit-delete-link)"
+    },
+    {
+      "op": "remove_may",
+      "id": "limit-redirect-conditional",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The order limits the link API only; the public redirect GET /:code is not limited, as answered in q-redirect-included. keep-redirect anchors it on s3. (drafted id in this run is limit-redirect-conditional)"
     },
     {
       "op": "replace_must_keep",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "The drafted must-keep (keep-health) checks step health-check, which is not a probe step. The same rule, GET /health still returns 200 for an anonymous request, is anchored on probe step s1 of the health probe. The rule keeps the drafted id keep-health, because take.ps1 matches a replacement by id.",
+      "reason": "Standing rule 2: the drafted keep-health names a step that is not a corpus step. Re-anchored on probe step s1 (GET /health), equals_base on status.",
       "rule": {
         "id": "keep-health",
         "selector": {
           "surface": "http",
           "method": "GET",
           "route_template": "/health",
-          "step_context": { "kind": "step", "step_id": "s1" },
-          "principal": { "kind": "anonymous" },
+          "step_context": {
+            "kind": "step",
+            "step_id": "s1"
+          },
+          "principal": {
+            "kind": "any"
+          },
           "channel": "status"
         },
         "obligations": [
           {
-            "obligation_id": "obl-keep-1",
-            "predicate": { "predicate": "status_in", "step_id": "s1", "statuses": [200] },
-            "text": "GET /health still returns 200"
+            "obligation_id": "ob-health-same",
+            "predicate": {
+              "predicate": "equals_base",
+              "step_id": "s1",
+              "path": "status",
+              "anchor": {
+                "kind": "fresh"
+              }
+            },
+            "text": "Health status unchanged from base."
           }
         ],
-        "text": "Health endpoint remains available",
-        "machine_ids": ["server", "middleware", "ratelimit", "auth", "errors"]
-      }
-    },
-    {
-      "op": "replace_must_keep",
-      "decided_by": "coordinator, delegated by the owner",
-      "reason": "Login is not part of the link API, so it is not limited, even after a user's link quota is used up.",
-      "rule": {
-        "id": "keep-login",
-        "selector": {
-          "surface": "http",
-          "method": "POST",
-          "route_template": "/api/login",
-          "step_context": { "kind": "step", "step_id": "s11" },
-          "principal": { "kind": "any" },
-          "channel": "status"
-        },
-        "obligations": [
-          {
-            "obligation_id": "ob-login-same",
-            "predicate": { "predicate": "equals_base", "step_id": "s11", "path": "status", "anchor": { "kind": "fresh" } },
-            "text": "Login status unchanged from base."
-          }
-        ],
-        "text": "Login behavior must keep working.",
-        "machine_ids": ["server", "middleware", "ratelimit", "auth", "store", "errors"]
+        "text": "Health endpoint must keep working.",
+        "machine_ids": [
+          "server",
+          "middleware",
+          "ratelimit",
+          "auth",
+          "errors"
+        ]
       }
     },
     {
       "op": "add_must_keep",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "This draft (run d02t-fresh2-o1-20261031-230914) has no redirect must-keep, so the earlier re-anchored redirect keep is added rather than replaced. The rule, the public redirect status stays as in base, is anchored on probe step s3 of link-redirect-and-clicks (anonymous GET /${link_code}, route /:code). The rule id keep-redirect is kept.",
+      "reason": "This run's draft has no GET /:code must-keep, so the earlier rule is added (anchored on probe step s3, anonymous, equals_base on status).",
       "rule": {
         "id": "keep-redirect",
         "selector": {
           "surface": "http",
           "method": "GET",
           "route_template": "/:code",
-          "step_context": { "kind": "step", "step_id": "s3" },
-          "principal": { "kind": "anonymous" },
+          "step_context": {
+            "kind": "step",
+            "step_id": "s3"
+          },
+          "principal": {
+            "kind": "anonymous"
+          },
           "channel": "status"
         },
         "obligations": [
           {
             "obligation_id": "obl-redirect-same",
-            "predicate": { "predicate": "equals_base", "step_id": "s3", "path": "status", "anchor": { "kind": "fresh" } },
+            "predicate": {
+              "predicate": "equals_base",
+              "step_id": "s3",
+              "path": "status",
+              "anchor": {
+                "kind": "fresh"
+              }
+            },
             "text": "Public redirect status remains as in base."
           }
         ],
         "text": "Public short-link redirect stays outside the signed-in link limit.",
-        "machine_ids": ["server", "links", "store"]
+        "machine_ids": [
+          "server",
+          "links",
+          "store"
+        ]
+      }
+    },
+    {
+      "op": "replace_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "Standing rule 2: the drafted keep-login names no corpus step. Re-anchored on probe step s11 (POST /api/login), equals_base on status.",
+      "rule": {
+        "id": "keep-login",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/login",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s11"
+          },
+          "principal": {
+            "kind": "any"
+          },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "ob-login-same",
+            "predicate": {
+              "predicate": "equals_base",
+              "step_id": "s11",
+              "path": "status",
+              "anchor": {
+                "kind": "fresh"
+              }
+            },
+            "text": "Login status unchanged from base."
+          }
+        ],
+        "text": "Login behavior must keep working.",
+        "machine_ids": [
+          "server",
+          "middleware",
+          "ratelimit",
+          "auth",
+          "store",
+          "errors"
+        ]
+      }
+    },
+    {
+      "op": "add_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "This run's draft has no POST /api/signup must-keep, so the earlier rule is added (anchored on probe step s1, equals_base on status).",
+      "rule": {
+        "id": "keep-signup",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/signup",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s1"
+          },
+          "principal": {
+            "kind": "any"
+          },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "ob-signup-same",
+            "predicate": {
+              "predicate": "equals_base",
+              "step_id": "s1",
+              "path": "status",
+              "anchor": {
+                "kind": "fresh"
+              }
+            },
+            "text": "Signup status unchanged from base."
+          }
+        ],
+        "text": "POST /api/signup keeps prior behavior",
+        "machine_ids": [
+          "server",
+          "middleware",
+          "auth",
+          "store",
+          "errors"
+        ]
       }
     },
     {
@@ -125,8 +251,14 @@
           "surface": "http",
           "method": "POST",
           "route_template": "/api/links",
-          "step_context": { "kind": "step", "step_id": "s13" },
-          "principal": { "kind": "actor", "name": "alice" },
+          "step_context": {
+            "kind": "step",
+            "step_id": "s13"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice"
+          },
           "channel": "status"
         },
         "change": "modify",
@@ -140,22 +272,45 @@
                   "run": "candidate",
                   "method": "ANY",
                   "route_template": "/api/links",
-                  "principal": { "kind": "actor", "name": "alice" }
+                  "principal": {
+                    "kind": "actor",
+                    "name": "alice"
+                  }
                 },
                 "group_by": "principal",
-                "anchor": { "kind": "first_match" },
+                "anchor": {
+                  "kind": "first_match"
+                },
                 "duration_ms": 60000,
                 "allowed_count": 10,
                 "boundary": "exclusive",
-                "rejected_attempts": { "status_in": [429], "counted": "counted" },
-                "obligations": [{ "kind": "first_allowed" }, { "kind": "recovers" }]
+                "rejected_attempts": {
+                  "status_in": [
+                    429
+                  ],
+                  "counted": "counted"
+                },
+                "obligations": [
+                  {
+                    "kind": "first_allowed"
+                  },
+                  {
+                    "kind": "recovers"
+                  }
+                ]
               }
             },
             "text": "Each user's first 10 requests to /api/links in 60 s, any method, are allowed; the 11th and later get 429; rejected attempts count; the first request at or after 60 s is allowed again. DELETE /api/links/:code shares the budget in the order but is not machine-checked; no probe sends more than ten deletes."
           },
           {
             "obligation_id": "obl-quota-alice-429",
-            "predicate": { "predicate": "status_in", "step_id": "s13", "statuses": [429] },
+            "predicate": {
+              "predicate": "status_in",
+              "step_id": "s13",
+              "statuses": [
+                429
+              ]
+            },
             "text": "alice's 11th link request, sent from client-b, is answered 429"
           }
         ],
@@ -164,10 +319,18 @@
           "kind": "target",
           "step_id": "s13",
           "path": "status",
-          "before": { "state": "present", "value": 201 },
-          "after": { "state": "present", "value": 429 }
+          "before": {
+            "state": "present",
+            "value": 201
+          },
+          "after": {
+            "state": "present",
+            "value": 429
+          }
         },
-        "machine_ids": ["ratelimit"]
+        "machine_ids": [
+          "ratelimit"
+        ]
       }
     },
     {
@@ -180,15 +343,27 @@
           "surface": "http",
           "method": "POST",
           "route_template": "/api/links",
-          "step_context": { "kind": "step", "step_id": "s11" },
-          "principal": { "kind": "actor", "name": "alice_relogin" },
+          "step_context": {
+            "kind": "step",
+            "step_id": "s11"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice_relogin"
+          },
           "channel": "status"
         },
         "change": "modify",
         "acceptance": [
           {
             "obligation_id": "obl-quota-relogin-429",
-            "predicate": { "predicate": "status_in", "step_id": "s11", "statuses": [429] },
+            "predicate": {
+              "predicate": "status_in",
+              "step_id": "s11",
+              "statuses": [
+                429
+              ]
+            },
             "text": "alice's relogin session shares her quota: its request is answered 429"
           }
         ],
@@ -197,10 +372,18 @@
           "kind": "target",
           "step_id": "s11",
           "path": "status",
-          "before": { "state": "present", "value": 201 },
-          "after": { "state": "present", "value": 429 }
+          "before": {
+            "state": "present",
+            "value": 201
+          },
+          "after": {
+            "state": "present",
+            "value": 429
+          }
         },
-        "machine_ids": ["ratelimit"]
+        "machine_ids": [
+          "ratelimit"
+        ]
       }
     },
     {
@@ -213,15 +396,27 @@
           "surface": "http",
           "method": "POST",
           "route_template": "/api/links",
-          "step_context": { "kind": "step", "step_id": "s15" },
-          "principal": { "kind": "actor", "name": "alice" },
+          "step_context": {
+            "kind": "step",
+            "step_id": "s15"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice"
+          },
           "channel": "status"
         },
         "change": "modify",
         "acceptance": [
           {
             "obligation_id": "obl-quota-inside-429",
-            "predicate": { "predicate": "status_in", "step_id": "s15", "statuses": [429] },
+            "predicate": {
+              "predicate": "status_in",
+              "step_id": "s15",
+              "statuses": [
+                429
+              ]
+            },
             "text": "A request 59999 ms into the window is still answered 429"
           }
         ],
@@ -230,10 +425,18 @@
           "kind": "target",
           "step_id": "s15",
           "path": "status",
-          "before": { "state": "present", "value": 201 },
-          "after": { "state": "present", "value": 429 }
+          "before": {
+            "state": "present",
+            "value": 201
+          },
+          "after": {
+            "state": "present",
+            "value": 429
+          }
         },
-        "machine_ids": ["ratelimit"]
+        "machine_ids": [
+          "ratelimit"
+        ]
       }
     },
     {
@@ -246,15 +449,27 @@
           "surface": "http",
           "method": "GET",
           "route_template": "/api/links",
-          "step_context": { "kind": "step", "step_id": "s14" },
-          "principal": { "kind": "actor", "name": "alice_fresh" },
+          "step_context": {
+            "kind": "step",
+            "step_id": "s14"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice_fresh"
+          },
           "channel": "status"
         },
         "change": "modify",
         "acceptance": [
           {
             "obligation_id": "obl-quota-get-links-429",
-            "predicate": { "predicate": "status_in", "step_id": "s14", "statuses": [429] },
+            "predicate": {
+              "predicate": "status_in",
+              "step_id": "s14",
+              "statuses": [
+                429
+              ]
+            },
             "text": "A signed-in user's over-limit GET /api/links is answered 429"
           }
         ],
@@ -263,10 +478,18 @@
           "kind": "target",
           "step_id": "s14",
           "path": "status",
-          "before": { "state": "present", "value": 200 },
-          "after": { "state": "present", "value": 429 }
+          "before": {
+            "state": "present",
+            "value": 200
+          },
+          "after": {
+            "state": "present",
+            "value": 429
+          }
         },
-        "machine_ids": ["ratelimit"]
+        "machine_ids": [
+          "ratelimit"
+        ]
       }
     },
     {
@@ -279,8 +502,14 @@
           "surface": "http",
           "method": "POST",
           "route_template": "/api/links",
-          "step_context": { "kind": "step", "step_id": "s12" },
-          "principal": { "kind": "actor", "name": "bob" },
+          "step_context": {
+            "kind": "step",
+            "step_id": "s12"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "bob"
+          },
           "channel": "status"
         },
         "obligations": [
@@ -293,44 +522,357 @@
                   "run": "candidate",
                   "method": "ANY",
                   "route_template": "/api/links",
-                  "principal": { "kind": "actor", "name": "bob" }
+                  "principal": {
+                    "kind": "actor",
+                    "name": "bob"
+                  }
                 },
                 "group_by": "principal",
-                "anchor": { "kind": "first_match" },
+                "anchor": {
+                  "kind": "first_match"
+                },
                 "duration_ms": 60000,
                 "allowed_count": 10,
                 "boundary": "exclusive",
-                "rejected_attempts": { "status_in": [429], "counted": "counted" },
-                "obligations": [{ "kind": "first_allowed" }]
+                "rejected_attempts": {
+                  "status_in": [
+                    429
+                  ],
+                  "counted": "counted"
+                },
+                "obligations": [
+                  {
+                    "kind": "first_allowed"
+                  }
+                ]
               }
             },
             "text": "bob's first 10 requests to /api/links in 60 s, any method, are allowed, even after alice has used up her quota. DELETE /api/links/:code shares the budget in the order but is not machine-checked; no probe sends more than ten deletes."
           }
         ],
         "text": "Each user keeps a separate link quota: bob's requests are not limited by alice's",
-        "machine_ids": ["ratelimit"]
+        "machine_ids": [
+          "ratelimit"
+        ]
       }
     },
     {
       "op": "add_may",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "An over-limit request is answered 429, so its body is an error instead of the link fields; the body may change only where the step answers 429.",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
       "item": {
-        "id": "i-quota-body-relogin",
+        "id": "i-quota-body-add-relogin",
         "selector": {
           "surface": "http",
           "method": "POST",
           "route_template": "/api/links",
-          "step_context": { "kind": "step", "step_id": "s11" },
-          "principal": { "kind": "actor", "name": "alice_relogin" },
+          "step_context": {
+            "kind": "step",
+            "step_id": "s11"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice_relogin"
+          },
+          "channel": "body"
+        },
+        "change": "add",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-add-429-relogin",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s11",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "equals",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.error"
+                  },
+                  "value": "too many requests"
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.clicks"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.code"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.createdAt"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.shortPath"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.target"
+                  }
+                }
+              ]
+            },
+            "text": "The relogin session's over-limit POST /api/links is answered 429, so its body may gain an error"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s11",
+          "path": "body.error",
+          "before": {
+            "state": "missing"
+          },
+          "after": {
+            "state": "present",
+            "value": "too many requests"
+          }
+        },
+        "machine_ids": [
+          "ratelimit"
+        ]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-modify-relogin",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s11"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice_relogin"
+          },
           "channel": "body"
         },
         "change": "modify",
         "acceptance": [
           {
-            "obligation_id": "obl-body-429-relogin",
-            "predicate": { "predicate": "status_in", "step_id": "s11", "statuses": [429] },
-            "text": "The relogin session's over-limit POST /api/links is answered 429, so its body may differ from the 201 body"
+            "obligation_id": "obl-body-modify-429-relogin",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s11",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "equals",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.error"
+                  },
+                  "value": "too many requests"
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.clicks"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.code"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.createdAt"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.shortPath"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.target"
+                  }
+                }
+              ]
+            },
+            "text": "The relogin session's over-limit POST /api/links is answered 429, so its body may change"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s11",
+          "path": "status",
+          "before": {
+            "state": "present",
+            "value": 201
+          },
+          "after": {
+            "state": "present",
+            "value": 429
+          }
+        },
+        "machine_ids": [
+          "ratelimit"
+        ]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-remove-relogin",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s11"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice_relogin"
+          },
+          "channel": "body"
+        },
+        "change": "remove",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-remove-429-relogin",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s11",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "equals",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.error"
+                  },
+                  "value": "too many requests"
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.clicks"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.code"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.createdAt"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.shortPath"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s11",
+                    "path": "body.target"
+                  }
+                }
+              ]
+            },
+            "text": "The relogin session's over-limit POST /api/links is answered 429, so its body may lose the link fields"
           }
         ],
         "provenance": "user",
@@ -338,31 +880,336 @@
           "kind": "target",
           "step_id": "s11",
           "path": "body.code",
-          "after": { "state": "missing" }
+          "before": {
+            "state": "present",
+            "value": "QxMNooK"
+          },
+          "after": {
+            "state": "missing"
+          }
         },
-        "machine_ids": ["ratelimit"]
+        "machine_ids": [
+          "ratelimit"
+        ]
       }
     },
     {
       "op": "add_may",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "An over-limit request is answered 429, so its body is an error instead of the link fields; the body may change only where the step answers 429.",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
       "item": {
-        "id": "i-quota-body-window",
+        "id": "i-quota-body-add-window",
         "selector": {
           "surface": "http",
           "method": "POST",
           "route_template": "/api/links",
-          "step_context": { "kind": "step", "step_id": "s13" },
-          "principal": { "kind": "actor", "name": "alice" },
+          "step_context": {
+            "kind": "step",
+            "step_id": "s13"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice"
+          },
+          "channel": "body"
+        },
+        "change": "add",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-add-429-window",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s13",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "equals",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.error"
+                  },
+                  "value": "too many requests"
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.clicks"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.code"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.createdAt"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.shortPath"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.target"
+                  }
+                }
+              ]
+            },
+            "text": "alice's 11th POST /api/links is answered 429, so its body may gain an error"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s13",
+          "path": "body.error",
+          "before": {
+            "state": "missing"
+          },
+          "after": {
+            "state": "present",
+            "value": "too many requests"
+          }
+        },
+        "machine_ids": [
+          "ratelimit"
+        ]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-modify-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s13"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice"
+          },
           "channel": "body"
         },
         "change": "modify",
         "acceptance": [
           {
-            "obligation_id": "obl-body-429-window",
-            "predicate": { "predicate": "status_in", "step_id": "s13", "statuses": [429] },
-            "text": "alice's 11th POST /api/links is answered 429, so its body may differ from the 201 body"
+            "obligation_id": "obl-body-modify-429-window",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s13",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "equals",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.error"
+                  },
+                  "value": "too many requests"
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.clicks"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.code"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.createdAt"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.shortPath"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.target"
+                  }
+                }
+              ]
+            },
+            "text": "alice's 11th POST /api/links is answered 429, so its body may change"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s13",
+          "path": "status",
+          "before": {
+            "state": "present",
+            "value": 201
+          },
+          "after": {
+            "state": "present",
+            "value": 429
+          }
+        },
+        "machine_ids": [
+          "ratelimit"
+        ]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-remove-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s13"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice"
+          },
+          "channel": "body"
+        },
+        "change": "remove",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-remove-429-window",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s13",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "equals",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.error"
+                  },
+                  "value": "too many requests"
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.clicks"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.code"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.createdAt"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.shortPath"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s13",
+                    "path": "body.target"
+                  }
+                }
+              ]
+            },
+            "text": "alice's 11th POST /api/links is answered 429, so its body may lose the link fields"
           }
         ],
         "provenance": "user",
@@ -370,31 +1217,336 @@
           "kind": "target",
           "step_id": "s13",
           "path": "body.code",
-          "after": { "state": "missing" }
+          "before": {
+            "state": "present",
+            "value": "mPCJpY8"
+          },
+          "after": {
+            "state": "missing"
+          }
         },
-        "machine_ids": ["ratelimit"]
+        "machine_ids": [
+          "ratelimit"
+        ]
       }
     },
     {
       "op": "add_may",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "An over-limit request is answered 429, so its body is an error instead of the link fields; the body may change only where the step answers 429.",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
       "item": {
-        "id": "i-quota-body-inside-window",
+        "id": "i-quota-body-add-inside-window",
         "selector": {
           "surface": "http",
           "method": "POST",
           "route_template": "/api/links",
-          "step_context": { "kind": "step", "step_id": "s15" },
-          "principal": { "kind": "actor", "name": "alice" },
+          "step_context": {
+            "kind": "step",
+            "step_id": "s15"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice"
+          },
+          "channel": "body"
+        },
+        "change": "add",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-add-429-inside",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s15",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "equals",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.error"
+                  },
+                  "value": "too many requests"
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.clicks"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.code"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.createdAt"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.shortPath"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.target"
+                  }
+                }
+              ]
+            },
+            "text": "A POST /api/links 59999 ms into the window is answered 429, so its body may gain an error"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s15",
+          "path": "body.error",
+          "before": {
+            "state": "missing"
+          },
+          "after": {
+            "state": "present",
+            "value": "too many requests"
+          }
+        },
+        "machine_ids": [
+          "ratelimit"
+        ]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-modify-inside-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s15"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice"
+          },
           "channel": "body"
         },
         "change": "modify",
         "acceptance": [
           {
-            "obligation_id": "obl-body-429-inside",
-            "predicate": { "predicate": "status_in", "step_id": "s15", "statuses": [429] },
-            "text": "A POST /api/links 59999 ms into the window is answered 429, so its body may differ from the 201 body"
+            "obligation_id": "obl-body-modify-429-inside",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s15",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "equals",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.error"
+                  },
+                  "value": "too many requests"
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.clicks"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.code"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.createdAt"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.shortPath"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.target"
+                  }
+                }
+              ]
+            },
+            "text": "A POST /api/links 59999 ms into the window is answered 429, so its body may change"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s15",
+          "path": "status",
+          "before": {
+            "state": "present",
+            "value": 201
+          },
+          "after": {
+            "state": "present",
+            "value": 429
+          }
+        },
+        "machine_ids": [
+          "ratelimit"
+        ]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-remove-inside-window",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s15"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice"
+          },
+          "channel": "body"
+        },
+        "change": "remove",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-remove-429-inside",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s15",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "equals",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.error"
+                  },
+                  "value": "too many requests"
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.clicks"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.code"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.createdAt"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.shortPath"
+                  }
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s15",
+                    "path": "body.target"
+                  }
+                }
+              ]
+            },
+            "text": "A POST /api/links 59999 ms into the window is answered 429, so its body may lose the link fields"
           }
         ],
         "provenance": "user",
@@ -402,31 +1554,228 @@
           "kind": "target",
           "step_id": "s15",
           "path": "body.code",
-          "after": { "state": "missing" }
+          "before": {
+            "state": "present",
+            "value": "qWTcBuy"
+          },
+          "after": {
+            "state": "missing"
+          }
         },
-        "machine_ids": ["ratelimit"]
+        "machine_ids": [
+          "ratelimit"
+        ]
       }
     },
     {
       "op": "add_may",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "An over-limit request is answered 429, so its body is an error instead of the link fields; the body may change only where the step answers 429.",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
       "item": {
-        "id": "i-quota-body-get-links",
+        "id": "i-quota-body-add-get-links",
         "selector": {
           "surface": "http",
           "method": "GET",
           "route_template": "/api/links",
-          "step_context": { "kind": "step", "step_id": "s14" },
-          "principal": { "kind": "actor", "name": "alice_fresh" },
+          "step_context": {
+            "kind": "step",
+            "step_id": "s14"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice_fresh"
+          },
+          "channel": "body"
+        },
+        "change": "add",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-add-429-get-links",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s14",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "equals",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s14",
+                    "path": "body.error"
+                  },
+                  "value": "too many requests"
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s14",
+                    "path": "body.links"
+                  }
+                }
+              ]
+            },
+            "text": "The signed-in user's over-limit GET /api/links is answered 429, so its body may gain an error"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s14",
+          "path": "body.error",
+          "before": {
+            "state": "missing"
+          },
+          "after": {
+            "state": "present",
+            "value": "too many requests"
+          }
+        },
+        "machine_ids": [
+          "ratelimit"
+        ]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-modify-get-links",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s14"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice_fresh"
+          },
           "channel": "body"
         },
         "change": "modify",
         "acceptance": [
           {
-            "obligation_id": "obl-body-429-get-links",
-            "predicate": { "predicate": "status_in", "step_id": "s14", "statuses": [429] },
-            "text": "The signed-in user's over-limit GET /api/links is answered 429, so its body may differ from the 200 body"
+            "obligation_id": "obl-body-modify-429-get-links",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s14",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "equals",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s14",
+                    "path": "body.error"
+                  },
+                  "value": "too many requests"
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s14",
+                    "path": "body.links"
+                  }
+                }
+              ]
+            },
+            "text": "The signed-in user's over-limit GET /api/links is answered 429, so its body may change"
+          }
+        ],
+        "provenance": "user",
+        "example": {
+          "kind": "target",
+          "step_id": "s14",
+          "path": "status",
+          "before": {
+            "state": "present",
+            "value": 200
+          },
+          "after": {
+            "state": "present",
+            "value": 429
+          }
+        },
+        "machine_ids": [
+          "ratelimit"
+        ]
+      }
+    },
+    {
+      "op": "add_may",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "An over-limit request is answered 429, so its body gains an error, loses the link fields, or changes; each is allowed only where the step answers 429.",
+      "item": {
+        "id": "i-quota-body-remove-get-links",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s14"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice_fresh"
+          },
+          "channel": "body"
+        },
+        "change": "remove",
+        "acceptance": [
+          {
+            "obligation_id": "obl-body-remove-429-get-links",
+            "predicate": {
+              "predicate": "all",
+              "of": [
+                {
+                  "predicate": "status_in",
+                  "step_id": "s14",
+                  "statuses": [
+                    429
+                  ]
+                },
+                {
+                  "predicate": "equals",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s14",
+                    "path": "body.error"
+                  },
+                  "value": "too many requests"
+                },
+                {
+                  "predicate": "absent",
+                  "at": {
+                    "ref": "field",
+                    "run": "candidate",
+                    "step_id": "s14",
+                    "path": "body.links"
+                  }
+                }
+              ]
+            },
+            "text": "The signed-in user's over-limit GET /api/links is answered 429, so its body may lose the link fields"
           }
         ],
         "provenance": "user",
@@ -434,35 +1783,148 @@
           "kind": "target",
           "step_id": "s14",
           "path": "body.links",
-          "after": { "state": "missing" }
+          "before": {
+            "state": "present",
+            "value": [
+              {
+                "clicks": 0,
+                "code": "sAh86ab",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "target": "https://example.test/q10"
+              },
+              {
+                "clicks": 0,
+                "code": "M7NHZVy",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "target": "https://example.test/q9"
+              },
+              {
+                "clicks": 0,
+                "code": "SbVnKM7",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "target": "https://example.test/q8"
+              },
+              {
+                "clicks": 0,
+                "code": "J6BY9TX",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "target": "https://example.test/q7"
+              },
+              {
+                "clicks": 0,
+                "code": "HgvAx96",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "target": "https://example.test/q6"
+              },
+              {
+                "clicks": 0,
+                "code": "N4M7lmA",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "target": "https://example.test/q5"
+              },
+              {
+                "clicks": 0,
+                "code": "2cPWDov",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "target": "https://example.test/q4"
+              },
+              {
+                "clicks": 0,
+                "code": "Ekn0rvf",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "target": "https://example.test/q3"
+              },
+              {
+                "clicks": 0,
+                "code": "DAVcLGc",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "target": "https://example.test/q2"
+              },
+              {
+                "clicks": 0,
+                "code": "Jsfnxze",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "target": "https://example.test/q1"
+              }
+            ]
+          },
+          "after": {
+            "state": "missing"
+          }
         },
-        "machine_ids": ["ratelimit"]
+        "machine_ids": [
+          "ratelimit"
+        ]
       }
     }
   ],
   "draft_mapping": {
-    "run": "D:\\dev\\acan-takes\\d02t-fresh2-o1-20261031-230914",
-    "draft_file": "D:\\dev\\acan-takes\\d02t-fresh2-o1-20261031-230914\\scope-draft-o-1.json",
+    "run": "D:\\dev\\acan-demo-runs\\intent\\x01-r7-20261103-104241",
+    "draft_file": "D:\\dev\\acan-demo-runs\\intent\\x01-r7-20261103-104241\\o-1\\scope-draft.json",
     "draft_rev": 1,
     "decided_by": "coordinator, delegated by the owner",
     "items": [
-      { "draft_id": "limit-get-links", "kind": "may", "action": "remove_may", "decision": "replaced by the corpus-anchored GET item i-quota-get-links (s14, alice_fresh, 429) and its body item i-quota-body-get-links" },
-      { "draft_id": "limit-post-links", "kind": "may", "action": "remove_may", "decision": "replaced by the corpus-anchored POST items i-quota-window (s13), i-quota-relogin (s11), i-quota-inside-window (s15), the must-keep mk-bob-quota (s12), and the body items i-quota-body-relogin, i-quota-body-window, i-quota-body-inside-window" },
-      { "draft_id": "limit-delete-links", "kind": "may", "action": "remove_may", "decision": "removed; no probe sends more than ten DELETEs, so it is reported out of scope" },
-      { "draft_id": "keep-health", "kind": "must_keep", "action": "replace_must_keep", "decision": "re-anchored on probe s1 (GET /health, anonymous, status 200); the draft step health-check is not a probe step" },
-      { "draft_id": "keep-login", "kind": "must_keep", "action": "replace_must_keep (rule id keep-login)", "decision": "re-anchored on login-over-quota s11 (POST /api/login, anonymous, status equals base), by coordinator decision 1. Login-check is not a probe step. Standing rule 2 would have picked login-failures s1; decision 1 is more specific and is used." },
-      { "draft_id": "keep-redirect", "kind": "not in draft", "action": "add_must_keep", "decision": "added at probe s3 (anonymous GET /:code, status equals base)" },
-      { "draft_id": "q-bucket-scope", "kind": "open", "action": "answered by choice rule cr-bucket-scope: Shared across GET POST DELETE link routes", "decision": "bucket-scope = shared (coordinator, earlier decision). Reason in cr-bucket-scope." },
-      { "draft_id": "q-retry-header", "kind": "open", "action": "answered by choice rule cr-retry-header: No extra header, status only", "decision": "Retry-After stays out of scope (coordinator decision 2: the answer to the header question is no header). Reason in cr-retry-header." }
-    ],
-    "link_api_scope": "The draft has no route question, so link-api-scope is not applied in this run. The shared option lists GET, POST and DELETE link routes; under the earlier decision (the link API is the signed-in /api/links routes), that matches.",
-    "code_format": "The draft has no code-format item, so D2 (drop i-code-format) holds with nothing to remove.",
-    "window_filter": "Event filters use method ANY on route /api/links for i-quota-window and mk-bob-quota (ANY branch of decision 2; types.rs:838, predicate.rs:687). The filter does not cover route /api/links/:code, the DELETE route. Coordinator decision 4: DELETE /api/links/:code is accepted as is; the sentence 'DELETE /api/links/:code shares the budget in the order but is not machine-checked; no probe sends more than ten deletes.' is added to the text of both window items. limit-delete-links stays removed (no DELETE may item).",
-    "standing_rule_log": [
-      "keep-login: drafted must-keep names step login-check, which is not in the corpus. Mapped to login-over-quota s11 (POST /api/login, first corpus step with a POST /api/login and principal kind any, status equals base) by coordinator decision 1."
-    ],
-    "decisions_applied": "1 keep-login re-anchor; 2 standing rule logged above, no other unmatched steps; 3 repair_rounds stays 2 (no edit here); 4 DELETE sentence in both window items; 5 paraphrased reasons accepted, o-0 is the internal id.",
-    "flags_for_coordinator": []
+      {
+        "draft_id": "limit-get-links",
+        "kind": "may",
+        "action": "remove_may",
+        "decision": "GET /api/links"
+      },
+      {
+        "draft_id": "limit-post-links",
+        "kind": "may",
+        "action": "remove_may",
+        "decision": "POST /api/links"
+      },
+      {
+        "draft_id": "limit-delete-link",
+        "kind": "may",
+        "action": "remove_may",
+        "decision": "DELETE /api/links/:code"
+      },
+      {
+        "draft_id": "limit-redirect-conditional",
+        "kind": "may",
+        "action": "remove_may",
+        "decision": "GET /:code not limited"
+      },
+      {
+        "draft_id": "keep-health",
+        "kind": "must_keep",
+        "action": "replace_must_keep",
+        "decision": "re-anchored on s1"
+      },
+      {
+        "draft_id": "keep-login",
+        "kind": "must_keep",
+        "action": "replace_must_keep",
+        "decision": "re-anchored on s11"
+      },
+      {
+        "draft_id": "(none)",
+        "kind": "must_keep",
+        "action": "add_must_keep",
+        "decision": "keep-redirect on s3"
+      },
+      {
+        "draft_id": "(none)",
+        "kind": "must_keep",
+        "action": "add_must_keep",
+        "decision": "keep-signup on s1"
+      },
+      {
+        "draft_id": "q-quota-scope",
+        "kind": "open",
+        "action": "choice rule",
+        "decision": "cr-bucket-scope"
+      },
+      {
+        "draft_id": "q-redirect-included",
+        "kind": "open",
+        "action": "choice rule",
+        "decision": "cr-redirect-api-only"
+      }
+    ]
   },
   "answers": []
 }

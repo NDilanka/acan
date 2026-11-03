@@ -1,0 +1,104 @@
+{
+  "schema": "acan-demo-intent-edits/2",
+  "order": "o-5",
+  "decided_by": "coordinator, delegated by the owner",
+  "note": "Written for the o-5 draft in replay run x01-r7-20261103-104241 (o-5/scope-draft.json, rev 1). The protected probe corpus has no probe that sends a limit or a cursor, or lists more than ten links, so the order's new behavior cannot be judged by the gate; the drafted may item names steps that are not corpus steps and is removed. The must-keep is re-anchored on a corpus step. Any difference the candidate makes on a corpus probe is then out of scope and goes to a ruling. Nothing here is a verdict.",
+  "choice_rules": [
+    {
+      "id": "cr-default-limit",
+      "question_match": "(?i)default limit",
+      "option_label_match": "(?i)^50",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The order sets only the maximum (100). The larger default, 50, cuts fewer existing lists, so it changes the current answer the least. This run asks it as default-limit with the option \"50 items\"."
+    },
+    {
+      "id": "cr-cursor-format",
+      "question_match": "(?i)cursor",
+      "option_label_match": "(?i)base64",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The order asks only that the cursor be opaque. An encoded offset needs no server state, so a restart or a second session reads it the same way. This run asks it as cursor-format with the option \"Base64-encoded offset\"."
+    }
+  ],
+  "scope_edits": [
+    {
+      "op": "remove_may",
+      "id": "paginate-links",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The item covers every GET /api/links at any step and its obligations name a step list-links that is not a corpus step. No corpus probe sends a limit or cursor, so the change cannot be judged. (drafted id paginate-links)"
+    },
+    {
+      "op": "replace_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "Standing rule 2: the drafted links-auth names step list-links-unauth, not a corpus step. Re-anchored on anonymous-link-api step s1 (anonymous GET /api/links), equals_base on status.",
+      "rule": {
+        "id": "links-auth",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s1"
+          },
+          "principal": {
+            "kind": "anonymous"
+          },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "obl-links-auth-same",
+            "predicate": {
+              "predicate": "equals_base",
+              "step_id": "s1",
+              "path": "status",
+              "anchor": {
+                "kind": "fresh"
+              }
+            },
+            "text": "An anonymous GET /api/links answers as in base."
+          }
+        ],
+        "text": "Keeps authentication on GET /api/links.",
+        "machine_ids": [
+          "auth"
+        ]
+      }
+    }
+  ],
+  "draft_mapping": {
+    "run": "D:\\dev\\acan-demo-runs\\intent\\x01-r7-20261103-104241",
+    "draft_file": "D:\\dev\\acan-demo-runs\\intent\\x01-r7-20261103-104241\\o-5\\scope-draft.json",
+    "draft_rev": 1,
+    "decided_by": "coordinator, delegated by the owner",
+    "items": [
+      {
+        "draft_id": "paginate-links",
+        "kind": "may",
+        "action": "remove_may",
+        "decision": "not judgeable, no corpus probe"
+      },
+      {
+        "draft_id": "links-auth",
+        "kind": "must_keep",
+        "action": "replace_must_keep",
+        "decision": "re-anchored on s1"
+      },
+      {
+        "draft_id": "default-limit",
+        "kind": "open",
+        "action": "choice rule",
+        "decision": "50"
+      },
+      {
+        "draft_id": "cursor-format",
+        "kind": "open",
+        "action": "choice rule",
+        "decision": "base64"
+      }
+    ]
+  },
+  "answers": []
+}

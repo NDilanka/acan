@@ -13,6 +13,14 @@
       "reason": "The order does not mention a request id. A random UUID per response identifies the request and carries no user name, so it is accepted. A value that carries a user name is not accepted by this rule and is reported as violating it."
     },
     {
+      "id": "rl-429-retry-after",
+      "field": "^header\\.retry-after$",
+      "candidate": "present",
+      "rule": "status_429",
+      "label": "an over-limit answer may say when to retry",
+      "reason": "The order does not mention Retry-After. On a 429 answer it tells the client how many seconds remain in the window (60 on the first over-limit request, 1 at 59999 ms), which is standard HTTP and carries no user data. It is accepted only where the step answers 429; a Retry-After on any other answer violates this ruling."
+    },
+    {
       "id": "rl-429-body-error",
       "field": "^body\\.error$",
       "candidate": "present",
