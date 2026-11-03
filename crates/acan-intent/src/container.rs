@@ -5,7 +5,8 @@
 //! - The command runs as a non-root user on a read-only root filesystem with a bounded `/tmp`,
 //!   with no capabilities and no privilege gain, under the CPU, memory and process caps below.
 //!   A run is killed and removed when it ends or when its time limit passes: `timeout_ms` for one
-//!   probe sequence or test command, `role_timeout_ms` for a long-lived role container.
+//!   test command, or for a probe sequence whose contract sets no sequence limit, and
+//!   `role_timeout_ms` for a long-lived role container.
 //! - The worktree is mounted read-write at the working directory. Every protected path is
 //!   mounted read-only on top of it from a snapshot of the protected head, never from the
 //!   worktree. A protected path the snapshot does not have is still covered as
@@ -361,8 +362,10 @@ pub struct ContainerPolicy {
     pub memory_bytes: NonZeroU64,
     /// Process cap.
     pub pids: NonZeroU32,
-    /// Wall-clock cap of one probe sequence or one test command, from container start. At it
-    /// the runner kills and removes the container.
+    /// Wall-clock cap of one test command, and of a probe sequence whose contract sets no
+    /// sequence limit, from container start. At it the runner kills and removes the container. A
+    /// contract's `sequence_timeout_ms` caps its own sequences instead, see
+    /// `RunLimits::sequence_cap_ms`.
     pub timeout_ms: NonZeroU64,
     /// Wall-clock cap of a long-lived role container. It is separate from `timeout_ms`, so a
     /// role container is not cut at the sequence cap.

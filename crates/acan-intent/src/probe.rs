@@ -477,6 +477,10 @@ pub enum StoreIsolation {
     FreshPerSequence,
 }
 
+/// The longest wall time one probe sequence may take, app start included. A contract may ask for
+/// less, never for more.
+pub const MAX_SEQUENCE_TIMEOUT_MS: u64 = 300_000;
+
 /// Bounds on one probe sequence. Exceeding one ends the run as an error, never a pass.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -487,6 +491,20 @@ pub struct RunLimits {
     pub max_output_bytes: u64,
     /// Wall time per sequence, app start included.
     pub sequence_timeout_ms: u64,
+}
+
+impl RunLimits {
+    /// The wall time one probe sequence may take: `sequence_timeout_ms`, at most
+    /// [`MAX_SEQUENCE_TIMEOUT_MS`]. A contract that sets it to zero keeps `policy_ms`, the policy's
+    /// `timeout_ms`, clamped the same way.
+    #[must_use]
+    pub fn sequence_cap_ms(&self, policy_ms: u64) -> u64 {
+        let asked = match self.sequence_timeout_ms {
+            0 => policy_ms,
+            ms => ms,
+        };
+        asked.min(MAX_SEQUENCE_TIMEOUT_MS)
+    }
 }
 
 /// The version of the protected app contract. `acan-app/1` is the bun contract; `acan-app/2` adds

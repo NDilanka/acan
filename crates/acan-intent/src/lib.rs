@@ -85,9 +85,9 @@ pub use observation::{
 pub use probe::{
     AdvanceTimeStep, AppContract, AppContractVersion, CaptureKind, CaptureOutcome, CaptureSource,
     CaptureStep, ClockControl, CompletionBarrier, CorpusProbe, Fixture, HttpStep, Isolation,
-    MissingCapture, ProbeCorpus, ProbeOrigin, ProbeProposal, ProbeSpec, ReadyCheck, RedirectPolicy,
-    RequestTemplate, RouteEntry, RoutePath, RouteSource, RouteStatus, Run, RunEnv, RunLimits,
-    RunOutcome, RunRole, SideEffectStep, Step, StoreIsolation, Template,
+    MAX_SEQUENCE_TIMEOUT_MS, MissingCapture, ProbeCorpus, ProbeOrigin, ProbeProposal, ProbeSpec,
+    ReadyCheck, RedirectPolicy, RequestTemplate, RouteEntry, RoutePath, RouteSource, RouteStatus,
+    Run, RunEnv, RunLimits, RunOutcome, RunRole, SideEffectStep, Step, StoreIsolation, Template,
 };
 pub use provenance::{
     CoreDerived, EvidenceAddress, HumanSpec, ModelProposal, Observed, Proposable, Provenance,

@@ -1,6 +1,6 @@
 //! The protected app contract: the install phase and the runtime agree with the version.
 
-use acan_intent::AppContract;
+use acan_intent::{AppContract, MAX_SEQUENCE_TIMEOUT_MS, RunLimits};
 use serde_json::{Value, json};
 
 /// A valid `acan-app/2` node contract with the install phase `npm ci` names.
@@ -27,6 +27,39 @@ fn node_contract() -> Value {
 
 fn decode(value: Value) -> AppContract {
     serde_json::from_value(value).expect("the contract decodes")
+}
+
+#[test]
+fn a_contract_sets_the_sequence_cap_up_to_the_hard_maximum() {
+    // The policy's 30 s default is the cap only when the contract sets none.
+    let limits = |sequence_timeout_ms| RunLimits {
+        max_requests: 64,
+        max_output_bytes: 65_536,
+        sequence_timeout_ms,
+    };
+    let mut acquit_like = node_contract();
+    acquit_like["limits"]["sequence_timeout_ms"] = json!(120_000);
+    assert_eq!(
+        decode(acquit_like).limits.sequence_cap_ms(30_000),
+        120_000,
+        "a contract above the policy default is honored"
+    );
+    assert_eq!(limits(10_000).sequence_cap_ms(30_000), 10_000);
+    assert_eq!(
+        limits(600_000).sequence_cap_ms(30_000),
+        MAX_SEQUENCE_TIMEOUT_MS,
+        "a contract above the maximum is clamped"
+    );
+    assert_eq!(
+        limits(0).sequence_cap_ms(30_000),
+        30_000,
+        "a contract that sets none keeps the policy's timeout"
+    );
+    assert_eq!(
+        limits(0).sequence_cap_ms(900_000),
+        MAX_SEQUENCE_TIMEOUT_MS,
+        "the policy's timeout is clamped the same way"
+    );
 }
 
 #[test]
