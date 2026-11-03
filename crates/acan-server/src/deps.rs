@@ -477,13 +477,14 @@ fn check_dep_name(owner: &str, dep: &str) -> Result<(), String> {
 }
 
 /// Checks overrides or resolutions. A string redirects the package it is keyed by, and an object
-/// nests more redirects. A key may be a selector rather than a package name, so a refusal names it
-/// only when it is a package name.
+/// nests more redirects. A key is a selector, and a refusal names it only when it is a package
+/// name.
 fn check_redirects(owner: &str, value: &Value) -> Result<(), String> {
     let map = value
         .as_object()
         .ok_or_else(|| format!("{owner} has redirects that are not an object"))?;
     for (key, redirect) in map {
+        check_selector(owner, key)?;
         match redirect {
             Value::Object(_) => check_redirects(owner, redirect)?,
             spec => {
@@ -494,6 +495,41 @@ fn check_redirects(owner: &str, value: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Checks an override's selector: a package name, optionally with a spec, and a `>` path of such
+/// selectors. npm fetches a selector's spec when the selector matches, so the spec must be one the
+/// install may fetch. `.` names the root's own dependency. A range that holds a `>` is split at it
+/// and refused, which is the safe side.
+fn check_selector(owner: &str, selector: &str) -> Result<(), String> {
+    if selector == "." {
+        return Ok(());
+    }
+    for part in selector.split('>') {
+        let (name, spec) = split_selector(part);
+        if !is_package_name(name) {
+            return Err(format!(
+                "{owner} overrides a package whose name is not a package name"
+            ));
+        }
+        if spec.is_some_and(|spec| !admitted_spec(spec)) {
+            return Err(format!(
+                "{owner} overrides a package with a spec the install may not fetch; only a version \
+                 range, a tag or an npm alias is admitted"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Splits a selector's `name@spec` into the name and the spec, when there is one. The `@` that
+/// opens a scope is not a separator.
+fn split_selector(part: &str) -> (&str, Option<&str>) {
+    let start = usize::from(part.starts_with('@'));
+    match part[start..].find('@') {
+        Some(at) => (&part[..start + at], Some(&part[start + at + 1..])),
+        None => (part, None),
+    }
 }
 
 /// Whether `key` names a map of package specs: a manifest's or a lockfile node's dependencies. A
@@ -1231,6 +1267,42 @@ mod tests {
             }
         }"#;
         assert_eq!(refusal(lock), None);
+    }
+
+    #[test]
+    fn an_override_selector_that_names_another_source_is_refused_and_no_url_is_named() {
+        for source in OTHER_SOURCES {
+            for selector in [
+                format!("left-pad@{source}"),
+                format!("@scope/left-pad@{source}"),
+                format!("right-pad@1.0.0>left-pad@{source}"),
+            ] {
+                let manifest = format!(r#"{{"name": "app", "overrides": {{"{selector}": {{}}}}}}"#);
+                let text = manifest_refusal(&manifest).expect("the selector is refused");
+                assert!(!text.contains(source), "the selector is not echoed: {text}");
+            }
+        }
+        let lock = r#"{"lockfileVersion": 3, "packages": {"": {"overrides": {"left-pad@http://169.254.169.254/x.tgz": {}}}}}"#;
+        assert!(
+            refusal(lock).is_some(),
+            "a lockfile selector is refused too"
+        );
+    }
+
+    #[test]
+    fn an_override_selector_with_a_registry_spec_or_a_path_of_names_is_admitted() {
+        for selector in [
+            "left-pad",
+            "@scope/left-pad",
+            "left-pad@^1.3.0",
+            "@scope/left-pad@1.3.0",
+            "left-pad@latest",
+            "right-pad@1.0.0>left-pad@^1",
+            ".",
+        ] {
+            let manifest = format!(r#"{{"name": "app", "overrides": {{"{selector}": "1.3.0"}}}}"#);
+            assert_eq!(manifest_refusal(&manifest), None, "{selector} is admitted");
+        }
     }
 
     #[tokio::test]
