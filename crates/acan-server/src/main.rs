@@ -1,8 +1,8 @@
 //! The `acan` command line: serves one or more repositories' worlds.
 
-use std::io;
+use std::io::{self, IsTerminal};
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use acan_llm::{KeyFile, ModelClient};
 use acan_server::init_cli::{self, InitArgs};
@@ -12,7 +12,7 @@ use acan_server::release::{self, Redaction};
 use acan_server::replay;
 use acan_server::{
     DEFAULT_WITNESS_CONCURRENCY, Models, ServeConfig, VisionConfig, default_browser,
-    default_data_dir, start_projects,
+    default_data_dir, start_projects, tokens_file,
 };
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -273,13 +273,19 @@ async fn serve(args: ServeArgs) -> Result<()> {
         }),
         local_workers: args.workers,
     };
+    let tokens = config
+        .projects
+        .projects
+        .first()
+        .map(|project| tokens_file(&project.repo))
+        .unwrap_or_else(|| tokens_file(Path::new(".")));
+    let tokens = std::path::absolute(&tokens).unwrap_or(tokens);
     let mut running = start_projects(config, clients).await?;
+    let terminal = io::stdout().is_terminal();
     if let Some(token) = &running.owner_token {
-        println!(
-            "owner token, shown once and saved in each project's .acan/tokens.json: {}",
-            token.as_str()
-        );
-        println!("http://{}/#token={}", running.local_addr, token.as_str());
+        for line in owner_token_lines(running.local_addr, token.as_str(), &tokens, terminal) {
+            println!("{line}");
+        }
     }
     println!(
         "acan serving projects {} at http://{}",
@@ -288,17 +294,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
     );
     if needs_key {
         // Model jobs get built-in replies until a key is saved, so say where to save one.
-        match &running.owner_token {
-            Some(token) => println!(
-                "no model key is set. Add one at http://{}/setup#token={}",
-                running.local_addr,
-                token.as_str()
-            ),
-            None => println!(
-                "no model key is set. Add one at http://{}/setup",
-                running.local_addr
-            ),
-        }
+        let token = running.owner_token.as_ref().map(|token| token.as_str());
+        println!("{}", key_line(running.local_addr, token, terminal));
     }
     // Either way the same barrier runs: no write may still be in flight when this returns.
     let outcome = tokio::select! {
@@ -310,6 +307,32 @@ async fn serve(args: ServeArgs) -> Result<()> {
     };
     let stopped = running.stop().await;
     outcome.and(stopped)
+}
+
+/// The lines `acan serve` prints about the owner token on its first start. On a terminal the token
+/// is shown once, with the sign-in link. Anywhere else the output may be kept in a log or read by
+/// another process, so the token is left out and the tokens file is named instead.
+fn owner_token_lines(addr: SocketAddr, token: &str, file: &Path, terminal: bool) -> Vec<String> {
+    if terminal {
+        vec![
+            format!("owner token, shown once and saved in .acan/tokens.json: {token}"),
+            format!("http://{addr}/#token={token}"),
+        ]
+    } else {
+        vec![format!(
+            "owner token not printed, because stdout is not a terminal. It is saved in {}. Open http://{addr}/ and paste it there.",
+            file.display()
+        )]
+    }
+}
+
+/// The line that says where to save a model key. The owner token is part of the link only when
+/// it is shown on a terminal.
+fn key_line(addr: SocketAddr, token: Option<&str>, terminal: bool) -> String {
+    match token.filter(|_| terminal) {
+        Some(token) => format!("no model key is set. Add one at http://{addr}/setup#token={token}"),
+        None => format!("no model key is set. Add one at http://{addr}/setup"),
+    }
 }
 
 /// Whether the update check runs. It is on unless `--no-update-check` or `ACAN_UPDATE_CHECK`
@@ -337,4 +360,67 @@ fn bundled_web() -> Option<PathBuf> {
     ]
     .into_iter()
     .find(|candidate| candidate.join("index.html").is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+    use std::path::Path;
+
+    use super::{key_line, owner_token_lines};
+
+    const TOKEN: &str = "acan_0123456789abcdef0123456789abcdef";
+
+    fn addr() -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 7311))
+    }
+
+    #[test]
+    fn a_terminal_shows_the_owner_token_with_its_sign_in_link() {
+        let lines = owner_token_lines(addr(), TOKEN, Path::new("/repo/.acan/tokens.json"), true);
+        assert_eq!(lines.len(), 2, "the token line and the link: {lines:?}");
+        assert!(lines[0].ends_with(TOKEN), "the token line: {}", lines[0]);
+        assert_eq!(lines[1], format!("http://127.0.0.1:7311/#token={TOKEN}"));
+    }
+
+    #[test]
+    fn output_that_is_not_a_terminal_names_the_file_and_leaves_the_token_out() {
+        let lines = owner_token_lines(addr(), TOKEN, Path::new("/repo/.acan/tokens.json"), false);
+        let text = lines.join("\n");
+        assert!(
+            !text.contains(TOKEN),
+            "the token reached the output: {text}"
+        );
+        assert!(!text.contains("#token"), "a link carries the token: {text}");
+        assert!(
+            text.contains("/repo/.acan/tokens.json"),
+            "the tokens file is not named: {text}"
+        );
+        assert!(
+            text.contains("http://127.0.0.1:7311/"),
+            "the address is not named: {text}"
+        );
+    }
+
+    #[test]
+    fn the_key_line_carries_the_token_only_on_a_terminal() {
+        assert_eq!(
+            key_line(addr(), Some(TOKEN), true),
+            format!("no model key is set. Add one at http://127.0.0.1:7311/setup#token={TOKEN}")
+        );
+        let piped = key_line(addr(), Some(TOKEN), false);
+        assert!(
+            !piped.contains(TOKEN),
+            "the token reached the output: {piped}"
+        );
+        assert_eq!(
+            piped,
+            "no model key is set. Add one at http://127.0.0.1:7311/setup"
+        );
+        assert_eq!(
+            key_line(addr(), None, true),
+            "no model key is set. Add one at http://127.0.0.1:7311/setup",
+            "a later start has no token to show"
+        );
+    }
 }

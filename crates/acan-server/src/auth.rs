@@ -10,7 +10,7 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const TOKENS_FILE: &str = "tokens.json";
+pub(crate) const TOKENS_FILE: &str = "tokens.json";
 
 /// Who a token acts for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
