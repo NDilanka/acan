@@ -60,6 +60,21 @@ pub fn nearest(boxes: &[[f32; 4]], p: [f32; 2]) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
+/// A plant narrower than this on screen, in CSS px, draws its marks at the far level of detail.
+pub const FAR_WIDTH_CSS: f32 = 160.0;
+
+/// Whether a project's marks draw at the far level of detail: its plant's box on screen, `[min
+/// x, min y, max x, max y]` in CSS px, is narrower than [`FAR_WIDTH_CSS`] or lies wholly outside
+/// the `viewport` (CSS width and height). Far marks keep their drones, pins, tints and state, and
+/// drop their flags, names, trails, tethers, beams and rings.
+pub fn far(screen_box: [f32; 4], viewport: [f32; 2]) -> bool {
+    let [x0, y0, x1, y1] = screen_box;
+    if ![x0, y0, x1, y1].iter().all(|v| v.is_finite()) {
+        return true;
+    }
+    let outside = x1 < 0.0 || y1 < 0.0 || x0 > viewport[0] || y0 > viewport[1];
+    outside || x1 - x0 < FAR_WIDTH_CSS
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +259,37 @@ mod tests {
             layout_key(&shop),
             layout_key(&lone),
             "a belt's weight is read too"
+        );
+    }
+    #[test]
+    fn marks_go_far_when_the_plant_is_narrow_on_screen_or_out_of_view() {
+        let view = [1366.0, 768.0];
+        assert!(
+            !far([100.0, 100.0, 700.0, 400.0], view),
+            "a plant across the view is near"
+        );
+        assert!(
+            !far([1200.0, 700.0, 1400.0, 900.0], view),
+            "a plant half in view is near"
+        );
+        assert!(
+            far([600.0, 300.0, 600.0 + FAR_WIDTH_CSS - 1.0, 360.0], view),
+            "too narrow"
+        );
+        assert!(
+            !far([600.0, 300.0, 600.0 + FAR_WIDTH_CSS, 360.0], view),
+            "at the width"
+        );
+        assert!(
+            far([1400.0, 100.0, 2000.0, 400.0], view),
+            "right of the view"
+        );
+        assert!(far([-900.0, 100.0, -10.0, 400.0], view), "left of the view");
+        assert!(far([100.0, 800.0, 700.0, 900.0], view), "below the view");
+        assert!(far([100.0, -500.0, 700.0, -1.0], view), "above the view");
+        assert!(
+            far([f32::NAN, 0.0, 10.0, 10.0], view),
+            "a plant behind the camera"
         );
     }
 }
