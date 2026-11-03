@@ -15,3 +15,24 @@ export function metaBadgeText({ serverCalls = null, logCalls = 0, error = null }
   const calls = serverCalls ?? logCalls;
   return `Meta · ${calls} ${calls === 1 ? "call" : "calls"}`;
 }
+
+// One short line for a card line the map's model writes, such as a settlement option or a
+// declaration: the first clause, cut at a word near `max` characters. A leading id tag
+// ("t-0 · ") is kept, since the separator there is part of the name. `title` is the full text
+// for the hover, or null when the line is already short.
+const CLAUSE = /\s+(?:—|–|--?)\s+|[:;,]\s+|\s+(?:because|since|so that)\s+/;
+
+export function shortLine(text, max = 40) {
+  const full = String(text ?? "");
+  const tag = full.match(/^\S+ · /)?.[0] ?? "";
+  const rest = full.slice(tag.length);
+  let line = rest.split(CLAUSE)[0].trim();
+  if (line === "") line = rest;
+  if (line.length > max) {
+    const cut = line.slice(0, max);
+    const space = cut.lastIndexOf(" ");
+    line = `${(space > max / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
+  }
+  const short = tag + line;
+  return short === full ? { line: full, title: null } : { line: short, title: full };
+}

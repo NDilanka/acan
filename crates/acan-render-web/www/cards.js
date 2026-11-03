@@ -16,6 +16,7 @@ import {
 } from "./question.js";
 import { $, canvas, card, freeBand, freeze, replay, state } from "./state.js";
 import { historyBlock } from "./guard.js";
+import { shortLine } from "./chrome.js";
 import { forgetToken, hold } from "./stream.js";
 
 // A settled card shows its one line this long, then fades out over FADE_MS.
@@ -102,14 +103,22 @@ function cardRow(row) {
     const dot = document.createElement("span");
     dot.className = "dot";
     dot.style.background = row.hue;
-    const text = document.createElement("span");
-    text.textContent = row.text;
     el.title = row.agent;
-    el.append(dot, text);
+    el.append(dot, shortText(row.text));
   } else {
-    el.textContent = row.text;
+    el.append(shortText(row.text));
   }
   return el;
+}
+
+// A card line as one short line, with the full text on hover.
+function shortText(text, { hover = true } = {}) {
+  const { line, title } = shortLine(text);
+  const span = document.createElement("span");
+  span.className = "line";
+  span.textContent = line;
+  if (title !== null && hover) span.title = title;
+  return span;
 }
 
 function optionList(clash, suggestedKey) {
@@ -125,8 +134,8 @@ function optionList(clash, suggestedKey) {
     if (blocked !== null) button.title = blocked;
     const chip = document.createElement("kbd");
     chip.textContent = String(option.key);
-    const label = document.createElement("span");
-    label.textContent = option.label;
+    // A blocked button's reason is its own title, so the label does not cover it.
+    const label = shortText(option.label, { hover: blocked === null });
     button.append(chip, label);
     if (option.key === suggestedKey) {
       const tag = document.createElement("span");

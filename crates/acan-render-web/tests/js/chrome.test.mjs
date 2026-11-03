@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { linkQuiet, metaBadgeText } from "../../www/chrome.js";
+import { linkQuiet, metaBadgeText, shortLine } from "../../www/chrome.js";
 import { keyAction } from "../../www/keys.js";
 
 const www = (name) => readFileSync(new URL(`../../www/${name}`, import.meta.url), "utf8");
@@ -81,4 +81,25 @@ test("the replay bar is a play or pause button and a progress bar, with no sente
   const js = www("replay.js");
   assert.match(js, /progressEl\.value = String\(playback\.next\)/);
   assert.doesNotMatch(js, /event \$\{playback\.next\} of/);
+});
+
+test("a clash card line keeps its first clause, with the full text on hover", () => {
+  assert.deepEqual(shortLine("t-0 lands first, t-1 waits"), { line: "t-0 lands first", title: "t-0 lands first, t-1 waits" });
+  assert.deepEqual(shortLine("split at auth.verify, t-1 lands it first"), { line: "split at auth.verify", title: "split at auth.verify, t-1 lands it first" });
+  const long = "t-0 · Rate-limit failed logins: after five failures from one client within a minute, answer 429";
+  assert.deepEqual(shortLine(long), { line: "t-0 · Rate-limit failed logins", title: long }, "the id tag stays, the reason goes on hover");
+  const run = shortLine("narrow the task to the endpoints the order names and nothing outside them at all");
+  assert.equal(run.line, "narrow the task to the endpoints the…");
+  assert.equal(run.title, "narrow the task to the endpoints the order names and nothing outside them at all");
+  for (const plain of ["narrow t-0", "t-0 · Per-user rate limiting", "inside confirmed scope o-1 rev 2"]) {
+    assert.deepEqual(shortLine(plain), { line: plain, title: null }, plain);
+  }
+});
+
+test("the clash card paints its options and rows through the short line, and keys still settle", () => {
+  const js = www("cards.js");
+  assert.match(js, /shortText\(option\.label/);
+  assert.match(js, /el\.append\(dot, shortText\(row\.text\)\)/);
+  assert.match(js, /button\.addEventListener\("click", \(\) => settle\(clash, option\)\)/);
+  assert.match(js, /const option = clash\.options\[key - 1\];/);
 });
