@@ -1,0 +1,111 @@
+[
+  {
+    "id": "rust/order.rs#OrderState",
+    "name": "OrderState",
+    "file": "rust/order.rs",
+    "line": 3,
+    "module": "rust",
+    "states": [
+      { "name": "Open", "line": 4 },
+      { "name": "Paid", "line": 5 },
+      { "name": "Shipped", "line": 6 }
+    ],
+    "transitions": [
+      {
+        "from": "Paid",
+        "to": "Shipped",
+        "file": "rust/fulfil.rs",
+        "line": 5,
+        "end_line": 5,
+        "via": "ship"
+      },
+      {
+        "from": "Open",
+        "to": "Paid",
+        "file": "rust/order.rs",
+        "line": 16,
+        "end_line": 16,
+        "via": "pay"
+      },
+      {
+        "from": "Shipped",
+        "to": "Open",
+        "file": "rust/order.rs",
+        "line": 23,
+        "end_line": 23,
+        "via": "reopen"
+      }
+    ],
+    "confidence": "high"
+  },
+  {
+    "id": "ts/order.ts#OrderStatus",
+    "name": "OrderStatus",
+    "file": "ts/order.ts",
+    "line": 1,
+    "module": "ts",
+    "states": [
+      { "name": "open", "line": 1 },
+      { "name": "paid", "line": 1 },
+      { "name": "shipped", "line": 1 }
+    ],
+    "transitions": [
+      {
+        "from": "*",
+        "to": "shipped",
+        "file": "js/legacy.js",
+        "line": 3,
+        "end_line": 3,
+        "via": "markShipped"
+      },
+      {
+        "from": "open",
+        "to": "paid",
+        "file": "ts/order.ts",
+        "line": 6,
+        "end_line": 6,
+        "via": "settle"
+      },
+      {
+        "from": "paid",
+        "to": "shipped",
+        "file": "ts/order.ts",
+        "line": 9,
+        "end_line": 9,
+        "via": "settle"
+      }
+    ],
+    "confidence": "low"
+  },
+  {
+    "id": "ts/ticket.ts#TicketStatus",
+    "name": "TicketStatus",
+    "file": "ts/ticket.ts",
+    "line": 1,
+    "module": "ts",
+    "states": [
+      { "name": "New", "line": 2 },
+      { "name": "Open", "line": 3 },
+      { "name": "Closed", "line": 4 }
+    ],
+    "transitions": [
+      {
+        "from": "Closed",
+        "to": "Open",
+        "file": "ts/ticket.ts",
+        "line": 9,
+        "end_line": 9,
+        "via": "reopen"
+      },
+      {
+        "from": "*",
+        "to": "Closed",
+        "file": "ts/ticket.ts",
+        "line": 14,
+        "end_line": 14,
+        "via": "close"
+      }
+    ],
+    "confidence": "low"
+  }
+]

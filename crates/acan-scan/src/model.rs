@@ -23,6 +23,59 @@ pub struct Plant {
     pub machines: Vec<Machine>,
     pub belts: Vec<Belt>,
     pub files: Vec<SourceFile>,
+    /// State machines found in the files, sorted by file and line.
+    #[serde(default)]
+    pub state_machines: Vec<StateMachine>,
+}
+
+/// A state machine the scanner found: a status-like type with its states and the transitions between them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateMachine {
+    /// `{file}#{name}`, stable across scans.
+    pub id: String,
+    /// The declared type name, for example `OrderState`.
+    pub name: String,
+    /// Repo-relative, forward slashes.
+    pub file: String,
+    /// 1-based line of the declaration.
+    pub line: u32,
+    /// The name of the plant machine (map building) that owns `file`. Filled after regroup.
+    pub module: String,
+    pub states: Vec<State>,
+    pub transitions: Vec<Transition>,
+    pub confidence: Confidence,
+}
+
+/// One state of a [`StateMachine`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct State {
+    pub name: String,
+    /// 1-based line where the state is declared.
+    pub line: u32,
+}
+
+/// A move from one state to another that the code performs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Transition {
+    /// The source state, or "*" when the extractor cannot tell it.
+    pub from: String,
+    pub to: String,
+    /// Repo-relative file of the transition site (may differ from the declaration file).
+    pub file: String,
+    /// 1-based first line of the assignment or match arm.
+    pub line: u32,
+    /// 1-based last line, inclusive.
+    pub end_line: u32,
+    /// Enclosing function name, or None outside a function.
+    pub via: Option<String>,
+}
+
+/// How much of a [`StateMachine`] the scanner could read. `High` when every transition has a known source state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Confidence {
+    High,
+    Low,
 }
 
 /// A replaceable module, a set of files that the foreman can regroup.
