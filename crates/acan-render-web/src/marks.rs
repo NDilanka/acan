@@ -15,7 +15,7 @@ use acan_iso::{
     BEACON_RADIUS, BODY_RADIUS, BOT_HEIGHT, EYE_DISTANCE, PIN_HEIGHT, PLINTH_TOP, STALK_HEIGHT,
 };
 use acan_render::theme::{
-    AGENT_SLOTS, TINT_BODY0, TINT_CLASH, TINT_DIM0, TINT_SCOPE0, TINT_SHELL0,
+    AGENT_SLOTS, TINT_BODY0, TINT_CLASH, TINT_DIM0, TINT_SCOPE0, TINT_SHELL0, TINT_STALE,
 };
 use acan_render::{Beam, Instance};
 use serde::Serialize;
@@ -54,15 +54,17 @@ const ORDER_LIFT: f32 = 4.0;
 /// The shortest a drone and a clash diamond are drawn on screen, in CSS px. The renderer grows
 /// either one that would be shorter. The drone's body is sized to be about 40 px at fit zoom, so this
 /// floor only applies when the view is zoomed out past fit.
-pub const BOT_MIN_PX: f32 = 20.0;
+pub const BOT_MIN_PX: f32 = 24.0;
 pub const PIN_MIN_PX: f32 = 18.0;
-/// The shortest a beacon is drawn on screen, in CSS px, when it is at rest.
-const BEACON_PX: f32 = 6.0;
+/// The shortest a beacon is drawn on screen, in CSS px, when it is at rest. Only a working
+/// agent's drone has a beacon.
+const BEACON_PX: f32 = 7.0;
 /// How much a working agent's beacon swells at the top of its pulse, as a share of its rest size.
 const BEACON_SWING: f32 = 0.5;
-/// The tether from a drone's eye to its beacon: its width in device px and its opacity.
-const TETHER_PX: f32 = 1.0;
-const TETHER_ALPHA: f32 = 0.8;
+/// The width of the tether from a drone's eye to its target, in device px.
+const TETHER_PX: f32 = 1.5;
+/// How far a stale drone sits below its seat, in plan units, so it reads as sagging.
+const STALE_DROP: f32 = 0.25 * BODY_RADIUS;
 /// Milliseconds for one pulse of a working agent's beacon.
 pub const PULSE_MS: f32 = 1_200.0;
 /// Milliseconds a drone takes to turn to face a new machine.
@@ -220,6 +222,17 @@ impl DroneState {
             Self::Working
         } else {
             Self::Idle
+        }
+    }
+
+    /// The tether's opacity: strong while the agent works or waits, faint while it idles, and
+    /// fainter still once it has gone stale.
+    #[must_use]
+    pub fn tether_alpha(self) -> f32 {
+        match self {
+            Self::Working | Self::Waiting => 0.9,
+            Self::Idle => 0.3,
+            Self::Stale => 0.2,
         }
     }
 
@@ -1117,11 +1130,23 @@ pub struct MarkKinds {
 /// A drone's instances: its shell and its accent at its centre, and its shadow on the plinth top
 /// under the centre. The shadow keeps its plan size, since it lies on the plinth.
 fn drone(kinds: MarkKinds, at: [f32; 3], slot: usize, turn: f32, bot: [f32; 2]) -> [Instance; 3] {
+    drone_shell(kinds, at, slot, shell_tint(slot), turn, bot)
+}
+
+/// A drone's instances with its shell in `shell`, which is its light hue unless it is stale.
+fn drone_shell(
+    kinds: MarkKinds,
+    at: [f32; 3],
+    slot: usize,
+    shell: u8,
+    turn: f32,
+    bot: [f32; 2],
+) -> [Instance; 3] {
     [
         Instance {
             offset: at,
             kind: kinds.body,
-            tint: shell_tint(slot),
+            tint: shell,
             grow: bot,
             turn,
         },
@@ -1148,11 +1173,12 @@ fn drone_grow(dpr: f32) -> [f32; 2] {
     [BOT_MIN_PX * dpr, BOT_HEIGHT]
 }
 
-/// The instances of the marks now. They are every drone, the ring round each waiting drone, each drone that
-/// is leaving, each drone's beacon at its target, and each pin's stalk and diamond. A drone, its
-/// ring, a beacon and a diamond grow to their screen floor, which `dpr` turns from CSS px into
-/// device px. A stalk keeps its plan size. A working agent's beacon swells with its pulse. The
-/// riding agent's drone has no shell, accent or shadow, but its ring and beacon still draw.
+/// The instances of the marks now. They are every drone, the ring round each waiting drone at its
+/// body's height, each drone that is leaving, each working drone's beacon at its target, and each
+/// pin's stalk and diamond. A drone, its ring, a beacon and a diamond grow to their screen floor,
+/// which `dpr` turns from CSS px into device px. A stalk keeps its plan size. A working agent's
+/// beacon swells with its pulse. A stale drone's shell is grey. The riding agent's drone has no
+/// shell, accent or shadow, but its ring and beacon still draw.
 #[must_use]
 pub fn mark_instances(
     motion: &Motion,
@@ -1170,22 +1196,26 @@ pub fn mark_instances(
         };
         let turn = motion.heading_of(&body.agent).unwrap_or(0.0);
         if riding != Some(body.agent.as_str()) {
-            out.extend(drone(kinds, at, body.slot, turn, bot));
+            let shell = if body.state == DroneState::Stale {
+                u8::try_from(TINT_STALE).expect("tint slots fit in a byte")
+            } else {
+                shell_tint(body.slot)
+            };
+            out.extend(drone_shell(kinds, at, body.slot, shell, turn, bot));
         }
         if body.waiting() {
             out.push(Instance {
-                offset: [at[0], at[1], PLINTH_TOP],
+                offset: at,
                 kind: kinds.ring,
                 tint: 0,
                 grow: bot,
                 turn: 0.0,
             });
         }
-        let swell = if body.working() {
-            1.0 + BEACON_SWING * motion.pulse()
-        } else {
-            1.0
-        };
+        if !body.working() {
+            continue;
+        }
+        let swell = 1.0 + BEACON_SWING * motion.pulse();
         out.push(Instance {
             offset: body.target,
             kind: kinds.beacon,
@@ -1239,8 +1269,8 @@ pub fn beams(motion: &Motion, marks: &Marks, dpr: f32, riding: Option<&str>) -> 
                 grow: drone_grow(dpr),
                 turn: facing,
                 tint: body_tint(body.slot),
-                alpha: TETHER_ALPHA,
-                width_px: TETHER_PX,
+                alpha: body.state.tether_alpha(),
+                width_px: TETHER_PX * dpr,
             })
         })
         .collect()
@@ -1380,13 +1410,15 @@ fn place(
             hover_height(top)
         };
         let id = agent.id.to_string();
+        let state = DroneState::of(agent.activity, waiting.contains(&id), false);
+        let z = seat_height(z, state);
         let check = agent
             .task
             .and_then(|task| view.tasks.iter().find(|candidate| candidate.id == task))
             .and_then(|candidate| candidate.check.clone());
         bodies.push(Body {
             slot: slots.slot(&id),
-            state: DroneState::of(agent.activity, waiting.contains(&id), false),
+            state,
             agent: id,
             machine,
             at: [spot[0], spot[1], z],
@@ -1396,6 +1428,15 @@ fn place(
         });
     }
     (bodies, pins(view, plan, stands))
+}
+
+/// The height a drone's centre takes over its seat: a stale drone sags below it.
+fn seat_height(z: f32, state: DroneState) -> f32 {
+    if state == DroneState::Stale {
+        z - STALE_DROP
+    } else {
+        z
+    }
 }
 
 /// The spot an agent takes on a machine: the first free spot a seat's step from the agents
@@ -1969,7 +2010,10 @@ mod tests {
                 .expect("a bot is drawn");
             assert_eq!(bot.grow[0], BOT_MIN_PX * dpr, "the floor is in device px");
         }
-        assert_eq!(BOT_MIN_PX, 20.0, "a bot reads at fit zoom only from 20 px");
+        assert_eq!(
+            BOT_MIN_PX, 24.0,
+            "a bot reads as a dot with ears from 24 px"
+        );
     }
 
     #[test]
@@ -2533,13 +2577,61 @@ mod tests {
             .filter(|instance| instance.kind == KINDS.beacon)
             .map(|instance| instance.grow[0])
             .collect();
-        assert_eq!(beacons.len(), 2);
-        assert_eq!(beacons[0], BEACON_PX, "an idle beacon stays at rest");
+        assert_eq!(beacons.len(), 1, "only the working drone has a beacon");
         assert!(
-            beacons[1] > BEACON_PX,
+            beacons[0] > BEACON_PX,
             "a working beacon swells: {}",
-            beacons[1]
+            beacons[0]
         );
+    }
+
+    #[test]
+    fn each_state_sets_its_tether_and_a_stale_drone_is_grey_and_lower() {
+        let at = [0.0, 0.0, 40.0];
+        let target = [4.0, 0.0, 9.0];
+        let with = |agent: &str, state: DroneState| Body {
+            state,
+            ..drone(agent, at, target, "building")
+        };
+        let marks = marks_of(vec![
+            with("work", DroneState::Working),
+            with("idle", DroneState::Idle),
+            with("wait", DroneState::Waiting),
+            with("stale", DroneState::Stale),
+        ]);
+        let mut motion = Motion::new(true);
+        motion.sync(&marks);
+        let alphas: Vec<f32> = beams(&motion, &marks, 2.0, None)
+            .iter()
+            .map(|beam| beam.alpha)
+            .collect();
+        assert_eq!(alphas, [0.9, 0.3, 0.9, 0.2]);
+        assert!(
+            beams(&motion, &marks, 2.0, None)
+                .iter()
+                .all(|beam| beam.width_px == TETHER_PX * 2.0),
+            "the tether is 1.5 CSS px"
+        );
+        let instances = mark_instances(&motion, &marks, KINDS, 1.0, None);
+        let shells: Vec<u8> = instances
+            .iter()
+            .filter(|i| i.kind == KINDS.body)
+            .map(|i| i.tint)
+            .collect();
+        assert_eq!(shells[3], u8::try_from(TINT_STALE).expect("fits"));
+        assert_eq!(shells[0], shell_tint(0));
+        let ring = instances
+            .iter()
+            .find(|i| i.kind == KINDS.ring)
+            .expect("the waiting drone has a ring");
+        assert_eq!(ring.offset, at, "the ring sits at the body's height");
+        assert_eq!(
+            instances.iter().filter(|i| i.kind == KINDS.beacon).count(),
+            1,
+            "only the working drone has a beacon"
+        );
+        assert_eq!(seat_height(40.0, DroneState::Stale), 40.0 - STALE_DROP);
+        assert_eq!(seat_height(40.0, DroneState::Working), 40.0);
     }
 
     #[test]
@@ -2571,7 +2663,11 @@ mod tests {
         assert_eq!(count(KINDS.body), 1, "only the other drone has a shell");
         assert_eq!(count(KINDS.accent), 1, "only the other drone has an accent");
         assert_eq!(count(KINDS.shadow), 1, "only the other drone has a shadow");
-        assert_eq!(count(KINDS.beacon), 2, "both beacons stay");
+        assert_eq!(
+            count(KINDS.beacon),
+            1,
+            "the riding drone keeps its beacon, and the idle one has none"
+        );
         let ridden = beams(&motion, &marks, 1.0, Some("a"));
         assert_eq!(ridden.len(), 1, "the riding drone has no beam");
         assert_eq!(ridden[0].origin, [9.0, 3.0, 40.0]);
