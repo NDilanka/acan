@@ -869,6 +869,115 @@ async fn a_serialized_waiter_builds_on_its_landed_predecessor_and_lands_cleanly(
     running.stop().await.expect("the server stops");
 }
 
+/// The file the touch test claims: one status type, and the two moves the code makes on it.
+const STATUS_FILE: &str = "src/order_status.ts";
+const STATUS_SOURCE: &str = "export type OrderStatus = 'open' | 'paid' | 'shipped';\n\nexport function settle(order: { status: OrderStatus }) {\n  switch (order.status) {\n    case 'open':\n      order.status = 'paid';\n      break;\n    case 'paid':\n      order.status = 'shipped';\n      break;\n  }\n}\n";
+
+/// A claim's footprint reaches the live stream as one `transition_touched` frame per transition it
+/// covers. A touch is not an event: it has no seq, and the stored log holds nothing for it.
+#[tokio::test]
+async fn a_claim_sends_a_live_touch_for_each_transition_it_covers() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    // The scan reads the working tree, so the file must be in the checkout before the server starts.
+    write_file(root, STATUS_FILE, STATUS_SOURCE);
+    let running = start_plant(root).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+    post_order(&running).await;
+    scope_first(&running, root, task).await;
+
+    // A member added after the stream connects reaches the stream. Once it does, the stream has
+    // subscribed to touches, so the claim's touches cannot go out unseen.
+    let mut frames = live_frames(&running, OWNER_TOKEN);
+    member(
+        &running,
+        &HumanCmd::AddMember {
+            member: MemberId::from_str("watcher").expect("valid member id"),
+            role: acan_core::Role::Member,
+        },
+    )
+    .await;
+    frame_where(&mut frames, |frame| {
+        frame["event"]["type"] == "member_added" && frame["event"]["member"]["id"] == "watcher"
+    })
+    .await;
+
+    let fence = claim(&running, task).await;
+    declare(&running, fence, &[STATUS_FILE]).await;
+
+    // Two transitions: the move to `paid` on line 6 and the move to `shipped` on line 9.
+    let mut touches = Vec::new();
+    while touches.len() < 2 {
+        touches.push(frame_where(&mut frames, |frame| frame["type"] == "transition_touched").await);
+    }
+    let lines: Vec<(u64, u64)> = touches
+        .iter()
+        .map(|touch| {
+            (
+                touch["line"].as_u64().expect("a line"),
+                touch["end_line"].as_u64().expect("an end line"),
+            )
+        })
+        .collect();
+    assert_eq!(lines, vec![(6, 6), (9, 9)], "the touches: {touches:?}");
+    for touch in &touches {
+        assert!(
+            touch.get("seq").is_none(),
+            "a touch is not an event: {touch}"
+        );
+        assert_eq!(touch["machine"], "src/order_status.ts#OrderStatus");
+        assert_eq!(touch["file"], STATUS_FILE);
+        assert_eq!(touch["by"], "claim");
+        assert_eq!(touch["stage"], "declared");
+        assert_eq!(touch["task"], 0);
+        assert!(touch["commit"].is_null(), "a claim has no commit: {touch}");
+    }
+    running.stop().await.expect("the server stops");
+}
+
+/// Streams the frames `token` reads from the live stream, from seq 0, in a task of its own. The
+/// receiver yields each text frame as JSON, until the socket closes.
+fn live_frames(running: &Running, token: &str) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut request = format!("ws://{}/api/stream?from=0", running.local_addr)
+        .into_client_request()
+        .expect("the stream URL");
+    let header = HeaderValue::from_str(&format!("Bearer {token}")).expect("the token header");
+    request.headers_mut().insert(AUTHORIZATION, header);
+    tokio::spawn(async move {
+        let (mut socket, _response) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("the stream connects");
+        while let Some(Ok(message)) = socket.next().await {
+            if let WsMessage::Text(text) = message {
+                let frame: Value = serde_json::from_str(&text).expect("a stream frame is JSON");
+                if tx.send(frame).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    rx
+}
+
+/// The next frame of `frames` that `done` accepts, within [`WAIT`]. Frames it refuses are skipped.
+async fn frame_where(
+    frames: &mut tokio::sync::mpsc::UnboundedReceiver<Value>,
+    done: impl Fn(&Value) -> bool,
+) -> Value {
+    timeout(WAIT, async {
+        loop {
+            let frame = frames.recv().await.expect("the stream stays open");
+            if done(&frame) {
+                return frame;
+            }
+        }
+    })
+    .await
+    .expect("the stream sends the frame in time")
+}
+
 /// The scope the scripted foreman drafts for the signup order: one may-change item on the signup
 /// route, in the shape the live foreman returns.
 fn drafted_scope_body() -> Value {

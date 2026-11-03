@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 use crate::host::{SubmitError, now};
 use crate::index::Scan;
 use crate::store::EventStore;
+use crate::touches::{TouchSink, publish_batch};
 
 /// Writes the writer queues before handlers wait. Larger than the live broadcast buffer, so a
 /// burst of commands queues on the writer instead of failing.
@@ -93,9 +94,12 @@ impl Writer {
         events: broadcast::Sender<Stamped>,
         wake: Arc<Notify>,
         snapshots: watch::Sender<Arc<Snapshot>>,
+        touches: TouchSink,
     ) -> Self {
         let (tx, rx) = mpsc::channel(QUEUE);
-        let task = tokio::spawn(run(rx, origin, scan, store, events, wake, snapshots));
+        let task = tokio::spawn(run(
+            rx, origin, scan, store, events, wake, snapshots, touches,
+        ));
         Self {
             tx,
             task: Arc::new(Mutex::new(Some(task))),
@@ -169,6 +173,10 @@ impl Writer {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the writer's state and its outlets, passed once at spawn"
+)]
 async fn run(
     mut rx: mpsc::Receiver<Request>,
     mut origin: Origin,
@@ -177,6 +185,7 @@ async fn run(
     events: broadcast::Sender<Stamped>,
     wake: Arc<Notify>,
     snapshots: watch::Sender<Arc<Snapshot>>,
+    touches: TouchSink,
 ) {
     let mut broken = false;
     while let Some(request) = rx.recv().await {
@@ -199,6 +208,7 @@ async fn run(
                     Mode::Ordinary,
                     &store,
                     &events,
+                    &touches,
                     &wake,
                     &snapshots,
                     &mut broken,
@@ -217,6 +227,7 @@ async fn run(
                     Mode::Advisory,
                     &store,
                     &events,
+                    &touches,
                     &wake,
                     &snapshots,
                     &mut broken,
@@ -237,6 +248,7 @@ async fn run(
                     Mode::Ordinary,
                     &store,
                     &events,
+                    &touches,
                     &wake,
                     &snapshots,
                     &mut broken,
@@ -261,6 +273,7 @@ async fn commit(
     mode: Mode,
     store: &EventStore,
     broadcast_tx: &broadcast::Sender<Stamped>,
+    touches: &TouchSink,
     wake: &Notify,
     snapshots: &watch::Sender<Arc<Snapshot>>,
     broken: &mut bool,
@@ -322,6 +335,8 @@ async fn commit(
         // A send fails only when nobody is subscribed, which is fine.
         let _ = broadcast_tx.send(event.clone());
     }
+    // The live transition touches of the stored batch. They never fail the write.
+    publish_batch(&batch, scan, touches);
     // Accounting-only batches must not wake the job loop: a job whose reply was unusable would
     // otherwise requeue itself and every other failed job without any user activity. An advisory
     // vision summary is no job's input either.

@@ -18,6 +18,7 @@ use crate::git::Workspace;
 use crate::index::Scan;
 use crate::jobs;
 use crate::store::EventStore;
+use crate::touches::{TouchSink, TransitionTouch};
 use crate::tour::TourCache;
 use crate::vision::Vision;
 use crate::writer::{Guard, Snapshot, Writer};
@@ -83,6 +84,8 @@ struct Inner<C> {
     store: EventStore,
     tokens: Tokens,
     events: broadcast::Sender<Stamped>,
+    /// The live transition touches of accepted writes. Never stored.
+    touches: broadcast::Sender<TransitionTouch>,
     wake: Arc<Notify>,
     ledger: UsageLedger,
     client: C,
@@ -141,6 +144,7 @@ impl<C: ModelClient> Host<C> {
             parts.probe_concurrency
         );
         let (events, _) = broadcast::channel(LIVE_BUFFER);
+        let (touches, _) = broadcast::channel(LIVE_BUFFER);
         let wake = Arc::new(Notify::new());
         let scan = Arc::new(parts.scan);
         let (publish, snapshots) = watch::channel(Arc::new(Snapshot {
@@ -154,6 +158,10 @@ impl<C: ModelClient> Host<C> {
             events.clone(),
             Arc::clone(&wake),
             publish,
+            TouchSink {
+                sender: touches.clone(),
+                repo: parts.repo.clone(),
+            },
         );
         Self {
             inner: Arc::new(Inner {
@@ -162,6 +170,7 @@ impl<C: ModelClient> Host<C> {
                 store: parts.store,
                 tokens: parts.tokens,
                 events,
+                touches,
                 wake,
                 ledger: parts.ledger,
                 client: parts.client,
@@ -277,6 +286,13 @@ impl<C: ModelClient> Host<C> {
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<Stamped> {
         self.inner.events.subscribe()
+    }
+
+    /// A receiver for the transition touches of writes accepted from now on. A touch is live only:
+    /// a receiver that lags skips them, and nothing stores them.
+    #[must_use]
+    pub(crate) fn subscribe_touches(&self) -> broadcast::Receiver<TransitionTouch> {
+        self.inner.touches.subscribe()
     }
 
     /// Reads the last committed world. Never waits on a write.

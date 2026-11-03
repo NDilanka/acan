@@ -4,6 +4,10 @@
 //! browsers cannot set headers on a WebSocket, with a first text frame `{"token": "..."}` sent
 //! within [`AUTH_FRAME_TIMEOUT`]. Nothing is sent before the token is accepted. Tokens never go
 //! in the URL, where proxies and access logs would keep them.
+//!
+//! Between the events, a stream sends each live transition touch as a text frame,
+//! `{"type": "transition_touched", ...}`. A touch is not in the log: it has no seq, a resume never
+//! replays it, and a lagging stream skips the touches it missed without closing.
 
 use std::time::Duration;
 
@@ -21,6 +25,7 @@ use crate::auth::Principal;
 use crate::host::Host;
 use crate::http::{ApiError, authenticate, bearer};
 use crate::redact;
+use crate::touches::TransitionTouch;
 
 /// How long a connection without an `Authorization` header has to send its token frame, and the
 /// multiplexed stream its subscription frame.
@@ -144,6 +149,9 @@ async fn pump<C: ModelClient>(host: Host<C>, mut socket: WebSocket, from: Seq, a
     // Subscribe before reading the backlog. An event committed in between is then both in the
     // backlog and in the subscription, and `Resume` drops the copy that arrives second.
     let mut live = host.subscribe();
+    // Touches are not in the log, so they bypass `Resume` and are not part of the backlog.
+    let mut touches = host.subscribe_touches();
+    let mut touches_open = true;
     let backlog = match host.store().load_from(from).await {
         Ok(events) => events,
         Err(err) => {
@@ -209,8 +217,34 @@ async fn pump<C: ModelClient>(host: Host<C>, mut socket: WebSocket, from: Seq, a
                 }
                 Err(RecvError::Closed) => return,
             },
+            touch = touches.recv(), if touches_open => match touch {
+                Ok(touch) => {
+                    if !send_touch(&mut socket, &touch).await {
+                        return;
+                    }
+                }
+                // A touch is live only, so a stream that lags skips the ones it missed and goes on.
+                Err(RecvError::Lagged(missed)) => {
+                    tracing::debug!(missed, "a stream skipped live transition touches");
+                }
+                // No sender is left, so no more touches come. The events still stream.
+                Err(RecvError::Closed) => touches_open = false,
+            },
         }
     }
+}
+
+/// Sends one touch frame as text. A touch is not in the log, so it has no seq and no resume
+/// bookkeeping. `false` means the socket is gone.
+async fn send_touch(socket: &mut WebSocket, touch: &TransitionTouch) -> bool {
+    let json = match serde_json::to_string(touch) {
+        Ok(json) => json,
+        Err(err) => {
+            tracing::error!(error = %err, "encoding a transition touch for the stream failed");
+            return true;
+        }
+    };
+    socket.send(Message::Text(json.into())).await.is_ok()
 }
 
 async fn close_for_gap(socket: &mut WebSocket, resume: &Resume) {
