@@ -18,9 +18,10 @@ use acan_core::{
     Settlement, Stage, SystemCmd, Task, TaskId, TaskSpec, TaskState, Witness, WitnessId, World,
 };
 use acan_intent::{
-    Channel, CorpusProbe, Fixture, HttpMethod, MachineId, MethodSelector, ModelProposal, ModelRef,
-    Operand, Predicate, ProbeProposal, RequestTemplate, RouteEntry, RouteTemplate, RunLimits,
-    ScopeBody, Selector, Step, StepContext, StepId, Template, TrustedSink, ValueRef, WindowAnchor,
+    Channel, CorpusProbe, Evidence, Fixture, HttpMethod, MachineId, MethodSelector, ModelProposal,
+    ModelRef, Operand, Predicate, ProbeProposal, RequestTemplate, RouteEntry, RouteTemplate,
+    RunLimits, ScopeBody, ScopeItem, Selector, Step, StepContext, StepId, Template, TrustedSink,
+    ValueRef, WindowAnchor, WindowObligation,
 };
 use acan_llm::{ChatRequest, Message};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
@@ -35,7 +36,7 @@ pub const EXPLAIN_PROMPT: &str = "You explain a clash between two tasks that dec
 
 /// The scope draft prompt. The reply is an `acan_intent::ScopeBody`, which Acan wraps as a
 /// `ModelProposal` that gains no authority until a human confirms it.
-pub const SCOPE_PROMPT: &str = "You draft the scope of one order for a code change. Reply with one JSON object that has three keys, may, must_keep and open, that matches the JSON schema under schema in the context. may lists what the order allows to change. Each may item names one HTTP route, copied exactly from the routes in the context, and the machines it touches, copied exactly from the machines in the context. Give every item at least one acceptance obligation, each with a predicate and one line of text. Give every item an example: one target value for one field of one step, written before any code exists. Set provenance to user when the order states the item, model when you interpret the order, and open when a human must still answer it. must_keep lists behavior the order must not break. open lists questions a human must answer, each with two or more options. Never state an observed value, a verdict or a pass. Never invent a route or a machine. A side_effect selector needs a field_path that starts with store or outbound_http. Its sink, method and route_template match one side_effects entry in the context, and its step_context is that entry's step_id or any. Name only step ids listed in the steps in the context. When previous_error in the context is not null, the last attempt failed for that reason: fix it and reply again.";
+pub const SCOPE_PROMPT: &str = "You draft the scope of one order for a code change. Reply with one JSON object that has three keys, may, must_keep and open, that matches the JSON schema under schema in the context. may lists what the order allows to change. Each may item names one HTTP route, copied exactly from the routes in the context, and the machines it touches, copied exactly from the machines in the context. Give every item at least one acceptance obligation, each with a predicate and one line of text. Give every item an example: one target value for one field of one step, written before any code exists. An example's expected status must be one that the item's acceptance allows that request to get. Set provenance to user when the order states the item, model when you interpret the order, and open when a human must still answer it. must_keep lists behavior the order must not break. open lists questions a human must answer, each with two or more options. Never state an observed value, a verdict or a pass. Never invent a route or a machine. A side_effect selector needs a field_path that starts with store or outbound_http. Its sink, method and route_template match one side_effects entry in the context, and its step_context is that entry's step_id or any. An item that changes a response status also covers that response's body and headers: give it channel any, or add body and header items on the same route, because a changed status usually changes them too. Name only step ids listed in the steps in the context. When previous_error in the context is not null, the last attempt failed for that reason: fix it and reply again.";
 
 /// The probe prompt. The reply is an input-only `acan_intent::ProbeProposal`.
 pub const PROBE_PROMPT: &str = "You propose input only probe steps for one order. Reply with one JSON object that has four keys, fixture, steps, route_template and rationale, that matches the JSON schema under schema in the context. fixture is one id copied from the fixtures in the context. steps is a non empty list of steps. An http step sends one request, and its path, headers and body may use ${name} for a value that an earlier capture step bound. A capture step reads a value from an earlier http step. An advance_time step moves the controlled clock. route_template is one route copied exactly from the routes in the context, and the probe sends no more http requests than max_requests. Propose inputs only. Never write an expected value, a count, a mask, a class, an observed value or a verdict. rationale is one sentence.";
@@ -133,6 +134,21 @@ pub enum DraftError {
     /// The scope reads events of a sink that no probe of the corpus observes.
     #[error("scope reads {0} events, which no probe observes")]
     UnobservedSink(String),
+    /// A status or body predicate reads a step that no probe sends to the rule's route, so it
+    /// compares a request the rule does not cover.
+    #[error(
+        "scope reads step {step:?} for {route:?}, but no probe sends that step to that route; name a step that sends a request to {route:?}"
+    )]
+    StepOffRoute { step: String, route: String },
+    /// An example expects a status that the item's window requires its request to receive.
+    #[error(
+        "example expects status {status} at step {step:?}, but the acceptance allows the first {allowed} requests of its window, so that request must not be rejected; expect the allowed status or name a later request"
+    )]
+    ExampleContradictsAcceptance {
+        step: String,
+        status: u16,
+        allowed: u32,
+    },
     /// A step uses a capture that no earlier capture step binds.
     #[error("step {step:?} uses capture {name:?}, which no earlier step binds")]
     UnknownCapture { step: String, name: String },
@@ -579,8 +595,9 @@ fn check_scope(body: &ScopeBody, bounds: &DraftBounds<'_>) -> Result<(), DraftEr
         check_machines(item.machine_ids.as_slice(), bounds.machines)?;
         check_selector(&item.selector, &corpus)?;
         corpus.check_step(&item.example.step_id)?;
+        check_example(item, &corpus)?;
         for obligation in item.acceptance.as_slice() {
-            check_predicate(&obligation.predicate, &corpus)?;
+            check_predicate(&obligation.predicate, &item.selector, &corpus)?;
         }
     }
     for rule in &body.must_keep {
@@ -588,7 +605,7 @@ fn check_scope(body: &ScopeBody, bounds: &DraftBounds<'_>) -> Result<(), DraftEr
         check_machines(rule.machine_ids.as_slice(), bounds.machines)?;
         check_selector(&rule.selector, &corpus)?;
         for obligation in rule.obligations.as_slice() {
-            check_predicate(&obligation.predicate, &corpus)?;
+            check_predicate(&obligation.predicate, &rule.selector, &corpus)?;
         }
     }
     for choice in &body.open {
@@ -676,6 +693,51 @@ impl<'a> CorpusSteps<'a> {
         })
     }
 
+    /// Whether some probe sends `step` as a request that `method` and `route` admit.
+    fn sends(&self, step: &StepId, method: MethodSelector, route: &RouteTemplate) -> bool {
+        self.sequences.iter().any(|sequence| {
+            sequence.iter().any(|request| {
+                matches!(request, Step::Http(http)
+                    if http.id == *step
+                        && method_matches(method, http.request.method)
+                        && route_matches(http.request.path.as_str(), route))
+            })
+        })
+    }
+
+    /// The smallest position of `step` among the requests a window on `method` and `route`
+    /// counts, over the probes that send it: 1 for the first such request in its sequence. Every
+    /// requester counts, so the position is never less than the one a single requester gets.
+    fn position_on_route(
+        &self,
+        step: &StepId,
+        method: MethodSelector,
+        route: Option<&RouteTemplate>,
+    ) -> Option<u32> {
+        self.sequences
+            .iter()
+            .filter_map(|sequence| {
+                let mut seen = 0_u32;
+                for request in sequence {
+                    let Step::Http(http) = request else {
+                        continue;
+                    };
+                    let counted = method_matches(method, http.request.method)
+                        && route
+                            .is_none_or(|route| route_matches(http.request.path.as_str(), route));
+                    if !counted {
+                        continue;
+                    }
+                    seen = seen.saturating_add(1);
+                    if http.id == *step {
+                        return Some(seen);
+                    }
+                }
+                None
+            })
+            .min()
+    }
+
     /// Each side effect the corpus reads, with the step a selector names for it and the method
     /// and route of the request it follows, as the route table writes them.
     fn side_effects(&self, routes: &[RouteEntry]) -> Vec<Value> {
@@ -717,6 +779,53 @@ impl<'a> CorpusSteps<'a> {
     }
 }
 
+/// Refuses an example that expects a status the item's window says its request must not get. A
+/// window with the first-allowed obligation admits its first `allowed_count` matching requests, so
+/// an example step at or before that position must not expect a rejected status. The position
+/// counts every requester on the route, which is never less than one requester's position, so a
+/// refusal is always a real contradiction.
+fn check_example(item: &ScopeItem, corpus: &CorpusSteps<'_>) -> Result<(), DraftError> {
+    let example = &item.example;
+    if example.path.as_str() != "status" {
+        return Ok(());
+    }
+    let Evidence::Present { value } = &example.after else {
+        return Ok(());
+    };
+    let Some(status) = value.as_u64().and_then(|status| u16::try_from(status).ok()) else {
+        return Ok(());
+    };
+    for obligation in item.acceptance.as_slice() {
+        let Predicate::Window { policy } = &obligation.predicate else {
+            continue;
+        };
+        if !policy
+            .obligations
+            .contains(&WindowObligation::FirstAllowed {})
+            || !policy
+                .rejected_attempts
+                .status_in
+                .as_slice()
+                .contains(&status)
+        {
+            continue;
+        }
+        let allowed = policy.allowed_count.get();
+        let route = policy.event_filter.route_template.as_ref();
+        if let Some(position) =
+            corpus.position_on_route(&example.step_id, policy.event_filter.method, route)
+            && position <= allowed
+        {
+            return Err(DraftError::ExampleContradictsAcceptance {
+                step: example.step_id.as_str().to_owned(),
+                status,
+                allowed,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Checks the step a selector names, and for a side-effect selector that a probe observes its
 /// sink after a request the selector admits.
 fn check_selector(selector: &Selector, corpus: &CorpusSteps<'_>) -> Result<(), DraftError> {
@@ -750,12 +859,28 @@ fn check_selector(selector: &Selector, corpus: &CorpusSteps<'_>) -> Result<(), D
 }
 
 /// Checks each step a predicate reads, and that a probe observes each sink whose events it reads.
-fn check_predicate(predicate: &Predicate, corpus: &CorpusSteps<'_>) -> Result<(), DraftError> {
+/// A status or body comparison must read a step that sends a request to the selector's route, so
+/// a step named for another request, such as a signup for a login rule, is refused.
+fn check_predicate(
+    predicate: &Predicate,
+    selector: &Selector,
+    corpus: &CorpusSteps<'_>,
+) -> Result<(), DraftError> {
     let mut steps = Vec::new();
     let mut sinks = Vec::new();
     predicate_refs(predicate, &mut steps, &mut sinks);
     for step in steps {
         corpus.check_step(step)?;
+    }
+    let mut compared = Vec::new();
+    status_steps(predicate, &mut compared);
+    for step in compared {
+        if !corpus.sends(step, selector.method, &selector.route_template) {
+            return Err(DraftError::StepOffRoute {
+                step: step.as_str().to_owned(),
+                route: selector.route_template.as_str().to_owned(),
+            });
+        }
     }
     for sink in sinks {
         if !corpus.observes(sink) {
@@ -805,6 +930,28 @@ fn value_refs<'p>(value: &'p ValueRef, steps: &mut Vec<&'p StepId>, sinks: &mut 
         ValueRef::Field { step_id, .. } => steps.push(step_id),
         ValueRef::Capture { .. } => {}
         ValueRef::Event { sink, .. } => sinks.push(*sink),
+    }
+}
+
+/// Every step a status or body comparison reads in `predicate`, at any depth.
+fn status_steps<'p>(predicate: &'p Predicate, steps: &mut Vec<&'p StepId>) {
+    match predicate {
+        Predicate::EqualsBase { step_id, .. } | Predicate::StatusIn { step_id, .. } => {
+            steps.push(step_id);
+        }
+        Predicate::AfterNWithin { then, .. } => status_steps(then, steps),
+        Predicate::All { of } => {
+            for inner in of.as_slice() {
+                status_steps(inner, steps);
+            }
+        }
+        Predicate::Equals { .. }
+        | Predicate::Present { .. }
+        | Predicate::Absent { .. }
+        | Predicate::MatchesSchema { .. }
+        | Predicate::Compare { .. }
+        | Predicate::Count { .. }
+        | Predicate::Window { .. } => {}
     }
 }
 
