@@ -54,6 +54,15 @@ const CALM_FRAME_MS: f32 = 50.0;
 /// keeps this much of each drone clear of the page's side panels.
 const FOCUS_REACH: f32 = 1.4 * acan_iso::BODY_RADIUS;
 
+/// A close-up's hold: the CSS band its drones keep within, the world point it centres on, and
+/// the camera as it left it, so a move by the reader ends the hold.
+#[derive(Debug, Clone, Copy)]
+struct FocusHold {
+    band: [f32; 2],
+    centre: [f32; 3],
+    camera: Camera,
+}
+
 #[wasm_bindgen]
 pub struct App {
     renderer: Renderer,
@@ -88,6 +97,8 @@ pub struct App {
     /// An agent to close up on, the zoom as a share of the fit zoom, and the CSS band the page's
     /// panels leave free. It applies once the view places the agent's drone, then clears.
     focus: Option<(String, f32, Option<[f32; 2]>)>,
+    /// A close-up that keeps its drones clear of the side panels until the reader moves it.
+    focus_hold: Option<FocusHold>,
     /// The ride, while the page shows one agent's drone from inside.
     ride: Option<Ride>,
     /// Whether the fit runs once the ride has eased back, as the `0` key asks.
@@ -203,6 +214,7 @@ impl App {
             still: false,
             card_clash: None,
             focus: None,
+            focus_hold: None,
             ride: None,
             fit_after_leave: false,
             bob_enabled: true,
@@ -902,12 +914,61 @@ impl App {
         self.camera.centre_on(at);
         self.camera.set_zoom(zoom);
         self.focus = None;
-        if let Some(band) = band {
-            let slide = self.slide_clear(band);
-            if slide != 0.0 {
-                self.pan(slide, 0.0);
-            }
+        self.focus_hold = band.map(|band| FocusHold {
+            band,
+            centre: at,
+            camera: self.camera,
+        });
+        self.hold_clear();
+    }
+
+    /// Slides a close-up the reader has not moved so its drones keep clear of the side panels.
+    /// The log may place a drone after the close-up, so each view rebuild checks again.
+    fn hold_clear(&mut self) {
+        let Some(hold) = self.focus_hold else {
+            return;
+        };
+        if self.camera != hold.camera {
+            self.focus_hold = None;
+            return;
         }
+        let slide = self.slide_clear(hold.band);
+        if slide == 0.0 {
+            return;
+        }
+        let centre = self.slid_centre(hold.centre, slide);
+        self.camera.centre_on(centre);
+        self.focus_hold = Some(FocusHold {
+            centre,
+            camera: self.camera,
+            ..hold
+        });
+    }
+
+    /// The point to centre on so the scene at `centre`'s depth moves `slide` CSS px across the
+    /// screen. It is worked out at that depth, since a ground pan moves the drones, nearer the
+    /// eye, further than the ground under a low perspective camera.
+    fn slid_centre(&self, centre: [f32; 3], slide: f32) -> [f32; 3] {
+        let at = self.camera.world_to_screen(centre);
+        let step = |axis: usize| {
+            let mut moved = centre;
+            moved[axis] += 1.0;
+            let [x, y] = self.camera.world_to_screen(moved);
+            [x - at[0], y - at[1]]
+        };
+        let (sx, sy) = (step(0), step(1));
+        let det = sx[0] * sy[1] - sy[0] * sx[1];
+        if det.abs() < 1e-6 {
+            return centre;
+        }
+        // The plan step d with J d = (-slide, 0) in device px, so the point now at the screen
+        // centre less the slide takes the centre.
+        let b = -slide * self.dpr;
+        [
+            centre[0] + b * sy[1] / det,
+            centre[1] - b * sx[1] / det,
+            centre[2],
+        ]
     }
 
     /// How far, in CSS px, to slide the view sideways so every drone on screen keeps out past
@@ -1376,6 +1437,7 @@ impl App {
         self.marks = marks;
         self.view = Some(view);
         self.apply_focus();
+        self.hold_clear();
         self.sync_scene();
         Ok(())
     }
