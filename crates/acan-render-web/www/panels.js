@@ -221,16 +221,12 @@ function metaRow(row) {
   return tr;
 }
 
-// The step cell holds the step word, and a muted line under it when the row has a detail.
+// The step cell holds the step word, with a tour's verdict. The row's full detail is the cell's
+// hover title.
 function historyRow(row) {
   const line = foremanLine(row);
   const tr = tableRow([line.step, line.model, row.calls, row.input, row.output], 2);
-  if (line.detail !== null) {
-    const detail = document.createElement("span");
-    detail.className = "detail";
-    detail.textContent = line.detail;
-    tr.cells[0].append(detail);
-  }
+  if (line.title !== null) tr.cells[0].title = line.title;
   return tr;
 }
 

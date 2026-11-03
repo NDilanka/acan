@@ -1,5 +1,5 @@
-// Node tests for the foreman plate's history rows: the model, the step word and the detail of each
-// row, the words a tour's detail reads, and the history cap. Run with:
+// Node tests for the foreman plate's history rows: the model, the step word and the hover title of
+// each row, the verdict a tour's step reads, and the history cap. Run with:
 //   node --test crates/acan-render-web/tests/js/usage.test.mjs
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -16,8 +16,14 @@ test("a_detail_row_shows_model_step_and_detail", () => {
   assert.deepEqual(foremanLine(scope), {
     model: "muse-spark-1.3",
     step: "scope",
-    detail: "scope draft for o-1 rev 1",
+    title: "scope draft for o-1 rev 1",
   });
+});
+
+test("a_scope_row_reads_scope", () => {
+  assert.equal(roleLabel("scope"), "scope");
+  const scope = rows.find((row) => row.role === "scope");
+  assert.equal(foremanLine(scope).step, "scope");
 });
 
 test("a_row_without_detail_shows_the_step_alone", () => {
@@ -25,7 +31,7 @@ test("a_row_without_detail_shows_the_step_alone", () => {
   assert.deepEqual(foremanLine(explain), {
     model: "muse-spark-1.3",
     step: "explain",
-    detail: null,
+    title: null,
   });
 });
 
@@ -34,7 +40,7 @@ test("an_unknown_step_renders_its_word", () => {
   assert.deepEqual(foremanLine(future), {
     model: "muse-spark-1.3",
     step: "future_step",
-    detail: null,
+    title: null,
   });
 });
 
@@ -43,13 +49,29 @@ test("a_tour_row_reads_directed_or_deterministic", () => {
   const refused = rows.find((row) => row.detail?.includes(": refused: "));
   assert.deepEqual(foremanLine(admitted), {
     model: "muse-spark-1.3",
-    step: "tour",
-    detail: "tour for receipt 1a2b3c4d: directed",
+    step: "tour · directed",
+    title: "tour for receipt 1a2b3c4d: admitted",
   });
   assert.deepEqual(foremanLine(refused), {
     model: "muse-spark-1.3",
+    step: "tour · deterministic",
+    title: "tour for receipt 9f8e7d6c: refused: out_of_scope",
+  });
+});
+
+test("a_refused_tour_reads_deterministic", () => {
+  const refused = { role: "director", model: "muse-spark-1.3", detail: "tour for receipt 1a2b3c4d: refused: out_of_scope" };
+  const failed = { role: "director", model: "muse-spark-1.3", detail: "tour for receipt 1a2b3c4d: error" };
+  assert.equal(foremanLine(refused).step, "tour · deterministic");
+  assert.equal(foremanLine(failed).step, "tour · deterministic");
+});
+
+test("a_row_with_no_detail_has_no_title", () => {
+  const tour = { role: "director", model: "muse-spark-1.3", detail: null };
+  assert.deepEqual(foremanLine(tour), {
+    model: "muse-spark-1.3",
     step: "tour",
-    detail: "tour for receipt 9f8e7d6c: deterministic",
+    title: null,
   });
 });
 

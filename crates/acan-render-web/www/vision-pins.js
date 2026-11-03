@@ -317,7 +317,7 @@ function button(text, onClick, pressed) {
 
 // Paints the viewer for the record it holds: the advisory line, the verdict over all pages, then
 // one page at a time with its two screenshots, its verdict and reason, and the second look.
-function paintViewer() {
+export function paintViewer() {
   if (open === null) return;
   const held = records.get(open.task);
   const record = held?.record ?? null;

@@ -6,9 +6,9 @@ import { apiPath, target } from "./projects.js";
 
 export const OFFLINE_PROVIDER = "offline";
 
-// The name a role has on the panel. `vision` is the advisory vision witness, and `director`
-// shows as `tour`.
-const ROLE_LABELS = { vision: "vision witness", director: "tour" };
+// The name a role has on the panel. `vision` is the advisory vision witness, `director` shows as
+// `tour`, and `scope` shows as `scope`.
+const ROLE_LABELS = { vision: "vision witness", director: "tour", scope: "scope" };
 
 export function roleLabel(role) {
   return ROLE_LABELS[role] ?? role;
@@ -20,17 +20,19 @@ export const HISTORY_ROWS = 3;
 // A tour's detail names its receipt, then the director's verdict.
 const TOUR_DETAIL = /^(tour for receipt [0-9a-fA-F]{8}):(.*)$/;
 
-// A history row as the foreman plate shows it: the model, the step word (the role's label), and
-// the detail when there is one. A tour reads `directed` when the director admitted it, and
-// `deterministic` otherwise.
+// A history row as the foreman plate shows it: the model, the step (the role's label), and the
+// title, which is the row's full detail on hover, or null when the row has none. A tour whose
+// detail matches TOUR_DETAIL adds its verdict to the step: `directed` when the director admitted
+// it, `deterministic` otherwise.
 export function foremanLine(row) {
   const model = row.model;
-  const step = roleLabel(row.role);
-  if (!row.detail) return { model, step, detail: null };
-  const tour = TOUR_DETAIL.exec(row.detail);
-  if (tour === null) return { model, step, detail: row.detail };
-  const verdict = tour[2].trim() === "admitted" ? "directed" : "deterministic";
-  return { model, step, detail: `${tour[1]}: ${verdict}` };
+  const title = row.detail || null;
+  const tour = TOUR_DETAIL.exec(row.detail ?? "");
+  let step = roleLabel(row.role);
+  if (row.role === "director" && tour !== null) {
+    step += tour[2].trim() === "admitted" ? " · directed" : " · deterministic";
+  }
+  return { model, step, title };
 }
 
 // Splits the origin's rows into live provider calls and offline stand-in calls. The live total

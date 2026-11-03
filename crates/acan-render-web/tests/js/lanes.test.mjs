@@ -34,6 +34,22 @@ const SYSTEM = { kind: "system" };
 const OWNER = { kind: "member", id: "owner" };
 const agent = (id) => ({ kind: "agent", id });
 
+// Runs a test body with navigator stubbed to nav, so the worker command follows the stub's platform
+// and not the host's. The real navigator is put back after the body, however it ends.
+const POSIX = { platform: "Linux x86_64", userAgent: "Mozilla/5.0 (X11; Linux x86_64)" };
+function onPlatform(nav, body) {
+  return () => {
+    const had = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    Object.defineProperty(globalThis, "navigator", { value: nav, configurable: true, writable: true });
+    try {
+      body();
+    } finally {
+      if (had) Object.defineProperty(globalThis, "navigator", had);
+      else delete globalThis.navigator;
+    }
+  };
+}
+
 // Two agents register; agent-a takes t-1 and renews; agent-b takes t-2, and its task lands later
 // under a system event. agent-c registers and never works.
 function log() {
@@ -135,13 +151,13 @@ test("the check reads as words for the row's label", () => {
   assert.equal(checkWords(null), "");
 });
 
-test("with no agent the strip names the worker command against this origin", () => {
+test("with no agent the strip names the worker command against this origin", onPlatform(POSIX, () => {
   const { line, command } = emptyLines("http://127.0.0.1:7311");
   assert.equal(line, "No worker connected.");
   assert.equal(command, "ACAN_AGENT_TOKEN=<agent token from .acan/tokens.json> acan-worker --server http://127.0.0.1:7311 --repo <path to your repo>");
   assert.equal(command, workerCommand("http://127.0.0.1:7311"), "the checklist offers the same command");
   assert.doesNotMatch(line + command, /\$|cost|token usage/i);
-});
+}));
 
 test("G then a digit rides; the digit alone and a late digit are left to the page", () => {
   const armed = goStep(null, "g", 100);
@@ -175,16 +191,16 @@ test("with GET /api/workers the strip's status and empty state read the server's
   assert.match(none.line, /--workers 1/);
 });
 
-test("without GET /api/workers the strip infers from the view's agents, as before", () => {
+test("without GET /api/workers the strip infers from the view's agents, as before", onPlatform(POSIX, () => {
   const origin = "http://127.0.0.1:7311";
   for (const answer of [{ status: 404, body: null }, { status: 403, body: null }, null]) {
     const empty = workerLines(answer, 0, origin);
     assert.deepEqual(empty, { kind: "outside", status: "no worker connected", ...emptyLines(origin), setKey: false });
     assert.equal(workerLines(answer, 2, origin).status, "2 workers connected");
   }
-});
+}));
 
-test("the strip and the first-run worker step never disagree on the same answer", () => {
+test("the strip and the first-run worker step never disagree on the same answer", onPlatform(POSIX, () => {
   const origin = "http://127.0.0.1:7311";
   const answers = [workersAnswer("running"), workersAnswer("no_key", "no_key"), workersAnswer(), { status: 404, body: null }, null];
   for (const answer of answers) {
@@ -198,7 +214,7 @@ test("the strip and the first-run worker step never disagree on the same answer"
       if (step.command) assert.equal(lanes.command, step.command);
     }
   }
-});
+}));
 
 // A stand-in for the strip: rows with a dataset and a class list, as the page builds them.
 function fakeStrip(agents) {
