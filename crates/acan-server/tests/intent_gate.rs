@@ -285,6 +285,7 @@ impl Gate {
             runner: &self.runner,
             slots: &self.slots,
             probes_at_once,
+            diagnostics: None,
         }
     }
 

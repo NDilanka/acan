@@ -347,6 +347,7 @@ mod tests {
             headers,
             body: Some(body.to_owned()),
             binary: false,
+            app_output: None,
             truncated: false,
         }
     }

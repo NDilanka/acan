@@ -23,6 +23,7 @@ mod install;
 mod process;
 mod record;
 mod sequence;
+mod volume;
 
 pub use install::{InstallError, InstallReport, install_dependencies};
 pub use sequence::{KeptBody, RunnerConfig, SequenceInput, run_sequence, run_sequence_keeping};
