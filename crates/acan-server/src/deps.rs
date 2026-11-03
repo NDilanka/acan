@@ -299,6 +299,7 @@ impl Installer<'_> {
         check_platform(self.cache)?;
         prepare_root(self.cache)?;
         check_root(self.cache, me)?;
+        check_ancestors(self.cache, me)?;
         if read_entry(&entry, me)? == Entry::Complete {
             return Ok(Some(Installed {
                 modules: entry.join(MODULES),
@@ -711,6 +712,40 @@ fn check_root(cache: &Path, me: Identity) -> Result<(), DepsError> {
     if owner(&root) != me.uid {
         return Err(tampered(cache, "the cache root belongs to another user"));
     }
+    Ok(())
+}
+
+/// Checks every directory above the cache root, on unix. Each belongs to this user or to root, and
+/// the group or others may write it only when it is sticky, so no other user can rename or replace
+/// a directory on the way to the cache. The walk starts from the cache as it resolves, so a link
+/// above the root is checked where it points.
+#[cfg(unix)]
+fn check_ancestors(cache: &Path, me: Identity) -> Result<(), DepsError> {
+    use std::os::unix::fs::PermissionsExt;
+    let real = fs::canonicalize(cache).map_err(|source| io_error(cache, source))?;
+    for dir in real.ancestors().skip(1) {
+        let meta = fs::symlink_metadata(dir).map_err(|source| io_error(dir, source))?;
+        if ![me.uid, 0].contains(&owner(&meta)) {
+            return Err(tampered(
+                dir,
+                "a directory above the cache belongs to another user",
+            ));
+        }
+        let sticky = meta.permissions().mode() & 0o1000 != 0;
+        if writable_by_others(&meta) && !sticky {
+            return Err(tampered(
+                dir,
+                "the group or others can write a directory above the cache, and it is not sticky",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Other platforms have no owner or mode to check above the cache. [`check_platform`] refuses a
+/// cache there that is not under the user's profile.
+#[cfg(not(unix))]
+fn check_ancestors(_cache: &Path, _me: Identity) -> Result<(), DepsError> {
     Ok(())
 }
 
@@ -1625,6 +1660,93 @@ mod tests {
             .expect_err("a root another user owns is refused before its entry is read");
         assert!(
             matches!(&refused, DepsError::Tampered { detail, .. } if detail.contains("another user")),
+            "{refused}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_above_the_cache_that_others_can_write_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("temporary directory");
+        let parent = fs::canonicalize(root.path())
+            .expect("a real path")
+            .join("parent");
+        fs::create_dir(&parent).expect("a parent");
+        let cache = parent.join("deps");
+        prepare_root(&cache).expect("the cache root");
+        let me = process_identity().expect("this process's identity");
+        let refused_parent = |result: Result<(), DepsError>| matches!(&result, Err(DepsError::Tampered { path, .. }) if path == &parent);
+
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).expect("private parent");
+        assert!(
+            !refused_parent(check_ancestors(&cache, me)),
+            "a private parent is not refused"
+        );
+
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o775)).expect("group parent");
+        let refused = check_ancestors(&cache, me).expect_err("a group-writable parent is refused");
+        assert!(
+            matches!(&refused, DepsError::Tampered { path, detail } if path == &parent && detail.contains("not sticky")),
+            "{refused}"
+        );
+
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o1777)).expect("sticky parent");
+        assert!(
+            !refused_parent(check_ancestors(&cache, me)),
+            "a sticky parent is not refused"
+        );
+
+        let foreign = Identity {
+            uid: me.uid + 1,
+            ..me
+        };
+        let refused =
+            check_ancestors(&cache, foreign).expect_err("a parent of another user is refused");
+        assert!(
+            matches!(&refused, DepsError::Tampered { path, detail } if path == &parent && detail.contains("another user")),
+            "{refused}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hit_is_refused_under_a_parent_others_can_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let (clone, head) = clone_with(&[("package.json", PACKAGE), ("package-lock.json", LOCK)]);
+        let repo = Repo::open(clone.path()).await.expect("the clone opens");
+        let PrepareOutcome::Prepared(prepared) = repo
+            .prepare(&head, &ProtectedPaths::default())
+            .await
+            .expect("the commit prepares")
+        else {
+            panic!("the commit merges without conflict");
+        };
+        let app: AppContract = serde_json::from_str(NODE_APP).expect("the app contract decodes");
+        let cache_parent = tempfile::tempdir().expect("a cache parent");
+        let parent = fs::canonicalize(cache_parent.path()).expect("a real path");
+        let cache = parent.join("deps");
+        prepare_root(&cache).expect("the cache root");
+        complete_entry(&cache.join(fixture_key(&app).replace(':', "-")));
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let config = RunnerConfig::new("acan-no-such-docker", 3000);
+        let slots = Semaphore::new(1);
+        let installer = Installer {
+            repo: &repo,
+            config: &config,
+            slots: &slots,
+            cache: &cache,
+            scratch: scratch.path(),
+        };
+        let me = process_identity().expect("this process's identity");
+
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o777)).expect("an open parent");
+        let refused = installer
+            .install_as(&prepared, Role::Base, &app, me)
+            .await
+            .expect_err("a parent others can write is refused before the entry is read");
+        assert!(
+            matches!(&refused, DepsError::Tampered { path, .. } if path == &parent),
             "{refused}"
         );
     }
