@@ -43,8 +43,10 @@ impl Offline {
 
 impl ModelClient for Offline {
     async fn chat(&self, role: Role, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        // The context is outside text, fenced for the model. An unfenced context reads as it is.
         let context: Value = request
             .last_user_text()
+            .map(|text| acan_llm::outside::unfence(text).unwrap_or(text))
             .and_then(|text| serde_json::from_str(text).ok())
             .ok_or(LlmError::NoScriptedReply { role })?;
         let reply = match model::ask_of(&request).ok_or(LlmError::NoScriptedReply { role })? {
@@ -143,6 +145,26 @@ mod tests {
             !explanation.consequence.is_empty(),
             "it says what goes wrong"
         );
+    }
+
+    #[tokio::test]
+    async fn a_split_is_answered_from_its_fenced_context() {
+        let context = json!({ "order": "Add a limit", "machine": "ui" });
+        let split = ChatRequest {
+            messages: vec![
+                Message::system(model::SPLIT_PROMPT),
+                Message::user(acan_llm::outside::fence(&context.to_string())),
+            ],
+            ..ChatRequest::default()
+        };
+        let reply = Offline::default()
+            .chat(Role::Foreman, split)
+            .await
+            .expect("the offline split reads its fenced context");
+        let text = reply.content.expect("the offline split has a reply");
+        let tasks: Value = serde_json::from_str(&text).expect("the offline split is JSON");
+        assert_eq!(tasks["tasks"][0]["scope"][0], "ui");
+        assert_eq!(tasks["tasks"][0]["title"], "Add a limit");
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@ mod config;
 mod error;
 mod key;
 mod openai;
+pub mod outside;
 mod plan;
 mod providers;
 mod role;

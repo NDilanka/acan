@@ -1139,7 +1139,9 @@ async fn a_scope_draft_that_never_checks_is_recorded_as_a_failure() {
         .clone();
     assert!(!sent.is_empty(), "the foreman was asked for a scope");
     for message in &sent {
-        let context: Value = serde_json::from_str(message).expect("the request is JSON");
+        let context: Value =
+            serde_json::from_str(acan_llm::outside::unfence(message).unwrap_or(message))
+                .expect("the request is JSON");
         assert_eq!(
             context["order"], "land the agent's file",
             "the scope request names the order's sentence: {message}"
@@ -1179,7 +1181,9 @@ async fn a_scope_draft_refused_for_a_side_effect_path_is_asked_again_with_the_re
         .expect("the asked lock is not poisoned")
         .clone();
     assert!(sent.len() >= 2, "the foreman was asked again: {sent:?}");
-    let retry: Value = serde_json::from_str(&sent[1]).expect("the request is JSON");
+    let retry: Value =
+        serde_json::from_str(acan_llm::outside::unfence(&sent[1]).unwrap_or(&sent[1]))
+            .expect("the request is JSON");
     assert!(
         retry["previous_error"]
             .as_str()
@@ -1217,7 +1221,9 @@ async fn a_scope_draft_naming_an_undefined_step_is_asked_again_with_the_refusal(
         .expect("the asked lock is not poisoned")
         .clone();
     assert!(sent.len() >= 2, "the foreman was asked again: {sent:?}");
-    let retry: Value = serde_json::from_str(&sent[1]).expect("the request is JSON");
+    let retry: Value =
+        serde_json::from_str(acan_llm::outside::unfence(&sent[1]).unwrap_or(&sent[1]))
+            .expect("the request is JSON");
     assert!(
         retry["previous_error"]
             .as_str()
