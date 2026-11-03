@@ -1598,7 +1598,8 @@ impl App {
             scene.bounds = joined(scene.bounds, base.bounds);
         }
         self.renderer.set_scene(&scene);
-        self.renderer.set_tints(&acan_render::theme::tints_of(self.renderer.look()));
+        self.renderer
+            .set_tints(&acan_render::theme::tints_of(self.renderer.look()));
     }
 
     /// A world point on screen, in CSS px.

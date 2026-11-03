@@ -341,7 +341,8 @@ pub fn palette(srgb_surface: bool) -> [[f32; 4]; PALETTE_LEN] {
 
 /// The palette of a look, as the surface wants it.
 pub fn palette_of(look: Look, srgb_surface: bool) -> [[f32; 4]; PALETTE_LEN] {
-    look.colours().map(|c| if srgb_surface { to_linear(c) } else { c })
+    look.colours()
+        .map(|c| if srgb_surface { to_linear(c) } else { c })
 }
 
 /// The tint table in sRGB. Slot 0 is the identity, each agent has a body slot at full hue, and the
@@ -523,12 +524,7 @@ mod tests {
         assert_eq!(flat_code(Surface::Ink(Ink::Hi)), SLOT_HI + 1);
     }
 
-    const LOOKS: [Look; 4] = [
-        Look::Paper,
-        Look::Dark,
-        Look::Blueprint,
-        Look::HighContrast,
-    ];
+    const LOOKS: [Look; 4] = [Look::Paper, Look::Dark, Look::Blueprint, Look::HighContrast];
 
     #[test]
     fn the_grid_stays_under_the_line_art() {
@@ -562,13 +558,23 @@ mod tests {
                 .into_iter()
                 .chain([SLOT_LINE]);
             // A blueprint's lines are blue-grey: the red channel, which the ink reads, is the paper's.
-            let limit = if look == Look::Blueprint { 48.0 / 255.0 } else { 6.0 / 255.0 };
+            let limit = if look == Look::Blueprint {
+                48.0 / 255.0
+            } else {
+                6.0 / 255.0
+            };
             for slot in slots {
                 let [r, g, b, _] = palette[slot as usize];
                 let spread = r.max(g).max(b) - r.min(g).min(b);
-                assert!(spread <= limit, "{look:?} slot {slot} is tinted by {spread}");
+                assert!(
+                    spread <= limit,
+                    "{look:?} slot {slot} is tinted by {spread}"
+                );
                 if look == Look::Blueprint {
-                    assert_eq!(r, PALETTE[slot as usize][0], "blueprint slot {slot} keeps its ink");
+                    assert_eq!(
+                        r, PALETTE[slot as usize][0],
+                        "blueprint slot {slot} keeps its ink"
+                    );
                 }
             }
         }
@@ -602,8 +608,17 @@ mod tests {
     fn every_look_keeps_the_agent_hues_and_the_clash_red() {
         for look in LOOKS {
             let palette = look.colours();
-            for slot in [SLOT_RED, SLOT_AGENT0, SLOT_AGENT0 + 1, SLOT_AGENT0 + 2, SLOT_AGENT0 + 3] {
-                assert_eq!(palette[slot as usize], PALETTE[slot as usize], "{look:?} slot {slot}");
+            for slot in [
+                SLOT_RED,
+                SLOT_AGENT0,
+                SLOT_AGENT0 + 1,
+                SLOT_AGENT0 + 2,
+                SLOT_AGENT0 + 3,
+            ] {
+                assert_eq!(
+                    palette[slot as usize], PALETTE[slot as usize],
+                    "{look:?} slot {slot}"
+                );
             }
         }
     }
