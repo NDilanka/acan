@@ -8,39 +8,48 @@ use crate::model::{Ink, Surface};
 pub const PALETTE_LEN: usize = 21;
 /// Tint slots. Slot 0 is the identity; instances pick a slot to tint what they draw. The slots from
 /// [`TINT_DIM0`] up are dimmed copies of the plain ones below it.
-pub const TINT_LEN: usize = 48;
+pub const TINT_LEN: usize = 40;
 /// The first dimmed tint slot: `TINT_DIM0 + slot` is the plain slot `slot` darkened by
 /// [`DIM_SHARE`]. A machine a tour step does not stage takes its dimmed slot.
-pub const TINT_DIM0: u32 = 24;
+pub const TINT_DIM0: u32 = 20;
 /// The share of its colour each dimmed slot keeps.
 pub const DIM_SHARE: f32 = 0.4;
 const _: () = assert!(
     TINT_DIM0 as usize * 2 == TINT_LEN,
     "every plain tint slot has a dimmed copy"
 );
-/// Agent hues, as `#rrggbb`. An agent's hue comes from its id, so it is the same on every reload.
+/// Agent hues, as `#rrggbb`. Only agents are saturated on the page. Each hue holds at least 4.5:1
+/// against white, so white text reads on it, and none is red, amber or green, which mean a clash,
+/// waiting and a pass.
 pub const AGENT_HUES: [u32; AGENT_SLOTS] =
-    [0x1f9e8f, 0x7a5cd6, 0x3d7fd1, 0xc0548c, 0x6a9a2e, 0x9b4d9b];
+    [0x0f7a6e, 0x6a45c8, 0x2763c4, 0x9c3c86, 0x0b6f94, 0x5d6b12];
 pub const AGENT_SLOTS: usize = 6;
-/// The share of an agent's hue a machine's footprint takes, mixed into white.
-pub const FOOTPRINT_MIX: f32 = 0.22;
-/// The share of an agent's hue a drone's shell takes, mixed into white. A shell reads as a pale
-/// tint of the hue, and its line art stays dark.
-pub const SHELL_MIX: f32 = 0.28;
-// The shell stays a pale tint, so its strokes and shading read over it.
-const _: () = assert!(SHELL_MIX < 0.3, "the shell stays a pale tint");
+/// The share of an agent's hue a drone's shell takes, mixed into white. The shell carries the hue
+/// at a glance, while the white glass and the dark line art still read over it.
+pub const SHELL_MIX: f32 = 0.65;
+/// The share of the clash red a machine with an open clash takes, mixed into white. It is the only
+/// colour a machine takes from the live work: a machine stays grey until it is abnormal.
+pub const CLASH_MIX: f32 = 0.14;
+/// The clash red, the diamond's colour.
+pub const CLASH_RED: u32 = 0xd0453a;
+/// The grey of a stale drone's shell, which has gone quiet while it holds a task.
+pub const STALE_GREY: u32 = 0xc4c4c8;
+/// The grey of a ghost: the outline a landed machine keeps for a returning reader.
+pub const GHOST_GREY: u32 = 0x8a8a8f;
 /// Tint slot of each agent's accent at full hue: `TINT_BODY0 + slot`. The drone's eye and lamp, its
 /// beam and its beacon draw with it.
 pub const TINT_BODY0: u32 = 1;
-/// Tint slot of each agent's footprint mix: `TINT_FOOTPRINT0 + slot`.
-pub const TINT_FOOTPRINT0: u32 = 7;
-/// Tint slot for a machine two or more agents touch. The page sets it per frame.
-pub const TINT_SHARED: u32 = 13;
 /// Tint slot of each agent's drone shell mix: `TINT_SHELL0 + slot`.
-pub const TINT_SHELL0: u32 = 14;
+pub const TINT_SHELL0: u32 = 7;
+/// Tint slot of a stale drone's shell.
+pub const TINT_STALE: u32 = 13;
+/// Tint slot of a ghost's outline.
+pub const TINT_GHOST: u32 = 14;
+/// Tint slot of a machine with an open clash.
+pub const TINT_CLASH: u32 = 15;
 /// Tint slots of the scope lanes, in [`SCOPE_TINTS`] order: a draft plot, a confirmed plot, a
 /// draft keep and a confirmed keep. `TINT_SCOPE0 + i` is the i-th.
-pub const TINT_SCOPE0: u32 = 20;
+pub const TINT_SCOPE0: u32 = 16;
 /// The scope tints as a hue and the share of it mixed into white. A plot is amber and a keep is
 /// brass; a draft takes less of its hue than a confirmed lane, so it reads as not yet in force.
 pub const SCOPE_TINTS: [(u32, f32); 4] = [
@@ -160,7 +169,7 @@ const PALETTE: [[f32; 4]; PALETTE_LEN] = [
     rgb(0xb4b4b8, 1.0),  // lo
     rgb(0xd4d4d6, 1.0),  // faint
     rgb(0x3a3a3e, 1.0),  // dot
-    rgb(0xd0453a, 1.0),  // red: the clash pin
+    rgb(CLASH_RED, 1.0), // red: the clash pin
     rgb(0x30a46c, 1.0),  // green
     rgb(0x3e63dd, 1.0),  // blue
     rgb(AGENT_HUES[0], 1.0),
@@ -215,15 +224,17 @@ pub fn palette(srgb_surface: bool) -> [[f32; 4]; PALETTE_LEN] {
 }
 
 /// The tint table in sRGB. Slot 0 is the identity, each agent has a body slot at full hue and a
-/// footprint slot mixed into white, and the shared slot starts as the identity.
+/// shell slot mixed into white, and the stale, ghost, clash and scope slots follow.
 pub fn tints() -> [[f32; 4]; TINT_LEN] {
     let mut table = [[1.0; 4]; TINT_LEN];
     for slot in 0..AGENT_SLOTS {
         let hue = agent_colour(slot);
         table[TINT_BODY0 as usize + slot] = hue;
-        table[TINT_FOOTPRINT0 as usize + slot] = footprint_mix(hue);
         table[TINT_SHELL0 as usize + slot] = shell_mix(hue);
     }
+    table[TINT_STALE as usize] = rgb(STALE_GREY, 1.0);
+    table[TINT_GHOST as usize] = rgb(GHOST_GREY, 1.0);
+    table[TINT_CLASH as usize] = mixed_into_white(rgb(CLASH_RED, 1.0), CLASH_MIX);
     for (i, (hue, share)) in SCOPE_TINTS.into_iter().enumerate() {
         table[TINT_SCOPE0 as usize + i] = mixed_into_white(rgb(hue, 1.0), share);
     }
@@ -248,11 +259,6 @@ pub fn add_dim_slots(table: &mut [[f32; 4]; TINT_LEN]) {
 /// An agent's hue in sRGB, for the slot it holds.
 pub fn agent_colour(slot: usize) -> [f32; 4] {
     rgb(AGENT_HUES[slot], 1.0)
-}
-
-/// A hue mixed into white by [`FOOTPRINT_MIX`], in sRGB.
-pub fn footprint_mix(hue: [f32; 4]) -> [f32; 4] {
-    mixed_into_white(hue, FOOTPRINT_MIX)
 }
 
 /// A hue mixed into white by [`SHELL_MIX`], in sRGB.
@@ -334,12 +340,13 @@ const _: () = assert!(
     "agents do not run into the belt slots"
 );
 const _: () = assert!(
-    TINT_BODY0 as usize + AGENT_SLOTS <= TINT_FOOTPRINT0 as usize
-        && TINT_FOOTPRINT0 as usize + AGENT_SLOTS <= TINT_SHARED as usize
-        && TINT_SHARED < TINT_SHELL0
-        && TINT_SHELL0 as usize + AGENT_SLOTS <= TINT_SCOPE0 as usize
+    TINT_BODY0 as usize + AGENT_SLOTS <= TINT_SHELL0 as usize
+        && TINT_SHELL0 as usize + AGENT_SLOTS <= TINT_STALE as usize
+        && TINT_STALE < TINT_GHOST
+        && TINT_GHOST < TINT_CLASH
+        && TINT_CLASH < TINT_SCOPE0
         && TINT_SCOPE0 as usize + SCOPE_TINTS.len() <= TINT_DIM0 as usize,
-    "body, footprint, shared, shell and scope tints do not overlap"
+    "body, shell, stale, ghost, clash and scope tints do not overlap"
 );
 const _: () = assert!(GRID_MINOR_ALPHA < GRID_MAJOR_ALPHA);
 const _: () = assert!(PAPER_TOP > 0.0, "a top never matches the page");
@@ -439,8 +446,66 @@ mod tests {
         assert!(ink(PALETTE[SLOT_BELT_EDGE as usize]) > belt);
     }
 
+    /// The WCAG contrast ratio of two sRGB colours.
+    fn contrast(a: [f32; 4], b: [f32; 4]) -> f32 {
+        let luminance = |c: [f32; 4]| {
+            let l = to_linear(c);
+            0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2]
+        };
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
     #[test]
-    fn a_shell_is_a_light_tint_of_its_agents_hue() {
+    fn every_agent_hue_holds_white_text() {
+        let white = rgb(0xffffff, 1.0);
+        for slot in 0..AGENT_SLOTS {
+            let ratio = contrast(agent_colour(slot), white);
+            assert!(ratio >= 4.5, "slot {slot} is {ratio}:1 against white");
+        }
+    }
+
+    #[test]
+    fn no_agent_hue_reads_as_the_clash_waiting_or_pass_colour() {
+        let hue_of = |c: [f32; 4]| {
+            let (max, min) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+            let d = max - min;
+            let h = if max == c[0] {
+                ((c[1] - c[2]) / d).rem_euclid(6.0)
+            } else if max == c[1] {
+                (c[2] - c[0]) / d + 2.0
+            } else {
+                (c[0] - c[1]) / d + 4.0
+            };
+            60.0 * h
+        };
+        for slot in 0..AGENT_SLOTS {
+            let h = hue_of(agent_colour(slot));
+            for (name, signal) in [("red", 0.0_f32), ("amber", 40.0), ("green", 120.0)] {
+                let apart = (h - signal).abs().min(360.0 - (h - signal).abs());
+                assert!(apart >= 20.0, "slot {slot} at {h} reads as {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_machine_takes_only_a_faint_clash_red_and_the_marks_greys_are_neutral() {
+        let table = tints();
+        let clash = table[TINT_CLASH as usize];
+        assert!(
+            clash[0] > clash[1] && clash[0] > clash[2],
+            "the clash tint is red"
+        );
+        assert!(ink(clash) < 0.05 && clash[1] > 0.85, "and faint: {clash:?}");
+        for slot in [TINT_STALE, TINT_GHOST] {
+            let [r, g, b, _] = table[slot as usize];
+            let spread = r.max(g).max(b) - r.min(g).min(b);
+            assert!(spread <= 6.0 / 255.0, "slot {slot} is grey");
+        }
+    }
+
+    #[test]
+    fn a_shell_is_its_agents_hue_mixed_into_white() {
         for slot in 0..AGENT_SLOTS {
             let hue = agent_colour(slot);
             let shell = tints()[TINT_SHELL0 as usize + slot];

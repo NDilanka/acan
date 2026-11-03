@@ -2,7 +2,8 @@
 //!
 //! [`Marks::build`] says where each mark stands. An agent's drone hovers over its machine, with its
 //! shadow on the plinth top below its centre. The amber ring round an agent that waits on the user,
-//! the clash pin on its stalk, the footprints the agents tint, and the flags the page labels. [`card`]
+//! the clash pin on its stalk, the faint red of a machine with an open clash, and the flags the page
+//! labels. [`card`]
 //! builds the clash card from the view and the world, so its rows follow the origin. [`Motion`] only
 //! eases marks between the positions the view gives them, and turns each drone toward its machine.
 
@@ -14,8 +15,7 @@ use acan_iso::{
     BEACON_RADIUS, BODY_RADIUS, BOT_HEIGHT, EYE_DISTANCE, PIN_HEIGHT, PLINTH_TOP, STALK_HEIGHT,
 };
 use acan_render::theme::{
-    self, AGENT_SLOTS, TINT_BODY0, TINT_DIM0, TINT_FOOTPRINT0, TINT_LEN, TINT_SCOPE0, TINT_SHARED,
-    TINT_SHELL0,
+    AGENT_SLOTS, TINT_BODY0, TINT_CLASH, TINT_DIM0, TINT_SCOPE0, TINT_SHELL0,
 };
 use acan_render::{Beam, Instance};
 use serde::Serialize;
@@ -134,10 +134,10 @@ impl AgentSlots {
 }
 
 /// The hue of a palette slot, as `#rrggbb`. Every mark that shows an agent's hue reads it here,
-/// and the renderer's tint for the body and footprint come from the same palette.
+/// and the renderer's tints for the drone come from the same palette.
 #[must_use]
 pub fn hue_css(slot: usize) -> String {
-    let [r, g, b, _] = theme::agent_colour(slot).map(|c| (c * 255.0).round() as u32);
+    let [r, g, b, _] = acan_render::theme::agent_colour(slot).map(|c| (c * 255.0).round() as u32);
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
@@ -316,12 +316,11 @@ pub struct Marks {
     pub bodies: Vec<Body>,
     pub pins: Vec<Pin>,
     pub flags: Vec<Flag>,
-    /// For each plan machine, the hue slots of the agents whose footprints cover it, sorted.
-    pub footprints: Vec<Vec<usize>>,
-    /// The plan machines that live tasks' declared files sit on, each with the tint of the agent
-    /// holding the task. Sorted and without repeats.
-    pub belt_hues: Vec<(usize, u8)>,
-    /// For each plan machine, the scope tint its footprint takes when no agent tints it.
+    /// For each plan machine, whether it is abnormal: an unsettled clash sits on it. Only an
+    /// abnormal machine takes a colour from the live work. A working, waiting or stale agent
+    /// leaves its machine grey, and the drone carries the state.
+    pub abnormal: Vec<bool>,
+    /// For each plan machine, the scope tint its footprint takes when it is not abnormal.
     pub scope_tints: Vec<Option<ScopeTint>>,
     /// Scope machine names the plan does not have, so the page can say they are not drawn.
     pub unplaced: Vec<String>,
@@ -334,14 +333,9 @@ impl Marks {
     pub fn build(view: &View, plan: &Plan, stands: &[Stand], slots: &AgentSlots) -> Self {
         let waiting = waiting_agents(view);
         let (bodies, pins) = place(view, plan, stands, slots, &waiting);
-        let mut footprints = vec![Vec::new(); plan.machines.len()];
-        for body in &bodies {
-            let hues: &mut Vec<usize> = &mut footprints[body.machine];
-            if !hues.contains(&body.slot) {
-                hues.push(body.slot);
-                hues.sort_unstable();
-            }
-        }
+        let abnormal = (0..plan.machines.len())
+            .map(|i| view.machines.get(i).is_some_and(|machine| machine.abnormal))
+            .collect();
         let scope = slice_layout(&view.lanes, plan);
         let mut flags = flags(view, plan, stands, &bodies, &pins);
         flags.extend(
@@ -354,52 +348,25 @@ impl Marks {
             bodies,
             pins,
             flags,
-            footprints,
-            belt_hues: live_hues(view, plan, slots),
+            abnormal,
             scope_tints: scope.tints,
             unplaced: scope.unplaced,
         }
     }
 
-    /// The tint slot of a plan machine's footprint: one agent's mix, the shared mix, or with no
-    /// agent on it, its scope tint or none. Live work outranks the scope underneath it.
+    /// The tint slot of a plan machine's footprint: the faint clash red when it is abnormal,
+    /// otherwise its scope tint or none. An open clash outranks the scope underneath it.
     #[must_use]
     pub fn footprint_tint(&self, machine: usize) -> u8 {
-        let tint = match self.footprints.get(machine).map(Vec::as_slice) {
-            None | Some([]) => match self.scope_tints.get(machine).copied().flatten() {
+        let tint = if self.abnormal.get(machine).copied().unwrap_or(false) {
+            TINT_CLASH
+        } else {
+            match self.scope_tints.get(machine).copied().flatten() {
                 Some(scope) => TINT_SCOPE0 + scope as u32,
                 None => 0,
-            },
-            Some([slot]) => TINT_FOOTPRINT0 + *slot as u32,
-            Some(_) => TINT_SHARED,
+            }
         };
         u8::try_from(tint).expect("tint slots fit in a byte")
-    }
-
-    /// The renderer's tint table: the defaults, with the shared slot holding the mix of every
-    /// hue that shares a machine.
-    #[must_use]
-    pub fn tint_table(&self) -> [[f32; 4]; TINT_LEN] {
-        let mut table = theme::tints();
-        let shared: BTreeSet<usize> = self
-            .footprints
-            .iter()
-            .filter(|slots| slots.len() > 1)
-            .flatten()
-            .copied()
-            .collect();
-        if !shared.is_empty() {
-            let count = shared.len() as f32;
-            let mut mix = [0.0_f32; 4];
-            for &slot in &shared {
-                for (total, channel) in mix.iter_mut().zip(theme::agent_colour(slot)) {
-                    *total += channel / count;
-                }
-            }
-            table[TINT_SHARED as usize] = theme::footprint_mix(mix);
-        }
-        theme::add_dim_slots(&mut table);
-        table
     }
 }
 
@@ -487,9 +454,10 @@ mod stage_tests {
 
     #[test]
     fn a_staged_machine_keeps_its_slot_and_any_other_takes_the_dimmed_one() {
+        let dim0 = u8::try_from(TINT_DIM0).expect("fits");
         assert_eq!(emphasised(7, true), 7);
-        assert_eq!(emphasised(7, false), 7 + 24);
-        assert_eq!(emphasised(0, false), 24);
+        assert_eq!(emphasised(7, false), 7 + dim0);
+        assert_eq!(emphasised(0, false), dim0);
     }
 
     #[test]
@@ -510,12 +478,14 @@ mod stage_tests {
     #[test]
     fn a_step_dims_the_machines_it_does_not_stage_and_clearing_restores_them() {
         let marks = Marks {
-            footprints: vec![vec![2], vec![]],
+            abnormal: vec![true, false],
             ..Marks::default()
         };
         let staged = [true, false];
-        assert_eq!(machine_tint(&marks, 0, Some(&staged)), 9);
-        assert_eq!(machine_tint(&marks, 1, Some(&staged)), 24);
+        let clash = u8::try_from(TINT_CLASH).expect("fits");
+        let dim0 = u8::try_from(TINT_DIM0).expect("fits");
+        assert_eq!(machine_tint(&marks, 0, Some(&staged)), clash);
+        assert_eq!(machine_tint(&marks, 1, Some(&staged)), dim0);
         // With no step staged, each machine keeps the slot its footprint gives it.
         assert_eq!(machine_tint(&marks, 0, None), marks.footprint_tint(0));
         assert_eq!(machine_tint(&marks, 1, None), marks.footprint_tint(1));
@@ -523,13 +493,13 @@ mod stage_tests {
 
     #[test]
     fn each_dimmed_slot_is_its_plain_colour_at_the_dim_share() {
-        let table = Marks::default().tint_table();
+        let table = acan_render::theme::tints();
         for slot in 0..TINT_DIM0 as usize {
             let plain = table[slot];
             let dimmed = table[TINT_DIM0 as usize + slot];
             for channel in 0..3 {
                 assert!(
-                    (dimmed[channel] - plain[channel] * theme::DIM_SHARE).abs() < 1e-6,
+                    (dimmed[channel] - plain[channel] * acan_render::theme::DIM_SHARE).abs() < 1e-6,
                     "slot {slot} channel {channel}"
                 );
             }
@@ -1532,26 +1502,6 @@ fn plot_flag(slice: &Slice, plan: &Plan, stands: &[Stand]) -> Flag {
     }
 }
 
-/// The plan machines that live tasks' declared files sit on, each with the tint of the agent that
-/// holds the task. A task that has no agent yet, or has landed, names no machine.
-fn live_hues(view: &View, plan: &Plan, slots: &AgentSlots) -> Vec<(usize, u8)> {
-    let mut hues = Vec::new();
-    for task in &view.tasks {
-        let Some(agent) = &task.agent else {
-            continue;
-        };
-        let tint = body_tint(slots.slot(&agent.to_string()));
-        for path in &task.paths {
-            if let Some(machine) = plan.machine_of_path(path) {
-                hues.push((machine, tint));
-            }
-        }
-    }
-    hues.sort_unstable();
-    hues.dedup();
-    hues
-}
-
 /// One landed dot per machine that has a landed task. Its text is `landed` and the change word of
 /// the last task that landed there. The page keeps the word for [`LANDED_HOLD_MS`], then the dot
 /// goes quiet with no text. Every dot stands at the same corner of its machine's plinth.
@@ -1748,9 +1698,9 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_footprint_outranks_the_scope_tint_underneath() {
+    fn an_open_clash_outranks_the_scope_tint_underneath() {
         let marks = Marks {
-            footprints: vec![Vec::new(), vec![0], Vec::new()],
+            abnormal: vec![false, true, false],
             scope_tints: vec![Some(ScopeTint::Keep), Some(ScopeTint::Plot), None],
             ..Marks::default()
         };
@@ -1758,7 +1708,7 @@ mod tests {
             u32::from(marks.footprint_tint(0)),
             TINT_SCOPE0 + ScopeTint::Keep as u32
         );
-        assert_eq!(u32::from(marks.footprint_tint(1)), TINT_FOOTPRINT0);
+        assert_eq!(u32::from(marks.footprint_tint(1)), TINT_CLASH);
         assert_eq!(marks.footprint_tint(2), 0);
     }
 
@@ -1981,8 +1931,8 @@ mod tests {
         let ids: Vec<String> = view.agents.iter().map(|a| a.id.to_string()).collect();
         assert_eq!(slots.slot(&ids[0]), 0, "the first agent takes slot 0");
         assert_eq!(slots.slot(&ids[1]), 1, "the second agent takes slot 1");
-        assert_eq!(hue_css(0), "#1f9e8f", "teal");
-        assert_eq!(hue_css(1), "#7a5cd6", "violet");
+        assert_eq!(hue_css(0), "#0f7a6e", "teal");
+        assert_eq!(hue_css(1), "#6a45c8", "violet");
         let before = slots.clone();
         slots.assign(&view);
         assert_eq!(slots, before, "a slot stays with its agent");
@@ -2083,9 +2033,28 @@ mod tests {
             "both agents wait on the open clash"
         );
         assert_eq!(
-            marks.footprint_tint(api),
-            u8::try_from(TINT_SHARED).expect("fits")
+            u32::from(marks.footprint_tint(api)),
+            TINT_CLASH,
+            "the clashed machine takes the faint red"
         );
+        let ui = machine(&plan, "src/ui");
+        assert_eq!(marks.footprint_tint(ui), 0, "a quiet machine stays grey");
+    }
+
+    #[test]
+    fn a_machine_with_working_agents_and_no_clash_stays_grey() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let mut view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        view.clashes.clear();
+        for machine in &mut view.machines {
+            machine.abnormal = false;
+        }
+        let marks = Marks::build(&view, &plan, &stands(&plan), &slots_for(&view));
+        assert!(!marks.bodies.is_empty(), "the agents still have drones");
+        for body in &marks.bodies {
+            assert_eq!(marks.footprint_tint(body.machine), 0);
+        }
     }
 
     #[test]
@@ -2279,31 +2248,6 @@ mod tests {
                 [x + LANDED_INSET, y + LANDED_INSET, PLINTH_TOP],
                 "the dot sits on the plinth top at the machine's corner"
             );
-        }
-    }
-
-    #[test]
-    fn a_live_task_hues_the_belts_of_the_machines_its_declared_files_sit_on() {
-        let plan = plan();
-        let (_origin, log, _index) = scripted();
-        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
-        let slots = slots_for(&view);
-        let marks = Marks::build(&view, &plan, &stands(&plan), &slots);
-        assert!(!marks.belt_hues.is_empty(), "the claimed tasks hue a belt");
-        for task in &view.tasks {
-            let Some(agent) = &task.agent else {
-                continue;
-            };
-            let tint = body_tint(slots.slot(&agent.to_string()));
-            for path in &task.paths {
-                let machine = plan
-                    .machine_of_path(path)
-                    .expect("a declared file sits on a machine");
-                assert!(
-                    marks.belt_hues.contains(&(machine, tint)),
-                    "{path} hues its machine in its agent's tint"
-                );
-            }
         }
     }
 

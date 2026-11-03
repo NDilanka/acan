@@ -124,8 +124,6 @@ struct Loaded {
     rest: Vec<bool>,
     /// The machines and belts as the layout places them, before any mark is added.
     base: Scene,
-    /// The belts that draw, with the instance index of the machines they join.
-    belts: Vec<scene::BeltLine>,
     /// For each plan machine, its instance in `base`.
     plan_instance: Vec<usize>,
     /// For each plan machine, its model's top and the free spots on its plinth top.
@@ -1101,7 +1099,6 @@ impl App {
         self.ride = None;
         self.fit_after_leave = false;
         self.dirty = true;
-        let belts = scene::belt_lines(&laid.belts);
         let drone_reach = stand::reach(&self.models[usize::from(scene::mark_kinds().body)]);
         let framing = scene::fit_boxes(&laid, &self.models, &self.kind_spots, drone_reach);
         let machine_bounds = scene::machine_model_boxes(&laid, &self.models);
@@ -1125,7 +1122,6 @@ impl App {
             framing,
             occluders,
             base: scene,
-            belts,
             plan_instance,
             stands,
         });
@@ -1155,7 +1151,7 @@ impl App {
     }
 
     /// Uploads the plant with the marks: each machine's footprint tint, then the body, ring and
-    /// pin instances as the motion has them now. The tint table follows the footprints.
+    /// pin instances as the motion has them now.
     fn sync_scene(&mut self) {
         let Some(loaded) = &self.plant else {
             return;
@@ -1166,13 +1162,6 @@ impl App {
             scene.instances[instance].tint =
                 marks::machine_tint(&self.marks, plan_index, staged.as_deref());
         }
-        let hues: Vec<(usize, u8)> = self
-            .marks
-            .belt_hues
-            .iter()
-            .map(|&(plan_index, tint)| (loaded.plan_instance[plan_index], tint))
-            .collect();
-        scene.hue_lines = scene::hue_lines(&loaded.belts, &hues);
         let riding = self.riding_agent();
         scene.beams = marks::beams(&self.motion, &self.marks, self.dpr, riding);
         scene.instances.extend(marks::mark_instances(
@@ -1183,7 +1172,7 @@ impl App {
             riding,
         ));
         self.renderer.set_scene(&scene);
-        self.renderer.set_tints(&self.marks.tint_table());
+        self.renderer.set_tints(&acan_render::theme::tints());
     }
 
     /// A world point on screen, in CSS px.
