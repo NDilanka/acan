@@ -1360,6 +1360,28 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_refused_run_creates_no_diagnostics_directory() {
+        let repo = clone_with(&contract_files());
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let diagnostics = dir.path().join("diagnostics");
+        let error = run_with(
+            &args(repo.path(), "main", "main"),
+            &missing_docker(),
+            Some(&diagnostics),
+        )
+        .await
+        .expect_err("a run without docker is refused");
+        assert!(
+            matches!(error, ShadowError::Docker(_)),
+            "no docker: {error}"
+        );
+        assert!(
+            !diagnostics.exists(),
+            "a refused run keeps no diagnostics directory"
+        );
+    }
+
     /// Every path under `dir` with its length, sorted, so a change to a directory shows.
     fn listing(dir: &Path) -> Vec<(PathBuf, u64)> {
         let mut found = Vec::new();
@@ -1395,7 +1417,7 @@ mod tests {
         set_writable(&git_dir, false);
         let probe_refused = fs::write(git_dir.join("probe"), "").is_err();
         let checked =
-            check_contract_with(&check_args(repo.path(), "main"), &missing_docker(), None).await;
+            check_contract_with(&check_args(repo.path(), "main"), &missing_docker()).await;
         set_writable(&git_dir, true);
 
         assert!(
@@ -1456,7 +1478,7 @@ mod tests {
         let origin = clone_with(&contract_files());
         let (_dir, partial, marker) = promisor_clone_of(origin.path());
 
-        let error = check_contract_with(&check_args(&partial, "main"), &missing_docker(), None)
+        let error = check_contract_with(&check_args(&partial, "main"), &missing_docker())
             .await
             .expect_err("the contract's contents are missing and are not fetched");
 
