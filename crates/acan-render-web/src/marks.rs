@@ -1,7 +1,7 @@
 //! The marks drawn on the plant, read from the origin's view.
 //!
-//! [`Marks::build`] says where each mark stands. An agent's drone hovers over its machine, with its
-//! shadow on the plinth top below its centre. The amber ring round an agent that waits on the user,
+//! [`Marks::build`] says where each mark stands. An agent's drone hovers beside its machine, with
+//! its shadow on the surface straight under its centre. The amber ring round an agent that waits on the user,
 //! the clash pin on its stalk, the faint red of a machine with an open clash, and the flags the page
 //! labels. [`card`]
 //! builds the clash card from the view and the world, so its rows follow the origin. [`Motion`] only
@@ -31,21 +31,32 @@ use crate::tour::Spot;
 /// under it, so its shadow lies here.
 pub const GROUND_Z: f32 = 0.0;
 
-/// The height of a drone's centre above its machine's top when it hovers beside the machine,
-/// in world units. The drone floats level with the machine's top rather than high above it. The
-/// spot is clear of the machine in plan, so the body's underside may sit below the top.
-pub const HOVER_LIFT: f32 = BODY_RADIUS * 0.5;
+/// The gap between a seated drone's underside and the surface straight under it, in world units:
+/// a quarter of its body radius, so its shadow touches it.
+pub const HOVER_GAP: f32 = 0.25 * BODY_RADIUS;
 
-/// The clearance between a drone's body and its machine's top when the drone hovers over the
-/// machine's centre, in world units. That only happens when every spot beside the machine is
-/// taken, and there the body must not touch the machine's parts.
-pub const HOVER_GAP: f32 = 6.0;
-
-/// The height of a drone's centre over a machine whose top is at `top`, in world units: beside
-/// the machine, level with its top.
+/// The height of a drone's centre over the surface straight under it, in world units: its body
+/// clears that surface by [`HOVER_GAP`].
 #[must_use]
-pub fn hover_height(top: f32) -> f32 {
-    top + HOVER_LIFT
+pub fn hover_height(surface: f32) -> f32 {
+    surface + BODY_RADIUS + HOVER_GAP
+}
+
+/// The height of the first surface straight under `at` in plan: the top of the machine whose
+/// footprint holds that point, the highest where several do, or else the ground. A footprint
+/// stands to its stand's top, so a drone over a machine finds that top below it, and a drone
+/// beside every machine finds the ground.
+#[must_use]
+pub fn surface_below(at: [f32; 2], plan: &Plan, stands: &[Stand]) -> f32 {
+    plan.machines
+        .iter()
+        .enumerate()
+        .filter(|(_, machine)| {
+            (machine.min[0]..=machine.min[0] + machine.size[0]).contains(&at[0])
+                && (machine.min[1]..=machine.min[1] + machine.size[1]).contains(&at[1])
+        })
+        .map(|(i, _)| stands.get(i).map_or(PLINTH_TOP, |stand| stand.top))
+        .fold(GROUND_Z, f32::max)
 }
 
 /// The room above a drone's crown that its flag takes, in world units. The plant's fit keeps it
@@ -221,19 +232,17 @@ pub fn eye_tint(state: DroneState, slot: usize) -> u8 {
     u8::try_from(tint).expect("tint slots fit in a byte")
 }
 
-/// A drone over a machine. It hovers on a spot beside the machine, its centre [`HOVER_LIFT`]
-/// above the machine's top, so it floats level with the top. Its shadow lies on the ground under
-/// its centre.
+/// A drone over a machine. It hovers on a spot beside the machine, [`HOVER_GAP`] above the
+/// surface straight under it, so its shadow touches it. Its shadow lies on that surface under its
+/// centre.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Body {
     pub agent: String,
     pub slot: usize,
     /// The plan index of the machine it works on.
     pub machine: usize,
-    /// Where the drone's centre hovers, in world units: over its spot beside the machine,
-    /// [`HOVER_LIFT`] above the machine's top. A drone seated at the machine's centre, when every
-    /// spot beside it is taken, hovers [`HOVER_GAP`] above the top instead, so it never touches
-    /// the machine's parts.
+    /// Where the drone's centre hovers, in world units: [`hover_height`] over the surface straight
+    /// under its seat.
     pub at: [f32; 3],
     /// The height of the surface straight under the drone, in world units: the ground beside its
     /// machine, or the machine's top when the drone hovers over it. Its shadow lies there.
@@ -2186,13 +2195,10 @@ fn place(
         let seats = seated.entry(machine).or_default();
         let spot = seat(spots, centre, seats);
         seats.push(spot);
-        // A drone beside its machine floats level with its top. The centre seat is over the
-        // machine, so a drone seated there keeps its body clear of the top instead.
-        let (z, ground) = if spot == centre {
-            (top + HOVER_GAP + BODY_RADIUS, top)
-        } else {
-            (hover_height(top), GROUND_Z)
-        };
+        // The drone hovers a gap above the first surface straight under its seat: the ground
+        // beside its machine, or the machine's top when the seat lies over it.
+        let ground = surface_below(spot, plan, stands);
+        let z = hover_height(ground);
         let id = agent.id.to_string();
         let state = DroneState::of(
             agent.activity,
@@ -3041,20 +3047,37 @@ mod tests {
         };
         let gap = distance([first.at[0], first.at[1]], [second.at[0], second.at[1]]);
         assert!(gap >= SEAT_STEP, "the bodies are a seat apart, not {gap}");
-        let top = stands(&plan)[api].top;
         for body in [first, second] {
             assert_eq!(
-                body.at[2],
-                hover_height(top),
-                "a drone hovers at its height"
+                body.ground,
+                surface_below([body.at[0], body.at[1]], &plan, &stands(&plan)),
+                "a drone's shadow lies on the surface straight under it"
             );
             assert_eq!(
-                body.at[2],
-                top + HOVER_LIFT,
-                "a drone beside its machine floats level with its top"
+                body.at[2] - BODY_RADIUS - body.ground,
+                HOVER_GAP,
+                "a drone's underside clears the surface under it by a quarter of its radius"
             );
         }
         assert_ne!(first.slot, second.slot, "the two agents have distinct hues");
+    }
+
+    #[test]
+    fn a_drone_sees_its_machine_top_when_over_it_and_the_ground_beside_every_machine() {
+        let plan = plan();
+        let stands = stands(&plan);
+        let api = machine(&plan, "src/api");
+        let centre = plan.machines[api].center();
+        assert_eq!(
+            surface_below(centre, &plan, &stands),
+            stands[api].top,
+            "over the machine, its top"
+        );
+        assert_eq!(
+            surface_below([-1.0e6, -1.0e6], &plan, &stands),
+            GROUND_Z,
+            "far from every machine, the ground"
+        );
     }
 
     #[test]
@@ -4087,7 +4110,7 @@ mod tests {
         let low = |x: f32, top: f32| {
             drone(
                 "a",
-                [x, 0.0, top + HOVER_LIFT],
+                [x, 0.0, hover_height(top)],
                 [x, 30.0, top + BEACON_RADIUS],
                 "idle",
             )
