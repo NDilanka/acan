@@ -1,14 +1,15 @@
 //! The offline model: built-in replies so a server with no routing file still runs its loop.
 //!
 //! Each job kind gets the plainest reply that moves it forward: a split into one task on the
-//! order's machine, and a generic clash explanation with no suggestion. Scope, probe and review
-//! requests get no reply at all. Token counts
-//! are estimates, so the usage panel shows the calls a live provider would have taken. Every reply
-//! here is recorded with provider `offline`, and the replies serve tests and the server without a
-//! routing file.
+//! order's machine, a generic clash explanation with no suggestion, and a built-in scope draft on
+//! the order's machine. The scope draft is labelled built in, and a human revises it before it is
+//! confirmed. Probe and review requests get no reply at all. Token counts are estimates, so the
+//! usage panel shows the calls a live provider would have taken. Every reply here is recorded with
+//! provider `offline`, and the replies serve tests and the server without a routing file.
 
 use std::time::Duration;
 
+use acan_intent::{RouteEntry, RouteStatus};
 use acan_llm::{
     CallRecord, ChatRequest, ChatResponse, LlmError, ModelClient, Role, Usage, UsageLedger,
 };
@@ -52,9 +53,10 @@ impl ModelClient for Offline {
         let reply = match model::ask_of(&request).ok_or(LlmError::NoScriptedReply { role })? {
             Ask::Split => split(&context),
             Ask::Explain => explain(),
-            // A scope or probe draft gains no authority from a built-in reply, and a review is
-            // retired, so none is given.
-            Ask::Scope | Ask::Probe | Ask::Review => {
+            Ask::Scope => scope(&context).ok_or(LlmError::NoScriptedReply { role })?,
+            // A probe draft gains no authority from a built-in reply, and a review is retired, so
+            // none is given.
+            Ask::Probe | Ask::Review => {
                 return Err(LlmError::NoScriptedReply { role });
             }
         }
@@ -95,6 +97,81 @@ fn split(context: &Value) -> Value {
     })
 }
 
+/// The built-in scope draft for the order's machine. It has one may-change item on a covered route
+/// that touches the machine, or else the first covered route. Its step is the first probe request
+/// the corpus sends on that route, so a probe reaches the item. Its acceptance is a count that one
+/// request on the route answers 200, so it needs no witness. It is not a broad grant, and it has
+/// no open question. The text says it is built in, and the same checks as a live draft still
+/// apply to it. None when the request names no machine, the table covers no route, or no probe
+/// sends the route.
+fn scope(context: &Value) -> Option<Value> {
+    let machine = context["machine"].as_str()?;
+    let routes: Vec<RouteEntry> = serde_json::from_value(context["routes"].clone()).ok()?;
+    let covered: Vec<&RouteEntry> = routes
+        .iter()
+        .filter(|route| matches!(route.status, RouteStatus::Covered {}))
+        .collect();
+    let route = covered
+        .iter()
+        .copied()
+        .find(|route| {
+            route
+                .route_path
+                .machines
+                .as_slice()
+                .iter()
+                .any(|found| found.as_str() == machine)
+        })
+        .or_else(|| covered.first().copied())?;
+    let method = serde_json::to_value(route.method).ok()?;
+    let template = serde_json::to_value(&route.route_template).ok()?;
+    let requests = context["requests"].as_array()?;
+    let step = requests
+        .iter()
+        .find(|request| request["method"] == method && request["route_template"] == template)
+        .and_then(|request| request["step_id"].as_str())?;
+    Some(json!({
+        "may": [{
+            "id": "i-built-in",
+            "selector": {
+                "surface": "http",
+                "method": method,
+                "route_template": template,
+                "step_context": { "kind": "step", "step_id": step },
+                "principal": { "kind": "anonymous" },
+                "channel": "status"
+            },
+            "change": "modify",
+            "acceptance": [{
+                "obligation_id": "obl-built-in",
+                "predicate": {
+                    "predicate": "count",
+                    "filter": {
+                        "run": "candidate",
+                        "method": method,
+                        "route_template": template,
+                        "status_in": [200],
+                        "principal": { "kind": "any" }
+                    },
+                    "op": "ge",
+                    "value": 1
+                },
+                "text": "Built-in offline draft: at least one request on this route answers 200."
+            }],
+            "provenance": "model",
+            "example": {
+                "kind": "target",
+                "step_id": step,
+                "path": "status",
+                "after": { "state": "present", "value": 200 }
+            },
+            "machine_ids": [machine]
+        }],
+        "must_keep": [],
+        "open": []
+    }))
+}
+
 fn explain() -> Value {
     json!({
         "consequence": "Both tasks change the same code, so whichever lands second would build on code that has moved under it.",
@@ -105,6 +182,10 @@ fn explain() -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
+    use acan_core::MachineKey;
+    use acan_intent::{ModelRef, ProbeCorpus, RunLimits, ScopeBody, StepContext};
     use acan_llm::Message;
 
     use super::*;
@@ -165,6 +246,84 @@ mod tests {
         let tasks: Value = serde_json::from_str(&text).expect("the offline split is JSON");
         assert_eq!(tasks["tasks"][0]["scope"][0], "ui");
         assert_eq!(tasks["tasks"][0]["title"], "Add a limit");
+    }
+
+    #[tokio::test]
+    async fn a_scope_request_gets_a_built_in_draft_that_the_checks_accept() {
+        let corpus: ProbeCorpus =
+            serde_json::from_str(include_str!("../../acan-intent/fixtures/probe-corpus.json"))
+                .expect("the probe corpus fixture decodes");
+        let machines: Vec<MachineKey> = ["api", "ui"]
+            .into_iter()
+            .map(|name| MachineKey::from_str(name).expect("a valid machine name"))
+            .collect();
+        let bounds = model::DraftBounds {
+            machines: &machines,
+            routes: &corpus.routes,
+            fixtures: &corpus.fixtures,
+            probes: &corpus.probes,
+            limits: RunLimits {
+                max_requests: 5,
+                max_output_bytes: 65_536,
+                sequence_timeout_ms: 30_000,
+            },
+        };
+        let reply = Offline::default()
+            .chat(
+                Role::Foreman,
+                model::scope_request_on("Add a limit", "ui", &bounds, None),
+            )
+            .await
+            .expect("the built-in scope answers the scope request");
+        let text = reply.content.expect("the built-in scope has a reply");
+        let body: ScopeBody = serde_json::from_str(&text).expect("the reply is a scope body");
+
+        let draft = model::scope_draft(
+            body,
+            ModelRef::from_str("offline").expect("a valid model id"),
+            &bounds,
+        )
+        .expect("the built-in scope passes the checks a live draft passes");
+
+        let proposal = draft.proposal();
+        assert_eq!(proposal.may.len(), 1, "one item on the order's machine");
+        assert!(proposal.must_keep.is_empty(), "no must-keep rule");
+        assert!(proposal.open.is_empty(), "no open question");
+        let item = &proposal.may[0];
+        assert_eq!(item.machine_ids.as_slice()[0].as_str(), "ui");
+        assert_eq!(item.selector.route_template.as_str(), "/health");
+        assert!(
+            matches!(
+                &item.selector.step_context,
+                StepContext::Step { step_id } if step_id.as_str() == "s1"
+            ),
+            "the step is the first probe request on the route"
+        );
+        assert!(!item.selector.is_broad(), "the item is no broad grant");
+        assert!(
+            item.acceptance.as_slice()[0]
+                .text
+                .starts_with("Built-in offline draft"),
+            "the built-in draft says so"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scope_request_without_a_machine_gets_no_reply() {
+        let err = Offline::default()
+            .chat(
+                Role::Foreman,
+                request(
+                    model::SCOPE_PROMPT,
+                    &json!({ "routes": [], "steps": [], "order": "Add a limit" }),
+                ),
+            )
+            .await
+            .expect_err("a built-in scope needs the order's machine");
+        assert!(
+            matches!(err, LlmError::NoScriptedReply { .. }),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]

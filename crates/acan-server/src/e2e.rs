@@ -1105,6 +1105,82 @@ async fn a_scope_draft_is_stored_without_authority_until_the_owner_adopts_it() {
     running.stop().await.expect("the server stops");
 }
 
+/// With no model keys, the offline foreman's built-in draft carries an order through. The draft is
+/// stored under the offline model and labelled built in, the owner adopts it, and the agent's build
+/// is gated and lands. No scripted foreman stands in for the draft.
+#[tokio::test]
+async fn an_offline_scope_draft_carries_an_order_through_to_a_landed_build() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let running = start_plant(root).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+    post_order(&running).await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let view = scope_draft_of(&running, order).await;
+    assert_eq!(
+        view["state"], "drafted",
+        "the built-in draft is stored: {view}"
+    );
+    let draft = &view["draft"];
+    assert_eq!(draft["draft"]["model"], "offline");
+    let text = &draft["draft"]["proposal"]["may"][0]["acceptance"][0]["text"];
+    assert!(
+        text.as_str()
+            .is_some_and(|text| text.starts_with("Built-in offline draft")),
+        "the draft says it is built in: {draft}"
+    );
+    let scope = adopted_scope(draft);
+    settle(&running, "the split", |_, world| world.task(task).map(drop)).await;
+    member(&running, &HumanCmd::RegisterAgent { agent: agent() }).await;
+    member(
+        &running,
+        &HumanCmd::ReviseScope {
+            order,
+            scope: Box::new(scope.clone()),
+        },
+    )
+    .await;
+    member(
+        &running,
+        &HumanCmd::ConfirmScope {
+            order,
+            confirmation: Box::new(confirmation_for(&scope)),
+        },
+    )
+    .await;
+    read_back(&running, task, &scope).await;
+    let fence = claim(&running, task).await;
+    wait_for_worktree(root, task, fence.generation).await;
+    let built = build(&running, root, task, fence, LANDED, AGENT_CONTENT).await;
+    settle(&running, "the task to land", |_, world| {
+        in_state(world, task, |state| {
+            matches!(state, TaskState::Landed { .. })
+        })
+        .then_some(())
+    })
+    .await;
+
+    let (log, _) = snapshot(&running).await;
+    assert!(
+        log.iter().any(|stamped| matches!(
+            &stamped.event,
+            Event::ReceiptRecorded { record, .. } if record.verdict == LaneVerdict::Passed
+        )),
+        "the final gate passed the built commit"
+    );
+    assert_eq!(
+        git(root, &["rev-parse", "main"]).trim(),
+        built.to_string(),
+        "the task branch fast-forwarded the protected branch"
+    );
+    assert_eq!(git(root, &["show", "main:landed.txt"]), AGENT_CONTENT);
+    running.stop().await.expect("the server stops");
+}
+
 /// A draft that never checks is recorded as a failure the owner can see. Nothing stands in for it,
 /// so the lane stays closed.
 #[tokio::test]
