@@ -74,6 +74,8 @@ const SENSITIVE_KEYS: [&str; 9] = [
 ];
 /// How long each Docker preflight command may run.
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long `git rev-parse` may take to resolve the head before the run refuses it.
+const REF_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Why a shadow receipt was refused. Every variant stops the command with no receipt.
 #[derive(Debug, thiserror::Error)]
@@ -215,13 +217,23 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
             .to_owned(),
     })?;
     let base_read = commit_sha(&base_head.to_string())?;
-    let head_commit = resolve_commit(repo.root(), &args.head)
-        .await
-        .ok_or_else(|| ShadowError::Ref {
-            flag: "--head",
-            name: args.head.clone(),
-            detail: "it does not name a commit of the clone".to_owned(),
-        })?;
+    let head_commit = match resolve_commit(repo.root(), &args.head).await {
+        Ok(Some(commit)) => commit,
+        Ok(None) => {
+            return Err(ShadowError::Ref {
+                flag: "--head",
+                name: args.head.clone(),
+                detail: "it does not name a commit of the clone".to_owned(),
+            });
+        }
+        Err(detail) => {
+            return Err(ShadowError::Ref {
+                flag: "--head",
+                name: args.head.clone(),
+                detail: format!("git could not resolve it: {detail}"),
+            });
+        }
+    };
 
     let policy = observe::runner_policy();
     policy
@@ -322,23 +334,50 @@ fn check_ref(flag: &'static str, name: &str) -> Result<(), ShadowError> {
     })
 }
 
-/// Resolves `spec` to the commit it names in the clone, or `None` when it names none.
-async fn resolve_commit(root: &Path, spec: &str) -> Option<CommitSha> {
-    let output = ProcessCommand::new("git")
+/// Resolves `spec` to the commit it names in the clone. `Ok(None)` means git ran and the spec
+/// names no commit. An error means git did not answer: it did not start, failed, or timed out.
+async fn resolve_commit(root: &Path, spec: &str) -> Result<Option<CommitSha>, String> {
+    resolve_commit_with(Path::new("git"), root, spec, REF_TIMEOUT).await
+}
+
+async fn resolve_commit_with(
+    git: &Path,
+    root: &Path,
+    spec: &str,
+    limit: Duration,
+) -> Result<Option<CommitSha>, String> {
+    let mut command = ProcessCommand::new(git);
+    command
         .arg("-C")
         .arg(root)
         .args(["rev-parse", "--verify", "--quiet"])
         .arg(format!("{spec}^{{commit}}"))
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(limit, command.output())
         .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
+        .map_err(|_| format!("git did not answer within {} s", limit.as_secs()))?
+        .map_err(|err| format!("git cannot run: {err}"))?;
+    match output.status.code() {
+        Some(0) => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            CommitSha::from_str(text.trim())
+                .map(Some)
+                .map_err(|err| format!("git printed a value that is not a commit: {err}"))
+        }
+        // With `--quiet`, git exits 1 and prints nothing when the spec names no object.
+        Some(1) => Ok(None),
+        _ => Err(String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map_or_else(
+                || format!("git exited with {}", output.status),
+                str::to_owned,
+            )),
     }
-    let text = String::from_utf8(output.stdout).ok()?;
-    CommitSha::from_str(text.trim()).ok()
 }
 
 fn commit_sha(text: &str) -> Result<CommitSha, ShadowError> {
@@ -950,6 +989,33 @@ mod tests {
         assert!(
             matches!(error, ShadowError::Docker(_)),
             "no docker: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_git_that_cannot_answer_is_not_read_as_a_missing_commit() {
+        let repo = clone_with(&contract_files());
+        let root = repo.path();
+        let unrunnable =
+            resolve_commit_with(Path::new("acan-no-such-git"), root, "main", REF_TIMEOUT).await;
+        assert!(
+            matches!(&unrunnable, Err(detail) if detail.contains("cannot run")),
+            "a git that cannot start: {unrunnable:?}"
+        );
+        let stalled = resolve_commit_with(Path::new("git"), root, "main", Duration::ZERO).await;
+        assert!(
+            matches!(&stalled, Err(detail) if detail.contains("did not answer")),
+            "a git that does not answer in time: {stalled:?}"
+        );
+        let missing = resolve_commit_with(Path::new("git"), root, "no-such-ref", REF_TIMEOUT).await;
+        assert!(
+            matches!(missing, Ok(None)),
+            "a ref that names no commit is Ok(None)"
+        );
+        let named = resolve_commit_with(Path::new("git"), root, "main", REF_TIMEOUT).await;
+        assert!(
+            matches!(named, Ok(Some(_))),
+            "a ref that names a commit resolves"
         );
     }
 
