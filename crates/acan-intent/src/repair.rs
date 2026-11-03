@@ -3,8 +3,9 @@
 //! Rules, binding on the conductor (C01) and the store (I01) that implement them:
 //! - An order has at most [`crate::RepairBudget::repair_rounds`] rounds, eight in v1. The count is
 //!   per order; a new episode, a new commit, a new worker or a retry never adds a round.
-//! - A round bounces every episode open at that moment in one batch, and is answered by one
-//!   candidate and one full-corpus run. Opening a round is the only increment.
+//! - A round bounces one batch of the episodes open at that moment, at most
+//!   [`crate::RepairBudget::max_episodes`] of them, and is answered by one candidate and one
+//!   full-corpus run. Opening a round is the only increment.
 //! - An episode's `bounce_count` counts the rounds that included it, so it never exceeds the
 //!   order's rounds.
 //! - A round's identity is the [`RoundId`] of its [`RoundKey`], and a result's the [`ResultId`]

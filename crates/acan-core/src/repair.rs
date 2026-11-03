@@ -5,18 +5,23 @@
 //!   it names the confirmed scope, the prepared context and every ruling at the current head
 //!     --> ReceiptRecorded, GateClosed, LeaseEnded Delivered | LeaseRenewed
 //! failing item obligation_failed | out_of_scope | violates_ruling --> episode open, bounced
-//!   by the next round while the order has rounds left, else stopped and the lane stops
+//!   by the next round, at most max_episodes open episodes per round; the rest stay open for a
+//!   later round. When the order has no rounds left, the open episodes are stopped and the lane
+//!   stops.
 //! failing item authorized_but_unspecified | unstable_base | incomparable --> residue
 //! failing item error --> stays open: an infrastructure retry never spends a round
 //! episode not failing, its item passing with every originally failing obligation passing
-//!   --> fixed
+//!   --> fixed; an out-of-scope episode whose difference no clean receipt shows --> fixed
+//! open episodes all residue or human-only --> no round opens; the lane waits for the human
+//!   and is not stopped
 //! FileContest(fence) --> contested; ResolveContest (human) --> residue | the prior state
 //! ```
 //!
-//! Rounds are the order's, never an episode's: a round bounces every open episode at once, and
-//! the next receipt answers it. An episode's identity comes from the receipt and excludes the
-//! probe, commit and worker, so a new probe spelling, commit or worker continues the same
-//! episode and its budget. Missing evidence, a contest or a note never makes an episode fixed.
+//! Rounds are the order's, never an episode's: a round bounces its batch of open episodes at
+//! once, and the next receipt answers it. An episode's identity comes from the receipt and
+//! excludes the probe, commit and worker, so a new probe spelling, commit or worker continues the
+//! same episode and its budget. Missing evidence, a contest or a note never makes an episode
+//! fixed.
 //! A prediction score is a finding only: the gate reads the classes, never the scores.
 
 use std::collections::btree_map::Entry;
@@ -444,6 +449,18 @@ fn fixed_by<'r>(episode: &Episode, receipt: &'r Receipt) -> Option<&'r ReceiptIt
     passes.then_some(item)
 }
 
+/// Whether an out-of-scope episode is fixed by absence: its difference is missing from a receipt
+/// that shows no errored item. Its items carry no obligation, so nothing else can pass it. An
+/// errored probe shows nothing either way, so it never counts as a fix.
+fn gone_out_of_scope(episode: &Episode, receipt: &Receipt) -> bool {
+    episode.class == ItemClass::OutOfScope
+        && episode.failing.is_empty()
+        && receipt
+            .items
+            .iter()
+            .all(|item| item.class != ItemClass::Error)
+}
+
 fn classify(
     lane: &ScopeLane,
     ledger: &Ledger,
@@ -552,6 +569,16 @@ fn classify(
                 class: item.class,
             });
             touched.insert(episode.id);
+        } else if gone_out_of_scope(episode, &receipt) {
+            // Nothing outside the scope differs any more, so the episode no longer needs a round.
+            episode.state = EpisodeState::Fixed;
+            episode.evidence.push(EpisodeEvidence {
+                run,
+                merged_commit: merged.clone(),
+                probe_hash: episode.probe_hash,
+                class: ItemClass::Preserved,
+            });
+            touched.insert(episode.id);
         }
     }
     let answered = match lane.rounds.last() {
@@ -572,8 +599,16 @@ fn classify(
         }
         _ => None,
     };
-    let over_cap = usize::try_from(budget.max_episodes).is_ok_and(|cap| episodes.len() > cap);
-    let bounce: Vec<EpisodeId> = episodes
+    // `max_episodes` caps the open, non-fixed episodes one round considers, not the order's
+    // lifetime. The batch is the first `max_episodes` bounceable episodes, fewest bounces first
+    // so that none starves, then by identity. The rest stay open for a later round.
+    //
+    // The lane stops for good only when the rounds run out with bounceable work left, or when a
+    // batch can hold none of it. With no bounceable episode left, every open episode is residue
+    // or human-only: no round opens and the lane waits for the human, unstopped, so a ruling can
+    // still resume it.
+    let rounds_used = u32::try_from(lane.rounds.len()).unwrap_or(u32::MAX);
+    let mut bounce: Vec<EpisodeId> = episodes
         .values()
         .filter(|e| {
             matches!(e.state, EpisodeState::Open | EpisodeState::Bounced)
@@ -581,11 +616,14 @@ fn classify(
         })
         .map(|e| e.id)
         .collect();
-    let rounds_used = u32::try_from(lane.rounds.len()).unwrap_or(u32::MAX);
-    let exhausted = !bounce.is_empty() && rounds_used >= budget.repair_rounds.get();
+    bounce.sort_by_key(|id| (episodes[id].bounce_count, *id));
+    let cap = usize::try_from(budget.max_episodes).unwrap_or(usize::MAX);
+    let batch: Vec<EpisodeId> = bounce.iter().copied().take(cap).collect();
+    let exhausted =
+        !bounce.is_empty() && (rounds_used >= budget.repair_rounds.get() || batch.is_empty());
     let mut opened = None;
     let mut stopped = Vec::new();
-    if over_cap || exhausted {
+    if exhausted {
         for episode in episodes
             .values_mut()
             .filter(|e| matches!(e.state, EpisodeState::Open | EpisodeState::Bounced))
@@ -594,14 +632,14 @@ fn classify(
             stopped.push(episode.id);
             touched.insert(episode.id);
         }
-    } else if let Ok(list) = NonEmpty::try_from(bounce.clone()) {
+    } else if let Ok(list) = NonEmpty::try_from(batch.clone()) {
         let round = RoundNumber::try_from(rounds_used + 1)
             .map_err(|_| Rejection::invalid("an order has at most eight repair rounds"))?;
         let key = RoundKey {
             order: lane::order_ref(lane.order)?,
             round,
         };
-        for id in &bounce {
+        for id in &batch {
             if let Some(episode) = episodes.get_mut(id) {
                 episode.bounce_count += 1;
                 episode.state = EpisodeState::Bounced;
