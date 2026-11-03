@@ -67,15 +67,10 @@ const TETHER_ALPHA: f32 = 0.8;
 pub const PULSE_MS: f32 = 1_200.0;
 /// Milliseconds a drone takes to turn to face a new machine.
 pub const TURN_MS: f32 = 400.0;
-/// The activities in which an agent is working on its task. Its beacon pulses while it works.
-const WORKING: [&str; 6] = [
-    "claimed",
-    "building",
-    "gating",
-    "landing",
-    "splitting",
-    "reading_back",
-];
+/// The activities in which an agent is working on its task, as the mirror names a claimed task's
+/// stage. Its drone bobs and its beacon pulses while it works. Every other activity (`open`,
+/// `readback`, `queued`, `landed` and `idle`) is idle.
+const WORKING: [&str; 4] = ["claimed", "declared", "building", "gating"];
 /// Plan units below which a drone and its target share a spot, so the drone has no direction.
 const FACE_EPSILON: f32 = 1e-3;
 /// Milliseconds a landed machine's dot shows its change word before it goes quiet.
@@ -175,8 +170,8 @@ pub struct Body {
     /// its top, lifted by the beacon's radius so the beacon stands on the top.
     pub target: [f32; 3],
     pub activity: &'static str,
-    /// Whether the agent waits on the user: its task is in an open clash, or its order asks a question.
-    pub waiting: bool,
+    /// What the drone shows: working, idle, waiting on the user, or stale.
+    pub state: DroneState,
     /// The check the agent's task answers to, as the chip beside its flag shows it.
     pub check: Option<CheckView>,
 }
@@ -185,7 +180,58 @@ impl Body {
     /// Whether the agent is working on its task now, so its beacon pulses.
     #[must_use]
     pub fn working(&self) -> bool {
-        WORKING.contains(&self.activity)
+        self.state == DroneState::Working
+    }
+
+    /// Whether the agent waits on the user: its task is in an open clash, or its order asks a
+    /// question.
+    #[must_use]
+    pub fn waiting(&self) -> bool {
+        self.state == DroneState::Waiting
+    }
+}
+
+/// What a drone shows of its agent. One state shows at a time, by precedence: waiting, then
+/// stale, then working, then idle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DroneState {
+    /// On a claimed task: it bobs and its beacon pulses.
+    Working,
+    /// On an open, read-back, queued or landed task, or none: still, with its lamp off.
+    #[default]
+    Idle,
+    /// Its task is in an open clash, or its order asks a question: still, with an amber ring.
+    Waiting,
+    /// It holds a task but has been quiet for a while: grey, and lower.
+    Stale,
+}
+
+impl DroneState {
+    /// The state of an agent whose activity is `activity`. `waiting` is whether it waits on the
+    /// user, and `stale` whether it holds a task and has gone quiet.
+    #[must_use]
+    pub fn of(activity: &str, waiting: bool, stale: bool) -> Self {
+        if waiting {
+            Self::Waiting
+        } else if stale {
+            Self::Stale
+        } else if WORKING.contains(&activity) {
+            Self::Working
+        } else {
+            Self::Idle
+        }
+    }
+
+    /// The state in one word, as the ride chip and the flag's hover line name it.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Idle => "idle",
+            Self::Waiting => "waiting",
+            Self::Stale => "stale",
+        }
     }
 }
 
@@ -1126,7 +1172,7 @@ pub fn mark_instances(
         if riding != Some(body.agent.as_str()) {
             out.extend(drone(kinds, at, body.slot, turn, bot));
         }
-        if body.waiting {
+        if body.waiting() {
             out.push(Instance {
                 offset: [at[0], at[1], PLINTH_TOP],
                 kind: kinds.ring,
@@ -1340,7 +1386,7 @@ fn place(
             .and_then(|candidate| candidate.check.clone());
         bodies.push(Body {
             slot: slots.slot(&id),
-            waiting: waiting.contains(&id),
+            state: DroneState::of(agent.activity, waiting.contains(&id), false),
             agent: id,
             machine,
             at: [spot[0], spot[1], z],
@@ -1405,7 +1451,7 @@ fn flags(view: &View, plan: &Plan, stands: &[Stand], bodies: &[Body], pins: &[Pi
             kind: FlagKind::Agent,
             text: format!("{} · {}", body.agent, body.activity),
             hue: Some(hue_css(body.slot)),
-            waiting: body.waiting,
+            waiting: body.waiting(),
             clash: None,
             check: body.check.clone(),
             leaving: false,
@@ -2033,7 +2079,7 @@ mod tests {
         );
 
         assert_eq!(
-            marks.bodies.iter().filter(|body| body.waiting).count(),
+            marks.bodies.iter().filter(|body| body.waiting()).count(),
             2,
             "both agents wait on the open clash"
         );
@@ -2293,9 +2339,56 @@ mod tests {
             at,
             target,
             activity,
-            waiting: false,
+            state: DroneState::of(activity, false, false),
             check: None,
         }
+    }
+
+    #[test]
+    fn a_claimed_stage_works_and_every_other_activity_is_idle() {
+        for activity in ["claimed", "declared", "building", "gating"] {
+            assert_eq!(DroneState::of(activity, false, false), DroneState::Working);
+        }
+        for activity in ["open", "readback", "queued", "landed", "idle"] {
+            assert_eq!(DroneState::of(activity, false, false), DroneState::Idle);
+        }
+    }
+
+    #[test]
+    fn waiting_outranks_stale_which_outranks_working() {
+        assert_eq!(DroneState::of("building", true, true), DroneState::Waiting);
+        assert_eq!(DroneState::of("building", false, true), DroneState::Stale);
+        assert_eq!(DroneState::of("open", false, true), DroneState::Stale);
+        assert_eq!(
+            DroneState::of("building", false, false),
+            DroneState::Working
+        );
+    }
+
+    #[test]
+    fn every_activity_the_mirror_names_has_a_state() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let marks = Marks::build(&view, &plan, &stands(&plan), &slots_for(&view));
+        for body in &marks.bodies {
+            assert_eq!(
+                body.waiting(),
+                body.state == DroneState::Waiting,
+                "{}",
+                body.agent
+            );
+        }
+        let words: BTreeSet<&str> = [
+            DroneState::Working,
+            DroneState::Idle,
+            DroneState::Waiting,
+            DroneState::Stale,
+        ]
+        .map(DroneState::word)
+        .into_iter()
+        .collect();
+        assert_eq!(words.len(), 4, "each state has its own word");
     }
 
     fn marks_of(bodies: Vec<Body>) -> Marks {

@@ -219,7 +219,7 @@ pub fn info(view: &View, plan: &Plan, body: &Body) -> Info {
     Info {
         agent: body.agent.clone(),
         hue: marks::hue_css(body.slot),
-        waiting: body.waiting,
+        waiting: body.waiting(),
         machine: plan.machines[body.machine].name.clone(),
         activity: body.activity.to_owned(),
         task: sentence,
