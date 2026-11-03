@@ -131,8 +131,8 @@ pub const GHOST_MAX: usize = 12;
 /// How far a ghost's outline stands out from its machine's footprint, in plan units.
 const GHOST_OFFSET: f32 = 3.0;
 /// A ghost's opacity, and its width in CSS px.
-const GHOST_ALPHA: f32 = 0.5;
-const GHOST_PX: f32 = 1.0;
+const GHOST_ALPHA: f32 = 0.8;
+const GHOST_PX: f32 = 1.75;
 /// Milliseconds a ghost takes to fade out once it clears.
 pub const GHOST_FADE_MS: f32 = 400.0;
 /// The dot of a declaration whose task has no agent.
@@ -4188,7 +4188,7 @@ mod tests {
         assert!(loop_.iter().all(|beam| {
             u32::from(beam.tint) == TINT_GHOST
                 && beam.alpha == GHOST_ALPHA
-                && beam.width_px == 2.0
+                && beam.width_px == GHOST_PX * 2.0
                 && beam.from[2] == 0.0
         }));
         for (i, beam) in loop_.iter().enumerate() {

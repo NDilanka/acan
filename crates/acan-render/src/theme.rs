@@ -35,7 +35,7 @@ pub const CLASH_RED: u32 = 0xd0453a;
 /// The grey of a stale drone's shell, which has gone quiet while it holds a task.
 pub const STALE_GREY: u32 = 0xc4c4c8;
 /// The grey of a ghost: the outline a landed machine keeps for a returning reader.
-pub const GHOST_GREY: u32 = 0x8a8a8f;
+pub const GHOST_GREY: u32 = 0x6e6e73;
 /// Tint slot of each agent's accent at full hue: `TINT_BODY0 + slot`. The drone's eye and lamp, its
 /// beam and its beacon draw with it.
 pub const TINT_BODY0: u32 = 1;
