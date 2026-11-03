@@ -27,9 +27,15 @@ export function setupState(answer) {
 // command is coming.
 export const INIT_SHIPPED = false;
 
-// The app contract (.acan/app.json) as GET /api/plant reports it: `contract: { present, version }`.
-// A plant without that field, from a server that does not report it yet, gives null.
+// What contractOf gives for a plant with no `contract` key at all: a server that does not report
+// the contract, so the step is not offered there.
+export const CONTRACT_ABSENT = "absent";
+
+// The app contract (.acan/app.json) as GET /api/plant reports it: `contract: { present, version }`,
+// sent on every plant answer by a server that reports it (version null when absent). A plant with
+// no such key gives CONTRACT_ABSENT; a key with any other value gives null, as a failed read does.
 export function contractOf(plant) {
+  if (plant !== null && typeof plant === "object" && !("contract" in plant)) return CONTRACT_ABSENT;
   const contract = plant?.contract;
   if (!contract || typeof contract !== "object" || typeof contract.present !== "boolean") return null;
   return { present: contract.present, version: typeof contract.version === "string" ? contract.version : null };
@@ -37,6 +43,7 @@ export function contractOf(plant) {
 
 export function contractState(plant) {
   const contract = contractOf(plant);
+  if (contract === CONTRACT_ABSENT) return UNAVAILABLE;
   if (contract === null) return UNKNOWN;
   return contract.present ? DONE : TODO;
 }
@@ -117,9 +124,12 @@ function keyStep(token, setup) {
   return { ...step, detail: "Add a provider key, so model jobs stop getting built-in replies.", action: { kind: "setup", label: "Set a key" } };
 }
 
-// `contract` is undefined before the page has asked, null when the server did not say, or
-// `{ present, version }`.
+// `contract` is undefined before the page has asked, null when the read failed, CONTRACT_ABSENT
+// when the server does not report it, or `{ present, version }`.
 function contractStep(token, contract) {
+  if (contract === CONTRACT_ABSENT) {
+    return { id: "contract", title: "Add the app contract", state: UNAVAILABLE, detail: "This acan does not report the app contract, so this step is not offered here.", action: null };
+  }
   const state = contract === undefined || contract === null ? UNKNOWN : (contract.present ? DONE : TODO);
   const step = { id: "contract", title: "Add the app contract", state };
   if (state === DONE) {
@@ -127,7 +137,7 @@ function contractStep(token, contract) {
     return { ...step, detail: `Your repository has an app contract${version}.`, action: null };
   }
   const run = `Run \`acan init\` in your repo${INIT_SHIPPED ? "" : " (coming in this alpha)"}, so the gate has an app contract to check against.`;
-  const detail = contract === null ? `${run} This acan cannot report it yet, so check for .acan/app.json.` : run;
+  const detail = contract === null ? `${run} The page could not read it, so check for .acan/app.json.` : run;
   return { ...step, detail, action: token ? { kind: "contract", label: "Check again" } : null };
 }
 

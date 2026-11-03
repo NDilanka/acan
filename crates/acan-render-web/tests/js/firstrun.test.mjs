@@ -11,6 +11,7 @@ import {
   TODO,
   UNAVAILABLE,
   UNKNOWN,
+  CONTRACT_ABSENT,
   allDone,
   contractOf,
   contractState,
@@ -82,12 +83,13 @@ test("with no key the step opens the key setup, and a routing file points at its
   assert.match(routed.detail, /llm\.toml/);
 });
 
-test("the contract step reads the plant's contract field, and a plant without it is unknown", () => {
-  assert.equal(contractOf({ machines: [] }), null);
+test("the contract step reads the plant's contract field, and a plant without it does not offer the step", () => {
+  assert.equal(contractOf({ machines: [] }), CONTRACT_ABSENT);
   assert.equal(contractOf({ contract: true }), null);
+  assert.equal(contractOf({ contract: null }), null, "a malformed flag is a failed read, not absent");
   assert.deepEqual(contractOf({ contract: { present: true, version: "acan-app/2" } }), { present: true, version: "acan-app/2" });
   assert.deepEqual(contractOf({ contract: { present: false, version: null } }), { present: false, version: null });
-  assert.equal(contractState({ machines: [] }), UNKNOWN);
+  assert.equal(contractState({ machines: [] }), UNAVAILABLE);
   assert.equal(contractState({ contract: { present: true, version: "acan-app/2" } }), DONE);
   assert.equal(contractState({ contract: { present: false, version: null } }), TODO);
   const present = byId(steps({ token: true, setup: KEYED, contract: { present: true, version: "acan-app/2" } })).contract;
@@ -106,7 +108,8 @@ test("the contract step says to run acan init, marked as coming while the comman
   assert.match(asked.detail, /^Run `acan init` in your repo \(coming in this alpha\), so the gate/);
   assert.deepEqual(asked.action, { kind: "contract", label: "Check again" });
   const silent = byId(steps({ token: true, setup: KEYED, contract: null })).contract;
-  assert.match(silent.detail, /cannot report it yet/);
+  assert.equal(silent.state, UNKNOWN, "a failed read keeps the step unknown");
+  assert.match(silent.detail, /could not read it/);
 });
 
 function workers(...states) {
@@ -209,4 +212,25 @@ test("the checklist still shows while any step is open", () => {
   assert.equal(allDone(steps({ ...done, view: view({ agents: 1, orders: 1, lanes: [{ state: "unconfirmed" }] }), live: true })), false, "no lane sealed");
   assert.equal(allDone(steps({ ...done, contract: null, live: true })), false, "a contract the server cannot report");
   assert.equal(allDone(steps({ ...done, token: false, live: true })), false, "signed out");
+});
+
+test("a server that sends no contract flag does not hold the checklist open", () => {
+  const rest = { token: true, setup: KEYED, view: view({ agents: 1, orders: 1, lanes: [{ state: "confirmed" }] }), live: true };
+  const absent = steps({ ...rest, contract: contractOf({ machines: [] }) });
+  assert.equal(byId(absent).contract.state, UNAVAILABLE);
+  assert.equal(byId(absent).contract.action, null);
+  assert.equal(progressShort(absent), "7/7");
+  assert.equal(allDone(absent), true, "the line can hide");
+  const missing = steps({ ...rest, contract: contractOf({ machines: [], contract: { present: false, version: null } }) });
+  assert.equal(byId(missing).contract.state, TODO);
+  assert.equal(allDone(missing), false);
+  const present = steps({ ...rest, contract: contractOf({ contract: { present: true, version: "acan-app/1" } }) });
+  assert.equal(byId(present).contract.state, DONE);
+  assert.equal(byId(present).contract.detail, "Your repository has an app contract (acan-app/1).");
+  assert.equal(allDone(present), true);
+  const failed = steps({ ...rest, contract: null });
+  assert.equal(byId(failed).contract.state, UNKNOWN);
+  assert.equal(allDone(failed), false, "a failed read keeps the line open");
+  const panel = readFileSync(new URL("../../www/firstrun-panel.js", import.meta.url), "utf8");
+  assert.match(panel, /contract = res\.ok \? contractOf\(await res\.json\(\)\) : null;/, "the panel reads GET /api/plant's body; a refused or failed read is null");
 });
