@@ -34,7 +34,7 @@ The POSIX options are `-d` (run folder), `-R` (demo repo), `-p` (UI and API port
 
 These differ from the PowerShell scripts.
 
-- `stop.sh` sends SIGINT to `acan serve`, so it shuts down cleanly. It sends SIGTERM to the other processes and SIGKILL after 10 seconds if one is still running. `stop.ps1` uses `taskkill /F`.
+- `stop.sh` sends SIGINT to `acan serve`, so it shuts down cleanly. It sends SIGTERM to the other processes and SIGKILL after 10 seconds if one is still running. It finds each process through its pid file in `logs`, which holds the pid and the process's start tick count from `/proc` (the `ps` start time where `/proc` is missing). Wall-clock start times can move when the clock is set, so they are not used. `stop.ps1` uses `taskkill /F`.
 - `watch.sh` polls once a second. `watch.ps1` polls every 500 ms. Without `-p`, `watch.sh` uses the port recorded in the run folder.
 - A failed poll reports the HTTP status, or `no answer on port N`. The PowerShell watch prints the .NET error text.
 - The take scripts under `demo/intent` (`take.ps1`, `ruling.ps1` and `control.ps1`) are Windows-only. They use Windows paths, `acan.exe` and Docker through Windows, and have no POSIX port.
