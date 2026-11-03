@@ -69,6 +69,9 @@ pub struct Mirror {
     built_at: BTreeMap<TaskId, u64>,
     /// The tasks whose latest receipt holds an episode out of scope or against a ruling.
     beyond_scope: BTreeSet<TaskId>,
+    /// The tasks whose latest decided gate run failed and that have not passed since. Their
+    /// machines show the failed tick until a later run passes.
+    failing: BTreeSet<TaskId>,
 }
 
 impl Mirror {
@@ -110,6 +113,7 @@ impl Mirror {
             cleared_at: BTreeMap::new(),
             built_at: BTreeMap::new(),
             beyond_scope: BTreeSet::new(),
+            failing: BTreeSet::new(),
         };
         mirror.note(&first);
         for entry in entries {
@@ -221,6 +225,20 @@ impl Mirror {
                     }
                 }
             }
+            // A run's verdict is decided when it closes. A failure marks its task until a later run
+            // passes. A run that is still running changes nothing.
+            Event::GateClosed { run, verdict } => {
+                let task = self.world().gate(*run).map(|gate| gate.task);
+                match (task, verdict) {
+                    (Some(task), GateVerdict::Failed { .. }) => {
+                        self.failing.insert(task);
+                    }
+                    (Some(task), GateVerdict::Passed) => {
+                        self.failing.remove(&task);
+                    }
+                    _ => {}
+                }
+            }
             // A call that gave no reply adds no row and moves none, so only an answered call
             // matches here.
             Event::ModelUsed {
@@ -302,6 +320,15 @@ impl Mirror {
         for times in landings.values_mut() {
             times.sort_unstable();
         }
+        let failed: BTreeSet<usize> = self
+            .failing
+            .iter()
+            .filter_map(|task| {
+                world
+                    .task(*task)
+                    .and_then(|task| task_machine(world, plan, task))
+            })
+            .collect();
         let machines = plan
             .machines
             .iter()
@@ -311,6 +338,7 @@ impl Mirror {
                 min: m.min,
                 size: m.size,
                 abnormal: abnormal.contains(&i),
+                failed: failed.contains(&i),
                 landed_at: landings.get(&i).and_then(|times| times.last().copied()),
                 landings: landings.remove(&i).unwrap_or_default(),
             })
@@ -607,6 +635,9 @@ pub struct MachineView {
     pub size: [f32; 2],
     /// Whether an unsettled clash touches this machine.
     pub abnormal: bool,
+    /// Whether a task on this machine failed its latest decided gate run and has not passed
+    /// since. The page draws the failed tick.
+    pub failed: bool,
     /// When the last of its tasks landed, in log milliseconds.
     pub landed_at: Option<u64>,
     /// When each of its tasks landed, in log milliseconds, oldest first.
@@ -1430,6 +1461,119 @@ mod tests {
         let failed = check_of(&mirror.view(&plan), first);
         assert_eq!(failed.state, "failed");
         assert_eq!(failed.name, witness.to_string());
+    }
+
+    /// The gate run the task is gating in now, if it is.
+    fn gating_run(origin: &Origin, task: TaskId) -> Option<GateRunId> {
+        match &origin.world().task(task)?.state {
+            TaskState::Claimed {
+                stage: Stage::Gating { run, .. },
+                ..
+            } => Some(*run),
+            _ => None,
+        }
+    }
+
+    fn ingest_all(mirror: &mut Mirror, events: &[Stamped]) {
+        for stamped in events {
+            mirror
+                .ingest(stamped)
+                .expect("a live event applies in order");
+        }
+    }
+
+    #[test]
+    fn a_failed_gate_marks_its_machine_until_a_later_run_passes() {
+        let plan = plan();
+        let (mut origin, log, index, first) = first_build_reported();
+        let mut mirror = Mirror::from_log(log).expect("the log replays");
+        let (machine, name) = {
+            let view = mirror.view(&plan);
+            let name = view
+                .tasks
+                .iter()
+                .find(|task| task.id == first)
+                .and_then(|task| task.machine.clone())
+                .expect("the first task names its machine");
+            (machine_index(&view, &name), name)
+        };
+        assert!(
+            !mirror.view(&plan).machines[machine].failed,
+            "a task that has not failed is not marked"
+        );
+
+        let run = gating_run(&origin, first).expect("the first build is gating");
+        let witness = origin
+            .world()
+            .gate(run)
+            .expect("the gate run exists")
+            .witnesses[0];
+        let failing = accepted(
+            &mut origin,
+            &index,
+            Command::System(SystemCmd::WitnessResult {
+                run,
+                witness,
+                outcome: WitnessOutcome::Fail {
+                    detail: "npm test exited 1".to_owned(),
+                },
+            }),
+        );
+        ingest_all(&mut mirror, &failing);
+        let view = mirror.view(&plan);
+        assert!(view.machines[machine].failed, "the failed run marks {name}");
+        assert!(
+            view.machines
+                .iter()
+                .enumerate()
+                .all(|(i, m)| i == machine || !m.failed),
+            "no other machine is marked"
+        );
+
+        let claim = match &origin.world().task(first).expect("the task").state {
+            TaskState::Claimed { claim, .. } => claim.clone(),
+            other => panic!("the failed task is still claimed, not {other:?}"),
+        };
+        let rebuilt = accepted(
+            &mut origin,
+            &index,
+            Command::Agent {
+                agent: AgentId::from_str(scenario::AGENTS[0]).expect("an agent id"),
+                cmd: AgentCmd::ReportBuilt {
+                    fence: claim.fence(first),
+                    head: CommitId::from_str("3f9c2e1").expect("a commit id"),
+                },
+            },
+        );
+        ingest_all(&mut mirror, &rebuilt);
+        assert!(
+            mirror.view(&plan).machines[machine].failed,
+            "a run that is still running does not clear the tick"
+        );
+
+        let run = gating_run(&origin, first).expect("the rebuilt task is gating again");
+        let witnesses = origin
+            .world()
+            .gate(run)
+            .expect("the run exists")
+            .witnesses
+            .clone();
+        for witness in witnesses {
+            let passing = accepted(
+                &mut origin,
+                &index,
+                Command::System(SystemCmd::WitnessResult {
+                    run,
+                    witness,
+                    outcome: WitnessOutcome::Pass,
+                }),
+            );
+            ingest_all(&mut mirror, &passing);
+        }
+        assert!(
+            !mirror.view(&plan).machines[machine].failed,
+            "the next passing run clears the tick"
+        );
     }
 
     #[test]
