@@ -1,8 +1,9 @@
 #!/bin/sh
 # Replays the recorded provider receipts in receipts/ without any API key. This is replay.ps1 for POSIX shells.
 #
-# It checks each receipt against receipts/SHA256SUMS, then prints the receipts. It reads no keys and makes no
-# network calls, so a judge can run it on a machine with no provider accounts.
+# It checks each receipt against receipts/SHA256SUMS, then prints the receipts and where the recorded run
+# plays. It reads no keys and makes no network calls, so a judge can run it on a machine with no provider
+# accounts.
 #
 # Usage: replay.sh [-d receipts_dir] [-v]
 #   -d  the folder with the receipts and SHA256SUMS (default: receipts/ at the repository root)
@@ -84,5 +85,14 @@ if [ "$verify_only" = 0 ]; then
     cat "$receipts_dir/$name"
   done
 fi
+
+# Where the recorded run plays. Neither route needs a key.
+replay_url='https://ndilanka.github.io/acan/?replay=1'
+printf '\nRecorded run, no keys needed:\n'
+printf '  hosted: %s\n' "$replay_url"
+printf '%s\n' '  local:  build the UI once with crates/acan-render-web/build.ps1'
+printf '%s\n' '          copy replay/ into crates/acan-render-web/www/'
+printf '%s\n' '          cargo run -p acan-server -- serve --repo . --web crates/acan-render-web/www'
+printf '%s\n' '          then open http://127.0.0.1:7311/?replay=1'
 
 exit 0
