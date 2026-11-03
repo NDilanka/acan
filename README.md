@@ -25,7 +25,7 @@ What main proves today:
 
 In progress, with no numbers yet:
 
-- T01, the tour director. It is built but not yet on main, and its Muse Spark call is not verified live.
+- T01, the tour director, is on main. Its two live calls, each on a landed receipt from the same test setup, gave one admitted tour (`receipts/director-live-2.md`). No other receipts have been run, and no measured comparison with the plain card has run.
 - DF1, `acan receipt`, which runs the gate's contrast on any clone that has an app contract.
 - The alpha release: a local app that takes a key for each provider the tester uses, an update check, a bug report, and a GitHub Pages replay.
 - X01, the 12-order replay. No numbers are published before it finishes.
@@ -41,7 +41,7 @@ Every model role in the code is listed here. A role counts as live only when a r
 | Workers, second host | Muse Spark Open, `accounts/fireworks/models/muse-spark-open` | Fireworks (`api.fireworks.ai`) | p00 rows 5-6 | Live, pass. Fireworks serves Muse Spark Open, and the API echoed that model id. |
 | Fast: clash explanations | Muse Spark Open | Baseten, `[routing.fast]` | none | Routed, not yet in a receipt |
 | Vision witness, advisory | Muse Spark, `muse-spark-1.3`, with images | Meta Model API, `[routing.vision]` | vision01 rows 1-2 | Live, pass on two hand-made candidates |
-| Director: proposes the receipt tour (T01) | Muse Spark, `muse-spark-1.3`, structured output | Meta Model API, `[routing.director]` or the foreman's route if unset | none | Built, not yet on main. Not verified live. |
+| Director: proposes the receipt tour (T01) | Muse Spark, `muse-spark-1.3`, structured output | Meta Model API, `[routing.director]` or the foreman's route if unset | director-live-2 rows 1-2 | Live. Two calls, each on its own landed receipt. The second was admitted; the first was not, and its reason was not logged. The other roles in that run were stubbed. |
 | Second look at vision (Muse Wonder), advisory | Muse Wonder, `muse-wonder-1.0` | Meta Model API, `[routing.wonder]`, called only after an inconsistent or unclear first look | vision02 row 3 | Live, one call on one hand-made candidate. Its verdict matched the first look's. Not yet run on an unclear first look. |
 
 ## Architecture
