@@ -1,0 +1,17 @@
+{
+  "schema": "acan-demo-intent-rulings/1",
+  "order": "o-3",
+  "decided_by": "coordinator, delegated by the owner",
+  "note": "Rulings on out-of-scope differences in an o-3 candidate's receipt. The owner delegated these decisions to the build coordinator (an AI agent); they are sent with the owner's member token and are labelled as delegated, not human. ruling.ps1 turns each rule into a standing predicate and records it through the member HTTP API (record_ruling). Nothing here is a verdict: the gate evaluates each ruling where its field differs, and a probe that fails it becomes violates_ruling.",
+  "rules": [
+    {
+      "id": "rl-expires-at-null",
+      "field": "^body\\.(links\\[[^\\]]*\\]\\.)?expiresAt$",
+      "candidate": "present",
+      "rule": "equals",
+      "value": null,
+      "label": "a link created without an expiry reports expiresAt null",
+      "reason": "The order lets an owner set an expiry time on a link. No corpus probe sends one, so every link in the corpus has no expiry, and the candidate reports that as expiresAt null on the create answer and in the link list. That is the order's own field, with the value that means no expiry, so it is accepted. Any other value on a link created without an expiry violates this ruling."
+    }
+  ]
+}
