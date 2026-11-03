@@ -544,14 +544,37 @@ pub fn scope_request(
     bounds: &DraftBounds<'_>,
     previous_error: Option<&str>,
 ) -> ChatRequest {
+    scope_request_with(sentence, None, bounds, previous_error)
+}
+
+/// The scope draft prompt for an order on `machine`, the order's machine as the plant names it.
+/// It is `scope_request` with the machine in the context, which the offline draft reads.
+#[must_use]
+pub fn scope_request_on(
+    sentence: &str,
+    machine: &str,
+    bounds: &DraftBounds<'_>,
+    previous_error: Option<&str>,
+) -> ChatRequest {
+    scope_request_with(sentence, Some(machine), bounds, previous_error)
+}
+
+fn scope_request_with(
+    sentence: &str,
+    machine: Option<&str>,
+    bounds: &DraftBounds<'_>,
+    previous_error: Option<&str>,
+) -> ChatRequest {
     let corpus = CorpusSteps::of(bounds);
     draft_request(
         SCOPE_PROMPT,
         &json!({
             "order": sentence,
+            "machine": machine,
             "machines": bounds.machines,
             "routes": bounds.routes,
             "steps": corpus.ids,
+            "requests": probe_requests(bounds.probes, bounds.routes),
             "side_effects": corpus.side_effects(bounds.routes),
             "schema": schema_value::<ScopeBody>(),
             "previous_error": previous_error,
@@ -895,6 +918,35 @@ impl<'a> CorpusSteps<'a> {
         }
         found
     }
+}
+
+/// Each request a probe of the corpus sends, with its step id and the method and route template
+/// the route table gives it, as a selector names it. A request no route admits is left out.
+fn probe_requests(probes: &[CorpusProbe], routes: &[RouteEntry]) -> Vec<Value> {
+    let mut found: Vec<Value> = Vec::new();
+    for probe in probes {
+        for step in probe.spec.steps.as_slice() {
+            let Step::Http(http) = step else {
+                continue;
+            };
+            for entry in routes {
+                if entry.method != http.request.method
+                    || !route_matches(http.request.path.as_str(), &entry.route_template)
+                {
+                    continue;
+                }
+                let value = json!({
+                    "step_id": http.id,
+                    "method": entry.method,
+                    "route_template": entry.route_template,
+                });
+                if !found.contains(&value) {
+                    found.push(value);
+                }
+            }
+        }
+    }
+    found
 }
 
 /// Refuses an example that expects a status the item's window says its request must not get. A

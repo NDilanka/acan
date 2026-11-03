@@ -653,7 +653,7 @@ async fn draft_scope<C: ModelClient>(
     };
     // The foreman drafts from the order's sentence, what the human asked for. The order ref is
     // only the draft's key, so it never stands in for the request.
-    let request = model::scope_request(&sentence, &bounds, previous);
+    let request = model::scope_request_on(&sentence, &machine, &bounds, previous);
     let detail = format!("scope draft for {order} rev {}", rev.get());
     let reply = match host
         .client()
