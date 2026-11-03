@@ -23,6 +23,7 @@ use acan_core::{
     AgentId, Check, ClashId, Event, Generation, HumanCmd, MachineKey, Origin, Rejection,
     Settlement, Stage, Stamped, TaskId, TaskState, WitnessSpec, World,
 };
+use acan_llm::outside::unfence;
 use acan_llm::{
     CallRecord, ChatRequest, ChatResponse, FunctionCall, LlmError, Message, ModelClient,
     Reply as StubReply, Role, Stub, ToolCall, ToolKind, Usage, UsageLedger,
@@ -80,7 +81,7 @@ impl ModelClient for Foreman {
     async fn chat(&self, role: Role, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         let context: Value = request
             .last_user_text()
-            .and_then(|text| serde_json::from_str(text).ok())
+            .and_then(|text| serde_json::from_str(unfence(text).unwrap_or(text)).ok())
             .ok_or(LlmError::NoScriptedReply { role })?;
         let reply = if context.get("clash").is_some() {
             explain()

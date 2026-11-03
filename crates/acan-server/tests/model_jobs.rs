@@ -45,7 +45,34 @@ fn user_json(request: &ChatRequest) -> Value {
     let text = request
         .last_user_text()
         .expect("every model request carries its context as the user message");
-    serde_json::from_str(text).expect("the context is JSON")
+    serde_json::from_str(acan_llm::outside::unfence(text).unwrap_or(text))
+        .expect("the context is JSON")
+}
+
+/// Asserts that a request states the data rule in its system prompt and fences its context as one
+/// block that closes once.
+fn assert_fenced(request: &ChatRequest) {
+    let [system, user] = &request.messages[..] else {
+        panic!(
+            "a request is a system and a user message: {:?}",
+            request.messages
+        );
+    };
+    let Message::System { content: system } = system else {
+        panic!("the system message comes first");
+    };
+    assert!(
+        system.contains(acan_llm::outside::DATA_RULE),
+        "the prompt carries the data rule: {system}"
+    );
+    let Message::User { content: context } = user else {
+        panic!("the context is a user message");
+    };
+    assert!(
+        context.starts_with("<outside-text>\n") && context.ends_with("\n</outside-text>"),
+        "{context}"
+    );
+    assert_eq!(context.matches("</outside-text>").count(), 1, "{context}");
 }
 
 /// Splits `order` into two fixed tasks, the way a live split would.
@@ -103,6 +130,7 @@ fn the_split_prompt_lists_the_plant_machines_and_the_order() {
     let machines = model::plant_machines(demo.index());
 
     let request = model::split_request(demo.world(), order, &machines).expect("the order exists");
+    assert_fenced(&request);
     let context = user_json(&request);
 
     assert_eq!(
@@ -151,6 +179,7 @@ fn the_explain_prompt_carries_both_declared_footprints_and_the_menu() {
     let clash = support::claim_and_declare(&mut demo, tasks);
 
     let request = model::explain_request(demo.world(), clash).expect("the clash exists");
+    assert_fenced(&request);
     let context = user_json(&request);
 
     let declared = json!([{ "file": support::GREET_FILE, "name": support::GREET }]);
@@ -893,7 +922,9 @@ fn the_scope_request_lists_the_steps_and_side_effects_the_corpus_defines() {
             _ => None,
         })
         .expect("the request has a user message");
-    let context: Value = serde_json::from_str(&content).expect("the context is JSON");
+    let context: Value =
+        serde_json::from_str(acan_llm::outside::unfence(&content).unwrap_or(&content))
+            .expect("the context is JSON");
 
     let steps = context["steps"].as_array().expect("the steps are a list");
     assert!(
@@ -939,7 +970,8 @@ fn the_scope_request_states_the_side_effect_rule_and_carries_the_last_error() {
                 _ => None,
             })
             .expect("the request has a user message");
-        serde_json::from_str(&content).expect("the context is JSON")
+        serde_json::from_str(acan_llm::outside::unfence(&content).unwrap_or(&content))
+            .expect("the context is JSON")
     };
     let schema = context(&retry)["schema"].to_string();
     assert!(

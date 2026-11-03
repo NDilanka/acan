@@ -90,6 +90,9 @@ async fn run_cli() -> Result<Exit> {
     match cli.role {
         Role::Worker => {}
     }
+    if let Some(line) = token_flag_warning(cli.token.as_deref()) {
+        eprintln!("{line}");
+    }
     let file = cli.token_file.as_deref().map(read_token_file).transpose()?;
     let token = agent_token(
         file.flatten().or(cli.token),
@@ -123,6 +126,17 @@ fn agent_token(given: Option<String>, variable: Option<String>) -> Result<String
         .filter(|token| !token.is_empty())
         .or_else(|| variable.filter(|token| !token.is_empty()))
         .context("no agent token: pass --token-file, or set ACAN_AGENT_TOKEN")
+}
+
+/// The line printed when the token came from `--token`, since a flag value can show in the process
+/// list.
+const TOKEN_FLAG_WARNING: &str =
+    "acan-worker: --token shows in the process list; prefer ACAN_AGENT_TOKEN";
+
+/// The warning for a `--token` flag, or `None` without one. The warning is a fixed line, so it can
+/// never hold the token.
+fn token_flag_warning(flag: Option<&str>) -> Option<&'static str> {
+    flag.map(|_| TOKEN_FLAG_WARNING)
 }
 
 /// Reads the agent token from a file that holds it alone. Surrounding whitespace is dropped, and
@@ -191,7 +205,7 @@ mod tests {
 
     use clap::{CommandFactory, Parser};
 
-    use super::{Cli, agent_token, load_env, project_url, read_token_file};
+    use super::{Cli, agent_token, load_env, project_url, read_token_file, token_flag_warning};
 
     #[test]
     fn the_flag_wins_and_the_variable_fills_in() {
@@ -301,6 +315,34 @@ mod tests {
             "acan_agent_flag",
         ]);
         assert!(parsed.is_err(), "the two sources of one token conflict");
+    }
+
+    #[test]
+    fn the_token_flag_warning_never_contains_the_token() {
+        let token = "acan_sentinel_value_123";
+        let warning = token_flag_warning(Some(token)).expect("a --token flag is warned about");
+        assert_eq!(
+            warning,
+            "acan-worker: --token shows in the process list; prefer ACAN_AGENT_TOKEN"
+        );
+        assert!(!warning.contains(token), "{warning}");
+        assert_eq!(token_flag_warning(None), None);
+    }
+
+    #[test]
+    fn a_token_file_or_the_variable_gets_no_flag_warning() {
+        // The conflict with `--token-file` is clap's; the parsed flag alone decides the warning.
+        let cli = Cli::try_parse_from([
+            "acan-worker",
+            "--server",
+            "http://127.0.0.1:7311",
+            "--repo",
+            ".",
+            "--token-file",
+            "token",
+        ])
+        .expect("the file option parses");
+        assert_eq!(token_flag_warning(cli.token.as_deref()), None);
     }
 
     #[test]
