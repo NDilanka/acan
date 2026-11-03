@@ -1,0 +1,152 @@
+{
+  "schema": "acan-demo-intent-edits/2",
+  "order": "o-4",
+  "decided_by": "coordinator, delegated by the owner",
+  "note": "Written for the o-4 draft in replay run x01-r7-20261103-104241 (o-4/scope-draft.json, rev 1). The protected probe corpus (.acan/probes/core.json) has no probe that sends a custom code or a duplicate one, so the order's new behavior cannot be judged by the gate; the drafted may item names steps (create-custom, create-duplicate) that are not corpus steps and is removed. The must-keeps are re-anchored on corpus steps, on status. Any difference the candidate makes on a corpus probe is then out of scope and goes to a ruling. Nothing here is a verdict.",
+  "choice_rules": [
+    {
+      "id": "cr-code-field",
+      "question_match": "(?i)(request field|which field|carry the custom code)",
+      "option_label_match": "(?i)^Use code field",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The order calls it a custom short code, and the link's code is already named code in every answer, so the request field is code. This run asks it as code-field with the option \"Use code field\"."
+    },
+    {
+      "id": "cr-invalid-code-400",
+      "question_match": "(?i)invalid",
+      "option_label_match": "(?i)400",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The link API already answers an invalid create request with 400 (links-create-validation), so an invalid custom code answers 400 the same way. This run asks it as invalid-code-status with the option \"Answer 400 for invalid codes\"."
+    }
+  ],
+  "scope_edits": [
+    {
+      "op": "remove_may",
+      "id": "custom-code",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The item covers every POST /api/links at any step and its obligations name steps create-custom and create-duplicate, which are not corpus steps. No corpus probe sends a custom code, so the change cannot be judged. (drafted id custom-code)"
+    },
+    {
+      "op": "replace_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "Standing rule 2: the drafted redirect-keep names step resolve-link, not a corpus step. Re-anchored on link-redirect-and-clicks step s3 (anonymous GET /:code), equals_base on status.",
+      "rule": {
+        "id": "redirect-keep",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/:code",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s3"
+          },
+          "principal": {
+            "kind": "anonymous"
+          },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "obl-redirect-same",
+            "predicate": {
+              "predicate": "equals_base",
+              "step_id": "s3",
+              "path": "status",
+              "anchor": {
+                "kind": "fresh"
+              }
+            },
+            "text": "An existing short link's redirect status is unchanged from base."
+          }
+        ],
+        "text": "Existing short links still resolve.",
+        "machine_ids": [
+          "links",
+          "store"
+        ]
+      }
+    },
+    {
+      "op": "replace_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "Standing rule 2: the drafted list-keep names step list-links, not a corpus step, and compares the whole body, whose codes and times are generated. Re-anchored on links-create-list-delete step s3 (alice's GET /api/links), equals_base on status; a body difference is out of scope and goes to a ruling.",
+      "rule": {
+        "id": "list-keep",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s3"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice"
+          },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "obl-list-same",
+            "predicate": {
+              "predicate": "equals_base",
+              "step_id": "s3",
+              "path": "status",
+              "anchor": {
+                "kind": "fresh"
+              }
+            },
+            "text": "Listing links answers as in base."
+          }
+        ],
+        "text": "Listing links keeps current shape.",
+        "machine_ids": [
+          "links",
+          "store"
+        ]
+      }
+    }
+  ],
+  "draft_mapping": {
+    "run": "D:\\dev\\acan-demo-runs\\intent\\x01-r7-20261103-104241",
+    "draft_file": "D:\\dev\\acan-demo-runs\\intent\\x01-r7-20261103-104241\\o-4\\scope-draft.json",
+    "draft_rev": 1,
+    "decided_by": "coordinator, delegated by the owner",
+    "items": [
+      {
+        "draft_id": "custom-code",
+        "kind": "may",
+        "action": "remove_may",
+        "decision": "not judgeable, no corpus probe"
+      },
+      {
+        "draft_id": "redirect-keep",
+        "kind": "must_keep",
+        "action": "replace_must_keep",
+        "decision": "re-anchored on s3"
+      },
+      {
+        "draft_id": "list-keep",
+        "kind": "must_keep",
+        "action": "replace_must_keep",
+        "decision": "re-anchored on s3, status"
+      },
+      {
+        "draft_id": "code-field",
+        "kind": "open",
+        "action": "choice rule",
+        "decision": "code"
+      },
+      {
+        "draft_id": "invalid-code-status",
+        "kind": "open",
+        "action": "choice rule",
+        "decision": "400"
+      }
+    ]
+  },
+  "answers": []
+}

@@ -1,0 +1,160 @@
+{
+  "schema": "acan-demo-intent-edits/2",
+  "order": "o-3",
+  "decided_by": "coordinator, delegated by the owner",
+  "note": "Written for the o-3 draft in replay run x01-r7-20261103-104241 (o-3/scope-draft.json, rev 1). The protected probe corpus (.acan/probes/core.json) has no probe that sends an expiry or reads an expired link, so the order's new behavior cannot be judged by the gate. The drafted may items name no corpus step and are removed; the must-keeps are re-anchored on corpus steps. Any difference the candidate makes on a corpus probe is then out of scope and goes to a ruling. Nothing here is a verdict.",
+  "choice_rules": [
+    {
+      "id": "cr-expiry-format",
+      "question_match": "(?i)expir",
+      "option_label_match": "(?i)RFC ?3339",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The order says the owner sets an expiry time, so the input is a timestamp, not a duration. This run asks it as expiry-input-format with the option \"RFC3339 timestamp field\"."
+    }
+  ],
+  "scope_edits": [
+    {
+      "op": "remove_may",
+      "id": "create-link-expiry",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The item covers every POST /api/links at any step and names no corpus step. No corpus probe sends an expiry field, so the change cannot be judged; a create without expiry is held by keep-create-without-expiry. (drafted id create-link-expiry)"
+    },
+    {
+      "op": "remove_may",
+      "id": "expired-link-404",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "No corpus probe creates a link that has expired, so the 404 cannot be judged; the item names no corpus step. Live redirects are held by keep-live-redirect. (drafted id expired-link-404)"
+    },
+    {
+      "op": "replace_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "Standing rule 2: the drafted keep-live-redirect names no corpus step. Re-anchored on link-redirect-and-clicks step s3 (anonymous GET /:code of a fresh link), equals_base on status.",
+      "rule": {
+        "id": "keep-live-redirect",
+        "selector": {
+          "surface": "http",
+          "method": "GET",
+          "route_template": "/:code",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s3"
+          },
+          "principal": {
+            "kind": "anonymous"
+          },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "obl-live-redirect-same",
+            "predicate": {
+              "predicate": "equals_base",
+              "step_id": "s3",
+              "path": "status",
+              "anchor": {
+                "kind": "fresh"
+              }
+            },
+            "text": "A live link's redirect status is unchanged from base."
+          }
+        ],
+        "text": "Live links keep current redirect behavior.",
+        "machine_ids": [
+          "server",
+          "middleware",
+          "ratelimit",
+          "auth",
+          "links",
+          "store",
+          "errors"
+        ]
+      }
+    },
+    {
+      "op": "replace_must_keep",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "Standing rule 2: the drafted keep-create-without-expiry names no corpus step. Re-anchored on step s1 (alice's POST /api/links with no expiry), equals_base on status.",
+      "rule": {
+        "id": "keep-create-without-expiry",
+        "selector": {
+          "surface": "http",
+          "method": "POST",
+          "route_template": "/api/links",
+          "step_context": {
+            "kind": "step",
+            "step_id": "s1"
+          },
+          "principal": {
+            "kind": "actor",
+            "name": "alice"
+          },
+          "channel": "status"
+        },
+        "obligations": [
+          {
+            "obligation_id": "obl-create-no-expiry-same",
+            "predicate": {
+              "predicate": "equals_base",
+              "step_id": "s1",
+              "path": "status",
+              "anchor": {
+                "kind": "fresh"
+              }
+            },
+            "text": "Creating a link without an expiry answers as in base."
+          }
+        ],
+        "text": "Creating without expiry keeps working.",
+        "machine_ids": [
+          "server",
+          "middleware",
+          "ratelimit",
+          "auth",
+          "links",
+          "store",
+          "errors"
+        ]
+      }
+    }
+  ],
+  "draft_mapping": {
+    "run": "D:\\dev\\acan-demo-runs\\intent\\x01-r7-20261103-104241",
+    "draft_file": "D:\\dev\\acan-demo-runs\\intent\\x01-r7-20261103-104241\\o-3\\scope-draft.json",
+    "draft_rev": 1,
+    "decided_by": "coordinator, delegated by the owner",
+    "items": [
+      {
+        "draft_id": "create-link-expiry",
+        "kind": "may",
+        "action": "remove_may",
+        "decision": "not judgeable, no corpus probe"
+      },
+      {
+        "draft_id": "expired-link-404",
+        "kind": "may",
+        "action": "remove_may",
+        "decision": "not judgeable, no corpus probe"
+      },
+      {
+        "draft_id": "keep-live-redirect",
+        "kind": "must_keep",
+        "action": "replace_must_keep",
+        "decision": "re-anchored on s3"
+      },
+      {
+        "draft_id": "keep-create-without-expiry",
+        "kind": "must_keep",
+        "action": "replace_must_keep",
+        "decision": "re-anchored on s1"
+      },
+      {
+        "draft_id": "expiry-input-format",
+        "kind": "open",
+        "action": "choice rule",
+        "decision": "rfc3339"
+      }
+    ]
+  },
+  "answers": []
+}
