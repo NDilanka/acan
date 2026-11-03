@@ -58,6 +58,9 @@ pub(crate) mod caps {
     pub const OPTION_WORDS: usize = 8;
     /// The most words an acceptance or must-keep obligation's line holds.
     pub const OBLIGATION_WORDS: usize = 30;
+    /// The most words a must-keep rule's text holds. The value lives in acan-intent, next to the
+    /// field it caps.
+    pub const MUST_KEEP_WORDS: usize = acan_intent::MUST_KEEP_WORDS;
     /// The most words a card or a usage detail holds.
     pub const CARD_WORDS: usize = 100;
 
@@ -657,8 +660,8 @@ pub fn probe_draft(
 }
 
 /// Refuses a scope whose person-facing text is over its cap: the obligation lines of the may-change
-/// items and the must-keep rules, each open question, and each option label. It runs before any
-/// reference is checked, so the retry is told the length first.
+/// items and the must-keep rules, the text of each must-keep rule, each open question, and each
+/// option label. It runs before any reference is checked, so the retry is told the length first.
 fn check_text(body: &ScopeBody) -> Result<(), DraftError> {
     let obligations = body
         .may
@@ -671,6 +674,9 @@ fn check_text(body: &ScopeBody) -> Result<(), DraftError> {
         );
     for obligation in obligations {
         check_words("obligation text", &obligation.text, caps::OBLIGATION_WORDS)?;
+    }
+    for rule in &body.must_keep {
+        check_words("must-keep rule", &rule.text, caps::MUST_KEEP_WORDS)?;
     }
     for choice in &body.open {
         check_words("open question", &choice.question, caps::QUESTION_WORDS)?;

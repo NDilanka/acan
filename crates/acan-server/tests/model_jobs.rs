@@ -737,6 +737,36 @@ fn a_scope_at_each_word_cap_is_accepted() {
 }
 
 #[test]
+fn a_must_keep_rule_over_thirty_words_is_refused() {
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["must_keep"][0]["text"] = json!(vec!["word"; 31].join(" "));
+
+    let err = check_scope_json(scope, &plant).expect_err("31 words is over the 30-word cap");
+
+    assert!(
+        matches!(
+            &err,
+            DraftError::TooLong {
+                field: "must-keep rule",
+                words: 31,
+                cap: 30,
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_must_keep_rule_at_thirty_words_is_accepted() {
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["must_keep"][0]["text"] = json!(vec!["word"; 30].join(" "));
+
+    check_scope_json(scope, &plant).expect("a 30-word must-keep rule fits its cap");
+}
+
+#[test]
 fn the_probe_fixture_is_accepted_as_a_proposal() {
     let plant = plant_with(fixed_machines());
     let proposal: ProbeProposal = serde_json::from_value(probe_json()).expect("the probe decodes");

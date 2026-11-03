@@ -272,6 +272,10 @@ pub struct ScopeItem {
     pub machine_ids: NonEmpty<MachineId>,
 }
 
+/// The most words a must-keep rule's text holds. It equals the server's obligation-line cap,
+/// `OBLIGATION_WORDS`, because a rule is one line like an obligation.
+pub const MUST_KEEP_WORDS: usize = 30;
+
 /// Behavior an order must keep. Takes precedence over every may-change item.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

@@ -1855,6 +1855,7 @@ fn decide_agent(
 }
 
 /// The most words a usage detail holds. The detail is a short note, so a usage row stays readable.
+/// The server's person-facing card cap, `caps::CARD_WORDS` in acan-server, is the same 100.
 const USAGE_DETAIL_WORDS: usize = 100;
 
 /// Decides one usage row. A call that gave no reply is a failure and carries no token counts, and
