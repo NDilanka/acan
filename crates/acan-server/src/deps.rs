@@ -520,13 +520,12 @@ fn check_redirects(owner: &str, value: &Value, declared: &[&str]) -> Result<(), 
 
 /// Checks an override's selector: a package name, optionally with a spec, and a `>` path of such
 /// selectors. npm fetches a selector's spec when the selector matches, so the spec must be one the
-/// install may fetch. `.` names the root's own dependency. A range that holds a `>` is split at it
-/// and refused, which is the safe side.
+/// install may fetch. `.` names the root's own dependency.
 fn check_selector(owner: &str, selector: &str) -> Result<(), String> {
     if selector == "." {
         return Ok(());
     }
-    for part in selector.split('>') {
+    for part in selector_parts(selector) {
         let (name, spec) = split_selector(part);
         if !is_package_name(name) {
             return Err(format!(
@@ -541,6 +540,26 @@ fn check_selector(owner: &str, selector: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Splits a selector at its `>` path separators. A `>` that opens a comparator belongs to the spec
+/// before it, as in `left-pad@>=1.0.0`. It follows the `@` of a spec, an operator or a space, or it
+/// is followed by `=`. Any other `>` separates two parts.
+fn selector_parts(selector: &str) -> Vec<&str> {
+    let bytes = selector.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (at, _) in selector.match_indices('>') {
+        let before = at.checked_sub(1).map(|prev| bytes[prev]);
+        let opens_comparator = bytes.get(at + 1) == Some(&b'=')
+            || before.is_some_and(|before| b"@<=~^| ".contains(&before));
+        if !opens_comparator {
+            parts.push(&selector[start..at]);
+            start = at + 1;
+        }
+    }
+    parts.push(&selector[start..]);
+    parts
 }
 
 /// Splits a selector's `name@spec` into the name and the spec, when there is one. The `@` that
@@ -1456,6 +1475,7 @@ mod tests {
                 format!("left-pad@{source}"),
                 format!("@scope/left-pad@{source}"),
                 format!("right-pad@1.0.0>left-pad@{source}"),
+                format!("left-pad@>=1.0.0>right-pad@{source}"),
             ] {
                 let manifest = format!(r#"{{"name": "app", "overrides": {{"{selector}": {{}}}}}}"#);
                 let text = manifest_refusal(&manifest).expect("the selector is refused");
@@ -1477,7 +1497,11 @@ mod tests {
             "left-pad@^1.3.0",
             "@scope/left-pad@1.3.0",
             "left-pad@latest",
+            "left-pad@>=1.0.0",
+            "left-pad@>1.0.0 <2",
             "right-pad@1.0.0>left-pad@^1",
+            "right-pad@>=1.0.0>left-pad@>1",
+            "right-pad@>=1.0.0>left-pad",
             ".",
         ] {
             let manifest = format!(r#"{{"name": "app", "overrides": {{"{selector}": "1.3.0"}}}}"#);
