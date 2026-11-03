@@ -5,6 +5,7 @@ use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 use crate::ScanError;
 use crate::lang::Lang;
 use crate::model::{LineRange, Symbol, SymbolKind};
+use crate::states::{self, FileStates};
 
 /// An import as written in the source, before it is resolved to a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +27,7 @@ pub(crate) enum RawRef {
 pub(crate) struct Extracted {
     pub(crate) symbols: Vec<Symbol>,
     pub(crate) imports: Vec<RawImport>,
+    pub(crate) states: FileStates,
 }
 
 pub(crate) struct Extractor {
@@ -84,7 +86,12 @@ impl Extractor {
                 js_imports(&queries.imports, root, bytes),
             ),
         };
-        Ok(Extracted { symbols, imports })
+        let states = states::extract(lang, path, root, bytes);
+        Ok(Extracted {
+            symbols,
+            imports,
+            states,
+        })
     }
 }
 
@@ -487,7 +494,7 @@ fn symbol(name: &str, kind: SymbolKind, node: Node, exported: bool) -> Symbol {
     }
 }
 
-fn text<'a>(node: Node, source: &'a [u8]) -> &'a str {
+pub(crate) fn text<'a>(node: Node, source: &'a [u8]) -> &'a str {
     node.utf8_text(source).unwrap_or_default()
 }
 
@@ -496,13 +503,14 @@ fn name_of<'a>(node: Node, source: &'a [u8]) -> Option<&'a str> {
         .map(|name| text(name, source))
 }
 
-fn string_literal(node: Node, source: &[u8]) -> String {
+/// The text of a string literal without its quote characters.
+pub(crate) fn string_literal(node: Node, source: &[u8]) -> String {
     text(node, source)
         .trim_matches(|c| matches!(c, '"' | '\'' | '`'))
         .to_string()
 }
 
-fn line_number(row: usize) -> u32 {
+pub(crate) fn line_number(row: usize) -> u32 {
     (row + 1) as u32
 }
 

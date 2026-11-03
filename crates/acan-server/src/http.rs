@@ -6,6 +6,7 @@
 //! and never reaches the origin. A command the origin refuses is 409, with the `Rejection` as the
 //! body.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -41,6 +42,8 @@ use crate::public::{self, PublicRoot};
 use crate::registry::{self, Registry};
 use crate::release::{self, BugReport, UpdateStatus, VersionInfo};
 use crate::ruling::{self, RulingBody, RulingDraftView};
+use crate::settings::data::{self, DataOwner};
+use crate::settings::{self, Settings};
 use crate::vision::{self, Side, VisionWitness};
 use crate::workers::{Board, WorkersView};
 use crate::{STATE_DIR, observe, redact, setup, stream, stream_all};
@@ -55,11 +58,13 @@ pub(crate) struct Mount<'a> {
 }
 
 /// The routes one project's host answers under `mount`. The board is this project's own local
-/// workers, which `GET .../workers` reports.
+/// workers, which `GET .../workers` reports. The owner names who may export or clear the project's
+/// data, and the project it belongs to.
 fn project_routes<C: ModelClient + 'static>(
     mount: Mount<'_>,
     host: Host<C>,
     board: Board,
+    owner: DataOwner,
 ) -> Router {
     let api = mount.api;
     Router::new()
@@ -69,6 +74,7 @@ fn project_routes<C: ModelClient + 'static>(
         .route(&format!("{api}/plant"), get(get_plant::<C>))
         .route(&format!("{api}/contract"), get(get_contract::<C>))
         .route(&format!("{api}/scan"), post(post_scan::<C>))
+        .route(&format!("{api}/plant/kinds"), put(put_plant_kinds::<C>))
         .route(&format!("{api}/usage"), get(get_usage::<C>))
         .route(&format!("{api}/workers"), get(get_workers::<C>))
         .route(&format!("{api}/update"), get(get_update::<C>))
@@ -84,6 +90,14 @@ fn project_routes<C: ModelClient + 'static>(
             put(setup::put_role::<C>),
         )
         .route(&format!("{api}/stream"), get(stream::upgrade::<C>))
+        .route(
+            &format!("{api}/settings/data/export"),
+            get(data::get_export::<C>),
+        )
+        .route(
+            &format!("{api}/settings/data/clear"),
+            post(data::post_clear::<C>),
+        )
         .route(
             &format!("{api}/tasks/{{task}}/worktree"),
             get(get_worktree::<C>),
@@ -130,6 +144,7 @@ fn project_routes<C: ModelClient + 'static>(
             get(get_vision_baseline::<C>),
         )
         .layer(Extension(board))
+        .layer(Extension(owner))
         .layer(middleware::from_fn_with_state(
             host.clone(),
             refuse_when_stopped::<C>,
@@ -153,10 +168,14 @@ async fn refuse_when_stopped<C: ModelClient + 'static>(
 /// Builds the router for every project. Each project answers under `/api/p/{id}`, and the default
 /// project also answers at the unprefixed paths, which the setup page and older clients use. The
 /// server's own health and version are not any project's. The public files are served for every
-/// path the API does not claim.
+/// path the API does not claim. The settings are the server's, so their route is global too.
+/// `founder` is the member whose token is the owner's: only it may export or clear a project's
+/// data.
 pub(crate) fn router<C: ModelClient + 'static>(
     projects: Arc<Registry<C>>,
     web: Option<PublicRoot>,
+    settings: Arc<Settings<C>>,
+    founder: MemberId,
 ) -> Router {
     let mut router = Router::new()
         .route("/health", get(health))
@@ -167,10 +186,15 @@ pub(crate) fn router<C: ModelClient + 'static>(
                 .route("/api/projects", get(registry::list_projects::<C>))
                 .route("/api/stream/all", get(stream_all::upgrade::<C>))
                 .with_state(Arc::clone(&projects)),
-        );
+        )
+        .merge(settings::routes(settings));
     for entry in projects.entries() {
         let api = format!("/api/p/{}", entry.id);
         let mcp = format!("{api}/mcp");
+        let owner = DataOwner {
+            project: entry.id.clone(),
+            founder: founder.clone(),
+        };
         router = router.merge(project_routes(
             Mount {
                 api: &api,
@@ -178,6 +202,7 @@ pub(crate) fn router<C: ModelClient + 'static>(
             },
             entry.host.clone(),
             entry.board.clone(),
+            owner.clone(),
         ));
         if entry.id == projects.default_id() {
             router = router.merge(project_routes(
@@ -187,6 +212,7 @@ pub(crate) fn router<C: ModelClient + 'static>(
                 },
                 entry.host.clone(),
                 entry.board.clone(),
+                owner,
             ));
         }
     }
@@ -197,6 +223,16 @@ pub(crate) fn router<C: ModelClient + 'static>(
         }
         None => router,
     }
+}
+
+/// One field a request got wrong, and the rule it broke. The path names the field, such as
+/// `budgets.repair_rounds`. The rule never repeats the value the request sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FieldError {
+    /// The path of the field in the request.
+    pub path: String,
+    /// The rule the field broke.
+    pub why: String,
 }
 
 /// A failed request, with the status it maps to.
@@ -212,6 +248,8 @@ pub enum ApiError {
     BadRequest(&'static str),
     /// The request is valid, but the server's state does not allow it. The name says why.
     Conflict(&'static str),
+    /// The request's values break the rules. Each failing field is listed with its rule.
+    Invalid(Vec<FieldError>),
     /// The origin refused the command. The body is the [`Rejection`].
     Rejected(Rejection),
     /// The scope-first lane refused the call with a closed code. The body is the [`McpError`].
@@ -248,6 +286,11 @@ impl IntoResponse for ApiError {
             Self::Conflict(why) => (
                 StatusCode::CONFLICT,
                 Json(json!({ "error": "conflict", "what": why })),
+            )
+                .into_response(),
+            Self::Invalid(fields) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "invalid", "fields": fields })),
             )
                 .into_response(),
             Self::Rejected(rejection) => (StatusCode::CONFLICT, Json(rejection)).into_response(),
@@ -325,7 +368,6 @@ pub(crate) fn authenticate<C: ModelClient>(
 ) -> Result<Principal, ApiError> {
     token
         .and_then(|token| host.tokens().principal(token))
-        .cloned()
         .ok_or(ApiError::Unauthorized)
 }
 
@@ -456,6 +498,53 @@ async fn post_scan<C: ModelClient + 'static>(
     headers: HeaderMap,
 ) -> Result<Json<Vec<Stamped>>, ApiError> {
     member(&host, &headers)?;
+    let events = host.rescan().await?;
+    Ok(Json(events))
+}
+
+/// Sets or clears the kinds of machines, then rescans so the map redraws. The body maps a machine
+/// name to a kind name, or to null to clear the kind the user set. The change is written to
+/// `.acan/kinds.json` in the repo. Only the owner may do this: a member gets 403, and an agent
+/// gets 403 from [`member`].
+async fn put_plant_kinds<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+    Json(body): Json<BTreeMap<String, Option<String>>>,
+) -> Result<Json<Vec<Stamped>>, ApiError> {
+    let member = member(&host, &headers)?;
+    let owner = host.read(|world| {
+        world
+            .member(&member)
+            .is_some_and(|found| found.role == acan_core::Role::Owner)
+    });
+    if !owner {
+        return Err(ApiError::Forbidden(
+            "only the owner may set a machine's kind",
+        ));
+    }
+    let machines: BTreeSet<String> = host
+        .scan()
+        .plant
+        .machines
+        .iter()
+        .map(|machine| machine.name.clone())
+        .collect();
+    let mut changes = BTreeMap::new();
+    for (name, kind) in body {
+        let kind = match kind {
+            None => None,
+            Some(text) => Some(acan_scan::kind_named(&text).ok_or(ApiError::BadRequest("kind"))?),
+        };
+        if kind.is_some() && !machines.contains(&name) {
+            return Err(ApiError::NotFound("machine"));
+        }
+        changes.insert(name, kind);
+    }
+    let repo = host.repo().to_path_buf();
+    tokio::task::spawn_blocking(move || acan_scan::write_kind_overrides(&repo, &changes))
+        .await
+        .map_err(|err| ApiError::Internal(err.into()))?
+        .map_err(|err| ApiError::Internal(err.into()))?;
     let events = host.rescan().await?;
     Ok(Json(events))
 }
@@ -874,7 +963,7 @@ async fn vision_png<C: ModelClient>(
 }
 
 /// A task id from a path. One that has no contract spelling names no task.
-fn task_ref(raw: &str) -> Result<TaskRef, ApiError> {
+pub(crate) fn task_ref(raw: &str) -> Result<TaskRef, ApiError> {
     TaskRef::from_str(raw).map_err(|_| ApiError::NotFound("task"))
 }
 

@@ -487,6 +487,18 @@ async fn resolve_commit(root: &Path, spec: &str) -> Result<Option<CommitSha>, St
     resolve_commit_with(Path::new("git"), root, spec, REF_TIMEOUT).await
 }
 
+/// Waits at most `limit` for git's answer. Git that has not answered by then did not answer, the
+/// same as git that cannot start, so a slow git is never read as a missing commit.
+async fn answer_within<T>(
+    limit: Duration,
+    answer: impl std::future::Future<Output = std::io::Result<T>>,
+) -> Result<T, String> {
+    tokio::time::timeout(limit, answer)
+        .await
+        .map_err(|_| format!("git did not answer within {} s", limit.as_secs()))?
+        .map_err(|err| format!("git cannot run: {err}"))
+}
+
 async fn resolve_commit_with(
     git: &Path,
     root: &Path,
@@ -504,10 +516,7 @@ async fn resolve_commit_with(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let output = tokio::time::timeout(limit, command.output())
-        .await
-        .map_err(|_| format!("git did not answer within {} s", limit.as_secs()))?
-        .map_err(|err| format!("git cannot run: {err}"))?;
+    let output = answer_within(limit, command.output()).await?;
     match output.status.code() {
         Some(0) => {
             let text = String::from_utf8_lossy(&output.stdout);
@@ -1379,6 +1388,28 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_refused_run_creates_no_diagnostics_directory() {
+        let repo = clone_with(&contract_files());
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let diagnostics = dir.path().join("diagnostics");
+        let error = run_with(
+            &args(repo.path(), "main", "main"),
+            &missing_docker(),
+            Some(&diagnostics),
+        )
+        .await
+        .expect_err("a run without docker is refused");
+        assert!(
+            matches!(error, ShadowError::Docker(_)),
+            "no docker: {error}"
+        );
+        assert!(
+            !diagnostics.exists(),
+            "a refused run keeps no diagnostics directory"
+        );
+    }
+
     /// Every path under `dir` with its length, sorted, so a change to a directory shows.
     fn listing(dir: &Path) -> Vec<(PathBuf, u64)> {
         let mut found = Vec::new();
@@ -1870,7 +1901,13 @@ mod tests {
             matches!(&unrunnable, Err(detail) if detail.contains("cannot run")),
             "a git that cannot start: {unrunnable:?}"
         );
-        let stalled = resolve_commit_with(Path::new("git"), root, "main", Duration::ZERO).await;
+        // A future that never completes stands in for git, so the limit always runs out first.
+        // A real git with a zero limit could finish before the first poll, under load.
+        let stalled = answer_within(
+            Duration::from_millis(10),
+            std::future::pending::<std::io::Result<()>>(),
+        )
+        .await;
         assert!(
             matches!(&stalled, Err(detail) if detail.contains("did not answer")),
             "a git that does not answer in time: {stalled:?}"

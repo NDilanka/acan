@@ -1,25 +1,31 @@
 //! Scans a source repository with tree-sitter into a plant: machines, the belts between them,
-//! and per-file symbols and imports for clash detection.
+//! per-file symbols and imports for clash detection, and the state machines found in the code.
 
 mod extract;
 mod group;
 mod hash;
+mod kind;
 mod lang;
 mod model;
 mod resolve;
+mod states;
+mod touch;
 mod walk;
 
 use std::path::{Path, PathBuf};
 
 use hash::Digest;
 
+pub use acan_iso::Kind;
 pub use group::Grouping;
 pub use hash::ContentHash;
+pub use kind::{OVERRIDES_PATH, kind_named, write_kind_overrides};
 pub use lang::Lang;
 pub use model::{
-    Belt, FileId, ImportRef, ImportTarget, LineRange, Machine, MachineId, Plant, SourceFile,
-    Symbol, SymbolKind,
+    Belt, Confidence, FileId, ImportRef, ImportTarget, LineRange, Machine, MachineId, Plant,
+    Source, SourceFile, State, StateCandidate, StateMachine, Symbol, SymbolKind, Transition,
 };
+pub use touch::{Change, Touched, hunks, touched};
 
 /// Why a scan failed.
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +39,18 @@ pub enum ScanError {
         path: PathBuf,
         #[source]
         source: std::io::Error,
+    },
+    #[error("failed to write {}: {source}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{} is not a valid kinds file: {source}", path.display())]
+    Overrides {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
     },
     #[error("failed to load the {lang:?} grammar: {source}")]
     Language {
@@ -63,6 +81,7 @@ pub fn scan(root: impl AsRef<Path>) -> Result<Plant, ScanError> {
     let mut extractor = extract::Extractor::new()?;
 
     let mut files = Vec::with_capacity(sources.len());
+    let mut file_states = Vec::with_capacity(sources.len());
     for (position, source) in sources.iter().enumerate() {
         let text = std::fs::read_to_string(&source.abs).map_err(|error| ScanError::Read {
             path: source.abs.clone(),
@@ -82,16 +101,22 @@ pub fn scan(root: impl AsRef<Path>) -> Result<Plant, ScanError> {
             symbols: extracted.symbols,
             imports,
         });
+        file_states.push(extracted.states);
     }
 
     let revision = revision_of(&files);
+    let (state_machines, state_candidates) = states::resolve_all(file_states);
     let mut plant = Plant {
         root: root.to_path_buf(),
         revision,
         machines: Vec::new(),
         belts: Vec::new(),
         files,
+        state_machines,
+        state_candidates,
+        kind_overrides: kind::read_overrides(root)?,
     };
+    // Regrouping also sets each state machine's module.
     plant.regroup(&Grouping::default());
     Ok(plant)
 }

@@ -18,6 +18,7 @@ use crate::git::Workspace;
 use crate::index::Scan;
 use crate::jobs;
 use crate::store::EventStore;
+use crate::touches::{TouchSink, TransitionTouch};
 use crate::tour::TourCache;
 use crate::vision::Vision;
 use crate::writer::{Guard, Snapshot, Writer};
@@ -83,9 +84,13 @@ struct Inner<C> {
     store: EventStore,
     tokens: Tokens,
     events: broadcast::Sender<Stamped>,
+    /// The live transition touches of accepted writes. Never stored.
+    touches: broadcast::Sender<TransitionTouch>,
     wake: Arc<Notify>,
     ledger: UsageLedger,
     client: C,
+    /// Where each rescan reads its statemap settings. `None` runs no statemap pass.
+    statemap: Option<crate::statemap::SettingsSource>,
     repo: PathBuf,
     shutdown: watch::Receiver<bool>,
     streams: Arc<Mutex<JoinSet<()>>>,
@@ -135,12 +140,28 @@ impl<C: ModelClient> Host<C> {
     /// Panics when called outside a Tokio runtime, or when `probe_concurrency` is zero.
     #[must_use]
     pub fn new_with_slots(parts: HostParts<C>, slots: Arc<Semaphore>) -> Self {
+        Self::new_with_statemap(parts, slots, None)
+    }
+
+    /// [`new_with_slots`](Self::new_with_slots), with the statemap settings each rescan reads. `None`
+    /// runs no statemap pass.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a Tokio runtime, or when `probe_concurrency` is zero.
+    #[must_use]
+    pub(crate) fn new_with_statemap(
+        parts: HostParts<C>,
+        slots: Arc<Semaphore>,
+        statemap: Option<crate::statemap::SettingsSource>,
+    ) -> Self {
         assert!(
             parts.probe_concurrency > 0,
             "probe_concurrency must allow at least one probe, got {}",
             parts.probe_concurrency
         );
         let (events, _) = broadcast::channel(LIVE_BUFFER);
+        let (touches, _) = broadcast::channel(LIVE_BUFFER);
         let wake = Arc::new(Notify::new());
         let scan = Arc::new(parts.scan);
         let (publish, snapshots) = watch::channel(Arc::new(Snapshot {
@@ -154,6 +175,10 @@ impl<C: ModelClient> Host<C> {
             events.clone(),
             Arc::clone(&wake),
             publish,
+            TouchSink {
+                sender: touches.clone(),
+                repo: parts.repo.clone(),
+            },
         );
         Self {
             inner: Arc::new(Inner {
@@ -162,9 +187,11 @@ impl<C: ModelClient> Host<C> {
                 store: parts.store,
                 tokens: parts.tokens,
                 events,
+                touches,
                 wake,
                 ledger: parts.ledger,
                 client: parts.client,
+                statemap,
                 repo: parts.repo,
                 shutdown: parts.shutdown,
                 streams: Arc::new(Mutex::new(JoinSet::new())),
@@ -279,6 +306,13 @@ impl<C: ModelClient> Host<C> {
         self.inner.events.subscribe()
     }
 
+    /// A receiver for the transition touches of writes accepted from now on. A touch is live only:
+    /// a receiver that lags skips them, and nothing stores them.
+    #[must_use]
+    pub(crate) fn subscribe_touches(&self) -> broadcast::Receiver<TransitionTouch> {
+        self.inner.touches.subscribe()
+    }
+
     /// Reads the last committed world. Never waits on a write.
     pub fn read<R>(&self, read: impl FnOnce(&World) -> R) -> R {
         read(&self.inner.snapshots.borrow().world)
@@ -385,9 +419,12 @@ impl<C: ModelClient> Host<C> {
     /// Returns an error when the scan fails, or when the `IndexUpdated` event cannot be stored.
     pub async fn rescan(&self) -> Result<Vec<Stamped>, SubmitError> {
         let repo = self.inner.repo.clone();
-        let scan = tokio::task::spawn_blocking(move || crate::index::scan(&repo))
+        let mut scan = tokio::task::spawn_blocking(move || crate::index::scan(&repo))
             .await
             .context("the scan task did not finish")??;
+        if let Some(statemap) = &self.inner.statemap {
+            crate::statemap::refine(&self.inner.client, &mut scan.plant, statemap.current()).await;
+        }
         self.inner.writer.rescan(scan).await
     }
 

@@ -14,12 +14,14 @@
 import { workerCommand, workerSummary } from "./firstrun.js";
 import { isRailOpen } from "./rail.js";
 
+export const MS_PER_MINUTE = 60_000;
+
 // A worker renews its lease every 20 seconds, so two minutes with no event from an agent that
 // holds a task means it has stopped talking to the origin. From AWAY_MS the map takes its drone
 // down and shows an away dot. Both mirror STALE_MS and AWAY_MS in the drone code (marks.rs), which
 // the map ring reads; change them together.
-export const STALE_MS = 2 * 60 * 1000;
-export const AWAY_MS = 10 * 60 * 1000;
+export const STALE_MS = 2 * MS_PER_MINUTE;
+export const AWAY_MS = 10 * MS_PER_MINUTE;
 
 // How often the "2m ago" words are refreshed while nothing else changes.
 export const TICK_MS = 15 * 1000;
@@ -111,7 +113,7 @@ function byName(a, b) {
 // How long an away agent has been quiet, as the map's away dot says it: whole minutes, then whole
 // hours from an hour on, such as "12m" or "2h".
 export function awayStamp(quietMs) {
-  const minutes = Math.floor(quietMs / 60_000);
+  const minutes = Math.floor(quietMs / MS_PER_MINUTE);
   return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h`;
 }
 
@@ -123,7 +125,7 @@ export function waitingAgents(view) {
   const asked = new Set((view.questions ?? []).map((q) => q.order));
   const held = new Set((view.lanes ?? []).filter((lane) => lane.stopped || (lane.open_contests ?? 0) > 0).map((lane) => lane.order));
   const tasks = new Map(view.tasks.map((task) => [task.id, task]));
-  return new Set(view.agents.filter((agent) => agent.task !== null && agent.task !== undefined
+  return new Set((view.agents ?? []).filter((agent) => agent.task !== null && agent.task !== undefined
     && (clashed.has(agent.task) || asked.has(tasks.get(agent.task)?.order) || held.has(tasks.get(agent.task)?.order))).map((agent) => agent.id));
 }
 
@@ -167,8 +169,10 @@ export function laneRows(view, activity, now, { live = true } = {}) {
       stale: state === "stale",
       away: state === "away",
       stamp: state === "away" ? awayStamp(quiet) : null,
-      // The drift the view derives in Rust (`Drift`): a stuck or beyond-scope agent says so.
-      drift: agent.drift?.kind === "stuck" || agent.drift?.kind === "beyond_scope" ? "drift" : null,
+      // The drift the view derives in Rust (`Drift`): a stuck or beyond-scope agent says so, unless
+      // it waits on the user, when its order already holds it still.
+      drift: !waiting.has(agent.id) && (agent.drift?.kind === "stuck" || agent.drift?.kind === "beyond_scope")
+        ? "drift" : null,
       check: task?.check ?? null,
       rideable: Array.isArray(agent.body),
       hold: typeof hold === "string" && hold !== "" ? hold : null,

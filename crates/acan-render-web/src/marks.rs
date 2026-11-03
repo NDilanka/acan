@@ -1,7 +1,7 @@
 //! The marks drawn on the plant, read from the origin's view.
 //!
-//! [`Marks::build`] says where each mark stands. An agent's drone hovers over its machine, with its
-//! shadow on the plinth top below its centre. The amber ring round an agent that waits on the user,
+//! [`Marks::build`] says where each mark stands. An agent's drone hovers beside its machine, with
+//! its shadow on the surface straight under its centre. The amber ring round an agent that waits on the user,
 //! the clash pin on its stalk, the faint red of a machine with an open clash, and the flags the page
 //! labels. [`card`]
 //! builds the clash card from the view and the world, so its rows follow the origin. [`Motion`] only
@@ -12,8 +12,8 @@ use std::f32::consts::{PI, TAU};
 
 use acan_core::{OrderId, TaskId, World};
 use acan_iso::{
-    BEACON_RADIUS, BODY_RADIUS, BOT_HEIGHT, GLOW_DROP, GLOW_RADIUS, PIN_HEIGHT, PLINTH_TOP,
-    STALK_HEIGHT, eye_point, shadow_at,
+    BEACON_RADIUS, BODY_RADIUS, BOT_HEIGHT, PIN_HEIGHT, PLINTH_TOP, STALK_HEIGHT, eye_point,
+    shadow_at,
 };
 use acan_render::theme::{
     AGENT_SLOTS, TINT_BODY0, TINT_CLASH, TINT_DIM0, TINT_GHOST, TINT_SCOPE0, TINT_SHADOW,
@@ -27,21 +27,36 @@ use crate::plan::Plan;
 use crate::slices::{ScopeTint, Slice, slice_layout};
 use crate::tour::Spot;
 
-/// The height of a drone's centre above its machine's top when it hovers beside the machine,
-/// in world units. The drone floats level with the machine's top rather than high above it. The
-/// spot is clear of the machine in plan, so the body's underside may sit below the top.
-pub const HOVER_LIFT: f32 = BODY_RADIUS * 0.5;
+/// The height of the ground, in world units. A drone that hovers beside its machine has this
+/// under it, so its shadow lies here.
+pub const GROUND_Z: f32 = 0.0;
 
-/// The clearance between a drone's body and its machine's top when the drone hovers over the
-/// machine's centre, in world units. That only happens when every spot beside the machine is
-/// taken, and there the body must not touch the machine's parts.
-pub const HOVER_GAP: f32 = 6.0;
+/// The gap between a seated drone's underside and the surface straight under it, in world units:
+/// a quarter of its body radius, so its shadow touches it.
+pub const HOVER_GAP: f32 = 0.25 * BODY_RADIUS;
 
-/// The height of a drone's centre over a machine whose top is at `top`, in world units: beside
-/// the machine, level with its top.
+/// The height of a drone's centre over the surface straight under it, in world units: its body
+/// clears that surface by [`HOVER_GAP`].
 #[must_use]
-pub fn hover_height(top: f32) -> f32 {
-    top + HOVER_LIFT
+pub fn hover_height(surface: f32) -> f32 {
+    surface + BODY_RADIUS + HOVER_GAP
+}
+
+/// The height of the first surface straight under `at` in plan: the top of the machine whose
+/// footprint holds that point, the highest where several do, or else the ground. A footprint
+/// stands to its stand's top, so a drone over a machine finds that top below it, and a drone
+/// beside every machine finds the ground.
+#[must_use]
+pub fn surface_below(at: [f32; 2], plan: &Plan, stands: &[Stand]) -> f32 {
+    plan.machines
+        .iter()
+        .enumerate()
+        .filter(|(_, machine)| {
+            (machine.min[0]..=machine.min[0] + machine.size[0]).contains(&at[0])
+                && (machine.min[1]..=machine.min[1] + machine.size[1]).contains(&at[1])
+        })
+        .map(|(i, _)| stands.get(i).map_or(PLINTH_TOP, |stand| stand.top))
+        .fold(GROUND_Z, f32::max)
 }
 
 /// The room above a drone's crown that its flag takes, in world units. The plant's fit keeps it
@@ -66,7 +81,10 @@ const BEACON_SWING: f32 = 0.5;
 /// The width of the tether from a drone's eye to its target, in device px.
 const TETHER_PX: f32 = 1.5;
 /// The opacity of a drone's shadow at full strength, which [`shadow_at`] thins as the drone rises.
-const SHADOW_ALPHA: f32 = 0.28;
+const SHADOW_ALPHA: f32 = 0.32;
+/// The least opacity a drone's shadow keeps at any height, so a drone at hover height still casts
+/// a readable contact shadow on the ground under it.
+const SHADOW_MIN_ALPHA: f32 = 0.22;
 /// How far a stale drone sits below its seat, in plan units, so it reads as sagging.
 const STALE_DROP: f32 = 0.25 * BODY_RADIUS;
 /// Milliseconds for one pulse of a working agent's beacon.
@@ -195,8 +213,8 @@ pub fn hue_css(slot: usize) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
-/// The tint slot of an agent's hue at full strength. A working drone's eye, every drone's glow,
-/// the beam and the beacon draw with it.
+/// The tint slot of an agent's hue at full strength. A working drone's eye, its beam and its
+/// beacon draw with it.
 #[must_use]
 pub fn body_tint(slot: usize) -> u8 {
     u8::try_from(TINT_BODY0 as usize + slot).expect("tint slots fit in a byte")
@@ -214,20 +232,21 @@ pub fn eye_tint(state: DroneState, slot: usize) -> u8 {
     u8::try_from(tint).expect("tint slots fit in a byte")
 }
 
-/// A drone over a machine. It hovers on a spot beside the machine, its centre [`HOVER_LIFT`]
-/// above the machine's top, so it floats level with the top. Its shadow lies on the ground under
-/// its centre.
+/// A drone over a machine. It hovers on a spot beside the machine, [`HOVER_GAP`] above the
+/// surface straight under it, so its shadow touches it. Its shadow lies on that surface under its
+/// centre.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Body {
     pub agent: String,
     pub slot: usize,
     /// The plan index of the machine it works on.
     pub machine: usize,
-    /// Where the drone's centre hovers, in world units: over its spot beside the machine,
-    /// [`HOVER_LIFT`] above the machine's top. A drone seated at the machine's centre, when every
-    /// spot beside it is taken, hovers [`HOVER_GAP`] above the top instead, so it never touches
-    /// the machine's parts.
+    /// Where the drone's centre hovers, in world units: [`hover_height`] over the surface straight
+    /// under its seat.
     pub at: [f32; 3],
+    /// The height of the surface straight under the drone, in world units: the ground beside its
+    /// machine, or the machine's top when the drone hovers over it. Its shadow lies there.
+    pub ground: f32,
     /// The point the drone faces and its beam ends at, in world units. It is the machine's centre on
     /// its top, lifted by the beacon's radius so the beacon stands on the top.
     pub target: [f32; 3],
@@ -258,16 +277,16 @@ impl Body {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DroneState {
-    /// On a claimed task: its eye is bright, its glow strong, it bobs and its beacon pulses.
+    /// On a claimed task: its eye is bright, it bobs and its beacon pulses.
     Working,
-    /// On an open, read-back, queued or landed task, or none: its eye dim, its glow faint, and it
-    /// bobs lower and slower than a working drone.
+    /// On an open, read-back, queued or landed task, or none: its eye dim, and it bobs lower and
+    /// slower than a working drone.
     #[default]
     Idle,
     /// Its task is in an open clash, or its order asks a question, is stopped or has an open
     /// contest: as idle, with an amber ring.
     Waiting,
-    /// It holds a task but has been quiet for a while: still and lower, its eye grey, no glow.
+    /// It holds a task but has been quiet for a while: still and lower, and its eye grey.
     Stale,
     /// It holds a task it has drifted from: it looks as it does while it works, and its flag
     /// carries a grey chevron.
@@ -301,17 +320,6 @@ impl DroneState {
             Self::Working | Self::Waiting | Self::Drifting => 0.9,
             Self::Idle => 0.3,
             Self::Stale => 0.2,
-        }
-    }
-
-    /// The opacity of the glow under the drone: strong while the agent works or drifts, faint while
-    /// it idles or waits, and none once it has gone stale.
-    #[must_use]
-    pub fn glow_alpha(self) -> f32 {
-        match self {
-            Self::Working | Self::Drifting => 0.5,
-            Self::Idle | Self::Waiting => 0.18,
-            Self::Stale => 0.0,
         }
     }
 
@@ -489,8 +497,12 @@ pub fn badge_centres(foot: [f32; 3], project: impl Fn([f32; 3]) -> [f32; 2]) -> 
 pub enum Follow {
     /// Stays at the flag's own point.
     Still,
-    /// Rides the body of the named agent.
-    Body(String),
+    /// Rides the body of the named agent, bobbing with it at its slot and state.
+    Body {
+        agent: String,
+        slot: usize,
+        state: DroneState,
+    },
     /// Rides the diamond of the named clash.
     Pin(String),
     /// The landed dot of a machine. `count` is how many of its tasks have landed, so a new
@@ -1715,7 +1727,9 @@ impl Motion {
     pub fn flag_at(&self, flag: &Flag) -> [f32; 3] {
         match &flag.follow {
             Follow::Still | Follow::Landed { .. } => flag.at,
-            Follow::Body(agent) => self.body_at(agent).unwrap_or(flag.at),
+            Follow::Body { agent, slot, state } => self.body_at(agent).map_or(flag.at, |at| {
+                [at[0], at[1], at[2] + self.bob(*slot, *state)]
+            }),
             Follow::Pin(clash) => self.pin_at(clash).unwrap_or(flag.at),
         }
     }
@@ -1746,7 +1760,7 @@ pub struct MarkKinds {
 }
 
 /// A drone's instances: its white body and its accent at its centre, the accent in `accent`,
-/// which [`eye_tint`] gives for the drone's state. Its glow and shadow are [`spots`].
+/// which [`eye_tint`] gives for the drone's state. Its shadow is [`spots`].
 fn drone(kinds: MarkKinds, at: [f32; 3], accent: u8, turn: f32, bot: [f32; 2]) -> [Instance; 2] {
     [
         Instance {
@@ -1847,7 +1861,7 @@ pub fn mark_instances(
 }
 
 /// A drone's centre lifted by its bob, which is zero for a drone that holds still.
-fn bobbed(motion: &Motion, body: &Body, at: [f32; 3]) -> [f32; 3] {
+pub fn bobbed(motion: &Motion, body: &Body, at: [f32; 3]) -> [f32; 3] {
     [at[0], at[1], at[2] + motion.bob(body.slot, body.state)]
 }
 
@@ -1890,35 +1904,22 @@ pub fn beams(
         .collect()
 }
 
-/// The soft spots now: the glow under each drone, in its agent's hue at its state's strength, and
-/// its shadow on the plinth top under its centre, which shrinks and fades as the drone rises. A
-/// glow hangs from the drone's centre in its own frame, so it bobs and grows with the drone, and a
-/// shadow grows with the drone too. A stale drone has no glow, a leaving drone glows as an idle
-/// one does, and the riding agent's drone has neither.
+/// The shadows now, each a soft level disc on the surface straight under its drone, so it is the
+/// drone's vertical projection from any camera angle. It lies on the ground, or the machine's top,
+/// beneath the drone's centre, shrinks and thins as the drone rises, and grows with the drone. A
+/// leaving drone casts one as an idle one does, and the riding agent's drone casts none.
 #[must_use]
 pub fn spots(motion: &Motion, marks: &Marks, dpr: f32, riding: Option<&str>) -> Vec<Beam> {
-    let glow = |at: [f32; 3], slot: usize, alpha: f32| Beam {
-        from: [0.0, 0.0, -GLOW_DROP],
-        to: at,
-        origin: at,
-        grow: drone_grow(dpr),
-        turn: 0.0,
-        tint: body_tint(slot),
-        alpha,
-        width_px: 0.0,
-        spot: GLOW_RADIUS,
-    };
-    let shadow = |at: [f32; 3]| {
-        let (radius, strength) = shadow_at(at[2] - PLINTH_TOP);
-        let ground = [at[0], at[1], PLINTH_TOP];
+    let shadow = |at: [f32; 3], ground: f32| {
+        let (radius, strength) = shadow_at(at[2] - ground);
         Beam {
             from: [0.0; 3],
-            to: ground,
-            origin: ground,
+            to: [at[0], at[1], ground],
+            origin: [at[0], at[1], ground],
             grow: drone_grow(dpr),
             turn: 0.0,
             tint: u8::try_from(TINT_SHADOW).expect("tint slots fit in a byte"),
-            alpha: SHADOW_ALPHA * strength,
+            alpha: SHADOW_MIN_ALPHA.max(SHADOW_ALPHA * strength),
             width_px: 0.0,
             spot: radius,
         }
@@ -1929,22 +1930,16 @@ pub fn spots(motion: &Motion, marks: &Marks, dpr: f32, riding: Option<&str>) -> 
         .filter(|body| riding != Some(body.agent.as_str()))
         .filter_map(|body| {
             let at = bobbed(motion, body, motion.body_at(&body.agent)?);
-            Some((at, body.slot, body.state.glow_alpha()))
+            Some((at, body.ground))
         });
     let leaving = motion
         .leaving
         .iter()
         .filter(|(agent, _)| riding != Some(agent.as_str()))
-        .map(|(_, leave)| {
-            let now = leave.now();
-            (now.at, now.slot, DroneState::Idle.glow_alpha())
-        });
+        .map(|(_, leave)| (leave.now().at, GROUND_Z));
     bodies
         .chain(leaving)
-        .flat_map(|(at, slot, alpha)| {
-            let glow = (alpha > 0.0).then(|| glow(at, slot, alpha));
-            [Some(shadow(at)), glow].into_iter().flatten()
-        })
+        .map(|(at, ground)| shadow(at, ground))
         .collect()
 }
 
@@ -2200,13 +2195,10 @@ fn place(
         let seats = seated.entry(machine).or_default();
         let spot = seat(spots, centre, seats);
         seats.push(spot);
-        // A drone beside its machine floats level with its top. The centre seat is over the
-        // machine, so a drone seated there keeps its body clear of the top instead.
-        let z = if spot == centre {
-            top + HOVER_GAP + BODY_RADIUS
-        } else {
-            hover_height(top)
-        };
+        // The drone hovers a gap above the first surface straight under its seat: the ground
+        // beside its machine, or the machine's top when the seat lies over it.
+        let ground = surface_below(spot, plan, stands);
+        let z = hover_height(ground);
         let id = agent.id.to_string();
         let state = DroneState::of(
             agent.activity,
@@ -2225,6 +2217,7 @@ fn place(
             agent: id,
             machine,
             at: [spot[0], spot[1], z],
+            ground,
             target: [centre[0], centre[1], top + BEACON_RADIUS],
             activity: agent.activity,
             check,
@@ -2578,7 +2571,11 @@ fn agent_flag(view: &View, body: &Body, clock: Clock) -> Flag {
         machine: Some(body.machine),
         at: body.at,
         on: None,
-        follow: Follow::Body(body.agent.clone()),
+        follow: Follow::Body {
+            agent: body.agent.clone(),
+            slot: body.slot,
+            state: body.state,
+        },
     }
 }
 
@@ -2692,6 +2689,11 @@ mod tests {
                 [200.0, 0.0, 296.0, 86.0]
             }
         })
+    }
+
+    /// Whether `flag` rides the body of agent `agent`.
+    fn follows_body(flag: &Flag, agent: &str) -> bool {
+        matches!(&flag.follow, Follow::Body { agent: named, .. } if named == agent)
     }
 
     /// Every machine's stand: its top at the plinth top, with three spots round its centre. Two
@@ -3045,20 +3047,37 @@ mod tests {
         };
         let gap = distance([first.at[0], first.at[1]], [second.at[0], second.at[1]]);
         assert!(gap >= SEAT_STEP, "the bodies are a seat apart, not {gap}");
-        let top = stands(&plan)[api].top;
         for body in [first, second] {
             assert_eq!(
-                body.at[2],
-                hover_height(top),
-                "a drone hovers at its height"
+                body.ground,
+                surface_below([body.at[0], body.at[1]], &plan, &stands(&plan)),
+                "a drone's shadow lies on the surface straight under it"
             );
             assert_eq!(
-                body.at[2],
-                top + HOVER_LIFT,
-                "a drone beside its machine floats level with its top"
+                body.at[2] - BODY_RADIUS - body.ground,
+                HOVER_GAP,
+                "a drone's underside clears the surface under it by a quarter of its radius"
             );
         }
         assert_ne!(first.slot, second.slot, "the two agents have distinct hues");
+    }
+
+    #[test]
+    fn a_drone_sees_its_machine_top_when_over_it_and_the_ground_beside_every_machine() {
+        let plan = plan();
+        let stands = stands(&plan);
+        let api = machine(&plan, "src/api");
+        let centre = plan.machines[api].center();
+        assert_eq!(
+            surface_below(centre, &plan, &stands),
+            stands[api].top,
+            "over the machine, its top"
+        );
+        assert_eq!(
+            surface_below([-1.0e6, -1.0e6], &plan, &stands),
+            GROUND_Z,
+            "far from every machine, the ground"
+        );
     }
 
     #[test]
@@ -3344,10 +3363,16 @@ mod tests {
             .filter(|spot| spot.tint == shadow)
             .collect();
         assert_eq!(shadows.len(), 2, "each drone has a shadow");
-        assert!(
-            shadows.iter().all(|s| s.origin[2] == PLINTH_TOP),
-            "a shadow lies on the plinth top"
-        );
+        for body in &marks.bodies {
+            let shadow = shadows
+                .iter()
+                .find(|s| s.origin[0] == body.at[0] && s.origin[1] == body.at[1])
+                .expect("the drone has a shadow straight under it");
+            assert_eq!(
+                shadow.origin[2], body.ground,
+                "the shadow lies on the ground under the drone"
+            );
+        }
         assert_eq!(count(kinds.ring), 2, "each waiting agent has a ring");
         assert_eq!(count(kinds.pin), 1);
         assert_eq!(count(kinds.stalk), 1, "each diamond has its stalk");
@@ -3425,9 +3450,7 @@ mod tests {
         let away = at(Some(heard + 12 * 60_000));
         assert!(!has_drone(&away), "the drone is gone");
         assert!(
-            away.flags
-                .iter()
-                .all(|flag| flag.follow != Follow::Body(agent.clone())),
+            away.flags.iter().all(|flag| !follows_body(flag, &agent)),
             "and its flag with it"
         );
         let dots = aways(&away);
@@ -3488,7 +3511,7 @@ mod tests {
             Marks::build_at(&view, &plan, &stands, &slots, clock)
                 .flags
                 .into_iter()
-                .find(|flag| flag.follow == Follow::Body(agent.clone()))
+                .find(|flag| follows_body(flag, &agent))
                 .expect("the agent has a flag")
         };
         let fresh = flag_at(None);
@@ -3778,6 +3801,7 @@ mod tests {
             slot: 0,
             machine: 0,
             at,
+            ground: GROUND_Z,
             target,
             activity,
             state: DroneState::of(activity, false, false, false),
@@ -4086,7 +4110,7 @@ mod tests {
         let low = |x: f32, top: f32| {
             drone(
                 "a",
-                [x, 0.0, top + HOVER_LIFT],
+                [x, 0.0, hover_height(top)],
                 [x, 30.0, top + BEACON_RADIUS],
                 "idle",
             )
@@ -4330,6 +4354,46 @@ mod tests {
     }
 
     #[test]
+    fn an_agents_name_bobs_with_its_drone() {
+        let mut motion = Motion::default();
+        motion.set_px_units(2.0);
+        let marks = marks_of(vec![drone("a", [0.0, 0.0, 40.0], [9.0, 0.0, 9.0], "idle")]);
+        motion.sync(&marks);
+        motion.advance(ARRIVE_MS + TURN_MS);
+        motion.advance(IDLE_BOB_PERIOD_MS / 4.0);
+        let name = Flag {
+            kind: FlagKind::Agent,
+            text: "a".to_string(),
+            hue: None,
+            waiting: false,
+            clash: None,
+            check: None,
+            leaving: false,
+            detail: Vec::new(),
+            scope: None,
+            drone: None,
+            on: None,
+            machine: Some(0),
+            at: [0.0, 0.0, 40.0],
+            follow: Follow::Body {
+                agent: "a".to_string(),
+                slot: 0,
+                state: DroneState::Idle,
+            },
+        };
+        let bob = motion.bob(0, DroneState::Idle);
+        assert_ne!(
+            bob, 0.0,
+            "the drone is off its rest at this point of its bob"
+        );
+        assert_eq!(
+            motion.flag_at(&name),
+            [0.0, 0.0, 40.0 + bob],
+            "the name sits over the drone as it is now"
+        );
+    }
+
+    #[test]
     fn reduced_motion_or_freeze_holds_an_idle_drone_and_asks_for_no_frames() {
         for (still, reduced) in [(false, true), (true, false)] {
             let mut motion = Motion::new(still);
@@ -4541,7 +4605,7 @@ mod tests {
     }
 
     #[test]
-    fn each_state_sets_its_tether_eye_and_glow_and_a_stale_drone_sits_lower() {
+    fn each_state_sets_its_tether_eye_and_a_stale_drone_sits_lower() {
         let at = [0.0, 0.0, 40.0];
         let target = [4.0, 0.0, 9.0];
         let with = |agent: &str, state: DroneState| Body {
@@ -4593,17 +4657,11 @@ mod tests {
         );
         let shadow = u8::try_from(TINT_SHADOW).expect("fits");
         let all = spots(&motion, &marks, 1.0, None);
-        let glows: Vec<f32> = all
-            .iter()
-            .filter(|spot| spot.tint != shadow)
-            .map(|spot| spot.alpha)
-            .collect();
-        assert_eq!(glows, [0.5, 0.18, 0.18], "a stale drone has no glow");
-        assert_eq!(
-            all.iter().filter(|spot| spot.tint == shadow).count(),
-            4,
-            "every drone has a shadow, a stale one too"
+        assert!(
+            all.iter().all(|spot| spot.tint == shadow),
+            "a drone's only spot is its shadow"
         );
+        assert_eq!(all.len(), 4, "every drone has a shadow, a stale one too");
         let ring = instances
             .iter()
             .find(|i| i.kind == KINDS.ring)
@@ -4655,8 +4713,37 @@ mod tests {
         assert_eq!(ridden.len(), 1, "the riding drone has no beam");
         assert_eq!(ridden[0].origin, [9.0, 3.0, 40.0]);
         let spots = spots(&motion, &marks, 1.0, Some("a"));
-        assert_eq!(spots.len(), 2, "the riding drone has no glow or shadow");
+        assert_eq!(spots.len(), 1, "the riding drone has no shadow");
         assert!(spots.iter().all(|s| s.origin[..2] == [9.0, 3.0]));
+    }
+
+    #[test]
+    fn a_shadow_keeps_a_readable_minimum_however_high_its_drone_hovers() {
+        assert!(
+            (0.18..=0.25).contains(&SHADOW_MIN_ALPHA),
+            "the minimum is a readable share: {SHADOW_MIN_ALPHA}"
+        );
+        let target = [5.0, 3.0, 9.0];
+        let shadow = u8::try_from(TINT_SHADOW).expect("fits");
+        for height in [4.0 * BODY_RADIUS, 20.0 * BODY_RADIUS] {
+            let at = [2.0, 3.0, PLINTH_TOP + height];
+            let body = Body {
+                ground: PLINTH_TOP,
+                ..drone("hover", at, target, "idle")
+            };
+            let marks = marks_of(vec![body]);
+            let mut motion = Motion::new(true);
+            motion.sync(&marks);
+            let spot = spots(&motion, &marks, 1.0, None)
+                .into_iter()
+                .find(|s| s.tint == shadow)
+                .expect("the drone casts a shadow");
+            assert!(
+                spot.alpha >= SHADOW_MIN_ALPHA,
+                "a shadow at {height} keeps its minimum: {}",
+                spot.alpha
+            );
+        }
     }
 
     #[test]
@@ -4664,10 +4751,12 @@ mod tests {
         let target = [5.0, 3.0, 9.0];
         let low = [2.0, 3.0, PLINTH_TOP + 1.5 * BODY_RADIUS];
         let high = [20.0, 3.0, PLINTH_TOP + 4.0 * BODY_RADIUS];
-        let marks = marks_of(vec![
-            drone("low", low, target, "idle"),
-            drone("high", high, target, "idle"),
-        ]);
+        // Both hover over the plinth, so the surface under each is its top.
+        let over_plinth = |agent: &str, at| Body {
+            ground: PLINTH_TOP,
+            ..drone(agent, at, target, "idle")
+        };
+        let marks = marks_of(vec![over_plinth("low", low), over_plinth("high", high)]);
         let mut motion = Motion::new(true);
         motion.sync(&marks);
         let shadow = u8::try_from(TINT_SHADOW).expect("fits");

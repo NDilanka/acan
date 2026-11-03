@@ -10,25 +10,79 @@ mod splitter;
 mod tank;
 mod valve;
 
+use serde::{Deserialize, Serialize};
+
 use crate::model::Model;
 
-/// The machine kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// The machine kinds: sixteen named kinds and the assembler fallback.
+///
+/// The names are the wire names in the plant JSON. A name this build does not know reads as
+/// [`Kind::Assembler`], so an older client draws a newer kind as the plain workbench.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Kind {
-    /// A tall unit with a side panel of lights and four stacked trays.
+    /// Entry points: servers, app bootstrap, main. A tall unit with a side panel of lights and four stacked trays.
     Intake,
-    /// A tall auth post pair with a turnstile hub, a badge reader and a lintel lamp.
+    /// Auth, sessions, permissions, guards. A tall auth post pair with a turnstile hub, a badge reader and a lintel lamp.
     Gate,
-    /// A stack of boards with a gauge, a knob, two dials and a lamp.
-    Assembler,
-    /// A relational database: a squat cylinder stack with banded seams, a gauge and pipe stubs.
+    /// Data access, persistence, caching, migrations. A relational database: a squat cylinder stack with banded seams, a gauge and pipe stubs.
     Tank,
-    /// A round hub with four chutes and a crown dial.
+    /// Middleware, proxies, gateways. A round hub with four chutes and a crown dial.
     Splitter,
-    /// A small belt fitting: a body with a handwheel.
+    /// Rate limits, throttles, quotas. A small belt fitting: a body with a handwheel.
     Valve,
-    /// A plain box, and what every kind without a drawing draws as.
+    /// Generated code, vendored output, tests, and machines with no files. A plain box.
     Crate,
+    /// Routes, controllers, handlers, endpoints. An angled panel on a frame with a grid of jack sockets.
+    Switchboard,
+    /// Web frontend: components, pages, screens, styles. A tall slim cabinet with an angled glass screen.
+    Kiosk,
+    /// Models, schemas, types, DTOs, protobuf. A two-part casting mould with a base plate and a hinged top.
+    Mould,
+    /// Background jobs, queues, workers, cron. A long belt conveyor on two leg frames.
+    Conveyor,
+    /// Events, messaging, pub/sub, hooks. A loudspeaker horn on a post.
+    Horn,
+    /// Config, settings, environment, constants. A wall switch cabinet with a door open on two hinges.
+    Switchbox,
+    /// Infra, deploy, containers, IaC, CI. A gantry crane on two A-frame legs.
+    Gantry,
+    /// CLI, commands, scripts, tools. A control pedestal with a lever and two push buttons.
+    Console,
+    /// External API clients, SDKs, integrations. A dish antenna on a mast.
+    Antenna,
+    /// Shared utilities, helpers, common, lib. A shop tool rack with a sloped tray and a pegboard back.
+    Toolrack,
+    /// Services, business logic, and anything no other rule names: the fallback. A stack of boards with a
+    /// gauge, a knob, two dials and a lamp. It is last so that `serde(other)` can read unknown names as it.
+    #[default]
+    #[serde(other)]
+    Assembler,
+}
+
+impl Kind {
+    /// Every kind, in declaration order.
+    pub const ALL: [Kind; 17] = [
+        Kind::Intake,
+        Kind::Gate,
+        Kind::Tank,
+        Kind::Splitter,
+        Kind::Valve,
+        Kind::Crate,
+        Kind::Switchboard,
+        Kind::Kiosk,
+        Kind::Mould,
+        Kind::Conveyor,
+        Kind::Horn,
+        Kind::Switchbox,
+        Kind::Gantry,
+        Kind::Console,
+        Kind::Antenna,
+        Kind::Toolrack,
+        Kind::Assembler,
+    ];
 }
 
 /// A model's size in plan units. The model is centred on the origin, so its plan runs from `-w / 2` to `w / 2`
@@ -54,6 +108,17 @@ pub fn model(kind: Kind) -> Model {
         Kind::Splitter => splitter::build(),
         Kind::Valve => valve::build(),
         Kind::Crate => crate_box::build(),
+        // The sixteen new kinds draw as the assembler until their figures land (kinds-expansion.md).
+        Kind::Switchboard
+        | Kind::Kiosk
+        | Kind::Mould
+        | Kind::Conveyor
+        | Kind::Horn
+        | Kind::Switchbox
+        | Kind::Gantry
+        | Kind::Console
+        | Kind::Antenna
+        | Kind::Toolrack => assembler::build(),
     }
 }
 
@@ -96,6 +161,17 @@ pub fn footprint(kind: Kind) -> Footprint {
             d: 40.0,
             top: 30.0,
         },
+        // Until their figures land, the new kinds take the assembler's footprint.
+        Kind::Switchboard
+        | Kind::Kiosk
+        | Kind::Mould
+        | Kind::Conveyor
+        | Kind::Horn
+        | Kind::Switchbox
+        | Kind::Gantry
+        | Kind::Console
+        | Kind::Antenna
+        | Kind::Toolrack => footprint(Kind::Assembler),
     }
 }
 
@@ -105,16 +181,6 @@ mod tests {
     use crate::mesh::tests::{check_closed, check_outward};
     use crate::model::{Detail, Ink, Surface};
 
-    const ALL: [Kind; 7] = [
-        Kind::Intake,
-        Kind::Gate,
-        Kind::Assembler,
-        Kind::Tank,
-        Kind::Splitter,
-        Kind::Valve,
-        Kind::Crate,
-    ];
-
     /// The triangles a model draws at every level of detail.
     fn triangles(model: &Model) -> usize {
         model.meshes.iter().map(|mesh| mesh.indices.len() / 3).sum()
@@ -122,14 +188,14 @@ mod tests {
 
     #[test]
     fn every_model_is_deterministic() {
-        for kind in ALL {
+        for kind in Kind::ALL {
             assert_eq!(model(kind), model(kind), "{kind:?}");
         }
     }
 
     #[test]
     fn every_mesh_is_a_union_of_closed_solids_with_outward_normals() {
-        for kind in ALL {
+        for kind in Kind::ALL {
             let built = model(kind);
             for (level, mesh) in built.meshes.iter().enumerate() {
                 check_closed(mesh).unwrap_or_else(|e| panic!("{kind:?} level {level}: {e}"));
@@ -150,7 +216,7 @@ mod tests {
 
     #[test]
     fn bounds_contain_every_vertex_line_and_dot_and_fit_the_footprint() {
-        for kind in ALL {
+        for kind in Kind::ALL {
             let built = model(kind);
             let fp = footprint(kind);
             let bounds = built.bounds;
@@ -182,7 +248,7 @@ mod tests {
 
     #[test]
     fn every_model_stays_within_the_budget_at_close() {
-        for kind in ALL {
+        for kind in Kind::ALL {
             let built = model(kind);
             let total = triangles(&built);
             println!(
@@ -197,6 +263,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn wire_names_are_snake_case_and_unknown_names_read_as_assembler() {
+        use serde::Deserialize;
+        use serde::de::IntoDeserializer;
+        let read = |name: &str| -> Result<Kind, serde::de::value::Error> {
+            Kind::deserialize(name.into_deserializer())
+        };
+        assert_eq!(read("switchboard").unwrap(), Kind::Switchboard);
+        assert_eq!(read("toolrack").unwrap(), Kind::Toolrack);
+        assert_eq!(read("crate").unwrap(), Kind::Crate);
+        assert_eq!(read("kind_from_the_future").unwrap(), Kind::Assembler);
+        assert_eq!(Kind::default(), Kind::Assembler);
+    }
+
     /// Only agents are saturated, and amber is reserved for waiting on the user.
     fn saturated(ink: Ink) -> bool {
         matches!(
@@ -207,7 +287,7 @@ mod tests {
 
     #[test]
     fn no_model_draws_a_saturated_colour_at_any_detail() {
-        for kind in ALL {
+        for kind in Kind::ALL {
             let built = model(kind);
             for level in [Detail::Always, Detail::Near, Detail::Close] {
                 for surface in &built.meshes[level as usize].surfaces {

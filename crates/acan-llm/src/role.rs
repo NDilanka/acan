@@ -22,17 +22,21 @@ pub enum Role {
     /// Muse Wonder. Takes the advisory second look at a vision check the first call found
     /// inconsistent or unclear.
     Wonder,
+    /// LLM refinement of the scanned state charts. Runs on the preferred provider like the
+    /// foreman; it is off without any key.
+    Statemap,
 }
 
 impl Role {
     /// Every role, in the order the setup page lists them.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Foreman,
         Self::Worker,
         Self::Fast,
         Self::Vision,
         Self::Director,
         Self::Wonder,
+        Self::Statemap,
     ];
 
     /// Whether the role needs a Meta model. Such a role is off without a Meta key, and no other
@@ -41,7 +45,7 @@ impl Role {
     #[must_use]
     pub fn needs_meta(self) -> bool {
         match self {
-            Self::Foreman | Self::Worker | Self::Fast => false,
+            Self::Foreman | Self::Worker | Self::Fast | Self::Statemap => false,
             Self::Vision | Self::Director | Self::Wonder => true,
         }
     }
@@ -55,6 +59,7 @@ impl Role {
             Self::Vision => "vision",
             Self::Director => "director",
             Self::Wonder => "wonder",
+            Self::Statemap => "statemap",
         }
     }
 }
@@ -76,7 +81,20 @@ impl FromStr for Role {
             "vision" => Ok(Self::Vision),
             "director" => Ok(Self::Director),
             "wonder" => Ok(Self::Wonder),
+            "statemap" => Ok(Self::Statemap),
             other => Err(UnknownRole(other.to_owned())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statemap_round_trips_through_its_name() {
+        let parsed: Role = Role::Statemap.as_str().parse().expect("statemap parses");
+        assert_eq!(parsed, Role::Statemap);
+        assert!(Role::ALL.contains(&Role::Statemap));
     }
 }

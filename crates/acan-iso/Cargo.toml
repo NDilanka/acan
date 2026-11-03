@@ -7,3 +7,4 @@ repository.workspace = true
 description = "Isometric machine models as draw lists, ported from the anatomy kit"
 
 [dependencies]
+serde = { workspace = true }

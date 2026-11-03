@@ -60,6 +60,9 @@ dependencies = [
 [[package]]
 name = "acan-iso"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "acan-llm"
@@ -113,6 +116,7 @@ dependencies = [
 name = "acan-scan"
 version = "0.1.0"
 dependencies = [
+ "acan-iso",
  "anyhow",
  "ignore",
  "serde",
@@ -147,6 +151,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror",

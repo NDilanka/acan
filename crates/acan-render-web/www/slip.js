@@ -5,6 +5,7 @@
 import { requestRender } from "./main.js";
 import { shownOrder } from "./panels.js";
 import {
+  REPLAY_SEAL_LINE,
   RETRY_LINE,
   SENT_LINE,
   UNSENT_LINE,
@@ -161,6 +162,9 @@ function sealBlock(lane, picks) {
   const panel = sealPanel(state, lane, picks, Date.now());
   const halt = panel.halt === null ? [] : [el("p", "warn", panel.halt)];
   if (panel.kind === "hidden") {
+    // A replay asks no route. A seal the recording holds still shows; otherwise the block says why
+    // no Seal is offered.
+    if (replay) return [...halt, lane.confirmation ? sealedStamp(lane.confirmation) : el("p", "sub", REPLAY_SEAL_LINE)];
     return [...halt, ...(panel.retrying ? [el("p", "sub", RETRY_LINE)] : [])];
   }
   if (panel.kind === "withheld") return [...halt, withheld(panel)];

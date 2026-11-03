@@ -1098,17 +1098,29 @@ fn the_scope_prompt_pairs_a_status_item_with_body_and_header_items_on_its_route(
     );
 }
 
+/// The offline client drafts a built-in scope for an order on a machine, and the checks accept it
+/// as they accept a live draft. A request that names no machine gets no built-in scope.
 #[tokio::test]
-async fn an_offline_client_gives_no_scope_draft() {
+async fn an_offline_client_drafts_a_built_in_scope_on_the_orders_machine() {
     let models = Models::load(Path::new("no-such-routing-file.toml")).expect("the offline client");
     let plant = plant_with(fixed_machines());
-    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
+    let request = model::scope_request_on(RATE_LIMIT_ORDER, "ratelimit", &plant.bounds(5), None);
 
+    let reply = models
+        .chat_json::<DraftReply>(Role::Foreman, request)
+        .await
+        .expect("the offline client drafts a built-in scope");
+    let body: ScopeBody = serde_json::from_value(reply.value.0).expect("the reply is a scope body");
+    let draft = model::scope_draft(body, model_ref(), &plant.bounds(5))
+        .expect("the built-in scope passes the checks a live draft passes");
+    assert_eq!(draft.proposal().may.len(), 1, "one item on the machine");
+    assert_eq!(models.ledger().records()[0].provider, "offline");
+
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
     let err = models
         .chat_json::<DraftReply>(Role::Foreman, request)
         .await
-        .expect_err("an offline client has no scope to draft");
-
+        .expect_err("a request that names no machine has no built-in scope");
     assert!(
         matches!(err, LlmError::NoScriptedReply { .. }),
         "got {err:?}"

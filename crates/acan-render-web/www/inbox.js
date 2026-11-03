@@ -1,9 +1,12 @@
 // The needs-you inbox: one count and one list of everything that waits on the human. That is
-// each open question, each clash not yet settled, each agent that drifts from its task, each scope
-// lane that waits for a seal, each stopped lane, each order whose receipt has residue to rule on,
-// and each advisory vision check that found something inconsistent or unclear. A click flies to
-// the machine. The list logic has no DOM, so Node can test it. `installInbox` binds it to the page.
-import { flyTo, goKeys } from "./lanes.js";
+// each open question, each clash not yet settled, each open contest a scope lane holds for the
+// human's ruling, each agent that drifts from its task, each scope lane that waits for a seal,
+// each stopped lane, each order whose receipt has residue to rule on, and each advisory vision
+// check that found something inconsistent or unclear. An agent that waits on the user is already
+// in the list through its clash, question, stop or contest, so it adds no drift row. A click flies
+// to the machine. The list logic has no DOM, so Node can test it. `installInbox` binds it to the
+// page.
+import { MS_PER_MINUTE, flyTo, goKeys, waitingAgents } from "./lanes.js";
 import { countsByProject, entityKey } from "./projects.js";
 import { firstWords } from "./words.js";
 
@@ -15,7 +18,7 @@ export const NOTIFY_KEY = "acan.notify";
 const PLANT_VIEW_CHECK_MS = 2000;
 
 // The order a kind sorts in: what blocks work first, then what only asks for a look.
-const KIND_ORDER = ["clash", "drift", "question", "stopped", "seal", "residue", "vision"];
+const KIND_ORDER = ["clash", "contest", "drift", "question", "stopped", "seal", "residue", "vision"];
 
 const DONE_PHASES = ["landed", "cancelled"];
 
@@ -78,6 +81,11 @@ export function inboxItems(view, plantViews = new Map(), doubts = new Map()) {
   }
   for (const lane of view.lanes) {
     if (!live(lane.order)) continue;
+    if (lane.open_contests > 0) {
+      add({ key: `contest:${lane.order}`, kind: "contest", id: lane.order,
+        ...words(`o-${lane.order} contest`, `${plural(lane.open_contests, "contest")} wait for your ruling`),
+        machine: machineOf(lane.order) });
+    }
     if (lane.stopped) {
       add({ key: `stopped:${lane.order}`, kind: "stopped", id: lane.order,
         ...words(`o-${lane.order} stopped`, "repair budget spent"), machine: machineOf(lane.order) });
@@ -102,14 +110,16 @@ export function inboxItems(view, plantViews = new Map(), doubts = new Map()) {
       ...words(`t-${doubt.task} vision`, `${found} (advisory)`), machine: task.machine ?? null });
   }
   // One row per agent that drifts from the task it holds. The drift is derived in Rust, so this
-  // only reads it.
+  // only reads it. A waiting agent holds still, so it shows no drift.
+  const waiting = waitingAgents(view);
   for (const agent of view.agents ?? []) {
     const drift = agent.drift;
     if (drift?.kind !== "stuck" && drift?.kind !== "beyond_scope") continue;
+    if (waiting.has(agent.id)) continue;
     const task = tasks.get(agent.task);
     if (task === undefined || !live(task.order)) continue;
     const detail = drift.kind === "stuck"
-      ? `${agent.id} quiet ${Math.floor(drift.quiet_ms / 60000)}m, no next step`
+      ? `${agent.id} quiet ${Math.floor(drift.quiet_ms / MS_PER_MINUTE)}m, no next step`
       : `${agent.id} edits beyond its scope`;
     add({ key: `drift:${agent.id}`, kind: "drift", id: task.id,
       ...words(`t-${task.id} drift`, detail), machine: agent.machine ?? task.machine ?? null });
@@ -167,6 +177,7 @@ function element(tag, className, text) {
 
 const KIND_WORDS = {
   clash: "clash",
+  contest: "contest",
   drift: "drift",
   question: "question",
   stopped: "stopped",

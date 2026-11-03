@@ -1,8 +1,7 @@
 //! The agents' drone is a small white sphere that hovers over the machine it works on, with no
 //! rotors. One big round lens on its nose looks at the machine, with a ring and an iris in the
 //! agent's hue. Two small disc ears stand off its sides, and a short antenna rises from its crown.
-//! A soft glow in the agent's hue lies under the body, and the renderer draws it, so the drone
-//! reads as floating.
+//! The renderer draws a soft shadow on the ground under it, so the drone reads as floating.
 //!
 //! A far drone is a circle with two discs and its eye: the seams and the lens glint draw at `Near`
 //! and closer, and the rivets at `Close` only.
@@ -41,15 +40,13 @@ const _: () = assert!(LIFT[2] > 0.0, "the lift leans back over the crown");
 /// light on the ground.
 pub const SHADOW_RADIUS: f32 = 0.9 * BODY_RADIUS;
 /// The height of the drone's centre over the plinth top at which its shadow has shrunk and faded
-/// out. A drone higher still casts none: a shadow that far up sits off its machine and reads as
-/// a stain on the floor.
+/// to its least strength. A drone higher still keeps that shadow, which the renderer draws at a
+/// readable minimum opacity, so it stays on the ground under the drone at any height.
 pub const SHADOW_RISE: f32 = 6.0 * BODY_RADIUS;
-const SHADOW_FAR_RADIUS: f32 = 0.55;
+/// The shadow's radius as a share of [`SHADOW_RADIUS`] once the drone is high: a slight shrink, so
+/// the contact shadow stays about the drone's own width when it hovers.
+const SHADOW_FAR_RADIUS: f32 = 0.8;
 const SHADOW_FAR_STRENGTH: f32 = 0.0;
-/// The glow under the body: a soft level disc in the agent's hue, this far below the centre and
-/// this wide, which the renderer draws. The body hides its middle, so it shows round the belly.
-pub const GLOW_DROP: f32 = 0.8 * BODY_RADIUS;
-pub const GLOW_RADIUS: f32 = 1.6 * BODY_RADIUS;
 /// The beacon's radius at its target. The renderer sets its on-screen size each frame.
 pub const BEACON_RADIUS: f32 = 0.07;
 /// The lens, as angles from the nose: the hue iris, the dark glass round it, and the hue ring that

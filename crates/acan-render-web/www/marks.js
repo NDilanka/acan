@@ -41,11 +41,10 @@ function isRiderFlag(flag) {
   return state.ridden !== "" && flag?.drone?.agent === state.ridden;
 }
 
-// An agent's name flag is a pill in its hue: PILL_PX high, with a POINTER_PX pointer at its
-// bottom left, POINTER_INSET_PX in from its edge, that points at the drone's crown.
+// An agent's name flag is a pill in its hue: PILL_PX high, with a POINTER_PX pointer hanging from
+// the middle of its bottom edge, whose tip points down at the drone.
 const PILL_PX = 18;
 const POINTER_PX = 5;
-const POINTER_INSET_PX = 6;
 
 // Labels come in priority order, larger and nearer first. A label that would overlap one
 // already placed stays hidden, so the plant never shows a pile of names. The page's fixed panels,
@@ -746,7 +745,7 @@ function pillStyle(el, flag) {
   pointer.className = "pointer";
   Object.assign(pointer.style, {
     position: "absolute",
-    left: `${POINTER_INSET_PX}px`,
+    left: "50%",
     top: "100%",
     width: "0",
     height: "0",
@@ -820,15 +819,16 @@ function checkChip(check, onPill = false) {
 }
 
 // Flags are placed before the names and are never hidden for overlap; a flag is hidden only when
-// it is off the canvas. An agent's flags stack in a column above their machine's drones, at most
-// FLAGS_PER_COLUMN with the rest folded into `+N`, and a flag never sits on a drone because the
-// column starts above the crowns. A lone flag that keeps its place points at its drone; any other
-// draws a leader in its hue. An idle drone's flag shows only with Alt. A clash's detail shows only
-// while its diamond is hovered, and starts to the right of it; the order's tag sits above its
-// machine and shows only while that machine is hovered. A flag that would cover a flag or a panel placed before it moves up clear of
-// it. Each flag keeps its place as the drones and diamonds move. The plot flags are the exception:
-// they are returned, not placed here, and placed after the names, so they move clear of a name.
-// Returns the plot flags and how many leader lines the flags drew.
+// it is off the canvas. An agent's name sits directly above its own drone, centred on it, and
+// follows the drone as it bobs. At most FLAGS_PER_COLUMN of a machine's names show, with the rest
+// folded into `+N`. A name that keeps its place points at its drone with a small pointer. A name
+// that would cover a box placed before it moves up clear of it, and a leader in its hue then runs
+// down to its drone. An idle drone's flag shows only with Alt. A clash's detail shows only while
+// its diamond is hovered, and starts to the right of it; the order's tag sits above its machine
+// and shows only while that machine is hovered. A flag that would cover a flag or a panel placed
+// before it moves up clear of it. Each flag keeps its place as the drones and diamonds move. The
+// plot flags are the exception: they are returned, not placed here, and placed after the names, so
+// they move clear of a name. Returns the plot flags and how many leader lines the flags drew.
 function placeFlags(placedBoxes) {
   const plots = [];
   // The drones come first, so no flag or name is placed over one.
@@ -897,31 +897,39 @@ function placeFlags(placedBoxes) {
     for (const item of column) item.el.style.visibility = "hidden";
     const { shown, folded } = foldColumn(wanted);
     if (shown.length === 0) continue;
-    const single = shown.length === 1;
     const centre = shown.reduce((sum, item) => sum + item.x, 0) / shown.length;
-    let bottom = Math.min(...shown.map((item) => item.y)) - (single ? POINTER_PX : LABEL_OFFSET_PX);
-    let lastLeft = centre;
+    let highest = Infinity;
+    // Each name sits directly above its own drone, centred on it, so it follows the drone. It
+    // moves up only where it would cover a box placed before it, and a leader then runs to it.
     for (const item of shown) {
       const [w, h] = item.el.size;
-      const wantLeft = single ? item.x - POINTER_INSET_PX : centre - w / 2;
-      const spot = flagSpot(wantLeft, bottom - h, w, h, placedBoxes, LABEL_PAD_PX, canvas.clientWidth);
-      const { left, top } = spot;
+      const wantLeft = item.x - w / 2;
+      const wantTop = item.y - POINTER_PX - h;
+      const { left, top } = flagSpot(
+        wantLeft,
+        wantTop,
+        w,
+        h,
+        placedBoxes,
+        LABEL_PAD_PX,
+        canvas.clientWidth,
+      );
       placeFlag(item.el, left, top, placedBoxes);
-      const pointed = single && left === wantLeft && top === bottom - h;
+      const pointed = left === wantLeft && top === wantTop;
       if (item.el.pointer !== undefined) item.el.pointer.style.display = pointed ? "" : "none";
       if (!pointed) {
-        drawLeader(leaders, left + (single ? POINTER_INSET_PX : w / 2), top + h, item.x, item.y, item.flag.hue ?? "", "1px");
+        drawLeader(leaders, left + w / 2, top + h, item.x, item.y, item.flag.hue ?? "", "1px");
         leaders += 1;
       }
-      lastLeft = left;
-      bottom = top - FLAG_ROW_GAP_PX;
+      highest = Math.min(highest, top);
     }
     if (folded > 0) {
       const el = moreElement(more, folded);
       more += 1;
       const [w, h] = el.size;
-      const left = single ? lastLeft : centre - w / 2;
-      placeFlag(el, left, clearOf(left, bottom - h, w, h, placedBoxes, LABEL_PAD_PX), placedBoxes);
+      const left = centre - w / 2;
+      const top = clearOf(left, highest - FLAG_ROW_GAP_PX - h, w, h, placedBoxes, LABEL_PAD_PX);
+      placeFlag(el, left, top, placedBoxes);
     }
   }
   for (let i = more; i < moreEls.length; i += 1) moreEls[i].hidden = true;

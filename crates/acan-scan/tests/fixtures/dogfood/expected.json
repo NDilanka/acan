@@ -1,0 +1,131 @@
+[
+  {
+    "id": "order.rs#OrderState",
+    "name": "OrderState",
+    "file": "order.rs",
+    "line": 132,
+    "module": ".",
+    "states": [
+      { "name": "Splitting", "line": 134 },
+      { "name": "Split", "line": 136 },
+      { "name": "Cancelled", "line": 138 }
+    ],
+    "transitions": [
+      {
+        "from": "*",
+        "to": "Split",
+        "file": "world.rs",
+        "line": 1027,
+        "end_line": 1027,
+        "via": "apply",
+        "source": "scan"
+      },
+      {
+        "from": "*",
+        "to": "Cancelled",
+        "file": "world.rs",
+        "line": 1260,
+        "end_line": 1260,
+        "via": "apply",
+        "source": "scan"
+      }
+    ],
+    "confidence": "low"
+  },
+  {
+    "id": "order.rs#TaskState",
+    "name": "TaskState",
+    "file": "order.rs",
+    "line": 240,
+    "module": ".",
+    "states": [
+      { "name": "Open", "line": 242 },
+      { "name": "Claimed", "line": 244 },
+      { "name": "Queued", "line": 251 },
+      { "name": "Landed", "line": 260 },
+      { "name": "Dropped", "line": 265 }
+    ],
+    "transitions": [
+      {
+        "from": "*",
+        "to": "Claimed",
+        "file": "world.rs",
+        "line": 1084,
+        "end_line": 1090,
+        "via": "apply",
+        "source": "scan"
+      },
+      {
+        "from": "*",
+        "to": "Open",
+        "file": "world.rs",
+        "line": 1111,
+        "end_line": 1111,
+        "via": "apply",
+        "source": "scan"
+      },
+      {
+        "from": "*",
+        "to": "Landed",
+        "file": "world.rs",
+        "line": 1248,
+        "end_line": 1250,
+        "via": "apply",
+        "source": "scan"
+      },
+      {
+        "from": "*",
+        "to": "Open",
+        "file": "world.rs",
+        "line": 1255,
+        "end_line": 1255,
+        "via": "apply",
+        "source": "scan"
+      },
+      {
+        "from": "*",
+        "to": "Dropped",
+        "file": "world.rs",
+        "line": 1264,
+        "end_line": 1264,
+        "via": "apply",
+        "source": "scan"
+      }
+    ],
+    "confidence": "low"
+  },
+  {
+    "id": "order.rs#Stage",
+    "name": "Stage",
+    "file": "order.rs",
+    "line": 271,
+    "module": ".",
+    "states": [
+      { "name": "Declaring", "line": 273 },
+      { "name": "Declared", "line": 275 },
+      { "name": "Building", "line": 280 },
+      { "name": "Gating", "line": 285 }
+    ],
+    "transitions": [
+      {
+        "from": "Declared",
+        "to": "Building",
+        "file": "world.rs",
+        "line": 1191,
+        "end_line": 1191,
+        "via": "apply",
+        "source": "scan"
+      },
+      {
+        "from": "Building",
+        "to": "Gating",
+        "file": "world.rs",
+        "line": 1228,
+        "end_line": 1232,
+        "via": "apply",
+        "source": "scan"
+      }
+    ],
+    "confidence": "high"
+  }
+]

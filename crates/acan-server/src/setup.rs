@@ -132,7 +132,7 @@ pub(crate) async fn put_role<C: ModelClient + 'static>(
 }
 
 /// Maps a setup refusal to the response it gets. The names say what was refused, never a key.
-fn setup_error(err: SetupError) -> ApiError {
+pub(crate) fn setup_error(err: SetupError) -> ApiError {
     match err {
         SetupError::UnknownProvider => ApiError::BadRequest("provider"),
         SetupError::InvalidKey => ApiError::BadRequest("key"),

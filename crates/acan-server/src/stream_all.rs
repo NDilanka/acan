@@ -4,12 +4,17 @@
 //! `Authorization` header, or a first text frame `{"token": "..."}`. The next text frame is the
 //! subscription, `{"from": {"<project>": <seq>}}`. A project missing from the map starts at seq 0,
 //! and a project the token is not a member of is absent. Each event arrives as
-//! `{"project": "<project>", "event": <the event as /api/p/<project>/events shows it>}`.
+//! `{"project": "<project>", "event": <the event as /api/p/<project>/events shows it>}`. Each live
+//! transition touch arrives as `{"project": "<project>", "type": "transition_touched", ...}`, with
+//! the touch's own fields. A touch is never resumed: a project that lags skips the touches it missed.
 //!
 //! Each project keeps its own cursor. A lag or gap in any project sends a control frame that
 //! names it, `{"control": "resume", "project": "<project>", "from": <seq>}`, then closes with
 //! 4001. The socket closes for every project, and the client reconnects with its cursors. Other
 //! projects' streams are not affected until then.
+//!
+//! A token that is revoked, such as by an owner's rotation, closes the socket with 4001 and the
+//! reason `token revoked`. The client must then authenticate again with the new token.
 //!
 //! Ids repeat across projects, so a client that merges events keys them by project and id.
 
@@ -22,21 +27,22 @@ use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::response::Response;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use crate::auth::Principal;
+use crate::auth::{Principal, subscribe_revocations};
 use crate::host::Host;
 use crate::http::bearer;
 use crate::redact;
 use crate::registry::{Entry, Registry};
 use crate::stream::{
-    AuthFrame, CLOSE_INTERNAL, CLOSE_RESUME, CLOSE_SHUTDOWN, CLOSE_UNAUTHORIZED, Offer, Resume,
-    close, next_text, shutting_down,
+    AuthFrame, CLOSE_INTERNAL, CLOSE_RESUME, CLOSE_REVOKED, CLOSE_SHUTDOWN, CLOSE_UNAUTHORIZED,
+    Offer, REVOKED_REASON, Resume, close, next_text, shutting_down,
 };
+use crate::touches::TransitionTouch;
 
 /// WebSocket close code for a subscription frame the protocol does not allow.
 const CLOSE_POLICY: u16 = 1008;
@@ -65,6 +71,17 @@ enum Live {
     Event(Box<Stamped>),
     Lagged,
     Closed,
+    /// A live transition touch. Touches are not resumable, so they never close the socket.
+    Touch(Box<TransitionTouch>),
+}
+
+/// One touch frame of a project, as the multiplexed stream frames it: the touch's own fields, with
+/// the project it belongs to.
+#[derive(Serialize)]
+struct ProjectTouch<'a> {
+    project: &'a str,
+    #[serde(flatten)]
+    touch: &'a TransitionTouch,
 }
 
 /// Upgrades `GET /api/stream/all`.
@@ -77,7 +94,12 @@ pub(crate) async fn upgrade<C: ModelClient + 'static>(
     ws: WebSocketUpgrade,
 ) -> Response {
     let header_token = bearer(&headers).map(str::to_owned);
-    ws.on_upgrade(move |socket| async move { track(&projects, socket, header_token) })
+    // Subscribed before the token is checked, so a revocation that lands after the check still
+    // reaches this connection.
+    let revocations = subscribe_revocations();
+    ws.on_upgrade(move |socket| async move {
+        track(&projects, socket, header_token, revocations);
+    })
 }
 
 /// Registers the stream so shutdown can wait for it to close, then runs it.
@@ -85,8 +107,9 @@ fn track<C: ModelClient + 'static>(
     projects: &Arc<Registry<C>>,
     socket: WebSocket,
     header_token: Option<String>,
+    revocations: broadcast::Receiver<String>,
 ) {
-    let pump = pump(Arc::clone(projects), socket, header_token);
+    let pump = pump(Arc::clone(projects), socket, header_token, revocations);
     let mut streams = projects.streams().lock().expect("stream set lock poisoned");
     // Reap closed streams so a long-running server does not keep one entry per connection.
     while streams.try_join_next().is_some() {}
@@ -97,6 +120,7 @@ async fn pump<C: ModelClient + 'static>(
     projects: Arc<Registry<C>>,
     mut socket: WebSocket,
     header_token: Option<String>,
+    mut revocations: broadcast::Receiver<String>,
 ) {
     let mut shutdown = projects.shutdown_signal();
     let token = match header_token {
@@ -119,6 +143,8 @@ async fn pump<C: ModelClient + 'static>(
         }
     };
 
+    // Cleared when the revocation channel closes, so the loop stops polling it.
+    let mut watching = true;
     let mut members = members_of(projects.entries(), &token);
     if members.is_empty() {
         close(&mut socket, CLOSE_UNAUTHORIZED, "unauthorized".to_owned()).await;
@@ -155,6 +181,11 @@ async fn pump<C: ModelClient + 'static>(
     let mut forwarders = JoinSet::new();
     for (index, member) in members.iter().enumerate() {
         forwarders.spawn(forward(index, member.host.subscribe(), tx.clone()));
+        forwarders.spawn(forward_touches(
+            index,
+            member.host.subscribe_touches(),
+            tx.clone(),
+        ));
     }
     drop(tx);
 
@@ -229,7 +260,31 @@ async fn pump<C: ModelClient + 'static>(
                 // The project's writer has stopped, so its events end. The other projects keep
                 // streaming until every project has ended.
                 Some((_, Live::Closed)) => {}
+                Some((index, Live::Touch(touch))) => {
+                    let member = &members[index];
+                    if !send_touch(&mut socket, &member.id, &touch).await {
+                        return;
+                    }
+                }
                 None => return,
+            },
+            revoked = revocations.recv(), if watching => match revoked {
+                Ok(revoked) if revoked == token => {
+                    close(&mut socket, CLOSE_REVOKED, REVOKED_REASON.to_owned()).await;
+                    return;
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => {
+                    // Revocations were skipped, so the token is checked in each project directly.
+                    let still_held = members
+                        .iter()
+                        .any(|member| member.host.tokens().principal(&token).is_some());
+                    if !still_held {
+                        close(&mut socket, CLOSE_REVOKED, REVOKED_REASON.to_owned()).await;
+                        return;
+                    }
+                }
+                Err(RecvError::Closed) => watching = false,
             },
         }
     }
@@ -241,7 +296,7 @@ fn members_of<C: ModelClient>(entries: &[Entry<C>], token: &str) -> Vec<Member<C
     entries
         .iter()
         .filter_map(|entry| {
-            let principal = entry.host.tokens().principal(token)?.clone();
+            let principal = entry.host.tokens().principal(token)?;
             Some(Member {
                 id: entry.id.clone(),
                 host: entry.host.clone(),
@@ -270,6 +325,48 @@ async fn forward(
             return;
         }
     }
+}
+
+/// Passes one project's live transition touches to the socket's loop. A touch is not resumable, so
+/// a lag skips the touches missed and the forwarder goes on. A closed channel ends it.
+async fn forward_touches(
+    index: usize,
+    mut touches: broadcast::Receiver<TransitionTouch>,
+    out: mpsc::Sender<(usize, Live)>,
+) {
+    loop {
+        match touches.recv().await {
+            Ok(touch) => {
+                if out
+                    .send((index, Live::Touch(Box::new(touch))))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(RecvError::Lagged(missed)) => {
+                tracing::debug!(
+                    missed,
+                    "a multiplexed stream skipped live transition touches"
+                );
+            }
+            Err(RecvError::Closed) => return,
+        }
+    }
+}
+
+/// Sends one touch frame, tagged with its project. `false` means the socket is gone.
+async fn send_touch(socket: &mut WebSocket, project: &str, touch: &TransitionTouch) -> bool {
+    let frame = ProjectTouch { project, touch };
+    let text = match serde_json::to_string(&frame) {
+        Ok(text) => text,
+        Err(err) => {
+            tracing::error!(error = %err, "encoding a transition touch for the stream failed");
+            return true;
+        }
+    };
+    socket.send(Message::Text(text.into())).await.is_ok()
 }
 
 /// Sends one event as the stream frames it. `false` means the socket is gone.

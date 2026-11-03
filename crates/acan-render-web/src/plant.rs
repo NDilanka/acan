@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use crate::kind::{Kind, classify};
+use crate::kind::Kind;
 use crate::layout::Edge;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -22,6 +22,12 @@ pub struct PlantMachine {
     pub name: String,
     pub files: usize,
     pub kind: Kind,
+    /// True when a rule guessed the kind, so the plinth groove is broken.
+    pub guessed: bool,
+    /// The rule that picked the kind, for the tooltip.
+    pub reason: String,
+    /// True when the user set the kind in `.acan/kinds.json`.
+    pub set_by_user: bool,
     /// The repo-relative paths of the files the machine groups, in scan order.
     pub paths: Vec<String>,
 }
@@ -56,8 +62,17 @@ struct ScanPlant {
 struct ScanMachine {
     id: u32,
     name: String,
-    dir: String,
     files: Vec<u32>,
+    /// Missing in older plant JSON, which reads as an assembler. A kind this build does not know
+    /// also reads as an assembler (see acan-iso's `Kind`).
+    #[serde(default)]
+    kind: Kind,
+    #[serde(default)]
+    kind_guessed: bool,
+    #[serde(default)]
+    kind_reason: String,
+    #[serde(default)]
+    kind_set_by_user: bool,
 }
 
 #[derive(Deserialize)]
@@ -99,7 +114,10 @@ pub fn from_scan_json(text: &str) -> Result<Plant, PlantError> {
             PlantMachine {
                 name: machine.name.clone(),
                 files: machine.files.len(),
-                kind: classify(&machine.name, &machine.dir, &paths),
+                kind: machine.kind,
+                guessed: machine.kind_guessed,
+                reason: machine.kind_reason.clone(),
+                set_by_user: machine.kind_set_by_user,
                 paths: paths.iter().map(|path| (*path).to_owned()).collect(),
             }
         })
@@ -148,19 +166,20 @@ fn folder_name(root: &str) -> String {
 /// A generated plant of `count` machines for the benchmark. Machines sit in about `sqrt(count)`
 /// layers, and every belt runs from one layer to the next, so belts stay short.
 pub fn stress(count: usize) -> Plant {
-    const NAMES: [&str; 12] = [
-        "server",
-        "auth",
-        "store",
-        "middleware",
-        "ratelimit",
-        "util",
-        "errors",
-        "links",
-        "dashboard",
-        "config",
-        "queue",
-        "mailer",
+    // Each name takes the kind the scan's token table gives it, so the stress plant shows the rules.
+    const NAMES: [(&str, Kind); 12] = [
+        ("server", Kind::Intake),
+        ("auth", Kind::Gate),
+        ("store", Kind::Tank),
+        ("middleware", Kind::Splitter),
+        ("ratelimit", Kind::Valve),
+        ("util", Kind::Toolrack),
+        ("errors", Kind::Assembler),
+        ("links", Kind::Assembler),
+        ("routes", Kind::Switchboard),
+        ("config", Kind::Switchbox),
+        ("queue", Kind::Conveyor),
+        ("client", Kind::Antenna),
     ];
     let mut rng = Lcg(0x5eed_0ac4_u64);
     let layers = ((count as f64).sqrt() as usize).max(2);
@@ -173,17 +192,24 @@ pub fn stress(count: usize) -> Plant {
         let layer = i % layers;
         layer_of.push(layer);
         members[layer].push(i);
-        let base = NAMES[i % NAMES.len()];
+        let (base, kind) = NAMES[i % NAMES.len()];
         let files = 1 + rng.below(12);
         let paths: Vec<String> = (0..files)
             .map(|f| format!("src/{base}-{i}/file{f}.ts"))
             .collect();
-        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
-        let name = format!("{base}-{i}");
+        let guessed = kind != Kind::Assembler;
+        let reason = if guessed {
+            format!("name word \"{base}\"")
+        } else {
+            "no rule matched; default".to_owned()
+        };
         machines.push(PlantMachine {
-            kind: classify(&name, "src", &refs),
-            name,
+            name: format!("{base}-{i}"),
             files,
+            kind,
+            guessed,
+            reason,
+            set_by_user: false,
             paths,
         });
     }
@@ -251,7 +277,7 @@ mod tests {
         "revision": "0123456789abcdef",
         "machines": [
             {"id": 0, "name": "src", "dir": "src", "files": [0, 1], "lang_mix": {"typescript": 2}},
-            {"id": 1, "name": "test", "dir": "test", "files": [2], "lang_mix": {"typescript": 1}}
+            {"id": 1, "name": "test", "dir": "test", "files": [2], "lang_mix": {"typescript": 1}, "kind": "crate", "kind_guessed": false, "kind_reason": "only tests"}
         ],
         "belts": [{"from": 1, "to": 0, "imports": 3}],
         "files": [
@@ -310,6 +336,32 @@ mod tests {
     }
 
     #[test]
+    fn a_kind_from_a_newer_scan_reads_as_an_assembler() {
+        // An older renderer has no kind named "switchboard", so the same rule applies in reverse:
+        // a name no kind has falls back to the assembler instead of failing the whole plant.
+        let text = LIVE.replace("\"crate\"", "\"a_kind_from_the_future\"");
+        let plant = from_scan_json(&text).expect("an unknown kind still parses");
+        assert_eq!(
+            kinds_by_name(&plant),
+            vec![("src", Kind::Assembler), ("test", Kind::Assembler)]
+        );
+    }
+
+    #[test]
+    fn the_scan_gives_the_kind_its_guess_and_reason() {
+        let plant = from_scan_json(FIXTURE).expect("fixture parses");
+        let server = plant
+            .machines
+            .iter()
+            .find(|m| m.name == "server")
+            .expect("the server machine");
+        assert_eq!(server.kind, Kind::Intake);
+        assert!(server.guessed);
+        assert_eq!(server.reason, "name word \"server\"");
+        assert!(!server.set_by_user);
+    }
+
+    #[test]
     fn a_belt_to_an_unknown_machine_is_an_error() {
         let text = LIVE.replace("\"to\": 0", "\"to\": 9");
         assert!(matches!(
@@ -350,6 +402,9 @@ mod tests {
             name: format!("m{files}"),
             files,
             kind: Kind::Assembler,
+            guessed: false,
+            reason: String::new(),
+            set_by_user: false,
             paths: Vec::new(),
         };
         let machines: Vec<PlantMachine> = (0..25).map(|i| machine(i % 7)).collect();

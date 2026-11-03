@@ -653,8 +653,8 @@ fn vs_hue(v: HueIn) -> StrokeOut {
     return stroke(start, v.b, half_px, ink, v.corner, vec2<f32>(0.0));
 }
 
-// A spot is a level disc round its start, grown with the start, so a drone's glow and shadow keep
-// their size against the drone at the screen floor. It is lifted toward the eye like a dot, so a
+// A spot is a level disc round its start, grown with the start, so a drone's shadow keeps
+// its size against the drone at the screen floor. It is lifted toward the eye like a dot, so a
 // shadow wins against the plinth top it lies on.
 fn spot(v: HueIn, ink: vec4<f32>) -> StrokeOut {
     let k = grown(v.origin, v.grow);
@@ -676,8 +676,8 @@ fn fs_hue(v: StrokeOut) -> @location(0) vec4<f32> {
         if (r >= 1.0) {
             discard;
         }
-        // A spot fades to its rim, so it reads as light and not as a disc.
-        return vec4<f32>(v.ink.rgb, v.ink.a * (1.0 - smoothstep(0.0, 1.0, r)));
+        // A spot holds its middle and softens toward its rim, so it reads as a soft shadow.
+        return vec4<f32>(v.ink.rgb, v.ink.a * (1.0 - smoothstep(0.5, 1.0, r)));
     }
     return vec4<f32>(v.ink.rgb, v.ink.a * stroke_coverage(v));
 }

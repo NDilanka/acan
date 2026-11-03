@@ -21,7 +21,7 @@ const RING_OUTER: f32 = 1.3 * BODY_RADIUS;
 // The ring clears the drone's shadow when seen from above.
 const _: () = assert!(RING_INNER > SHADOW_RADIUS);
 const RING_SEGMENTS: usize = 32;
-/// How far the ring hangs below the drone's centre, by its glow. The lens looks down, so a ring
+/// How far the ring hangs below the drone's centre. The lens looks down, so a ring
 /// round the equator crosses it; this low, the ring's near side passes under the body and its far
 /// side behind it, from the lowest camera tilt up.
 pub(crate) const RING_DROP: f32 = 0.85 * BODY_RADIUS;

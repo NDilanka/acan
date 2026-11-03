@@ -1,12 +1,29 @@
 name: Release
 
-# Runs on a version tag, such as v0.1.0-alpha.1. It builds the acan binary for each platform,
-# bundles the web UI, and attaches the archives and SHA256SUMS to a pre-release. macOS builds are
-# untested: they are published with that label in the release notes.
+# Builds the Acan app and the Acan Demo for Windows and Linux, with SHA256SUMS.
+#
+# A version tag (v0.1.0-pre.1) also publishes the files to a pre-release that is not marked latest.
+# A manual run (workflow_dispatch) builds the same files as workflow artifacts and publishes nothing,
+# so the installers can be tested before any tag.
+#
+# The file names are fixed, because the in-app updater looks them up. <ver> is the version without
+# its leading v:
+#   acan-setup-<ver>-windows-x64.exe
+#   acan-demo-setup-<ver>-windows-x64.exe
+#   acan-<ver>-linux-x64.tar.gz
+#   acan-demo-<ver>-linux-x64.tar.gz
+#   SHA256SUMS
+# No macOS files are built for this pre-release.
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The version to build, without the v (for example 0.1.0-pre.1)"
+        required: true
+        default: "0.1.0-pre.1"
 
 permissions:
   contents: read
@@ -16,11 +33,31 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
-  # The version the binary reports and the update check compares against.
-  ACAN_VERSION: ${{ github.ref_name }}
+  # The commit the binaries report, and the replay manifest records.
   ACAN_COMMIT: ${{ github.sha }}
 
 jobs:
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$INPUT_VERSION"
+          fi
+          case "$version" in
+            ""|*[!0-9A-Za-z.-]*) echo "not a usable version: $version" >&2; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   web:
     name: web UI bundle
     runs-on: ubuntu-latest
@@ -59,78 +96,136 @@ jobs:
           path: dist/web
           if-no-files-found: error
 
-  build:
-    name: build ${{ matrix.target }}${{ matrix.untested && ' (untested)' || '' }}
-    needs: web
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            archive: zip
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-            untested: true
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-            untested: true
-    runs-on: ${{ matrix.os }}
+  build-linux:
+    name: build Linux (app and demo)
+    needs: [version, web]
+    runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      DEMO_SHA: f91962156841332d5753d869554839f7c4cdea79
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: linux
       - uses: actions/download-artifact@v4
         with:
           name: web
           path: dist/web
       - name: Build acan
-        run: cargo build -p acan-server --bin acan --release --locked --target ${{ matrix.target }}
+        run: cargo build -p acan-server --bin acan --release --locked
       - name: Build acan-worker
-        run: cargo build -p acan-agent --bin acan-worker --release --locked --target ${{ matrix.target }}
-      - name: Package
+        run: cargo build -p acan-agent --bin acan-worker --release --locked
+      # The demo pin: DEMO_SHA above and the ref below must name the same commit.
+      - uses: actions/checkout@v4
+        with:
+          repository: NDilanka/acan-demo
+          ref: f91962156841332d5753d869554839f7c4cdea79
+          path: demo-src
+          fetch-depth: 0
+      - name: Package the app and the demo
         shell: pwsh
-        run: pwsh ./scripts/package.ps1 -Target ${{ matrix.target }} -BinDir target/${{ matrix.target }}/release -WebDir dist/web -OutDir dist
+        run: |
+          ./scripts/package.ps1 -Kind app -Os linux -Version $env:VERSION -BinDir target/release -WebDir dist/web -OutDir dist
+          ./scripts/package.ps1 -Kind demo -Os linux -Version $env:VERSION -BinDir target/release -WebDir dist/web -ReplayDir replay -DemoRepo demo-src -DemoSha $env:DEMO_SHA -OutDir dist
+          Get-ChildItem dist -Filter '*.tar.gz' | ForEach-Object { "$($_.Name) $((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())" }
       - uses: actions/upload-artifact@v4
         with:
-          name: acan-${{ matrix.target }}
-          path: dist/acan-${{ matrix.target }}.${{ matrix.archive }}
+          name: release-linux
+          path: dist/*.tar.gz
           if-no-files-found: error
 
-  release:
-    name: publish pre-release
-    needs: build
+  build-windows:
+    name: build Windows (app and demo setups)
+    needs: [version, web]
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      DEMO_SHA: f91962156841332d5753d869554839f7c4cdea79
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: web
+          path: dist/web
+      - name: Build acan
+        run: cargo build -p acan-server --bin acan --release --locked
+      - name: Build acan-worker
+        run: cargo build -p acan-agent --bin acan-worker --release --locked
+      # The demo pin: DEMO_SHA above and the ref below must name the same commit.
+      - uses: actions/checkout@v4
+        with:
+          repository: NDilanka/acan-demo
+          ref: f91962156841332d5753d869554839f7c4cdea79
+          path: demo-src
+          fetch-depth: 0
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+      - name: Package and build the setups
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc)) { throw "ISCC.exe not found at $iscc" }
+          ./scripts/package.ps1 -Kind app -Os windows -Version $env:VERSION -BinDir target/release -WebDir dist/web -OutDir dist
+          ./scripts/package.ps1 -Kind demo -Os windows -Version $env:VERSION -BinDir target/release -WebDir dist/web -ReplayDir replay -DemoRepo demo-src -DemoSha $env:DEMO_SHA -OutDir dist
+          $out = Join-Path $PWD 'dist'
+          & $iscc "/DStageDir=$out\acan-$env:VERSION-windows-x64" "/DVersion=$env:VERSION" "/DOutName=acan-setup-$env:VERSION-windows-x64" "/O$out" installer\windows\acan.iss
+          if ($LASTEXITCODE -ne 0) { throw 'ISCC failed for the app setup' }
+          & $iscc "/DStageDir=$out\acan-demo-$env:VERSION-windows-x64" "/DVersion=$env:VERSION" "/DOutName=acan-demo-setup-$env:VERSION-windows-x64" "/O$out" installer\windows\acan-demo.iss
+          if ($LASTEXITCODE -ne 0) { throw 'ISCC failed for the demo setup' }
+          Get-ChildItem $out -Filter '*-setup-*.exe' | ForEach-Object { $_.Name }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: dist/*-setup-*-windows-x64.exe
+          if-no-files-found: error
+
+  publish:
+    name: publish the pre-release
+    needs: [version, build-linux, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: acan-*
+          pattern: release-*
           path: archives
           merge-multiple: true
       - name: Checksums
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         working-directory: archives
-        run: sha256sum acan-* > SHA256SUMS && cat SHA256SUMS
+        run: |
+          set -eu
+          files="acan-setup-$VERSION-windows-x64.exe acan-demo-setup-$VERSION-windows-x64.exe acan-$VERSION-linux-x64.tar.gz acan-demo-$VERSION-linux-x64.tar.gz"
+          for f in $files; do
+            test -f "$f" || { echo "missing $f" >&2; exit 1; }
+          done
+          sha256sum $files > SHA256SUMS
+          cat SHA256SUMS
       - name: Publish the pre-release
         uses: softprops/action-gh-release@v2
         with:
           prerelease: true
-          generate_release_notes: true
+          make_latest: false
+          generate_release_notes: false
+          body_path: installer/RELEASE-NOTES.md
           fail_on_unmatched_files: true
-          body: |
-            Alpha build. The macOS archives (aarch64 and x86_64) are built in CI but untested.
           files: |
-            archives/acan-*
+            archives/acan-setup-*-windows-x64.exe
+            archives/acan-demo-setup-*-windows-x64.exe
+            archives/acan-*-linux-x64.tar.gz
             archives/SHA256SUMS

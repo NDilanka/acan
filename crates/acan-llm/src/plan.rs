@@ -178,7 +178,7 @@ fn preference(role: Role, needs_meta: bool) -> &'static [&'static str] {
         return &["meta"];
     }
     match role {
-        Role::Foreman => &["meta", "baseten", "fireworks"],
+        Role::Foreman | Role::Statemap => &["meta", "baseten", "fireworks"],
         Role::Worker | Role::Fast => &["baseten", "fireworks", "meta"],
         Role::Vision | Role::Director | Role::Wonder => &["meta"],
     }
@@ -284,8 +284,21 @@ mod tests {
     #[test]
     fn meta_alone_serves_every_role() {
         let plan = resolve(&saved(&["meta"], &[]), &ApiKeys::default()).expect("resolves");
-        assert_eq!(served_by(&plan), [Some("meta"); 6]);
+        assert_eq!(served_by(&plan), [Some("meta"); 7]);
         assert!(plan.config.is_some());
+    }
+
+    #[test]
+    fn with_a_meta_key_only_the_statemap_role_resolves_to_meta() {
+        let plan = resolve(&saved(&["meta"], &[]), &ApiKeys::default()).expect("resolves");
+        let statemap = plan
+            .roles
+            .iter()
+            .find(|status| status.role == Role::Statemap)
+            .expect("the statemap role is listed");
+        assert_eq!(statemap.provider.as_deref(), Some("meta"));
+        assert_eq!(statemap.off_reason, None);
+        assert!(!statemap.meta_only);
     }
 
     #[test]
@@ -299,7 +312,8 @@ mod tests {
                 Some("baseten"),
                 None,
                 None,
-                None
+                None,
+                Some("baseten"),
             ]
         );
         assert_eq!(plan.roles[3].off_reason, Some(NEEDS_META));
@@ -334,7 +348,8 @@ mod tests {
                 Some("fireworks"),
                 None,
                 None,
-                None
+                None,
+                Some("fireworks"),
             ]
         );
     }
@@ -349,6 +364,7 @@ mod tests {
                 Some("meta"),
                 Some("baseten"),
                 Some("baseten"),
+                Some("meta"),
                 Some("meta"),
                 Some("meta"),
                 Some("meta"),
@@ -451,6 +467,7 @@ mod tests {
                     (Role::Vision, true),
                     (Role::Director, true),
                     (Role::Wonder, true),
+                    (Role::Statemap, false),
                 ]
             );
         }

@@ -867,6 +867,16 @@ impl App {
         }
     }
 
+    /// Shows the page's look: `paper`, `dark`, `blueprint` or `high_contrast`. Returns false, and
+    /// keeps the look as it was, for a name it does not know.
+    pub fn set_look(&mut self, name: &str) -> bool {
+        let Some(look) = acan_render::theme::Look::from_name(name) else {
+            return false;
+        };
+        self.renderer.set_look(look);
+        true
+    }
+
     /// A fresh motion for the page's freeze and reduced-motion settings.
     fn new_motion(&self) -> Motion {
         let mut motion = Motion::new(self.still);
@@ -1207,7 +1217,7 @@ impl App {
             .iter()
             .map(|body| {
                 let at = self.motion.body_at(&body.agent).unwrap_or(body.at);
-                marks::drone_disc(at, |p| self.screen(p))
+                marks::drone_disc(marks::bobbed(&self.motion, body, at), |p| self.screen(p))
             })
             .collect();
         marks::disc_under(&discs, [x, y]).map_or_else(String::new, |i| bodies[i].agent.clone())
@@ -1222,7 +1232,8 @@ impl App {
             .find(|body| body.agent == agent)
             .map_or_else(Vec::new, |body| {
                 let at = self.motion.body_at(&body.agent).unwrap_or(body.at);
-                let ([x, y], radius) = marks::drone_disc(at, |p| self.screen(p));
+                let ([x, y], radius) =
+                    marks::drone_disc(marks::bobbed(&self.motion, body, at), |p| self.screen(p));
                 vec![x, y, radius]
             })
     }
@@ -1588,7 +1599,8 @@ impl App {
             scene.bounds = joined(scene.bounds, base.bounds);
         }
         self.renderer.set_scene(&scene);
-        self.renderer.set_tints(&acan_render::theme::tints());
+        self.renderer
+            .set_tints(&acan_render::theme::tints_of(self.renderer.look()));
     }
 
     /// A world point on screen, in CSS px.

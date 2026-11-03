@@ -93,7 +93,7 @@ const CONTRAST_DIR: &str = "contrasts";
 /// The state directory's folder that holds the stored observations, by hash.
 pub(crate) const OBSERVATIONS_DIR: &str = "observations";
 /// The directory, under the state directory, that installed dependency entries are cached in.
-const DEPS_DIR: &str = "deps";
+pub(crate) const DEPS_DIR: &str = "deps";
 
 /// The state directory's folder that holds one protected-head snapshot per commit.
 const SNAPSHOT_DIR: &str = "snapshots";
@@ -653,7 +653,7 @@ async fn draft_scope<C: ModelClient>(
     };
     // The foreman drafts from the order's sentence, what the human asked for. The order ref is
     // only the draft's key, so it never stands in for the request.
-    let request = model::scope_request(&sentence, &bounds, previous);
+    let request = model::scope_request_on(&sentence, &machine, &bounds, previous);
     let detail = format!("scope draft for {order} rev {}", rev.get());
     let reply = match host
         .client()

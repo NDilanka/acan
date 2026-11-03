@@ -43,9 +43,9 @@ pub struct Beam {
     /// The stroke's width in device px, before the shader's thinnest-stroke floor.
     pub width_px: f32,
     /// When above zero, the beam is a soft spot instead of a stroke: a flat round disc of this
-    /// radius in plan units, lying level and centred on the start, that fades from its middle to
-    /// its rim. It grows with the start, and `to` and `width_px` are not read. A drone's glow and
-    /// its shadow are spots.
+    /// radius in plan units, lying level and centred on the start, that holds its middle and
+    /// fades toward its rim. It grows with the start, and `to` and `width_px` are not read. A
+    /// drone's shadow is a spot.
     pub spot: f32,
 }
 

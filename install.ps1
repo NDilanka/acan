@@ -1,22 +1,20 @@
-# Installs the acan alpha on Windows (x64).
+# Installs the Acan app on Windows (x64) for the current user, with no admin rights.
 #
-# It downloads the newest release (pre-releases included), checks the archive's SHA256 against
-# the release's SHA256SUMS, and installs acan.exe and its web folder under
-# %LOCALAPPDATA%\Programs\acan. It adds that folder to your user PATH. It prints what you need
-# next. It changes nothing else: no config, no keys, no other environment variables.
+# It downloads the newest release (pre-releases included), checks the setup's SHA256 against the
+# release's SHA256SUMS, and runs the setup silently. The setup installs to
+# %LOCALAPPDATA%\Programs\Acan and adds that folder to your user PATH. It does not start Acan.
 #
 #   irm https://raw.githubusercontent.com/NDilanka/acan/main/install.ps1 | iex
 #
-# Optional: set $env:ACAN_INSTALL_TAG = 'v0.1.0-alpha.1' to install that tag instead of the newest.
+# Optional: set $env:ACAN_INSTALL_TAG = 'v0.1.0-pre.1' to install that tag instead of the newest.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $repo = 'NDilanka/acan'
-$target = 'x86_64-pc-windows-msvc'
 
 if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') {
-    throw 'There is no Windows build for this architecture yet. The alpha ships x64 only.'
+    throw 'There is no Windows build for this architecture yet. The pre-release ships x64 only.'
 }
 
 $tag = $env:ACAN_INSTALL_TAG
@@ -26,73 +24,38 @@ if (-not $tag) {
     $tag = $releases[0].tag_name
 }
 if (-not $tag) { throw "No release found for $repo. GitHub may be rate limiting; try again later." }
+$version = $tag.TrimStart('v')
 
 $base = "https://github.com/$repo/releases/download/$tag"
-$archive = "acan-$target.zip"
-$tmp = Join-Path ([IO.Path]::GetTempPath()) ("acan-install-" + [guid]::NewGuid())
+$setupName = "acan-setup-$version-windows-x64.exe"
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ('acan-install-' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $tmp | Out-Null
 
 try {
-    Write-Host "Downloading acan $tag for $target"
-    $zip = Join-Path $tmp $archive
-    Invoke-WebRequest -Uri "$base/$archive" -OutFile $zip
+    Write-Host "Downloading Acan $tag"
+    $setup = Join-Path $tmp $setupName
+    Invoke-WebRequest -Uri "$base/$setupName" -OutFile $setup
     $sums = Join-Path $tmp 'SHA256SUMS'
     Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sums
 
-    $line = Get-Content $sums | Where-Object { $_ -match ('\s' + [regex]::Escape($archive) + '$') } |
+    $line = Get-Content $sums | Where-Object { $_ -match ('\s' + [regex]::Escape($setupName) + '$') } |
         Select-Object -First 1
-    if (-not $line) { throw "$archive is not listed in SHA256SUMS. Refusing to install." }
+    if (-not $line) { throw "$setupName is not listed in SHA256SUMS. Refusing to install." }
     $expected = ($line -split '\s+')[0].ToLowerInvariant()
-    $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLowerInvariant()
+    $actual = (Get-FileHash -Algorithm SHA256 -Path $setup).Hash.ToLowerInvariant()
     if ($actual -ne $expected) {
-        throw "SHA256 mismatch for $archive (expected $expected, got $actual). Nothing was installed."
+        throw "SHA256 mismatch for $setupName (expected $expected, got $actual). Nothing was installed."
     }
-    Write-Host "SHA256 ok: $archive"
+    Write-Host "SHA256 ok: $setupName"
 
-    Expand-Archive -Path $zip -DestinationPath $tmp
-    $stage = Join-Path $tmp "acan-$target"
-    if (-not (Test-Path (Join-Path $stage 'acan.exe'))) { throw 'The archive has no acan.exe.' }
-    if (-not (Test-Path (Join-Path $stage 'web'))) { throw 'The archive has no web folder.' }
-
-    $installDir = Join-Path $env:LOCALAPPDATA 'Programs\acan'
-    New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-    Copy-Item -Path (Join-Path $stage 'acan.exe') -Destination (Join-Path $installDir 'acan.exe') -Force
-    $installedWorker = Test-Path (Join-Path $stage 'acan-worker.exe')
-    if ($installedWorker) {
-        Copy-Item -Path (Join-Path $stage 'acan-worker.exe') -Destination (Join-Path $installDir 'acan-worker.exe') -Force
-    }
-    $web = Join-Path $installDir 'web'
-    if (Test-Path $web) { Remove-Item -Recurse -Force $web }
-    Copy-Item -Path (Join-Path $stage 'web') -Destination $web -Recurse
+    $run = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOLAUNCH=1' -Wait -PassThru
+    if ($run.ExitCode -ne 0) { throw "The setup exited with code $($run.ExitCode)." }
 }
 finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
 
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-$entries = @()
-if ($userPath) { $entries = $userPath -split ';' | Where-Object { $_ } }
-if ($entries -notcontains $installDir) {
-    $newPath = (@($entries) + $installDir) -join ';'
-    [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-    Write-Host "Added $installDir to your user PATH. Open a new terminal to use it."
-}
-
 Write-Host ''
-Write-Host "Installed acan ${tag}: $(Join-Path $installDir 'acan.exe') (web UI in $web)"
-if ($installedWorker) {
-    Write-Host "Installed $(Join-Path $installDir 'acan-worker.exe') (optional): the built-in worker; agents can also connect over MCP."
-}
-Write-Host ''
-Write-Host 'Before you run it:'
-Write-Host "  - Git: 'git --version' must work, and your project must be a git repository with a commit."
-Write-Host "  - Docker Desktop: 'docker version' must work. Candidate code runs in containers."
-Write-Host '  - A model key: bring your own key for the provider you use. Keys stay on your machine and'
-Write-Host '    are never sent anywhere else by acan. Without a routing file, acan answers with labelled'
-Write-Host '    offline replies. The README explains the key setup.'
-Write-Host '  - The binary is not code-signed, so Windows may warn the first time you run it.'
-Write-Host ''
-Write-Host 'Start it on your project:'
-Write-Host '  acan serve --repo C:\path\to\your\project'
-Write-Host ''
-Write-Host 'Then open the address it prints. Stop it with Ctrl+C.'
+Write-Host "Installed Acan $tag to $(Join-Path $env:LOCALAPPDATA 'Programs\Acan')"
+Write-Host 'Open Acan from the Start menu, or run acan in a new terminal.'
+Write-Host 'Acan needs Git on your PATH. Keys are optional; the README explains them.'

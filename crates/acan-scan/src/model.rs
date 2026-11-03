@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::PathBuf;
 
+use acan_iso::Kind;
 use serde::{Deserialize, Serialize};
 
 use crate::hash::ContentHash;
@@ -23,6 +24,107 @@ pub struct Plant {
     pub machines: Vec<Machine>,
     pub belts: Vec<Belt>,
     pub files: Vec<SourceFile>,
+    /// State machines found in the files, sorted by file and line.
+    #[serde(default)]
+    pub state_machines: Vec<StateMachine>,
+    /// Status-like enums with two or more states and no transition the scanner found. The scan
+    /// does not report them as machines; the optional statemap refinement may. Not serialized.
+    #[serde(skip)]
+    pub state_candidates: Vec<StateCandidate>,
+    /// Kinds the user set in `.acan/kinds.json`, by machine name. [`Plant::regroup`] applies them
+    /// again, so they survive a regroup. Left out of the JSON when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub kind_overrides: BTreeMap<String, Kind>,
+}
+
+/// A state machine the scanner found: a status-like type with its states and the transitions between them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateMachine {
+    /// `{file}#{name}`, stable across scans.
+    pub id: String,
+    /// The declared type name, for example `OrderState`.
+    pub name: String,
+    /// Repo-relative, forward slashes.
+    pub file: String,
+    /// 1-based line of the declaration.
+    pub line: u32,
+    /// The name of the plant machine (map building) that owns `file`. Filled after regroup.
+    pub module: String,
+    pub states: Vec<State>,
+    pub transitions: Vec<Transition>,
+    pub confidence: Confidence,
+    /// True when the state is computed from other fields by a function, not moved by assignments.
+    /// Only the statemap refinement sets it. Left out of the JSON when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub derived: bool,
+}
+
+/// A status-like enum the scanner found without a transition. See [`Plant::state_candidates`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateCandidate {
+    /// `{file}#{name}`, the same id a [`StateMachine`] for it would get.
+    pub id: String,
+    pub name: String,
+    pub file: String,
+    /// 1-based line of the declaration.
+    pub line: u32,
+    pub states: Vec<State>,
+}
+
+/// One state of a [`StateMachine`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct State {
+    pub name: String,
+    /// 1-based line where the state is declared.
+    pub line: u32,
+    /// A one-line description from the statemap refinement. Left out of the JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// A move from one state to another that the code performs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Transition {
+    /// The source state, or "*" when the extractor cannot tell it.
+    pub from: String,
+    pub to: String,
+    /// Repo-relative file of the transition site (may differ from the declaration file).
+    pub file: String,
+    /// 1-based first line of the assignment or match arm.
+    pub line: u32,
+    /// 1-based last line, inclusive.
+    pub end_line: u32,
+    /// Enclosing function name, or None outside a function.
+    pub via: Option<String>,
+    /// Who found the transition: the scanner, or the statemap refinement.
+    #[serde(default)]
+    pub source: Source,
+    /// A one-line description from the statemap refinement. Left out of the JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// Who found a [`Transition`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    /// The deterministic scanner.
+    #[default]
+    Scan,
+    /// The statemap refinement, after its citation was checked against the source.
+    Llm,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+/// How much of a [`StateMachine`] the scanner could read. `High` when every transition has a known source state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Confidence {
+    High,
+    Low,
 }
 
 /// A replaceable module, a set of files that the foreman can regroup.
@@ -34,6 +136,19 @@ pub struct Machine {
     pub dir: String,
     pub files: Vec<FileId>,
     pub lang_mix: BTreeMap<Lang, u32>,
+    /// The drawing the renderer uses for this machine. See [`crate::kind`].
+    #[serde(default)]
+    pub kind: Kind,
+    /// True when a keyword or the language share guessed `kind`. The renderer breaks the plinth groove for these.
+    /// Left out of the JSON when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub kind_guessed: bool,
+    /// The rule that picked `kind`, in words for the tooltip, such as `name word "auth"`.
+    #[serde(default)]
+    pub kind_reason: String,
+    /// True when the user set `kind` in `.acan/kinds.json`. Left out of the JSON when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub kind_set_by_user: bool,
 }
 
 /// Import edges from one machine to another, aggregated from file-level imports.

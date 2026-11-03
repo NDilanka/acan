@@ -14,6 +14,8 @@ const RETRY_EVERY_MS = 30000;
 export const LAST_PLOT = "This removes the last plot: the order will have nothing it may change.";
 export const STOPPED_LINE = "This order is stopped: its repair budget ran out, so no work on it may start. A seal does not lift the stop.";
 export const RETRY_LINE = "Couldn't reach the confirmation route; retrying";
+// What the Seal block says in a replay, which has no origin to ask for the route.
+export const REPLAY_SEAL_LINE = "The Seal needs the live origin, so it is not in this replay.";
 export const SENT_LINE = "Sent. Waiting for the server to show the seal.";
 export const UNSENT_LINE = "The last send did not reach the server. Seal sends the same confirmation again.";
 

@@ -61,8 +61,8 @@ pub struct Route {
 }
 
 /// One route per role. Foreman, worker and fast must be routed, so a missing one fails at load
-/// time. Vision and director are optional: without a route, they use the foreman's route.
-/// Wonder is optional and has no fallback: without its route, no wonder call is sent.
+/// time. Vision, director and statemap are optional: without a route, they use the foreman's
+/// route. Wonder is optional and has no fallback: without its route, no wonder call is sent.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Routing {
@@ -75,6 +75,8 @@ pub struct Routing {
     pub director: Option<Route>,
     #[serde(default)]
     pub wonder: Option<Route>,
+    #[serde(default)]
+    pub statemap: Option<Route>,
 }
 
 impl Routing {
@@ -86,6 +88,7 @@ impl Routing {
             Role::Vision => Some(self.vision.as_ref().unwrap_or(&self.foreman)),
             Role::Director => Some(self.director.as_ref().unwrap_or(&self.foreman)),
             Role::Wonder => self.wonder.as_ref(),
+            Role::Statemap => Some(self.statemap.as_ref().unwrap_or(&self.foreman)),
         }
     }
 
@@ -97,6 +100,7 @@ impl Routing {
             Role::Vision => self.vision.get_or_insert_with(|| self.foreman.clone()),
             Role::Director => self.director.get_or_insert_with(|| self.foreman.clone()),
             Role::Wonder => self.wonder.get_or_insert_with(|| self.foreman.clone()),
+            Role::Statemap => self.statemap.get_or_insert_with(|| self.foreman.clone()),
         }
     }
 
@@ -233,6 +237,7 @@ impl LlmConfig {
             Role::Fast,
             Role::Vision,
             Role::Director,
+            Role::Statemap,
         ] {
             self.resolve(role)?;
         }

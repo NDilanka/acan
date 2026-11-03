@@ -17,6 +17,7 @@ import {
 import { closeCommand, commandOpen, openCommand } from "./commandbar.js";
 import { clickMachine, closeCompose, composeOpen, orderHere } from "./compose.js";
 import { keyAction } from "./keys.js";
+import { closeSettings, installSettings, settingsOpen, toggleSettings } from "./settings.js";
 import { droneHover, paintMarks, pinAt, placeLabels } from "./marks.js";
 import { paintRide, paintStale, paintUsage, toggleHelp } from "./panels.js";
 import { syncSeals } from "./seal.js";
@@ -36,7 +37,7 @@ import {
   setCanvas,
   state,
 } from "./state.js";
-import { playOf, syncPlantViews } from "./plant.js";
+import { markReplayReceipts, playOf, syncPlantViews } from "./plant.js";
 import { bindPlate, paintPlate, stepBy, toggleMode, togglePlay } from "./plate.js";
 import { startReplay } from "./replay.js";
 import { bindShell, startShell } from "./shell.js";
@@ -174,9 +175,15 @@ function paint() {
   paintMarks();
   paintUsage();
   paintStale();
-  syncPlantViews(state, get, paintPlate);
+  // A replay has no origin to ask, so it makes no plant-view or route call. Its receipts and
+  // scopes say what the replay lacks instead (see `markReplayReceipts` and the Seal block).
+  if (replay) {
+    markReplayReceipts(state);
+  } else {
+    syncPlantViews(state, get, paintPlate);
+    syncSeals(state, get, paintSlip);
+  }
   paintPlate();
-  syncSeals(state, get, paintSlip);
   paintSlip();
   requestUsage(state, get, paintUsage);
   syncVision();
@@ -399,6 +406,9 @@ function runKey(action, event) {
     case "step":
       stepBy(action.delta);
       break;
+    case "settings":
+      toggleSettings();
+      break;
     default:
       console.warn("no handler for key action", action.kind, event.key);
   }
@@ -410,6 +420,7 @@ const CLOSERS = {
   viewer: closeViewer,
   question: closeQuestionCard,
   clash: closeClashCard,
+  settings: closeSettings,
 };
 
 // When G was pressed, while the chord waits for its digit or letter.
@@ -441,6 +452,7 @@ function bindKeys() {
           viewer: viewerOpen(),
           question: questionOpen(),
           clash: Boolean(state.markState.card),
+          settings: settingsOpen(),
         },
       },
     );
@@ -476,6 +488,20 @@ function bindKeys() {
 
 // The owner token arrives as `#token=` from `acan serve`. It is kept for the session only, then
 // the fragment is removed so it does not sit in the address bar or the history.
+// The owner token was rotated on the drawer. The old one is dead, so the page closes its stream
+// before the stream reads the refusal as a sign-out, keeps the new token and starts again.
+export function rotateToken(token) {
+  const old = state.socket;
+  state.socket = null;
+  old?.close();
+  state.token = token;
+  sessionStorage.setItem(TOKEN_KEY, token);
+  start().catch((err) => {
+    console.error(err);
+    setLink("failed");
+  });
+}
+
 function adoptToken() {
   const fragment = new URLSearchParams(location.hash.slice(1)).get("token");
   if (fragment) {
@@ -594,6 +620,8 @@ async function boot() {
     bindShell();
     startShell();
     installFirstRun();
+    installSettings({ app: state.app, requestRender, token: () => state.token, onToken: rotateToken,
+      fixture: params.get("settings") === "fixture" });
   }
   // `?plate=fixture` or `?plate=plain` shows the receipt plate over a fixture plant view, without
   // the origin. The plate is watermarked FIXTURE.
