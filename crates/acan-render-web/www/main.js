@@ -477,7 +477,7 @@ function adoptToken() {
 }
 
 async function createApp() {
-  const plan = backendPlan(params.get("backend"), Boolean(navigator.gpu));
+  const plan = backendPlan(params.get("backend"));
   const made = await createOnFirst(plan, canvas, {
     create: (target, backend) => App.create(target, backend),
     freshCanvas: (old) => {
