@@ -84,6 +84,44 @@ impl Tokens {
         self.by_token.get(token)
     }
 
+    /// The token of agent `agent`. A token the file does not hold yet is minted and written to
+    /// `<dir>/tokens.json` before it is returned, so an agent keeps its token across starts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be written. The new token is not kept then.
+    pub fn agent_token(&mut self, dir: &Path, agent: &AgentId) -> anyhow::Result<Token> {
+        let principal = Principal::Agent(agent.clone());
+        if let Some((text, _)) = self.by_token.iter().find(|(_, held)| **held == principal) {
+            return Ok(Token(text.clone()));
+        }
+        let token = Token(format!("acan_{}", Uuid::new_v4().simple()));
+        self.by_token.insert(token.0.clone(), principal);
+        if let Err(err) = self.write(dir) {
+            self.by_token.remove(&token.0);
+            return Err(err);
+        }
+        Ok(token)
+    }
+
+    /// Writes every entry to `<dir>/tokens.json` through a temporary file, so a crash mid-write
+    /// leaves the old file in place.
+    fn write(&self, dir: &Path) -> anyhow::Result<()> {
+        let entries: Vec<Entry> = self
+            .by_token
+            .iter()
+            .map(|(token, principal)| Entry {
+                token: token.clone(),
+                principal: principal.clone(),
+            })
+            .collect();
+        let path = dir.join(TOKENS_FILE);
+        let temporary = dir.join(format!("{TOKENS_FILE}.tmp"));
+        fs::write(&temporary, serde_json::to_string_pretty(&entries)?)
+            .with_context(|| format!("writing {}", temporary.display()))?;
+        fs::rename(&temporary, &path).with_context(|| format!("writing {}", path.display()))
+    }
+
     fn from_entries(entries: Vec<Entry>) -> anyhow::Result<Self> {
         let mut by_token = BTreeMap::new();
         for entry in entries {
@@ -100,5 +138,57 @@ impl fmt::Debug for Tokens {
         f.debug_struct("Tokens")
             .field("count", &self.by_token.len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::*;
+
+    #[test]
+    fn an_agent_keeps_its_token_across_loads_and_each_agent_has_its_own() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let owner = MemberId::from_str("owner").expect("valid member id");
+        let local = AgentId::from_str("local-1").expect("valid agent id");
+        let (mut tokens, owner_token) =
+            Tokens::load_or_create(dir.path(), &owner).expect("tokens load");
+        assert!(
+            owner_token.is_some(),
+            "the first load mints the owner token"
+        );
+
+        let first = tokens
+            .agent_token(dir.path(), &local)
+            .expect("the agent gets a token");
+        let again = tokens
+            .agent_token(dir.path(), &local)
+            .expect("the same agent gets the same token");
+        assert_eq!(first, again);
+
+        let (mut reloaded, owner_again) =
+            Tokens::load_or_create(dir.path(), &owner).expect("tokens reload");
+        assert!(owner_again.is_none(), "a second load mints nothing");
+        assert_eq!(
+            reloaded
+                .agent_token(dir.path(), &local)
+                .expect("the token survives"),
+            first
+        );
+        assert_eq!(
+            reloaded.principal(first.as_str()),
+            Some(&Principal::Agent(local))
+        );
+
+        let other = AgentId::from_str("local-2").expect("valid agent id");
+        let second = reloaded
+            .agent_token(dir.path(), &other)
+            .expect("a second agent gets a token");
+        assert_ne!(second, first);
+        assert!(
+            !dir.path().join("tokens.json.tmp").exists(),
+            "the write leaves no temporary file"
+        );
     }
 }

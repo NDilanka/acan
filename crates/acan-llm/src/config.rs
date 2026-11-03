@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::client::Destination;
 use crate::role::Role;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -60,7 +61,7 @@ pub struct Route {
 }
 
 /// One route per role. Foreman, worker and fast must be routed, so a missing one fails at load
-/// time. Vision is optional: without a vision route, vision calls use the foreman's route.
+/// time. Vision and director are optional: without a route, they use the foreman's route.
 /// Wonder is optional and has no fallback: without its route, no wonder call is sent.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +71,8 @@ pub struct Routing {
     pub fast: Route,
     #[serde(default)]
     pub vision: Option<Route>,
+    #[serde(default)]
+    pub director: Option<Route>,
     #[serde(default)]
     pub wonder: Option<Route>,
 }
@@ -81,6 +84,7 @@ impl Routing {
             Role::Worker => Some(&self.worker),
             Role::Fast => Some(&self.fast),
             Role::Vision => Some(self.vision.as_ref().unwrap_or(&self.foreman)),
+            Role::Director => Some(self.director.as_ref().unwrap_or(&self.foreman)),
             Role::Wonder => self.wonder.as_ref(),
         }
     }
@@ -91,8 +95,13 @@ impl Routing {
             Role::Worker => &mut self.worker,
             Role::Fast => &mut self.fast,
             Role::Vision => self.vision.get_or_insert_with(|| self.foreman.clone()),
+            Role::Director => self.director.get_or_insert_with(|| self.foreman.clone()),
             Role::Wonder => self.wonder.get_or_insert_with(|| self.foreman.clone()),
         }
+    }
+
+    fn set(&mut self, role: Role, route: Route) {
+        *self.route_mut(role) = route;
     }
 }
 
@@ -142,6 +151,25 @@ impl LlmConfig {
         &self.providers
     }
 
+    /// The name of the provider `role` is routed to. `None` when the role has no route.
+    #[must_use]
+    pub fn route_of(&self, role: Role) -> Option<&str> {
+        self.routing
+            .route(role)
+            .map(|route| route.provider.as_str())
+    }
+
+    /// Where calls for `role` go: the provider its effective route names, explicit or inherited,
+    /// and the model that provider runs for the route. `None` only when the route names no
+    /// provider, which validation rules out.
+    #[must_use]
+    pub fn destination(&self, role: Role) -> Option<Destination> {
+        self.resolve(role).ok().map(|route| Destination {
+            provider: route.provider.name.clone(),
+            model: route.model.to_owned(),
+        })
+    }
+
     /// Points `role` at `provider`, using that provider's default model.
     ///
     /// # Errors
@@ -155,10 +183,13 @@ impl LlmConfig {
                 provider: provider.to_owned(),
             });
         }
-        *self.routing.route_mut(role) = Route {
-            provider: provider.to_owned(),
-            model: None,
-        };
+        self.routing.set(
+            role,
+            Route {
+                provider: provider.to_owned(),
+                model: None,
+            },
+        );
         Ok(())
     }
 
@@ -196,7 +227,13 @@ impl LlmConfig {
                 });
             }
         }
-        for role in [Role::Foreman, Role::Worker, Role::Fast, Role::Vision] {
+        for role in [
+            Role::Foreman,
+            Role::Worker,
+            Role::Fast,
+            Role::Vision,
+            Role::Director,
+        ] {
             self.resolve(role)?;
         }
         if self.routing.wonder.is_some() {

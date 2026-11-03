@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>acan: model keys</title>
+<style>
+  :root { --ink: #1d1d1f; --muted: #5d5d63; --rule: #d6d6db; --face: #ffffff; --page: #f4f4f6;
+          --accent: #2d5bd6; --ok: #1f7a3d; --bad: #b3261e; --warn: #8a5a00; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--page); color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 620px; margin: 48px auto; padding: 0 20px; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 8px; }
+  h2 { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
+  p { margin: 0 0 12px; }
+  .muted { color: var(--muted); font-size: 14px; }
+  .card { background: var(--face); border: 1px solid var(--rule); border-radius: 8px; padding: 20px; margin-top: 20px; }
+  .status { font-size: 14px; padding: 10px 12px; border-radius: 6px; background: #eef1fb; margin: 0 0 4px; }
+  .status.set { background: #e8f4ec; }
+  .provider { border: 1px solid var(--rule); border-radius: 6px; padding: 14px; margin-top: 12px; }
+  .provider > header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .provider small { display: block; color: var(--muted); font-size: 14px; }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #eef1fb; color: var(--muted); white-space: nowrap; }
+  .pill.set { background: #e8f4ec; color: var(--ok); }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+  .row input { flex: 1; min-width: 0; }
+  .role { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--rule); }
+  .role:first-child { border-top: 0; padding-top: 0; }
+  .role small { display: block; color: var(--muted); font-size: 14px; }
+  .role small.off { color: var(--bad); }
+  .role small.used { color: var(--ink); }
+  input[type=password], input[type=text], select { font: inherit; padding: 9px 12px; border: 1px solid var(--rule);
+    border-radius: 6px; background: #fff; color: var(--ink); }
+  input[type=password], input[type=text] { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  select { min-width: 200px; }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button { font: inherit; font-weight: 600; padding: 9px 14px; border-radius: 6px; border: 0; white-space: nowrap;
+    background: var(--accent); color: #fff; cursor: pointer; }
+  button.secondary { background: #fff; color: var(--ink); border: 1px solid var(--rule); }
+  button:disabled, select:disabled { opacity: 0.55; cursor: default; }
+  #result { min-height: 1.45em; margin: 16px 0 0; font-size: 14px; }
+  #result.ok { color: var(--ok); }
+  #result.bad { color: var(--bad); }
+  #result.warn { color: var(--warn); }
+  .hidden { display: none; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Model keys</h1>
+  <p class="muted">acan calls each model provider with a key you give it. A key is checked with its own provider only, and kept in a file that only your user account can read. A key is never shown again and never sent anywhere else.</p>
+
+  <div class="card">
+    <p id="status" class="status" role="status">Checking the current setup&hellip;</p>
+    <div id="token-row" class="hidden">
+      <label class="muted" for="token">Owner token. It was printed when acan first started, and it is kept in the repository's .acan/tokens.json.</label>
+      <div class="row">
+        <input id="token" type="text" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="acan_&hellip;">
+        <button id="use-token" type="button">Use token</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="providers-card" class="card hidden">
+    <h2>Providers</h2>
+    <p class="muted">Add a key for each provider you use. A key is used only for that provider.</p>
+    <div id="providers"></div>
+  </div>
+
+  <div id="roles-card" class="card hidden">
+    <h2>Roles</h2>
+    <p class="muted">Each role uses the provider you pick. Default takes the first provider with a key that can serve it.</p>
+    <div id="roles"></div>
+  </div>
+
+  <p id="result" role="alert"></p>
+  <p class="muted">Until a role has a provider, its model jobs get built-in replies, labelled as offline. <a href="/">Back to acan</a></p>
+</main>
+<script>
+(() => {
+  const TOKEN_KEY = "acan.owner";
+  const PROVIDERS = {
+    meta: { label: "Meta Model API", detail: "muse-spark-1.3 at api.meta.ai" },
+    baseten: { label: "Baseten", detail: "Muse Spark Open, hosted by Baseten" },
+    fireworks: { label: "Fireworks", detail: "Muse Spark Open, hosted by Fireworks" },
+  };
+  const ROLES = {
+    foreman: "Plans and reviews the work.",
+    worker: "Runs the worker calls.",
+    fast: "Quick, cheap calls such as clash triage.",
+    vision: "Compares page screenshots. Needs a Meta key.",
+  };
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, props, ...children) => {
+    const node = document.createElement(tag);
+    Object.assign(node, props || {});
+    node.append(...children);
+    return node;
+  };
+  const label = (provider) => (PROVIDERS[provider] && PROVIDERS[provider].label) || provider;
+  const titled = (role) => role.charAt(0).toUpperCase() + role.slice(1);
+
+  // The owner token arrives as #token= from `acan serve`. It is kept for this browser session and
+  // removed from the address bar, as the app does.
+  function adoptToken() {
+    const fragment = new URLSearchParams(location.hash.slice(1)).get("token");
+    if (fragment) {
+      sessionStorage.setItem(TOKEN_KEY, fragment);
+      history.replaceState(null, "", location.pathname + location.search);
+    }
+    return sessionStorage.getItem(TOKEN_KEY);
+  }
+
+  let token = adoptToken();
+
+  function say(text, tone) {
+    const result = $("result");
+    result.textContent = text;
+    result.className = tone || "";
+  }
+
+  async function call(method, path, body) {
+    const headers = {};
+    if (token) headers.Authorization = "Bearer " + token;
+    const init = { method, headers };
+    if (body !== undefined) {
+      headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+    const response = await fetch(path, init);
+    const data = await response.json().catch(() => ({}));
+    return { status: response.status, data };
+  }
+
+  function summary(status) {
+    if (status.source === "routing_file") {
+      return status.configured
+        ? { text: "This repository's .acan/llm.toml chooses the providers, and their keys are set.", set: true }
+        : { text: "This repository's .acan/llm.toml chooses the providers, but no key is set for them. Set their keys in its .env.", set: false };
+    }
+    const served = status.roles.filter((role) => role.provider).length;
+    if (!status.configured) {
+      return { text: "No model key is set. Model jobs get built-in replies, labelled as offline, until you add one.", set: false };
+    }
+    if (served < status.roles.length) {
+      return { text: served + " of " + status.roles.length + " roles have a provider. The others get built-in replies, labelled as offline.", set: false };
+    }
+    return { text: "Every role has a provider. Model calls go to live models.", set: true };
+  }
+
+  // What a refused request means. Names come from the server, and only these fixed texts are shown.
+  function explain(status, data) {
+    const what = data && data.what;
+    if (status === 400 && what === "key") return "That key is not accepted. Paste the whole key, with no spaces.";
+    if (status === 400 && what === "provider") return "That provider is not one this page offers.";
+    if (status === 400 && what === "needs_meta") return "That role needs a Meta key, so only Meta can serve it.";
+    if (status === 401) return "The owner token was not accepted. Paste it again.";
+    if (status === 403) return "Only members can change keys, so this session cannot.";
+    if (status === 404) return "That role is not one this page offers.";
+    if (status === 409 && what === "routing_file") return "This repository's .acan/llm.toml chooses the providers. Set their keys in its .env.";
+    if (status === 409 && what === "no_key") return "Save a key for that provider first.";
+    if (status === 409) return "This acan cannot change keys from this page.";
+    return "Something went wrong. Nothing was saved.";
+  }
+
+  const SAVED = {
+    stored: (provider, checked) => checked
+      ? { text: "Saved. " + label(provider) + " accepted the key.", tone: "ok" }
+      : { text: "Saved, but " + label(provider) + " did not confirm the key. The first model call will show whether it works.", tone: "warn" },
+    rejected: (provider) => ({ text: label(provider) + " did not accept this key. Check it and try again. Nothing was saved.", tone: "bad" }),
+    unreachable: (provider) => ({ text: "Could not reach " + label(provider) + ". Check the connection and try again. Nothing was saved.", tone: "bad" }),
+  };
+
+  async function saveKey(provider, input, button) {
+    // The key leaves the field at once, so it is not left in the page while the request runs.
+    const key = input.value;
+    input.value = "";
+    if (!key.trim()) {
+      say("Paste the key first.", "bad");
+      return;
+    }
+    button.disabled = true;
+    say("Checking the key with " + label(provider) + "\u2026");
+    try {
+      const { status, data } = await call("POST", "/api/setup/keys", { provider, key });
+      if (status === 200) {
+        const outcome = SAVED.stored(provider, data.checked);
+        say(outcome.text, outcome.tone);
+        await refresh();
+      } else if (status === 422) {
+        const outcome = SAVED.rejected(provider);
+        say(outcome.text, outcome.tone);
+      } else if (status === 503) {
+        const outcome = SAVED.unreachable(provider);
+        say(outcome.text, outcome.tone);
+      } else {
+        say(explain(status, data), "bad");
+      }
+    } catch (_) {
+      say("Cannot reach acan. Nothing was saved.", "bad");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function removeKey(provider, button) {
+    button.disabled = true;
+    try {
+      const { status, data } = await call("DELETE", "/api/setup/keys/" + encodeURIComponent(provider));
+      if (status === 200) {
+        say(data.removed
+          ? "Removed the saved key for " + label(provider) + ". A role that was picked for it takes the default."
+          : "There was no saved key for " + label(provider) + ".", data.removed ? "ok" : "warn");
+        await refresh();
+      } else {
+        say(explain(status, data), "bad");
+      }
+    } catch (_) {
+      say("Cannot reach acan. Nothing was changed.", "bad");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function setRole(role, provider, select) {
+    select.disabled = true;
+    try {
+      const { status, data } = await call("PUT", "/api/setup/roles/" + encodeURIComponent(role), { provider });
+      if (status === 200) {
+        say(provider ? titled(role) + " uses " + label(provider) + "." : titled(role) + " takes the default again.", "ok");
+      } else {
+        say(explain(status, data), "bad");
+      }
+    } catch (_) {
+      say("Cannot reach acan. Nothing was changed.", "bad");
+    } finally {
+      select.disabled = false;
+      await refresh();
+    }
+  }
+
+  function providerCard(provider, canSave) {
+    const info = PROVIDERS[provider.name] || { label: provider.name, detail: "" };
+    const has = provider.saved || provider.environment;
+    const keyText = provider.saved && provider.environment ? "Key saved; the environment's key is used"
+      : provider.environment ? "Key set in the environment or .env"
+      : provider.saved ? "Key saved"
+      : "No key";
+    const card = el("div", { className: "provider" },
+      el("header", {},
+        el("div", {}, el("h2", { textContent: info.label }), el("small", { textContent: info.detail })),
+        el("span", { className: "pill" + (has ? " set" : ""), textContent: keyText })));
+    if (!canSave) return card;
+
+    const input = el("input", { type: "password", spellcheck: false, autocomplete: "off", placeholder: has ? "Paste a new key to replace it" : "Paste the key" });
+    input.setAttribute("data-lpignore", "true");
+    input.setAttribute("data-1p-ignore", "true");
+    const save = el("button", { type: "submit", textContent: has ? "Replace key" : "Check and save" });
+    const form = el("form", { className: "row", autocomplete: "off" }, input, save);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      saveKey(provider.name, input, save);
+    });
+    card.append(form);
+    if (provider.saved) {
+      const remove = el("button", { type: "button", className: "secondary", textContent: "Remove saved key" });
+      remove.addEventListener("click", () => removeKey(provider.name, remove));
+      card.append(el("div", { className: "row" }, remove));
+    }
+    return card;
+  }
+
+  function roleRow(role, providers, canSave) {
+    const serves = role.provider ? label(role.provider) : null;
+    const detail = role.provider
+      ? el("small", { className: "used", textContent: role.picked ? "Uses " + serves + " (picked)" : "Uses " + serves + " by default" })
+      : el("small", { className: "off", textContent: "Off: " + role.off_reason + "." });
+    const select = el("select", { disabled: !canSave });
+    select.setAttribute("aria-label", titled(role.role) + " provider");
+    select.append(el("option", { value: "", textContent: role.provider && !role.picked ? "Default (" + serves + ")" : "Default" }));
+    for (const provider of providers) {
+      if (provider.saved || provider.environment) {
+        select.append(el("option", { value: provider.name, textContent: label(provider.name) }));
+      }
+    }
+    select.value = role.picked ? role.provider : "";
+    select.addEventListener("change", () => setRole(role.role, select.value || null, select));
+    return el("div", { className: "role" },
+      el("div", {}, el("strong", { textContent: titled(role.role) }), el("small", { textContent: ROLES[role.role] || "" }), detail),
+      select);
+  }
+
+  function render(status) {
+    const view = summary(status);
+    $("status").textContent = view.text;
+    $("status").classList.toggle("set", view.set);
+    $("token-row").classList.add("hidden");
+    const canSave = status.can_save;
+    $("providers").replaceChildren(...status.providers.map((provider) => providerCard(provider, canSave)));
+    $("roles").replaceChildren(...status.roles.map((role) => roleRow(role, status.providers, canSave)));
+    $("providers-card").classList.remove("hidden");
+    $("roles-card").classList.remove("hidden");
+  }
+
+  function askForToken(text) {
+    $("status").textContent = text;
+    $("status").classList.remove("set");
+    $("token-row").classList.remove("hidden");
+    $("providers-card").classList.add("hidden");
+    $("roles-card").classList.add("hidden");
+  }
+
+  async function refresh() {
+    if (!token) {
+      askForToken("Paste the owner token to continue.");
+      return;
+    }
+    let response;
+    try {
+      response = await fetch("/api/setup", { headers: { Authorization: "Bearer " + token } });
+    } catch (_) {
+      $("status").textContent = "Cannot reach acan. Check that it is running, then reload this page.";
+      return;
+    }
+    if (response.status === 401) {
+      token = null;
+      sessionStorage.removeItem(TOKEN_KEY);
+      askForToken("The token was not accepted. Paste the owner token to continue.");
+      return;
+    }
+    if (!response.ok) {
+      $("status").textContent = "Could not read the setup status.";
+      return;
+    }
+    render(await response.json());
+  }
+
+  $("use-token").addEventListener("click", () => {
+    const value = $("token").value.trim();
+    if (!value) return;
+    token = value;
+    sessionStorage.setItem(TOKEN_KEY, token);
+    $("token").value = "";
+    refresh();
+  });
+
+  refresh();
+})();
+</script>
+</body>
+</html>

@@ -4,10 +4,36 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 
 use crate::chat::{ChatRequest, ChatResponse, JsonSchemaFormat};
-use crate::error::LlmError;
+use crate::error::{LlmError, ReplyTrace};
 use crate::role::Role;
+use crate::setup::{KeyOutcome, KeyStatus, SetupError};
 use crate::trace::Traced;
 use crate::usage::CallRecord;
+
+/// The provider name Muse Spark is served under in routing.
+pub const MUSE_SPARK_PROVIDER: &str = "meta";
+
+/// The Muse Spark model ids a route may run. A route to any other model is not Muse Spark. A new
+/// Muse Spark release is one more entry here.
+pub const MUSE_SPARK_MODELS: &[&str] = &["muse-spark-1.3"];
+
+/// Where a role's calls go: the provider that answers them, and the model that provider runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Destination {
+    /// The provider's name in the routing file.
+    pub provider: String,
+    /// The model id the route runs.
+    pub model: String,
+}
+
+impl Destination {
+    /// Whether this destination is Muse Spark: the Meta provider running one of
+    /// [`MUSE_SPARK_MODELS`].
+    #[must_use]
+    pub fn is_muse_spark(&self) -> bool {
+        self.provider == MUSE_SPARK_PROVIDER && MUSE_SPARK_MODELS.contains(&self.model.as_str())
+    }
+}
 
 /// The one interface the rest of Acan uses for model calls.
 ///
@@ -25,6 +51,12 @@ pub trait ModelClient: Send + Sync {
         role: Role,
         request: ChatRequest,
     ) -> impl Future<Output = Result<ChatResponse, LlmError>> + Send;
+
+    /// Where calls for `role` go, when the client routes them. A client without routing, such as
+    /// an offline one, has no destination for any role.
+    fn destination(&self, _role: Role) -> Option<Destination> {
+        None
+    }
 
     /// Runs a completion whose reply must parse as `T`. The call is metered even when the
     /// reply does not parse.
@@ -45,8 +77,49 @@ pub trait ModelClient: Send + Sync {
         async move {
             let cap = request.max_tokens;
             let response = self.chat(role, with_schema::<T>(request)).await?;
-            parse_structured(response, cap, str::to_owned)
+            parse_structured(response, cap, None, str::to_owned)
         }
+    }
+
+    /// The providers, keys and role picks in use for model calls. A client with no setup of its
+    /// own reports none. It never reports a key itself.
+    fn key_status(&self) -> KeyStatus {
+        KeyStatus::default()
+    }
+
+    /// Checks `key` with `provider` and saves it, so calls use it from then on. Only a client
+    /// that keeps its keys in a keys file takes one; this default refuses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`save_checked`](crate::save_checked), or
+    /// [`SetupError::Unavailable`] when this client does not take saved keys.
+    fn save_key(
+        &self,
+        _provider: &str,
+        _key: &str,
+    ) -> impl Future<Output = Result<KeyOutcome, SetupError>> + Send {
+        async { Err(SetupError::Unavailable) }
+    }
+
+    /// Removes the saved key for `provider`, and any role pick that named it. Returns whether a
+    /// key was removed. This default refuses, as [`ModelClient::save_key`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetupError::Unavailable`] when this client does not take saved keys.
+    fn remove_key(&self, _provider: &str) -> Result<bool, SetupError> {
+        Err(SetupError::Unavailable)
+    }
+
+    /// Picks `provider` for `role`, or clears the pick when `provider` is `None`. This default
+    /// refuses, as [`ModelClient::save_key`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SetupError::Unavailable`] when this client does not take saved keys.
+    fn set_role(&self, _role: Role, _provider: Option<&str>) -> Result<(), SetupError> {
+        Err(SetupError::Unavailable)
     }
 
     /// Runs [`ModelClient::chat`] and also returns the provider's trace fields. A client that
@@ -76,6 +149,8 @@ pub trait ModelClient: Send + Sync {
 pub struct Structured<T> {
     pub value: T,
     pub call: CallRecord,
+    /// The request id the provider sent for the call, when it sent one.
+    pub request_id: Option<String>,
 }
 
 /// Asks the provider for a reply that matches the JSON Schema of `T`.
@@ -88,17 +163,23 @@ pub(crate) fn with_schema<T: JsonSchema>(mut request: ChatRequest) -> ChatReques
 const FINISH_LENGTH: &str = "length";
 
 /// Parses a reply as `T`. `cap` is the output cap the request set. A reply that stopped at that
-/// cap is refused before it is parsed, because its text is cut short. `scrub` removes credentials
-/// from provider text before the text is kept in an error.
+/// cap is refused before it is parsed, because its text is cut short. `request_id` is the id the
+/// provider sent for the call, when it sent one. Both errors keep the call's trace. `scrub`
+/// removes credentials from provider text before the text is kept in an error.
 pub(crate) fn parse_structured<T: DeserializeOwned>(
     response: ChatResponse,
     cap: Option<u32>,
+    request_id: Option<String>,
     scrub: impl Fn(&str) -> String,
 ) -> Result<Structured<T>, LlmError> {
     if response.finish_reason.as_deref() == Some(FINISH_LENGTH) {
         return Err(LlmError::OutputCapped {
             provider: response.call.provider.clone(),
             max_tokens: cap,
+            trace: Box::new(ReplyTrace {
+                call: response.call,
+                request_id,
+            }),
         });
     }
     let raw = response.content.as_deref().unwrap_or_default();
@@ -107,11 +188,16 @@ pub(crate) fn parse_structured<T: DeserializeOwned>(
         Ok(value) => Ok(Structured {
             value,
             call: response.call,
+            request_id,
         }),
         Err(err) => Err(LlmError::SchemaValidation {
             provider: response.call.provider.clone(),
             detail: scrub(&err.to_string()),
             raw: scrub(raw),
+            trace: Box::new(ReplyTrace {
+                call: response.call,
+                request_id,
+            }),
         }),
     }
 }

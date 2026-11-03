@@ -2,7 +2,7 @@
   "schema": "acan-demo-intent-edits/2",
   "order": "o-1",
   "decided_by": "coordinator, delegated by the owner",
-  "note": "Written for the draft in run D:\\dev\\acan-takes\\d02t-fresh3-o1-20261101-022207 (scope-draft-o-1.json, rev 1, foreman draft d02t). That draft differs from the d02k draft: keep-redirect is absent, and its open choices are scope-shared and window-reset. Each edit names the draft item it acts on by id; draft_mapping maps each drafted id to the decision it follows. Items follow the coordinator decisions D1 to D19 in coordinator-decisions-d02t.json. take.ps1 applies scope_edits to the draft in order, then choice_rules to the open choices, then sends the result as one revise_scope, and logs each edit as a human step. An op whose id is not in the draft stops the take (fail closed). Nothing here is a verdict: the edits state the order's rules and the gate checks them.",
+  "note": "Written for the draft in run C:\\work\\acan-takes\\d02t-fresh3-o1-20261101-022207 (scope-draft-o-1.json, rev 1, foreman draft d02t). That draft differs from the d02k draft: keep-redirect is absent, and its open choices are scope-shared and window-reset. Each edit names the draft item it acts on by id; draft_mapping maps each drafted id to the decision it follows. Items follow the coordinator decisions D1 to D19 in coordinator-decisions-d02t.json. take.ps1 applies scope_edits to the draft in order, then choice_rules to the open choices, then sends the result as one revise_scope, and logs each edit as a human step. An op whose id is not in the draft stops the take (fail closed). Nothing here is a verdict: the edits state the order's rules and the gate checks them.",
   "choice_rules": [
     {
       "id": "cr-bucket-scope",
@@ -843,8 +843,8 @@
     }
   ],
   "draft_mapping": {
-    "run": "D:\\dev\\acan-takes\\d02t-fresh3-o1-20261101-022207",
-    "draft_file": "D:\\dev\\acan-takes\\d02t-fresh3-o1-20261101-022207\\scope-draft-o-1.json",
+    "run": "C:\\work\\acan-takes\\d02t-fresh3-o1-20261101-022207",
+    "draft_file": "C:\\work\\acan-takes\\d02t-fresh3-o1-20261101-022207\\scope-draft-o-1.json",
     "draft_rev": 1,
     "decided_by": "coordinator, delegated by the owner",
     "items": [

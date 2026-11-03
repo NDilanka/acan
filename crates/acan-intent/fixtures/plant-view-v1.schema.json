@@ -118,6 +118,81 @@
         "unknown"
       ]
     },
+    "BindableValue": {
+      "description": "A value trusted code resolved from a snapshot for a caption slot: a copy of the evidence\nrow the slot's reference named, with the row's provenance, column and full address. Model\nlayout cannot substitute a proposal for an observation or swap base and candidate, because\nthe row decodes only with a provenance its column admits and an observed row only with its\nrun, commit and observation hash.",
+      "type": "object",
+      "properties": {
+        "item_id": {
+          "description": "The receipt item.",
+          "$ref": "#/$defs/ItemId"
+        },
+        "receipt_hash": {
+          "description": "The snapshot.",
+          "$ref": "#/$defs/ReceiptHash"
+        },
+        "row": {
+          "description": "The resolved row.",
+          "$ref": "#/$defs/EvidenceRow"
+        },
+        "unit": {
+          "description": "Its unit, from the template's slot.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ValueUnit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value_type": {
+          "description": "What kind of value, from the template's slot.",
+          "$ref": "#/$defs/ValueType"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "value_type",
+        "receipt_hash",
+        "item_id",
+        "row"
+      ]
+    },
+    "BoundItemView": {
+      "description": "One item's caption slots bound by trusted code. Rendered by the trusted card; any invalid\nbinding rejects the whole view.",
+      "type": "object",
+      "properties": {
+        "catalog_version": {
+          "description": "The template catalog version.",
+          "$ref": "#/$defs/CatalogVersion"
+        },
+        "item_id": {
+          "description": "The receipt item.",
+          "$ref": "#/$defs/ItemId"
+        },
+        "receipt_hash": {
+          "description": "The snapshot.",
+          "$ref": "#/$defs/ReceiptHash"
+        },
+        "typed_slot_bindings": {
+          "description": "Each slot's value.",
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[A-Za-z0-9._:/@-]{1,128}$": {
+              "$ref": "#/$defs/BindableValue"
+            }
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "receipt_hash",
+        "item_id",
+        "typed_slot_bindings",
+        "catalog_version"
+      ]
+    },
     "Camera": {
       "description": "Where the camera goes for one tour step.",
       "type": "object",
@@ -1560,12 +1635,19 @@
       ]
     },
     "TourView": {
-      "description": "A validated tour and who ordered it. The UI shows a `directed` or `plain` toggle.",
+      "description": "A validated tour and who ordered it. The UI shows a `directed` or `plain` toggle. Each tour\ncarries the bindings admission made for its steps, in step order, so the page shows the\nvalues trusted code bound and never the model's text.",
       "oneOf": [
         {
           "description": "Ordered by the director model and validated by trusted code.",
           "type": "object",
           "properties": {
+            "bindings": {
+              "description": "The admitted bindings, one per step.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/BoundItemView"
+              }
+            },
             "mode": {
               "type": "string",
               "const": "directed"
@@ -1583,13 +1665,21 @@
           "required": [
             "mode",
             "model",
-            "tour"
+            "tour",
+            "bindings"
           ]
         },
         {
-          "description": "The deterministic order: residue, then violations, then bounced, then fulfilled.",
+          "description": "The deterministic order: residue, then violations, then bounced, then the other mandatory\nitems, then fulfilled, then a few open preserved checks.",
           "type": "object",
           "properties": {
+            "bindings": {
+              "description": "The admitted bindings, one per step.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/BoundItemView"
+              }
+            },
             "mode": {
               "type": "string",
               "const": "deterministic"
@@ -1602,7 +1692,8 @@
           "additionalProperties": false,
           "required": [
             "mode",
-            "tour"
+            "tour",
+            "bindings"
           ]
         }
       ]
@@ -1612,6 +1703,76 @@
       "type": "integer",
       "format": "uint64",
       "minimum": 0
+    },
+    "ValueType": {
+      "description": "What kind of value a bound slot holds.",
+      "oneOf": [
+        {
+          "description": "An HTTP status code.",
+          "type": "string",
+          "const": "status"
+        },
+        {
+          "description": "A count.",
+          "type": "string",
+          "const": "count"
+        },
+        {
+          "description": "A duration.",
+          "type": "string",
+          "const": "duration"
+        },
+        {
+          "description": "A commit.",
+          "type": "string",
+          "const": "commit"
+        },
+        {
+          "description": "An identifier.",
+          "type": "string",
+          "const": "identifier"
+        },
+        {
+          "description": "Free text.",
+          "type": "string",
+          "const": "text"
+        },
+        {
+          "description": "A number.",
+          "type": "string",
+          "const": "number"
+        },
+        {
+          "description": "A boolean.",
+          "type": "string",
+          "const": "boolean"
+        },
+        {
+          "description": "A present value of any type, JSON `null` included, for a caption that names a value\nwithout reading it. A `null` is written as `null`, which is what the run observed.",
+          "type": "string",
+          "const": "any"
+        }
+      ]
+    },
+    "ValueUnit": {
+      "description": "The unit a bound value is shown in.",
+      "oneOf": [
+        {
+          "description": "Milliseconds.",
+          "type": "string",
+          "const": "ms"
+        },
+        {
+          "description": "Requests.",
+          "type": "string",
+          "const": "requests"
+        },
+        {
+          "description": "Bytes.",
+          "type": "string",
+          "const": "bytes"
+        }
+      ]
     },
     "ZoomLevel": {
       "description": "A zoom level of the camera catalog.",

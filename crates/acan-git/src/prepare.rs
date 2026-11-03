@@ -114,6 +114,39 @@ impl Preparation {
     }
 }
 
+/// The protected paths of one commit, read from that commit's own tree.
+///
+/// Unlike a [`Preparation`] it merges nothing and tests nothing. It is the overlay a gate pass over
+/// its commit restores, so a receipt can be checked against the inputs it ran on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtectedExport {
+    commit: CommitSha,
+    protected: ProtectedPaths,
+    files: Vec<BlobFile>,
+    overlay: OverlayManifest,
+    overlay_hash: OverlayHash,
+}
+
+impl ProtectedExport {
+    /// The commit the protected paths were read from.
+    #[must_use]
+    pub fn commit(&self) -> &CommitSha {
+        &self.commit
+    }
+
+    /// Every protected file of the commit, with its content hash.
+    #[must_use]
+    pub fn overlay(&self) -> &OverlayManifest {
+        &self.overlay
+    }
+
+    /// The identity of [`Self::overlay`], which a receipt records as its overlay hash.
+    #[must_use]
+    pub fn overlay_hash(&self) -> OverlayHash {
+        self.overlay_hash
+    }
+}
+
 /// What [`Repo::prepare`] found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[must_use]
@@ -241,28 +274,12 @@ impl Repo {
         }
 
         let mut records = String::new();
-        let mut overlay_files = Vec::new();
         let head_listing = self.list_tree(head.as_str()).await?;
+        let overlay_files = protected_files(&head_listing, protected)?;
         for entry in tree_entries(&head_listing)? {
-            if !protected.covers(entry.path) {
-                continue;
+            if protected.covers(entry.path) {
+                push_record(&mut records, entry.record);
             }
-            let executable = match entry.mode {
-                REGULAR => false,
-                EXECUTABLE => true,
-                mode => {
-                    return Err(Error::ProtectedNotAFile {
-                        path: entry.path.to_owned(),
-                        mode: mode.to_owned(),
-                    });
-                }
-            };
-            overlay_files.push(BlobFile {
-                path: entry.path.parse()?,
-                oid: entry.oid.to_owned(),
-                executable,
-            });
-            push_record(&mut records, entry.record);
         }
         let merged_listing = self.list_tree(merged_tree).await?;
         for entry in tree_entries(&merged_listing)? {
@@ -277,17 +294,7 @@ impl Repo {
         let blobs = self
             .read_blobs(overlay_files.iter().map(|file| file.oid.as_str()))
             .await?;
-        let overlay = OverlayManifest {
-            files: overlay_files
-                .iter()
-                .zip(&blobs)
-                .map(|(file, bytes)| {
-                    let hash: ArtifactHash = ContentHash::of_bytes(bytes).into();
-                    (file.path.clone(), hash)
-                })
-                .collect(),
-        };
-        let overlay_hash = overlay.overlay_hash()?;
+        let (overlay, overlay_hash) = overlay_of(&overlay_files, &blobs)?;
         Ok(PrepareOutcome::Prepared(Preparation {
             protected_head: head,
             candidate: candidate.clone(),
@@ -410,24 +417,82 @@ impl Repo {
         preparation: &Preparation,
         dir: &Path,
     ) -> Result<OverlayHash, Error> {
+        self.restore_overlay(
+            &preparation.protected,
+            &preparation.overlay_files,
+            &preparation.overlay,
+            dir,
+        )
+        .await
+    }
+
+    /// The protected paths of `commit`, read from that commit's own tree. Nothing is merged,
+    /// and no branch or checkout moves. A receipt names the commit it ran on, so this reads
+    /// back the protected inputs of that commit after the protected head has moved on.
+    ///
+    /// # Errors
+    /// Fails when `commit` is not a commit of this repository, when a protected path of it is
+    /// not a regular file, or when git fails.
+    pub async fn export_protected(
+        &self,
+        commit: &CommitSha,
+        protected: &ProtectedPaths,
+    ) -> Result<ProtectedExport, Error> {
+        let spec = format!("{commit}^{{commit}}");
+        git::ok(
+            self.root(),
+            &["rev-parse", "--verify", "--quiet", &spec],
+            &[],
+        )
+        .await?;
+        let listing = self.list_tree(commit.as_str()).await?;
+        let files = protected_files(&listing, protected)?;
         let blobs = self
-            .read_blobs(
-                preparation
-                    .overlay_files
-                    .iter()
-                    .map(|file| file.oid.as_str()),
-            )
+            .read_blobs(files.iter().map(|file| file.oid.as_str()))
             .await?;
-        let files: Vec<(BlobFile, Vec<u8>)> = preparation
-            .overlay_files
-            .iter()
-            .cloned()
-            .zip(blobs)
-            .collect();
-        let protected = preparation.protected.clone();
+        let (overlay, overlay_hash) = overlay_of(&files, &blobs)?;
+        Ok(ProtectedExport {
+            commit: commit.clone(),
+            protected: protected.clone(),
+            files,
+            overlay,
+            overlay_hash,
+        })
+    }
+
+    /// Write the protected paths of `export` into `dir`, which is created when missing, and
+    /// read them back. Returns the overlay hash read back from disk, which equals the
+    /// export's. Files outside the protected paths are left as they are.
+    ///
+    /// # Errors
+    /// Fails on I/O, or with [`Error::OverlayMismatch`] when the protected paths on disk do
+    /// not read back as the export's overlay.
+    pub async fn write_protected(
+        &self,
+        export: &ProtectedExport,
+        dir: &Path,
+    ) -> Result<OverlayHash, Error> {
+        self.restore_overlay(&export.protected, &export.files, &export.overlay, dir)
+            .await
+    }
+
+    /// Restore `files`, the protected files a manifest names, into `dir`, and check that the
+    /// protected paths on disk read back as `expected`.
+    async fn restore_overlay(
+        &self,
+        protected: &ProtectedPaths,
+        files: &[BlobFile],
+        expected: &OverlayManifest,
+        dir: &Path,
+    ) -> Result<OverlayHash, Error> {
+        let blobs = self
+            .read_blobs(files.iter().map(|file| file.oid.as_str()))
+            .await?;
+        let files: Vec<(BlobFile, Vec<u8>)> = files.iter().cloned().zip(blobs).collect();
+        let protected = protected.clone();
         let root = dir.to_path_buf();
         let on_disk = blocking(move || checkout::restore(&root, &protected, &files)).await?;
-        if on_disk != preparation.overlay {
+        if on_disk != *expected {
             return Err(Error::OverlayMismatch(dir.to_path_buf()));
         }
         Ok(on_disk.overlay_hash()?)
@@ -571,6 +636,51 @@ fn push_record(records: &mut String, record: &str) {
     records.push('\0');
 }
 
+/// The protected files of a tree listing, in listing order. A protected path that is not a
+/// regular file is refused, because the gate restores files only.
+fn protected_files(listing: &str, protected: &ProtectedPaths) -> Result<Vec<BlobFile>, Error> {
+    tree_entries(listing)?
+        .into_iter()
+        .filter(|entry| protected.covers(entry.path))
+        .map(|entry| {
+            let executable = match entry.mode {
+                REGULAR => false,
+                EXECUTABLE => true,
+                mode => {
+                    return Err(Error::ProtectedNotAFile {
+                        path: entry.path.to_owned(),
+                        mode: mode.to_owned(),
+                    });
+                }
+            };
+            Ok(BlobFile {
+                path: entry.path.parse()?,
+                oid: entry.oid.to_owned(),
+                executable,
+            })
+        })
+        .collect()
+}
+
+/// The manifest of `files`, whose contents are `blobs` in the same order, and its identity.
+fn overlay_of(
+    files: &[BlobFile],
+    blobs: &[Vec<u8>],
+) -> Result<(OverlayManifest, OverlayHash), Error> {
+    let overlay = OverlayManifest {
+        files: files
+            .iter()
+            .zip(blobs)
+            .map(|(file, bytes)| {
+                let hash: ArtifactHash = ContentHash::of_bytes(bytes).into();
+                (file.path.clone(), hash)
+            })
+            .collect(),
+    };
+    let overlay_hash = overlay.overlay_hash()?;
+    Ok((overlay, overlay_hash))
+}
+
 fn tree_entries(listing: &str) -> Result<Vec<TreeEntry<'_>>, Error> {
     listing
         .split('\0')
@@ -687,4 +797,5 @@ impl Drop for ScratchIndex {
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Preparation>();
+    assert_send_sync::<ProtectedExport>();
 };

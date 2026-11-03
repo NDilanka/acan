@@ -50,7 +50,7 @@ use acan_core::{
     Stage, Step, SystemCmd, TaskId, TaskState, Timestamp, WitnessId, WitnessKind, WitnessOutcome,
     World,
 };
-use acan_git::{Preparation, PrepareOutcome, Repo};
+use acan_git::{Preparation, PrepareOutcome, ProtectedExport, Repo};
 use acan_intent::{
     AppContract, CommitSha, ContainerPolicy, DiscrepancyEpisode, GateContext, MachineId, ModelRef,
     OrderRef, PreparedCommit, ProbeCorpus, RepoPath, Scope, ScopeConfirmation, ScopeDraft,
@@ -62,12 +62,15 @@ use tokio::sync::Semaphore;
 use tokio::task::{self, JoinHandle, JoinSet};
 
 use crate::STATE_DIR;
+use crate::deps::{self, Installer};
 use crate::examples;
 use crate::git::{LandFailure, Workspace};
 use crate::host::{self, Host, SubmitError};
 use crate::land::{self, Delivery, LandError};
 use crate::model::{self, ReplyError};
 use crate::observe::{self, ObserveError, Order, Plan};
+use crate::plant_view;
+use crate::tour;
 use crate::vision;
 
 /// Total attempts one job key gets before the loop stops retrying it. Chosen so a broken model
@@ -79,16 +82,18 @@ const MAX_JOB_ATTEMPTS: u32 = 5;
 const RETRY_BACKOFF: Duration = Duration::from_millis(20);
 
 /// The program the containers run under.
-const RUNNER_PROGRAM: &str = "docker";
+pub(crate) const RUNNER_PROGRAM: &str = "docker";
 
 /// The port the app listens on inside its container.
-const APP_PORT: u16 = 3000;
+pub(crate) const APP_PORT: u16 = 3000;
 
 /// The state directory's folder that holds one directory per observe pass.
 const CONTRAST_DIR: &str = "contrasts";
 
 /// The state directory's folder that holds the stored observations, by hash.
-const OBSERVATIONS_DIR: &str = "observations";
+pub(crate) const OBSERVATIONS_DIR: &str = "observations";
+/// The directory, under the state directory, that installed dependency entries are cached in.
+const DEPS_DIR: &str = "deps";
 
 /// The state directory's folder that holds one protected-head snapshot per commit.
 const SNAPSHOT_DIR: &str = "snapshots";
@@ -132,10 +137,11 @@ impl From<SubmitError> for JobError {
     }
 }
 
-/// How often a job key failed, and when it may run again.
+/// How often a job key failed, why the last attempt failed, and when it may run again.
 struct Retry {
     attempts: u32,
     not_before: Instant,
+    last_error: String,
 }
 
 /// What a task worktree step does.
@@ -358,6 +364,7 @@ fn record_failure<K: Eq + std::hash::Hash + std::fmt::Debug>(
             Retry {
                 attempts: MAX_JOB_ATTEMPTS,
                 not_before: Instant::now(),
+                last_error: err.to_string(),
             },
         );
         return;
@@ -373,6 +380,7 @@ fn record_failure<K: Eq + std::hash::Hash + std::fmt::Debug>(
         Retry {
             attempts,
             not_before: Instant::now() + RETRY_BACKOFF * 2u32.pow(attempts.saturating_sub(1)),
+            last_error: err.to_string(),
         },
     );
 }
@@ -397,8 +405,9 @@ fn start_derived<C: ModelClient + 'static>(
             Some(retry) => retry.attempts + 1,
             None => 1,
         };
+        let previous = retries.get(&job).map(|retry| retry.last_error.clone());
         let id = tasks
-            .spawn(run_one(host.clone(), job.clone(), attempt))
+            .spawn(run_one(host.clone(), job.clone(), attempt, previous))
             .id();
         in_flight.insert(id, job);
     }
@@ -491,8 +500,9 @@ async fn run_one<C: ModelClient>(
     host: Host<C>,
     job: Job,
     attempt: u32,
+    previous: Option<String>,
 ) -> (Job, Result<(), JobError>) {
-    let result = match execute(&host, &job).await {
+    let result = match execute(&host, &job, previous.as_deref()).await {
         Ok(Some(command)) => host
             .submit(Command::System(command))
             .await
@@ -549,10 +559,14 @@ async fn report_exhausted<C: ModelClient>(host: &Host<C>, job: &Job, err: &JobEr
     }
 }
 
-async fn execute<C: ModelClient>(host: &Host<C>, job: &Job) -> Result<Option<SystemCmd>, JobError> {
+async fn execute<C: ModelClient>(
+    host: &Host<C>,
+    job: &Job,
+    previous: Option<&str>,
+) -> Result<Option<SystemCmd>, JobError> {
     match job {
         Job::Split { order, rev } => split(host, job, *order, *rev).await,
-        Job::DraftScope { order, rev } => draft_scope(host, job, *order, *rev).await,
+        Job::DraftScope { order, rev } => draft_scope(host, job, *order, *rev, previous).await,
         Job::Explain { clash } => explain(host, job, *clash).await,
         Job::Barrier { deadline, .. } => {
             sleep_until(*deadline).await;
@@ -602,12 +616,13 @@ async fn split<C: ModelClient>(
 /// plant's machines, the protected route table and the protected limits, then reported as
 /// `ScopeDrafted`. The draft confirms nothing: a human revises and confirms the scope. No offline
 /// draft stands in for a failed call; a failure is retried and then reported as
-/// `ScopeDraftFailed`.
+/// `ScopeDraftFailed`. A retry is told why the last attempt failed, through `previous`.
 async fn draft_scope<C: ModelClient>(
     host: &Host<C>,
     job: &Job,
     order: OrderId,
     rev: OrderRev,
+    previous: Option<&str>,
 ) -> Result<Option<SystemCmd>, JobError> {
     let Some(workspace) = host.workspace() else {
         return Err(JobError::Unavailable(
@@ -632,11 +647,12 @@ async fn draft_scope<C: ModelClient>(
         machines: &machines,
         routes: &corpus.routes,
         fixtures: &corpus.fixtures,
+        probes: &corpus.probes,
         limits: app.limits,
     };
     // The foreman drafts from the order's sentence, what the human asked for. The order ref is
     // only the draft's key, so it never stands in for the request.
-    let request = model::scope_request(&sentence, &bounds);
+    let request = model::scope_request(&sentence, &bounds, previous);
     let reply = host
         .client()
         .chat_json::<model::DraftReply>(Role::Foreman, request)
@@ -953,6 +969,12 @@ struct Pass {
     slots: Arc<Semaphore>,
     /// How many probes of the contrast run at once.
     probes_at_once: usize,
+    /// The directory installed dependencies are cached in, and where each install's tree is
+    /// written before it is cached.
+    cache: PathBuf,
+    installs: PathBuf,
+    /// The base's install `node_modules`, which the base runs mount, when the app has an install.
+    base_dependencies: Option<PathBuf>,
 }
 
 impl Pass {
@@ -963,8 +985,7 @@ impl Pass {
         repo: &Repo,
         label: impl std::fmt::Display,
     ) -> Result<Self, JobError> {
-        let policy = observe::runner_policy();
-        let base = protected_base(repo, &policy).await?;
+        let base = protected_base(repo, &observe::runner_policy()).await?;
         let state = host.repo().join(STATE_DIR);
         let dir = state
             .join(CONTRAST_DIR)
@@ -972,26 +993,69 @@ impl Pass {
         let snapshot = dir.join("snapshot");
         observe::snapshot(repo, &base, &snapshot).await?;
         let (app, corpus) = observe::read_protected(&snapshot)?;
+        // The run policy depends on the runtime the contract names, so it is chosen only now.
+        let policy = observe::policy_for(&app)?;
+        let runner = RunnerConfig::new(RUNNER_PROGRAM, APP_PORT);
+        let slots = host.witness_slots();
+        let cache = state.join(DEPS_DIR);
+        let installs = dir.join("installs");
+        let base_dependencies = Installer {
+            repo,
+            config: &runner,
+            slots: slots.as_ref(),
+            cache: &cache,
+            scratch: &installs,
+        }
+        .install(&base, deps::Role::Base, &app)
+        .await
+        .map_err(install_refusal)?
+        .map(|installed| installed.modules);
         Ok(Self {
             base,
             snapshot,
             app,
             corpus,
             policy,
-            runner: RunnerConfig::new(RUNNER_PROGRAM, APP_PORT),
+            runner,
             scratch: dir.join("scratch"),
             observations: state.join(OBSERVATIONS_DIR),
-            slots: host.witness_slots(),
+            slots,
             probes_at_once: host.probe_concurrency(),
+            cache,
+            installs,
+            base_dependencies,
         })
     }
 
+    /// Installs the candidate's dependencies when the app has an install, and returns the
+    /// directory the candidate's runs mount.
+    async fn install_candidate(
+        &self,
+        repo: &Repo,
+        candidate: &Preparation,
+    ) -> Result<Option<PathBuf>, JobError> {
+        let installer = Installer {
+            repo,
+            config: &self.runner,
+            slots: self.slots.as_ref(),
+            cache: &self.cache,
+            scratch: &self.installs,
+        };
+        let installed = installer
+            .install(candidate, deps::Role::Candidate, &self.app)
+            .await
+            .map_err(install_refusal)?;
+        Ok(installed.map(|installed| installed.modules))
+    }
+
     /// The plan that observes `candidate` on this pass's base, writing into `scratch`.
+    /// `candidate_dependencies` is the candidate's install, when the app has one.
     fn plan<'a>(
         &'a self,
         repo: &'a Repo,
         candidate: &'a Preparation,
         scratch: &'a Path,
+        candidate_dependencies: Option<&'a Path>,
     ) -> Plan<'a> {
         Plan {
             repo,
@@ -1003,11 +1067,18 @@ impl Pass {
             app: &self.app,
             corpus: &self.corpus,
             policy: &self.policy,
+            base_dependencies: self.base_dependencies.as_deref(),
+            candidate_dependencies,
             runner: &self.runner,
             slots: self.slots.as_ref(),
             probes_at_once: self.probes_at_once,
         }
     }
+}
+
+/// The job error of an install that did not finish. A run cannot be tested without its install.
+fn install_refusal(err: deps::DepsError) -> JobError {
+    JobError::Unavailable(format!("the dependencies cannot be installed: {err}"))
 }
 
 /// The episodes of `order` as the judge reads them. A repeat of a failure is judged with the state
@@ -1031,7 +1102,10 @@ fn judged_episodes<C: ModelClient>(
 /// fails rather than judging a different commit. Then the candidate is observed and judged, and
 /// the receipt is recorded. The context must still match the recorded one, or the origin would
 /// refuse the receipt.
-async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), JobError> {
+async fn contrast<C: ModelClient + 'static>(
+    host: &Host<C>,
+    run: GateRunId,
+) -> Result<(), JobError> {
     let Some(workspace) = host.workspace() else {
         return Err(JobError::Unavailable(
             "this server has no git repository to gate candidates in".to_owned(),
@@ -1073,7 +1147,7 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
     // a protected input moved, so a human must confirm again.
     if pass.base.protected_head() != &contrast.confirmation.base_commit {
         let scratch = pass.scratch.join("context");
-        let plan = pass.plan(repo, &candidate, &scratch);
+        let plan = pass.plan(repo, &candidate, &scratch, None);
         let context = observe::current(&plan, &order).await?;
         let rebind = SystemCmd::RebindBase {
             order: contrast.order,
@@ -1099,6 +1173,7 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
         }
         return Ok(());
     }
+    let candidate_dependencies = pass.install_candidate(repo, &candidate).await?;
     let recorded = match contrast.prepared {
         Some(prepared) => {
             if candidate.merged_commit() != &prepared.context.merged_commit
@@ -1112,7 +1187,12 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
         }
         None => {
             let scratch = pass.scratch.join("context");
-            let plan = pass.plan(repo, &candidate, &scratch);
+            let plan = pass.plan(
+                repo,
+                &candidate,
+                &scratch,
+                candidate_dependencies.as_deref(),
+            );
             let context = observe::current(&plan, &order).await?;
             let prepared = PreparedCommit {
                 base_commit: pass.base.protected_head().clone(),
@@ -1127,7 +1207,12 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
         }
     };
     let scratch = pass.scratch.join("judge");
-    let plan = pass.plan(repo, &candidate, &scratch);
+    let plan = pass.plan(
+        repo,
+        &candidate,
+        &scratch,
+        candidate_dependencies.as_deref(),
+    );
     tracing::debug!(%run, "the candidate is observed and judged");
     // The judge's future is large, so it is boxed where it is awaited.
     let judged = Box::pin(observe::judge(&plan, &order)).await?;
@@ -1167,11 +1252,17 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
         receipt: Box::new(judged.receipt),
     }))
     .await?;
+    prefetch_tour(host, contrast.order);
     // The receipt is recorded, so the gate's outcome is fixed before the advisory witness runs,
     // and the witness reports its own failures instead of returning them.
     if let Some(vision) = host.vision() {
         let scratch = pass.scratch.join("vision");
-        let plan = pass.plan(repo, &candidate, &scratch);
+        let plan = pass.plan(
+            repo,
+            &candidate,
+            &scratch,
+            candidate_dependencies.as_deref(),
+        );
         Box::pin(vision::witness(
             host,
             vision,
@@ -1183,6 +1274,23 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
         .await;
     }
     Ok(())
+}
+
+/// Starts the director's call for the receipt `order` has just recorded, in the background, so its
+/// answer is cached before the plant view is opened. The contrast does not wait for it. A view that
+/// cannot be built starts no call, and the view is built again when it is opened.
+fn prefetch_tour<C: ModelClient + 'static>(host: &Host<C>, order: OrderId) {
+    let host = host.clone();
+    tokio::spawn(async move {
+        match plant_view::untoured_view(&host, order).await {
+            Ok(view) => tour::prefetch(&host, &view),
+            Err(err) => tracing::warn!(
+                %order,
+                error = ?err,
+                "the director's tour is not started: the plant view cannot be built"
+            ),
+        }
+    });
 }
 
 /// The command that records the protected inputs of the scope `order` was just confirmed under, at
@@ -1228,7 +1336,12 @@ fn confirmed_inputs<C: ModelClient>(
         return Ok(None);
     };
     let ledger = host.folded_rulings().map_err(JobError::Rulings)?;
-    let plan = pass.plan(repo, &pass.base, &pass.scratch);
+    let plan = pass.plan(
+        repo,
+        &pass.base,
+        &pass.scratch,
+        pass.base_dependencies.as_deref(),
+    );
     let view = Order {
         scope: &scope,
         confirmation,
@@ -1315,8 +1428,9 @@ async fn gated_land<C: ModelClient>(
         ledger: &ledger,
         episodes: &episodes,
     };
+    // The land reads the current context only, which runs no container, so no install is mounted.
     let scratch = pass.scratch.join("land");
-    let plan = pass.plan(repo, &candidate, &scratch);
+    let plan = pass.plan(repo, &candidate, &scratch, None);
     let current = observe::current(&plan, &order).await?;
     // Only the protected head moved since the receipt: the core may re-bind the scope to it, and
     // the candidate is then prepared and receipted again. The receipt here is never installed.
@@ -1428,7 +1542,7 @@ async fn protected_base(repo: &Repo, policy: &ContainerPolicy) -> Result<Prepara
 }
 
 /// The protected-head snapshot a task's worktree is tested against: the protected paths of the
-/// protected head as it is now, prepared the way every gate pass prepares its base.
+/// protected head as it is now, read from the head's own tree.
 ///
 /// The snapshot sits under `state`, one directory per protected-head commit. A head that has not
 /// moved returns the directory already written. A new head is written under a temporary name and
@@ -1436,18 +1550,64 @@ async fn protected_base(repo: &Repo, policy: &ContainerPolicy) -> Result<Prepara
 ///
 /// # Errors
 ///
-/// Returns an error when git cannot prepare the protected head or the snapshot cannot be written.
+/// Returns an error when git cannot read the protected head or the snapshot cannot be written.
 pub(crate) async fn protected_snapshot(repo: &Repo, state: &Path) -> anyhow::Result<PathBuf> {
-    let base = protected_base(repo, &observe::runner_policy()).await?;
+    let head = protected_sha(repo).await?;
+    let export = repo
+        .export_protected(&head, &observe::protected_paths(&observe::runner_policy()))
+        .await?;
+    snapshot_of(repo, state, &export, &format!("head-{head}")).await
+}
+
+/// The protected paths a receipt ran against, read from the receipt's base commit and written
+/// under `state`. A plant view reads the corpus through this, so a receipt keeps its own route
+/// table after the protected head moves on.
+///
+/// The paths are read from `prepared.base_commit`, never from the protected head now. They are
+/// refused unless they hash to the overlay the receipt recorded, so a snapshot that does not
+/// match the receipt is never written.
+///
+/// # Errors
+///
+/// Returns an error when the receipt does not name its base as the protected head it ran on,
+/// when the paths at its base do not hash to its overlay, or when git or the snapshot fails.
+pub(crate) async fn receipt_snapshot(
+    repo: &Repo,
+    state: &Path,
+    prepared: &PreparedCommit,
+) -> anyhow::Result<PathBuf> {
+    let base = &prepared.base_commit;
+    if prepared.context.protected_head != *base {
+        anyhow::bail!("the receipt's protected head is not its base commit {base}");
+    }
+    let export = repo
+        .export_protected(base, &observe::protected_paths(&observe::runner_policy()))
+        .await?;
+    if export.overlay_hash() != prepared.context.overlay_hash {
+        anyhow::bail!(
+            "the protected paths at {base} do not hash to the overlay the receipt ran against"
+        );
+    }
+    snapshot_of(repo, state, &export, &format!("receipt-{base}")).await
+}
+
+/// Writes `export`'s protected paths under `state`, one directory per name. A name that is
+/// already written returns its directory. The names keep the snapshots of heads and of receipts
+/// apart, since they are read through different checks.
+async fn snapshot_of(
+    repo: &Repo,
+    state: &Path,
+    export: &ProtectedExport,
+    name: &str,
+) -> anyhow::Result<PathBuf> {
     let root = state.join(SNAPSHOT_DIR);
-    let head = base.protected_head();
-    let dir = root.join(head.as_str());
+    let dir = root.join(name);
     if dir.is_dir() {
         return Ok(dir);
     }
     fs::create_dir_all(&root)?;
-    let partial = root.join(format!("{head}-{}.partial", unique_suffix()));
-    observe::snapshot(repo, &base, &partial).await?;
+    let partial = root.join(format!("{name}-{}.partial", unique_suffix()));
+    observe::export_snapshot(repo, export, &partial).await?;
     match fs::rename(&partial, &dir) {
         Ok(()) => Ok(dir),
         // Another caller renamed the same head's snapshot into place first. Its copy is complete.
@@ -1508,5 +1668,145 @@ async fn record_usage<C: ModelClient>(host: &Host<C>, job: &Job, call: &CallReco
     // Metering is best-effort: a lost usage event must not retry the model call it paid for.
     if let Err(err) = host.submit(Command::System(command)).await {
         tracing::warn!(?job, error = %err, "recording model usage failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use acan_intent::OverlayHash;
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    const RECEIPT: &str = include_str!("../../acan-intent/fixtures/receipt.json");
+    const ROUTES: &str = ".acan/probes/core.json";
+
+    /// Runs git in `dir`, failing the test on a non-zero exit.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// Writes `files` into `root` and commits them on the current branch.
+    fn commit(root: &Path, files: &[(&str, &str)], message: &str) -> CommitSha {
+        for (name, content) in files {
+            let full = root.join(name);
+            fs::create_dir_all(full.parent().expect("a parent directory")).expect("mkdir");
+            fs::write(full, content).expect("write file");
+        }
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", message]);
+        CommitSha::from_str(&git(root, &["rev-parse", "HEAD"])).expect("a commit sha")
+    }
+
+    /// A repository on `main` whose protected paths carry two routes, and whose head then gains a
+    /// third route with the same count: the route table changes, its size does not. Returns the
+    /// repository, the commit the receipt ran on, and the head now.
+    async fn advanced_head() -> (tempfile::TempDir, Repo, CommitSha, CommitSha) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.name", "Tester"]);
+        git(root, &["config", "user.email", "tester@example.com"]);
+        let base = commit(
+            root,
+            &[(".acan/app.json", "{}\n"), (ROUTES, "routes: a, b\n")],
+            "protected inputs",
+        );
+        let head = commit(
+            root,
+            &[(ROUTES, "routes: a, c\n"), ("src/app.ts", "app v2\n")],
+            "the routes change",
+        );
+        let repo = Repo::open(root).await.expect("open the repository");
+        (dir, repo, base, head)
+    }
+
+    /// A receipt's prepared commit that names `base` and `overlay`, built from the fixture.
+    fn prepared_at(base: &CommitSha, overlay: OverlayHash) -> PreparedCommit {
+        let receipt: Value = serde_json::from_str(RECEIPT).expect("the fixture decodes");
+        let mut prepared = receipt["prepared"].clone();
+        prepared["base_commit"] = json!(base.as_str());
+        prepared["context"]["protected_head"] = json!(base.as_str());
+        prepared["context"]["overlay_hash"] = serde_json::to_value(overlay).expect("a hash");
+        serde_json::from_value(prepared).expect("the prepared commit decodes")
+    }
+
+    fn policy_paths() -> acan_git::ProtectedPaths {
+        observe::protected_paths(&observe::runner_policy())
+    }
+
+    #[tokio::test]
+    async fn a_receipt_reads_the_protected_paths_of_its_base_after_the_head_moves() {
+        let (dir, repo, base, head) = advanced_head().await;
+        let at_base = repo
+            .export_protected(&base, &policy_paths())
+            .await
+            .expect("the base exports");
+        let prepared = prepared_at(&base, at_base.overlay_hash());
+        let state = dir.path().join("state");
+
+        let snapshot = receipt_snapshot(&repo, &state, &prepared)
+            .await
+            .expect("the receipt's snapshot");
+        let current = protected_snapshot(&repo, &state)
+            .await
+            .expect("the head's snapshot");
+
+        assert_eq!(
+            fs::read_to_string(snapshot.join(ROUTES)).expect("the routes"),
+            "routes: a, b\n",
+            "the receipt keeps the routes it ran against"
+        );
+        assert_eq!(
+            fs::read_to_string(current.join(ROUTES)).expect("the routes"),
+            "routes: a, c\n",
+            "the head keeps its own routes"
+        );
+        assert_ne!(base, head);
+    }
+
+    #[tokio::test]
+    async fn a_receipt_whose_overlay_the_base_does_not_hold_is_refused() {
+        let (dir, repo, base, head) = advanced_head().await;
+        let at_head = repo
+            .export_protected(&head, &policy_paths())
+            .await
+            .expect("the head exports");
+        // The receipt names the old base but carries the head's overlay, the mismatch the snapshot
+        // used to hide by reading the head's files under the base's name.
+        let prepared = prepared_at(&base, at_head.overlay_hash());
+        let state = dir.path().join("state");
+
+        let err = receipt_snapshot(&repo, &state, &prepared)
+            .await
+            .expect_err("the overlay does not match the base");
+
+        assert!(
+            err.to_string().contains("do not hash to the overlay"),
+            "{err}"
+        );
+        assert!(
+            !state
+                .join(SNAPSHOT_DIR)
+                .join(format!("receipt-{base}"))
+                .exists(),
+            "nothing is written for a receipt that does not match"
+        );
     }
 }

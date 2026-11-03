@@ -19,10 +19,13 @@ use std::time::Duration;
 
 use acan_core::{
     AgentCmd, AgentId, Command, CommitId, DeclarationInput, Event, Fence, FilePath, Generation,
-    HumanCmd, LEASE_TTL_MS, LaneVerdict, MachineKey, OrderId, Origin, ScopeBinding, Stage, Stamped,
-    TaskId, TaskState, World,
+    HumanCmd, LEASE_TTL_MS, LaneVerdict, MachineKey, MemberId, OrderId, Origin, ScopeBinding,
+    Stage, Stamped, TaskId, TaskState, World,
 };
-use acan_intent::{ContrastExample, ItemClass, LedgerEvent, Scope, ScopeConfirmation};
+use acan_intent::{
+    ContrastExample, EpisodeId, ItemClass, LedgerEvent, RulingStatus, Scope, ScopeConfirmation,
+    Supersedes,
+};
 use acan_llm::{
     CallRecord, ChatRequest, ChatResponse, LlmError, ModelClient, Role, Usage, UsageLedger,
 };
@@ -41,6 +44,11 @@ use crate::{DEFAULT_WITNESS_CONCURRENCY, Running, ServerConfig, start};
 
 const OWNER_TOKEN: &str = "acan_owner_e2e";
 const AGENT_TOKEN: &str = "acan_agent_e2e";
+/// A member who posts an order and then rules in it without being an owner.
+const REVIEWER_TOKEN: &str = "acan_reviewer_e2e";
+const REVIEWER: &str = "reviewer";
+/// A member who neither owns nor posted the orders the tests build.
+const STRANGER_TOKEN: &str = "acan_stranger_e2e";
 const AGENT: &str = "agent-1";
 /// The machine the order is pinned on. The demo's signup rule reaches the auth and store machines.
 const MACHINE: &str = "auth";
@@ -789,6 +797,48 @@ impl ModelClient for Drafting {
     }
 }
 
+/// A foreman whose first scope reply is `refused` and whose later replies are `then`. Each
+/// scope request's user message is recorded in `asked`, in the order the foreman received them.
+struct RefusedFirst {
+    inner: TwoTasks,
+    refused: Value,
+    then: Value,
+    asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ModelClient for RefusedFirst {
+    async fn chat(&self, role: Role, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        if model::ask_of(&request) != Some(Ask::Scope) {
+            return self.inner.chat(role, request).await;
+        }
+        let draft = {
+            let mut asked = self.asked.lock().expect("the asked lock is not poisoned");
+            asked.extend(request.messages.iter().filter_map(|message| match message {
+                acan_llm::Message::User { content } => Some(content.clone()),
+                _ => None,
+            }));
+            if asked.len() == 1 {
+                &self.refused
+            } else {
+                &self.then
+            }
+            .clone()
+        };
+        Ok(ChatResponse {
+            content: Some(draft.to_string()),
+            tool_calls: Vec::new(),
+            finish_reason: None,
+            call: CallRecord {
+                role,
+                provider: "scripted".to_owned(),
+                model: "scripted-foreman".to_owned(),
+                usage: Usage::default(),
+                latency: Duration::ZERO,
+            },
+        })
+    }
+}
+
 /// Polls the latest scope draft of `order` until the draft job stores its outcome, and returns
 /// the view. A failed draft is a stored outcome too, so the caller checks the state.
 async fn scope_draft_of(running: &Running, order: OrderId) -> Value {
@@ -949,6 +999,83 @@ async fn a_scope_draft_that_never_checks_is_recorded_as_a_failure() {
     }
     let (_, origin) = snapshot(&running).await;
     assert!(origin.world().lane(order).is_none(), "no scope is opened");
+    running.stop().await.expect("the server stops");
+}
+
+/// A draft refused for a side-effect selector without a field path is asked again, and the retry
+/// carries the refusal. The second reply checks, so the draft is stored.
+#[tokio::test]
+async fn a_scope_draft_refused_for_a_side_effect_path_is_asked_again_with_the_refusal() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let mut refused = drafted_scope_body();
+    refused["may"][0]["selector"]["channel"] = json!("side_effect");
+    let asked = std::sync::Arc::<std::sync::Mutex<Vec<String>>>::default();
+    let foreman = RefusedFirst {
+        inner: TwoTasks::default(),
+        refused,
+        then: drafted_scope_body(),
+        asked: std::sync::Arc::clone(&asked),
+    };
+    let running = start_with(root, foreman, UsageLedger::default()).await;
+    post_order(&running).await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let view = scope_draft_of(&running, order).await;
+    assert_eq!(view["state"], "drafted", "the retry is stored: {view}");
+    let sent = asked
+        .lock()
+        .expect("the asked lock is not poisoned")
+        .clone();
+    assert!(sent.len() >= 2, "the foreman was asked again: {sent:?}");
+    let retry: Value = serde_json::from_str(&sent[1]).expect("the request is JSON");
+    assert!(
+        retry["previous_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("selector is malformed")),
+        "the retry carries the refusal: {retry}"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn a_scope_draft_naming_an_undefined_step_is_asked_again_with_the_refusal() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let mut refused = drafted_scope_body();
+    refused["may"][0]["selector"]["step_context"] =
+        json!({ "kind": "step", "step_id": "login-step" });
+    let asked = std::sync::Arc::<std::sync::Mutex<Vec<String>>>::default();
+    let foreman = RefusedFirst {
+        inner: TwoTasks::default(),
+        refused,
+        then: drafted_scope_body(),
+        asked: std::sync::Arc::clone(&asked),
+    };
+    let running = start_with(root, foreman, UsageLedger::default()).await;
+    post_order(&running).await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let view = scope_draft_of(&running, order).await;
+    assert_eq!(view["state"], "drafted", "the retry is stored: {view}");
+    let sent = asked
+        .lock()
+        .expect("the asked lock is not poisoned")
+        .clone();
+    assert!(sent.len() >= 2, "the foreman was asked again: {sent:?}");
+    let retry: Value = serde_json::from_str(&sent[1]).expect("the request is JSON");
+    assert!(
+        retry["previous_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("login-step")),
+        "the retry names the undefined step: {retry}"
+    );
     running.stop().await.expect("the server stops");
 }
 
@@ -1202,42 +1329,7 @@ async fn a_member_rules_on_a_kept_example_from_the_ruling_draft() {
     let _docker = DOCKER.lock().await;
     let repo = demo_repo();
     let root = repo.path();
-    let running = start_plant(root).await;
-    let task = TaskId::from_str("t-0").expect("valid task id");
-    post_order(&running).await;
-    scope_first(&running, root, task).await;
-    let fence = claim(&running, task).await;
-    wait_for_worktree(root, task, fence.generation).await;
-    build_with(
-        &running,
-        root,
-        task,
-        fence,
-        &["src/auth.ts"],
-        seed_regression,
-    )
-    .await;
-    settle(&running, "the gate to block the regression", |log, _| {
-        log.iter().find_map(|stamped| match &stamped.event {
-            Event::ReceiptRecorded { record, .. }
-                if matches!(record.verdict, LaneVerdict::Blocked { .. }) =>
-            {
-                Some(())
-            }
-            _ => None,
-        })
-    })
-    .await;
-    let order = settle(&running, "the order", |_, world| {
-        world.orders().next().map(|found| found.id)
-    })
-    .await;
-    let episode = settle(&running, "the episode the regression opened", |_, world| {
-        world
-            .lane(order)
-            .and_then(|lane| lane.episodes.keys().next().copied())
-    })
-    .await;
+    let (running, order, episode) = blocked_signup_episode(root).await;
 
     let path = format!("/api/orders/{order}/episodes/{episode}/ruling-draft");
     let refused = client()
@@ -1332,6 +1424,1036 @@ async fn a_member_rules_on_a_kept_example_from_the_ruling_draft() {
         origin.world().ledger().head().event_seq,
         1,
         "the ruling built from the draft is the ledger's first event"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// Builds the seeded signup regression on the scope-first lane until the gate blocks it. Returns
+/// the running server with the order and the episode the regression opened.
+async fn blocked_signup_episode(root: &Path) -> (Running, OrderId, EpisodeId) {
+    let (running, order, episode, _, _) = blocked_signup_task(root).await;
+    (running, order, episode)
+}
+
+/// As [`blocked_signup_episode`], and also returns the task and the fence it was built under, so a
+/// test can build the regression again on the same task.
+async fn blocked_signup_task(root: &Path) -> (Running, OrderId, EpisodeId, TaskId, Fence) {
+    blocked_signup_posted_by(root, OWNER_TOKEN).await
+}
+
+/// As [`blocked_signup_task`], with the order posted by the member `poster` holds. Only a member of
+/// the world may post, so the owner adds the reviewer first.
+async fn blocked_signup_posted_by(
+    root: &Path,
+    poster: &str,
+) -> (Running, OrderId, EpisodeId, TaskId, Fence) {
+    let running = start_plant(root).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+    if poster == REVIEWER_TOKEN {
+        member(
+            &running,
+            &HumanCmd::AddMember {
+                member: MemberId::from_str(REVIEWER).expect("valid member id"),
+                role: acan_core::Role::Member,
+            },
+        )
+        .await;
+    }
+    post_order_as(&running, poster).await;
+    scope_first(&running, root, task).await;
+    let fence = claim(&running, task).await;
+    wait_for_worktree(root, task, fence.generation).await;
+    build_with(
+        &running,
+        root,
+        task,
+        fence,
+        &["src/auth.ts"],
+        seed_regression,
+    )
+    .await;
+    settle(&running, "the gate to block the regression", |log, _| {
+        log.iter().find_map(|stamped| match &stamped.event {
+            Event::ReceiptRecorded { record, .. }
+                if matches!(record.verdict, LaneVerdict::Blocked { .. }) =>
+            {
+                Some(())
+            }
+            _ => None,
+        })
+    })
+    .await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let episode = settle(&running, "the episode the regression opened", |_, world| {
+        world
+            .lane(order)
+            .and_then(|lane| lane.episodes.keys().next().copied())
+    })
+    .await;
+    (running, order, episode, task, fence)
+}
+
+/// The agent builds the regression again on the same task, adding a file, so the gate runs a second
+/// time on the same episode.
+async fn rebuild_regressed(running: &Running, root: &Path, task: TaskId, fence: Fence) {
+    build_with(
+        running,
+        root,
+        task,
+        fence,
+        &["src/auth.ts", "second.txt"],
+        |worktree| write_file(worktree, "second.txt", "the second build\n"),
+    )
+    .await;
+}
+
+/// The predicate the signup must-keep rule names: the signup answer's body equals base. The
+/// regressed answer differs from base, so this predicate fails on the example.
+fn same_as_base() -> Value {
+    json!({
+        "predicate": "equals_base",
+        "step_id": "s1",
+        "path": "body",
+        "anchor": { "kind": "fresh" }
+    })
+}
+
+/// A predicate the regressed answer holds: the signup answers 201 Created.
+fn created() -> Value {
+    json!({ "predicate": "status_in", "step_id": "s1", "statuses": [201] })
+}
+
+/// The body of a ruling made from `draft`: the member's decision and predicate, with the head and
+/// the example the draft named.
+fn ruling_body(draft: &Value, decision: &str, predicate: Value) -> Value {
+    json!({
+        "decision": decision,
+        "draft_head": draft["ledger_head"],
+        "ruled_on": draft["ruled_on"],
+        "scope_hash": draft["scope_hash"],
+        "evidence_run": draft["evidence_run"],
+        "evidence_revision": draft["evidence_revision"],
+        "predicate": predicate,
+        "applicability": "standing_predicate_approval",
+        "label": "the signup body",
+    })
+}
+
+/// The ruling draft of `episode`, read as the owner. Fails the test unless it is served.
+async fn draft_of(running: &Running, order: OrderId, episode: EpisodeId) -> Value {
+    let response = client()
+        .get(url(
+            running,
+            &format!("/api/orders/{order}/episodes/{episode}/ruling-draft"),
+        ))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .expect("the draft request is sent");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "the owner reads the draft"
+    );
+    response.json().await.expect("the draft is JSON")
+}
+
+/// Posts a ruling on `episode` as `token`. Returns the status and the response body.
+async fn post_ruling(
+    running: &Running,
+    token: &str,
+    order: OrderId,
+    episode: EpisodeId,
+    body: &Value,
+) -> (reqwest::StatusCode, String) {
+    let response = client()
+        .post(url(
+            running,
+            &format!("/api/orders/{order}/episodes/{episode}/ruling"),
+        ))
+        .bearer_auth(token)
+        .json(body)
+        .send()
+        .await
+        .expect("the ruling is sent");
+    let status = response.status();
+    (status, response.text().await.unwrap_or_default())
+}
+
+/// A member allows the kept example through the ruling route. The predicate holds on the regressed
+/// answer, so the server builds the decision from the draft and the origin records it.
+#[tokio::test]
+async fn a_member_allows_an_episode_through_the_ruling_route() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let draft = draft_of(&running, order, episode).await;
+    let ruled_on = draft["ruled_on"]
+        .as_str()
+        .expect("the draft names its example");
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&draft, "allow", created()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the allow is recorded: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    match origin.world().ledger().events() {
+        [LedgerEvent::DecisionConfirmed(decision)] => {
+            let accepts: Vec<String> = decision.accepts.iter().map(ToString::to_string).collect();
+            assert_eq!(
+                accepts,
+                [ruled_on],
+                "the allow accepts the example it is on"
+            );
+            assert!(decision.rejects.is_empty(), "an allow rejects nothing");
+            assert_eq!(decision.ruled_on.to_string(), ruled_on);
+            assert_eq!(decision.episode_id, Some(episode));
+            assert_eq!(
+                decision.actor.as_str(),
+                "owner",
+                "the member signs the ruling"
+            );
+        }
+        other => panic!("one decision is recorded, got {other:?}"),
+    }
+    running.stop().await.expect("the server stops");
+}
+
+/// A member forbids the kept example through the ruling route. The predicate fails on the
+/// regressed answer, so the example is rejected and the origin records it so.
+#[tokio::test]
+async fn a_member_forbids_an_episode_through_the_ruling_route() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let draft = draft_of(&running, order, episode).await;
+    let ruled_on = draft["ruled_on"]
+        .as_str()
+        .expect("the draft names its example");
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&draft, "forbid", same_as_base()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the forbid is recorded: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    match origin.world().ledger().events() {
+        [LedgerEvent::DecisionConfirmed(decision)] => {
+            assert!(decision.accepts.is_empty(), "a forbid accepts nothing");
+            let rejects: Vec<String> = decision.rejects.iter().map(ToString::to_string).collect();
+            assert_eq!(
+                rejects,
+                [ruled_on],
+                "the forbid rejects the example it is on"
+            );
+        }
+        other => panic!("one decision is recorded, got {other:?}"),
+    }
+    running.stop().await.expect("the server stops");
+}
+
+/// The server checks the predicate on the example before it records anything. Allowing with a
+/// predicate the regressed answer fails is refused, and so is forbidding with one it holds on. The
+/// log does not move.
+#[tokio::test]
+async fn a_predicate_that_does_not_give_the_decisions_answer_is_refused() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let draft = draft_of(&running, order, episode).await;
+    let (allow, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&draft, "allow", same_as_base()),
+    )
+    .await;
+    assert_eq!(
+        allow,
+        reqwest::StatusCode::BAD_REQUEST,
+        "an allow with a predicate the example fails is refused: {body}"
+    );
+    let (forbid, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&draft, "forbid", created()),
+    )
+    .await;
+    assert_eq!(
+        forbid,
+        reqwest::StatusCode::BAD_REQUEST,
+        "a forbid with a predicate the example holds is refused: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        0,
+        "a refused ruling is not recorded"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A draft is stale once the ruling log moves. A ruling sent from a stale draft is refused with
+/// 409 and records nothing. A ruling made from the fresh draft supersedes the first one.
+#[tokio::test]
+async fn a_stale_draft_is_refused_and_a_fresh_draft_supersedes_the_ruling() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let first = draft_of(&running, order, episode).await;
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&first, "allow", created()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the first ruling is recorded: {body}"
+    );
+
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&first, "forbid", same_as_base()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::CONFLICT,
+        "a ruling from the draft read before the first ruling is stale: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        1,
+        "the stale ruling is not recorded"
+    );
+
+    let second = draft_of(&running, order, episode).await;
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&second, "forbid", same_as_base()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the fresh ruling is recorded: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    match origin.world().ledger().events() {
+        [
+            LedgerEvent::DecisionConfirmed(_),
+            LedgerEvent::DecisionConfirmed(decision),
+        ] => {
+            assert_eq!(decision.event_seq, 2);
+            assert_eq!(
+                decision.supersedes,
+                Some(Supersedes { event_seq: 1 }),
+                "the fresh ruling supersedes the first in the same lineage"
+            );
+        }
+        other => panic!("two decisions are recorded, got {other:?}"),
+    }
+    running.stop().await.expect("the server stops");
+}
+
+/// Only a member rules. An agent's token gets 403 and no token gets 401, and neither reaches the
+/// log, even with a ruling the draft would accept.
+#[tokio::test]
+async fn only_a_member_rules_through_the_ruling_route() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let draft = draft_of(&running, order, episode).await;
+    let body = ruling_body(&draft, "allow", created());
+    let (agent, text) = post_ruling(&running, AGENT_TOKEN, order, episode, &body).await;
+    assert_eq!(
+        agent,
+        reqwest::StatusCode::FORBIDDEN,
+        "an agent never rules: {text}"
+    );
+    let anonymous = client()
+        .post(url(
+            &running,
+            &format!("/api/orders/{order}/episodes/{episode}/ruling"),
+        ))
+        .json(&body)
+        .send()
+        .await
+        .expect("the anonymous ruling is sent");
+    assert_eq!(
+        anonymous.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "a ruling without a token is unauthorized"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        0,
+        "no refused ruling is recorded"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A receipt that lands while a ruling waits for the writer refuses the ruling. The draft was read
+/// at one evidence revision; the agent's second build adds one before the writer decides the
+/// ruling, so the ruling is refused with 409 and nothing is recorded. A ruling from a fresh draft
+/// is then recorded.
+#[tokio::test]
+async fn a_receipt_that_lands_while_a_ruling_waits_refuses_it() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let (running, order, episode, task, fence) = blocked_signup_task(root).await;
+    let draft = draft_of(&running, order, episode).await;
+    assert_eq!(
+        draft["evidence_revision"],
+        json!(1),
+        "the draft reads the evidence of one gate run"
+    );
+    let stale = ruling_body(&draft, "allow", created());
+
+    running.ruling_hold.hold();
+    let ruling = post_ruling(&running, OWNER_TOKEN, order, episode, &stale);
+    let receipt = async {
+        running.ruling_hold.parked(1).await;
+        rebuild_regressed(&running, root, task, fence).await;
+        settle(&running, "the second receipt on the episode", |_, world| {
+            let found = world.lane(order)?.episodes.get(&episode)?;
+            (found.evidence.len() == 2).then_some(())
+        })
+        .await;
+        running.ruling_hold.release();
+    };
+    let ((status, body), ()) = tokio::join!(ruling, receipt);
+    assert_eq!(
+        status,
+        reqwest::StatusCode::CONFLICT,
+        "a ruling on the first evidence is refused: {body}"
+    );
+    assert!(
+        body.contains("stale_evidence"),
+        "the refusal names the evidence: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        0,
+        "the refused ruling is not recorded"
+    );
+
+    let fresh = draft_of(&running, order, episode).await;
+    assert_eq!(
+        fresh["evidence_revision"],
+        json!(2),
+        "the fresh draft reads both gate runs"
+    );
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&fresh, "allow", created()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "a ruling from the fresh draft is recorded: {body}"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A scope revision that lands while a ruling waits for the writer refuses the ruling with 409 and
+/// the current scope. The draft named the first revision; the revision moves the lane past it.
+#[tokio::test]
+async fn a_scope_revision_that_lands_while_a_ruling_waits_refuses_it() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let (running, order, episode) = blocked_signup_episode(root).await;
+    let draft = draft_of(&running, order, episode).await;
+    let base = git(root, &["rev-parse", PROTECTED_BRANCH])
+        .trim()
+        .to_owned();
+    let mut revised = serde_json::to_value(scope_for(order, &base)).expect("the scope serializes");
+    revised["rev"] = json!(2);
+    let revised: Scope = serde_json::from_value(revised).expect("the revised scope decodes");
+
+    let body = ruling_body(&draft, "allow", created());
+    running.ruling_hold.hold();
+    let ruling = post_ruling(&running, OWNER_TOKEN, order, episode, &body);
+    let revision = async {
+        running.ruling_hold.parked(1).await;
+        member(
+            &running,
+            &HumanCmd::ReviseScope {
+                order,
+                scope: Box::new(revised),
+            },
+        )
+        .await;
+        running.ruling_hold.release();
+    };
+    let ((status, body), ()) = tokio::join!(ruling, revision);
+    assert_eq!(
+        status,
+        reqwest::StatusCode::CONFLICT,
+        "a ruling under the first scope is refused: {body}"
+    );
+    assert!(
+        body.contains("stale_scope"),
+        "the refusal names the scope: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        0,
+        "the refused ruling is not recorded"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// Two rulings from the same draft, sent at once, record one decision. The writer decides them in
+/// turn, so the second finds the log past the head it was built on and is refused with 409.
+#[tokio::test]
+async fn two_rulings_from_the_same_draft_record_one_decision() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let draft = draft_of(&running, order, episode).await;
+    let body = ruling_body(&draft, "allow", created());
+
+    running.ruling_hold.hold();
+    let first = post_ruling(&running, OWNER_TOKEN, order, episode, &body);
+    let second = post_ruling(&running, OWNER_TOKEN, order, episode, &body);
+    let release = async {
+        running.ruling_hold.parked(2).await;
+        running.ruling_hold.release();
+    };
+    let ((first, first_body), (second, second_body), ()) = tokio::join!(first, second, release);
+    let statuses = [first, second];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == reqwest::StatusCode::OK)
+            .count(),
+        1,
+        "one of the two rulings is recorded: {first} {first_body} / {second} {second_body}"
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == reqwest::StatusCode::CONFLICT)
+            .count(),
+        1,
+        "the other is refused as stale: {first} {first_body} / {second} {second_body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        1,
+        "exactly one decision is recorded"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// Only the order's poster or an owner rules in it. A member who neither posted the order nor
+/// owns the plant is refused with 403, and nothing is recorded.
+#[tokio::test]
+async fn a_member_who_did_not_post_the_order_cannot_rule_in_it() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let draft = draft_of(&running, order, episode).await;
+    let (status, body) = post_ruling(
+        &running,
+        STRANGER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&draft, "allow", created()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::FORBIDDEN,
+        "an unrelated member is refused: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        0,
+        "no refused ruling is recorded"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// The member who posted the order rules in it without being an owner. The decision is signed by
+/// that member.
+#[tokio::test]
+async fn the_poster_of_an_order_rules_in_it_without_being_an_owner() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode, _, _) =
+        blocked_signup_posted_by(repo.path(), REVIEWER_TOKEN).await;
+    let draft = draft_of(&running, order, episode).await;
+    let (status, body) = post_ruling(
+        &running,
+        REVIEWER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&draft, "allow", created()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the poster's ruling is recorded: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    match origin.world().ledger().events() {
+        [LedgerEvent::DecisionConfirmed(decision)] => assert_eq!(
+            decision.actor.as_str(),
+            "reviewer",
+            "the poster signs the ruling"
+        ),
+        other => panic!("one decision is recorded, got {other:?}"),
+    }
+    running.stop().await.expect("the server stops");
+}
+
+/// An episode belongs to the order that opened it. A draft or a ruling that names it under another
+/// order is not found, and nothing is recorded.
+#[tokio::test]
+async fn an_episode_is_not_found_under_another_order() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let draft = draft_of(&running, order, episode).await;
+    member(
+        &running,
+        &HumanCmd::PostOrder {
+            machine: machine(),
+            sentence: "a second order".to_owned(),
+            witnesses: Vec::new(),
+        },
+    )
+    .await;
+    let other = settle(&running, "the second order", |_, world| {
+        world.orders().map(|found| found.id).find(|id| *id != order)
+    })
+    .await;
+
+    let response = client()
+        .get(url(
+            &running,
+            &format!("/api/orders/{other}/episodes/{episode}/ruling-draft"),
+        ))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .expect("the draft request is sent");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "the draft of another order's episode is not found"
+    );
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        other,
+        episode,
+        &ruling_body(&draft, "allow", created()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::NOT_FOUND,
+        "a ruling on another order's episode is not found: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        0,
+        "no ruling is recorded"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A ruling names the example it is on. One naming another example is refused with 409, and
+/// nothing is recorded.
+#[tokio::test]
+async fn a_ruling_on_a_moved_example_is_refused() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let draft = draft_of(&running, order, episode).await;
+    let mut body = ruling_body(&draft, "allow", created());
+    body["ruled_on"] = json!(format!("sha256:{}", "0".repeat(64)));
+    let (status, text) = post_ruling(&running, OWNER_TOKEN, order, episode, &body).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::CONFLICT,
+        "a ruling on another example is refused: {text}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        0,
+        "no refused ruling is recorded"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A body that is not JSON, has an unknown field, lacks a decision, names an unknown decision, or
+/// has a blank label is refused with 400 before anything is checked or recorded.
+#[tokio::test]
+async fn a_malformed_or_unlabelled_ruling_is_refused() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let draft = draft_of(&running, order, episode).await;
+    let valid = ruling_body(&draft, "allow", created());
+    let mut blank = valid.clone();
+    blank["label"] = json!("   ");
+    let mut unknown = valid.clone();
+    unknown["extra"] = json!(true);
+    let mut missing = valid.clone();
+    missing
+        .as_object_mut()
+        .expect("the body is an object")
+        .remove("decision");
+    let mut unknown_decision = valid.clone();
+    unknown_decision["decision"] = json!("maybe");
+    for (what, body) in [
+        ("a blank label", blank),
+        ("an unknown field", unknown),
+        ("no decision", missing),
+        ("an unknown decision", unknown_decision),
+    ] {
+        let (status, text) = post_ruling(&running, OWNER_TOKEN, order, episode, &body).await;
+        assert_eq!(
+            status,
+            reqwest::StatusCode::BAD_REQUEST,
+            "{what} is refused: {text}"
+        );
+    }
+    let not_json = client()
+        .post(url(
+            &running,
+            &format!("/api/orders/{order}/episodes/{episode}/ruling"),
+        ))
+        .bearer_auth(OWNER_TOKEN)
+        .body("not json")
+        .send()
+        .await
+        .expect("the ruling is sent");
+    assert_eq!(
+        not_json.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "a body that is not JSON is refused"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        0,
+        "no malformed ruling is recorded"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A fixed base anchor names a saved example, and the gate builds its receipts with none. A ruling
+/// with one would block the next gate run, so the server refuses it with 400 and records nothing.
+/// The forbid here names the example it is on, which the save check alone would have accepted.
+#[tokio::test]
+async fn a_fixed_anchor_is_refused_and_nothing_is_recorded() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let draft = draft_of(&running, order, episode).await;
+    let fixed = json!({
+        "predicate": "equals_base",
+        "step_id": "s1",
+        "path": "body",
+        "anchor": { "kind": "fixed", "example": draft["ruled_on"] }
+    });
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&draft, "forbid", fixed),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "a fixed anchor is refused: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        0,
+        "no ruling with a fixed anchor is recorded"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A ruling on a fresh base anchor is judged at the gate run that follows it. The agent builds the
+/// regression again after the ruling, and the receipt of that run lists the ruling as held or
+/// violated, never unknown. A fixed anchor would read unknown there, since the gate loads no saved
+/// examples. The verdict depends on which probes the predicate covers, so the test pins only that
+/// the ruling is judged.
+#[tokio::test]
+async fn a_posted_ruling_is_judged_at_the_gate_run_that_follows_it() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let (running, order, episode, task, fence) = blocked_signup_task(root).await;
+    let draft = draft_of(&running, order, episode).await;
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&draft, "forbid", same_as_base()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the ruling is recorded: {body}"
+    );
+
+    rebuild_regressed(&running, root, task, fence).await;
+    let ruling_id = format!("episode:{episode}");
+    let (verdict, rulings) = settle(&running, "the gate run after the ruling", |log, _| {
+        let ruled_at = log
+            .iter()
+            .position(|stamped| matches!(stamped.event, Event::RulingRecorded { .. }))?;
+        log[ruled_at..]
+            .iter()
+            .rev()
+            .find_map(|stamped| match &stamped.event {
+                Event::ReceiptRecorded { record, .. } => {
+                    Some((record.verdict.clone(), record.receipt.rulings.clone()))
+                }
+                _ => None,
+            })
+    })
+    .await;
+    let judged = rulings
+        .iter()
+        .find(|check| check.ruling_id.to_string() == ruling_id)
+        .map(|check| {
+            matches!(
+                check.status,
+                RulingStatus::Held {} | RulingStatus::Violated { .. }
+            )
+        });
+    assert_eq!(
+        judged,
+        Some(true),
+        "the ruling is judged at the gate run that follows it; verdict {verdict:?}, rulings {rulings:?}"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A must-keep obligation that names a saved example as its base is refused when a member revises
+/// the scope. The refusal is a 400 that names the anchor, and the scope does not move. A fixed
+/// anchor nested under `all` is refused too. The same rule with a fresh anchor is accepted.
+#[tokio::test]
+async fn a_fixed_anchor_in_a_must_keep_rule_is_refused_and_the_scope_does_not_move() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let running = start_plant(root).await;
+    post_order(&running).await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let base = git(root, &["rev-parse", PROTECTED_BRANCH])
+        .trim()
+        .to_owned();
+    let fixed = json!({ "kind": "fixed", "example": format!("sha256:{}", "a".repeat(64)) });
+
+    let mut direct = revise_command(order, &base);
+    direct["scope"]["body"]["must_keep"][0]["obligations"][0]["predicate"]["anchor"] =
+        fixed.clone();
+    let (status, body) = send_command(&running, &direct).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "a fixed anchor in a must-keep rule is refused: {body}"
+    );
+    assert!(
+        body.contains("fixed anchors are not supported yet"),
+        "the refusal names the anchor: {body}"
+    );
+
+    let mut nested = revise_command(order, &base);
+    nested["scope"]["body"]["must_keep"][0]["obligations"][0]["predicate"] = json!({
+        "predicate": "all",
+        "of": [
+            same_as_base(),
+            { "predicate": "equals_base", "step_id": "s1", "path": "body", "anchor": fixed }
+        ]
+    });
+    let (status, body) = send_command(&running, &nested).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "a fixed anchor nested under all is refused: {body}"
+    );
+    assert!(
+        body.contains("fixed anchors are not supported yet"),
+        "the nested refusal names the anchor: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert!(
+        origin.world().lane(order).is_none(),
+        "a refused scope revision moves nothing"
+    );
+
+    member(
+        &running,
+        &HumanCmd::ReviseScope {
+            order,
+            scope: Box::new(scope_for(order, &base)),
+        },
+    )
+    .await;
+    let (_, origin) = snapshot(&running).await;
+    assert!(
+        origin.world().lane(order).is_some(),
+        "the same rule with a fresh anchor is accepted"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A `ReviseScope` command as the HTTP body the owner sends, for the scope `scope_for` builds.
+fn revise_command(order: OrderId, base: &str) -> Value {
+    serde_json::to_value(HumanCmd::ReviseScope {
+        order,
+        scope: Box::new(scope_for(order, base)),
+    })
+    .expect("the command serializes")
+}
+
+/// Posts one command body to `/api/commands` as the owner. Returns the status and the body.
+async fn send_command(running: &Running, cmd: &Value) -> (reqwest::StatusCode, String) {
+    let response = client()
+        .post(url(running, "/api/commands"))
+        .bearer_auth(OWNER_TOKEN)
+        .json(cmd)
+        .send()
+        .await
+        .expect("the command is sent");
+    let status = response.status();
+    (status, response.text().await.unwrap_or_default())
+}
+
+/// The plant as the owner reads it over HTTP.
+async fn plant_of(running: &Running) -> Value {
+    let response = client()
+        .get(url(running, "/api/plant"))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .expect("the plant request is sent");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    response.json().await.expect("the plant is JSON")
+}
+
+/// The contract flag reads the protected app contract at the protected head. The demo carries one,
+/// so the flag is present and names the contract's version. The plant carries the same flag, and
+/// the server runs no vision checks, so the plant's vision flag is off.
+#[tokio::test]
+async fn the_contract_flag_reads_the_protected_app_contract() {
+    let repo = demo_repo();
+    let running = start_plant(repo.path()).await;
+    let response = client()
+        .get(url(&running, "/api/contract"))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .expect("the contract request is sent");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let contract: Value = response.json().await.expect("the contract is JSON");
+    assert_eq!(
+        contract,
+        json!({ "present": true, "version": "acan-app/1" })
+    );
+    let plant = plant_of(&running).await;
+    assert_eq!(
+        plant["contract"],
+        json!({ "present": true, "version": "acan-app/1" }),
+        "the plant carries the same contract flag"
+    );
+    assert_eq!(
+        plant["vision"],
+        json!({ "on": false, "reason": "the server runs no vision checks" }),
+        "the test server runs no vision checks"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A protected head with no app contract reports none, with no version. The contract is removed on
+/// the protected branch before the server starts, so the flag reads the head as it is.
+#[tokio::test]
+async fn a_protected_head_without_a_contract_reports_none() {
+    let repo = demo_repo();
+    let root = repo.path();
+    git(root, &["checkout", "-q", PROTECTED_BRANCH]);
+    git(root, &["rm", "-q", ".acan/app.json"]);
+    git(root, &["commit", "-q", "-m", "drop the app contract"]);
+    git(root, &["switch", "-q", "user-work"]);
+    let running = start_plant(root).await;
+    let response = client()
+        .get(url(&running, "/api/contract"))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .expect("the contract request is sent");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let contract: Value = response.json().await.expect("the contract is JSON");
+    assert_eq!(contract, json!({ "present": false, "version": null }));
+    assert_eq!(
+        plant_of(&running).await["contract"],
+        json!({ "present": false, "version": null }),
+        "the plant carries the same contract flag"
     );
     running.stop().await.expect("the server stops");
 }
@@ -1478,6 +2600,8 @@ fn write_tokens(root: &Path) {
         format!(
             r#"[
               {{"token": "{OWNER_TOKEN}", "principal": {{"kind": "member", "id": "owner"}}}},
+              {{"token": "{REVIEWER_TOKEN}", "principal": {{"kind": "member", "id": "{REVIEWER}"}}}},
+              {{"token": "{STRANGER_TOKEN}", "principal": {{"kind": "member", "id": "stranger"}}}},
               {{"token": "{AGENT_TOKEN}", "principal": {{"kind": "agent", "id": "{AGENT}"}}}}
             ]"#
         ),
@@ -1532,9 +2656,15 @@ fn machine() -> MachineKey {
 
 /// Sends one member command over HTTP as the owner, and fails the test unless it is accepted.
 async fn member(running: &Running, cmd: &HumanCmd) {
+    member_as(running, OWNER_TOKEN, cmd).await;
+}
+
+/// Sends one member command over HTTP as the member `token` holds, and fails the test unless it
+/// is accepted.
+async fn member_as(running: &Running, token: &str, cmd: &HumanCmd) {
     let response = client()
         .post(url(running, "/api/commands"))
-        .bearer_auth(OWNER_TOKEN)
+        .bearer_auth(token)
         .json(cmd)
         .send()
         .await
@@ -1549,8 +2679,14 @@ async fn member(running: &Running, cmd: &HumanCmd) {
 }
 
 async fn post_order(running: &Running) {
-    member(
+    post_order_as(running, OWNER_TOKEN).await;
+}
+
+/// Posts the test order as the member `token` holds.
+async fn post_order_as(running: &Running, token: &str) {
+    member_as(
         running,
+        token,
         &HumanCmd::PostOrder {
             machine: machine(),
             sentence: "land the agent's file".to_owned(),

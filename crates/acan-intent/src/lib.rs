@@ -27,6 +27,7 @@ mod hash;
 mod ledger;
 mod mcp;
 mod observation;
+mod order;
 pub mod predicate;
 mod probe;
 pub mod provenance;
@@ -41,8 +42,9 @@ mod version;
 mod view;
 
 pub use container::{
-    ContainerImage, ContainerNetwork, ContainerPolicy, ContainerUser, MissingProtected,
-    MountPolicy, Privileges, RootFilesystem,
+    BUN_RUNTIME, ContainerImage, ContainerNetwork, ContainerPolicy, ContainerUser, Driver,
+    MissingProtected, MountPolicy, NODE_RUNTIME, NPM_REGISTRY, PLACEHOLDER_PREFIX, Privileges,
+    RootFilesystem, is_credential_name,
 };
 pub use episode::{
     CandidateAttempt, Contest, ContestKind, ContestStatus, DiscrepancyEpisode, EpisodeKey,
@@ -81,12 +83,13 @@ pub use observation::{
     MaskSelector, NormalizationPlan, Observation, ObservedRun, Projection, ProjectionKind,
     Relation, RequestRecord, StepPath, TypedCapture,
 };
+pub use order::{DeterministicError, deterministic};
 pub use probe::{
-    AdvanceTimeStep, AppContract, CaptureKind, CaptureOutcome, CaptureSource, CaptureStep,
-    ClockControl, CompletionBarrier, CorpusProbe, Fixture, HttpStep, Isolation, MissingCapture,
-    ProbeCorpus, ProbeOrigin, ProbeProposal, ProbeSpec, ReadyCheck, RedirectPolicy,
-    RequestTemplate, RouteEntry, RoutePath, RouteSource, RouteStatus, Run, RunEnv, RunLimits,
-    RunOutcome, RunRole, SideEffectStep, Step, StoreIsolation, Template,
+    AdvanceTimeStep, AppContract, AppContractVersion, CaptureKind, CaptureOutcome, CaptureSource,
+    CaptureStep, ClockControl, CompletionBarrier, CorpusProbe, Fixture, HttpStep, Isolation,
+    MAX_SEQUENCE_TIMEOUT_MS, MissingCapture, ProbeCorpus, ProbeOrigin, ProbeProposal, ProbeSpec,
+    ReadyCheck, RedirectPolicy, RequestTemplate, RouteEntry, RoutePath, RouteSource, RouteStatus,
+    Run, RunEnv, RunLimits, RunOutcome, RunRole, SideEffectStep, Step, StoreIsolation, Template,
 };
 pub use provenance::{
     CoreDerived, EvidenceAddress, HumanSpec, ModelProposal, Observed, Proposable, Provenance,
@@ -119,7 +122,7 @@ pub use verdict::{
     ObligationCheck, Outcome, UnknownReason,
 };
 pub use version::{
-    AppContractV1, CaptionCatalogV1, CardV1, ContestV1, ContrastExampleV1, EpisodeV1, LedgerV1,
+    AppContractV1, CaptionCatalogV2, CardV1, ContestV1, ContrastExampleV1, EpisodeV1, LedgerV1,
     McpV1, ObservationV1, PlantViewV1, ProbeCorpusV1, ReceiptV1, RepairRoundV1, RunV1,
     RunnerContractV1, ScopeConfirmationV1, ScopeDraftV1, ScopeV1, TwinV1,
 };

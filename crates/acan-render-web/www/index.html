@@ -12,8 +12,12 @@
     --ink: #1f1f1d;
     --muted: #7a7a72;
     --rule: #dcdcd6;
+    /* Red is for failures and the Strike only; the map's own colours are the drone code's. */
     --red: #d0453a;
     --amber: #d99a1e;
+    --soft: #4a4a45;
+    --radius: 8px;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 2px 8px rgba(0, 0, 0, 0.04);
     --mono: "IBM Plex Mono", Consolas, monospace;
     --sans: "IBM Plex Sans", system-ui, sans-serif;
     /* --pov is the riding agent's hue, set from main.js on each ride. */
@@ -26,13 +30,13 @@
   canvas.dragging { cursor: grabbing; }
   #labels { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
   /* A paper halo round the text, so no belt or grid line crosses a word. */
-  .label { position: absolute; left: 0; top: 0; white-space: nowrap;
+  #labels .label { position: absolute; left: 0; top: 0; white-space: nowrap;
     font: 12px system-ui, sans-serif; color: #57575a;
     text-shadow: 1.5px 0 0 #fff, -1.5px 0 0 #fff, 0 1.5px 0 #fff, 0 -1.5px 0 #fff,
       1px 1px 0 #fff, -1px 1px 0 #fff, 1px -1px 0 #fff, -1px -1px 0 #fff, 0 0 3px #fff; }
   #labels.alt .label { background: rgba(255, 255, 255, 0.92); border-radius: 4px; padding: 0 5px;
     box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.05); }
-  .label .count { display: none; margin-left: 6px; color: #8a8a8f; }
+  #labels .label .count { display: none; margin-left: 6px; color: #8a8a8f; }
   #labels.alt .count { display: inline; }
   /* Flags are the marks the plant draws: an agent with its activity, the order, a clash, a
      question. Each is one fixed-size label with a hue dot; an amber dot means it waits on you. */
@@ -65,22 +69,108 @@
      each plot and keep under it. A plot is behavior the order may change, not a fence. */
   .flag.plot { font-size: 11px; color: #7a5a12; border-color: #d9a441; flex-direction: column; align-items: flex-start; gap: 2px; }
   .flag.plot.draft { border-style: dashed; }
+  /* A tour step's chip: one per mark the step stages, on the machine the mark sits on. The other
+     machines dim while the step shows. */
+  .flag.stage { font-size: 11px; border-color: var(--ink); border-style: dotted; }
   .flag .detail { display: flex; flex-direction: column; color: var(--muted); font-size: 11px; }
   .flag.clash .scope { font-size: 11px; color: #7a5a12; border: 1px solid #d9a441; border-radius: 3px; padding: 0 4px; }
   .flag.unplaced { position: fixed; left: 12px; top: 96px; font-size: 11px; color: var(--muted); border-style: dashed; }
   @keyframes flag-out { to { opacity: 0; } }
-  .island { position: fixed; background: var(--face); border: 1px solid #e5e5e2; border-radius: 10px;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 6px 18px rgba(0, 0, 0, 0.06); padding: 6px 12px; }
+  .island { position: fixed; background: var(--face); border: 1px solid var(--rule); border-radius: var(--radius);
+    box-shadow: var(--shadow); padding: 6px 12px; }
   #shell { top: 12px; left: 12px; display: flex; gap: 10px; align-items: baseline; }
+  /* At rest the shell is the brand and two keys; the repo and a healthy link show with the key bar. */
+  #shell .repo:not(:empty), #shell #link { display: none; }
+  #shell.open .repo:not(:empty), #shell.open #link, #shell #link:not(.quiet) { display: inline; }
+  #shell button.key { align-self: center; min-width: 20px; height: 20px; padding: 0 5px; font: 11px/18px var(--mono); color: var(--ink);
+    background: var(--card); border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+  #shell button.key:hover, #shell button.key[aria-expanded="true"] { border-color: var(--ink); }
   .brand { font-weight: 600; letter-spacing: 0.02em; }
   .repo, .muted { color: var(--muted); }
-  #order { top: 52px; left: 12px; max-width: 56vw; font: 12px/1.4 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #link { font: 11px var(--mono); }
   .stale { font: 11px var(--mono); color: var(--red); }
-  #hint { top: 12px; left: 50%; transform: translateX(-50%); color: #57575a; white-space: nowrap; }
+  .version { font: 11px var(--mono); color: var(--muted); }
+  /* Bottom centre: the clash card (top right), the seal panel (bottom right), the usage panel and the
+     plate (left) never cover it, and a bug note does not reach the card. */
+  #alpha { bottom: 12px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column;
+    align-items: center; gap: 4px; width: 300px; box-sizing: border-box; text-align: center; }
+  #alpha[hidden] { display: none; }
+  #report-bug[hidden] { display: none; }
+  .update { font: 11px var(--sans); color: var(--muted); }
+  .update a { color: var(--muted); text-decoration: underline; }
+  .alpha-actions { display: flex; gap: 6px; justify-content: center; }
+  #report-bug, #setup-manage { font: 11px var(--mono); padding: 2px 8px; background: var(--face); color: var(--ink);
+    border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+  #report-bug:disabled { color: var(--muted); cursor: default; }
+  #setup-manage[hidden] { display: none; }
+  #bug-note { font: 11px/1.4 var(--sans); max-width: 300px; white-space: normal; }
+  /* The bug report dialog: the full pre-filled issue, shown before anything opens. */
+  dialog { width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 32px); box-sizing: border-box;
+    margin: auto; padding: 16px 18px; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--face);
+    color: var(--ink); font: 13px/1.45 var(--sans); box-shadow: var(--shadow); }
+  dialog::backdrop { background: rgba(20, 20, 22, 0.25); }
+  dialog h2 { margin: 0 0 4px; font: 600 14px/1.3 var(--sans); }
+  dialog p { margin: 6px 0; }
+  dialog .bug-title { font: 600 12px/1.4 var(--mono); overflow-wrap: anywhere; }
+  dialog pre { margin: 8px 0 0; padding: 10px 12px; max-height: 46vh; overflow: auto; white-space: pre-wrap;
+    overflow-wrap: anywhere; font: 11px/1.45 var(--mono); background: var(--card); border: 1px solid var(--rule); border-radius: 6px; }
+  .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 12px; }
+  .dialog-actions button, .dialog-actions a { font: 12px/1.3 var(--mono); padding: 4px 10px; border-radius: 4px;
+    border: 1px solid var(--rule); background: var(--face); color: var(--ink); cursor: pointer; text-decoration: none; }
+  .dialog-actions button:hover, .dialog-actions a:hover { border-color: var(--ink); }
+  .dialog-actions #bug-copy { margin-right: auto; }
+  .dialog-actions .primary { background: var(--ink); color: #ffffff; border-color: var(--ink); }
+  dialog fieldset { border: 0; margin: 10px 0 0; padding: 0; }
+  dialog legend { font: 600 12px/1.3 var(--sans); margin-bottom: 6px; padding: 0; }
+  dialog .choice { display: flex; gap: 8px; align-items: center; padding: 6px 10px; margin-bottom: 6px;
+    border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; font: 12px var(--sans); }
+  dialog .choice:has(input:checked) { border-color: var(--ink); }
+  #setup-choices { display: flex; flex-wrap: wrap; gap: 6px; }
+  #setup-choices .choice { margin-bottom: 0; padding: 4px 10px; }
+  dialog .field { display: block; margin-top: 10px; font: 600 12px var(--sans); }
+  dialog input[type=password] { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 6px 8px;
+    font: 12px var(--mono); color: var(--ink); background: var(--face); border: 1px solid var(--rule); border-radius: 4px; }
+  dialog .setup-status { font: 12px/1.4 var(--sans); color: var(--muted); padding: 6px 8px; background: var(--card); border-radius: 4px; }
+  dialog .setup-status.set { color: var(--ink); background: var(--card); }
+  dialog h3 { margin: 12px 0 4px; font: 600 12px/1.3 var(--sans); }
+  dialog .setup-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+  dialog .setup-row { display: grid; grid-template-columns: 7em minmax(0, 1fr) auto; gap: 8px; align-items: center;
+    padding: 3px 0; border-bottom: 1px solid var(--rule); font: 12px/1.4 var(--sans); }
+  dialog .setup-name { font: 12px var(--mono); overflow-wrap: anywhere; }
+  dialog .setup-now { color: var(--ink); overflow-wrap: anywhere; }
+  dialog .setup-now.off { color: var(--muted); }
+  dialog .setup-note { font: 12px/1.4 var(--sans); color: var(--muted); max-width: 12em; }
+  dialog .setup-row select, dialog .setup-row button { font: 12px var(--mono); padding: 2px 6px; color: var(--ink);
+    background: var(--face); border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; max-width: 12em; }
+  dialog .setup-row select:hover, dialog .setup-row button:hover { border-color: var(--ink); }
+  dialog .setup-row select[aria-disabled=true], dialog .setup-row button[aria-disabled=true] { cursor: default; opacity: 0.6; }
+  /* The form's buttons stay at the dialog's foot when the dialog scrolls. They are the form's last
+     box, so scrolling to the end shows everything above them. */
+  #setup-form .dialog-actions { position: sticky; bottom: -16px; margin-bottom: -16px; padding: 8px 0 16px;
+    background: var(--face); }
+  #setup-changes { min-height: 1.4em; margin: 4px 0 0; font: 12px/1.4 var(--sans); }
+  #setup-changes:focus { outline: none; }
+  #setup-changes.ok { color: var(--ink); }
+  #setup-changes.warn { color: var(--ink); font-weight: 600; }
+  #setup-changes.bad { color: var(--red); }
+  #setup-result { min-height: 1.4em; font: 12px/1.4 var(--sans); }
+  #setup-result.ok { color: var(--ink); }
+  #setup-result.warn { color: var(--ink); font-weight: 600; }
+  #setup-result.bad { color: var(--red); }
+  #setup-banner { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; align-items: center; color: var(--ink); }
+  #setup-open { font: 11px var(--mono); padding: 2px 8px; background: var(--ink); color: #ffffff; border: 1px solid var(--ink);
+    border-radius: 4px; cursor: pointer; }
+  #setup-banner[hidden] { display: none; }
+  /* The key bar ends left of the rail (300 px wide, 12 px from the window, 12 px gap), so it never
+     runs under it. A narrow window drops the optional keys first; "/ command" always shows. */
+  #hint[hidden] { display: none; }
+  #hint { top: 12px; right: 324px; display: flex; gap: 12px; color: var(--muted); white-space: nowrap; font-size: 12px; }
+  #hint > span { display: inline-flex; gap: 4px; align-items: center; }
+  @media (max-width: 1180px) { #hint .opt { display: none; } }
+  @media (max-width: 760px) { #hint > span:not(:last-child) { display: none; } }
   kbd { font: 11px ui-monospace, Consolas, monospace; color: var(--ink); background: var(--face);
-    border: 1px solid #e5e5e2; border-radius: 4px; padding: 0 4px; }
-  #card { position: fixed; right: 16px; top: 16px; width: 300px; box-sizing: border-box; background: #ffffff; border: 1px solid var(--rule); border-radius: 6px; padding: 12px 14px; transition: opacity 0.4s ease; }
+    border: 1px solid var(--rule); border-radius: 4px; padding: 0 4px; }
+  #card { box-sizing: border-box; font: 12px/1.4 var(--sans); transition: opacity 0.4s ease; }
   #card.fading { opacity: 0; }
   #card ol.options { list-style: none; margin: 8px 0 0; padding: 0; border-top: 1px solid var(--rule); }
   #card ol.options li { margin: 0; border-bottom: 1px solid var(--rule); }
@@ -94,7 +184,8 @@
   #card p { margin: 6px 0; }
   #card .row { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
   #card .row .muted { font-size: 11px; }
-  #card .row.witness { color: var(--red); font-family: var(--mono); }
+  #card .line { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #card .row.witness { color: var(--ink); font-family: var(--mono); }
   #card .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
   #card .resolved { font-family: var(--mono); color: var(--muted); }
   #card ol { list-style: none; margin: 8px 0 0; padding: 0; }
@@ -105,26 +196,94 @@
   #card button:disabled { color: var(--muted); cursor: default; }
   #card .key { font-family: var(--mono); color: var(--muted); min-width: 10px; }
   #card .note { font-family: var(--mono); font-size: 11px; color: var(--red); }
+  /* The compose panel opens beside the machine an order is written for, and a dashed ring marks
+     the spot. A posted order's ring spreads out from its machine once the view carries it. */
+  #compose { width: 300px; box-sizing: border-box; padding: 10px 12px; font: 12px/1.4 var(--sans); }
+  #compose .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  #compose h2 { margin: 0; font: 600 13px/1.3 var(--mono); overflow-wrap: anywhere; }
+  #compose .sub { margin: 2px 0 8px; color: var(--muted); font-size: 11px; }
+  #compose input { display: block; width: 100%; box-sizing: border-box; padding: 6px 8px; font: 13px/1.3 var(--sans); text-overflow: ellipsis;
+    color: var(--ink); background: var(--face); border: 1px solid var(--rule); border-radius: 4px; }
+  #compose input:focus { outline: none; border-color: var(--ink); }
+  #compose .actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  #compose .actions .muted { margin-left: auto; font-size: 11px; }
+  #compose button { font: 12px/1.3 var(--mono); padding: 3px 10px; border-radius: 4px; border: 1px solid var(--ink);
+    background: var(--ink); color: #ffffff; cursor: pointer; }
+  #compose button:disabled { opacity: 0.6; cursor: default; }
+  #compose button.close { background: none; border: none; color: var(--muted); padding: 0; font-size: 11px; }
+  #compose .note { margin: 6px 0 0; font: 11px/1.4 var(--mono); color: var(--ink); }
+  #compose .note.bad { color: var(--red); }
+  #compose .note:empty { display: none; }
+  #pulses { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+  .pulse { position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px; box-sizing: border-box;
+    border-radius: 50%; border: 2px solid var(--ink); }
+  .pulse.target { border-style: dashed; background: rgba(255, 255, 255, 0.55); }
+  .pulse.sent { opacity: 0; animation: order-pulse 950ms var(--pov-ease) 2; }
+  @keyframes order-pulse { from { transform: scale(0.5); opacity: 0.9; } to { transform: scale(3.4); opacity: 0; } }
+  @keyframes order-still { 0%, 60% { opacity: 1; } to { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .pulse.sent { animation: order-still 1900ms ease-out; } }
+  /* The question card: the clash card's twin, beside the question's pin. */
+  #question { width: 300px; box-sizing: border-box; padding: 10px 12px; font: 12px/1.4 var(--sans); transition: opacity 0.4s ease; }
+  #question.fading { opacity: 0; }
+  #question .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  #question h2 { margin: 0 0 6px; font: 600 13px/1.3 var(--mono); }
+  #question p { margin: 6px 0; }
+  #question .ask { font: 13px/1.4 var(--sans); }
+  #question .sub { color: var(--muted); font-size: 11px; }
+  #question .resolved { font-family: var(--mono); color: var(--muted); }
+  #question .note { font: 11px/1.4 var(--mono); color: var(--red); }
+  #question ol.options { list-style: none; margin: 8px 0 0; padding: 0; border-top: 1px solid var(--rule); }
+  #question ol.options li { margin: 0; border-bottom: 1px solid var(--rule); }
+  #question button.option { display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box; padding: 7px 2px;
+    background: none; border: none; color: var(--ink); font: 12px/1.3 var(--sans); text-align: left; cursor: pointer; }
+  #question button.option:hover span { text-decoration: underline; }
+  #question button.option:disabled { color: var(--muted); cursor: default; }
+  #question button.option kbd { min-width: 16px; text-align: center; background: var(--card); border-color: var(--rule); border-radius: 3px; }
+  #question button.close { flex: none; font: 11px var(--mono); color: var(--muted); border: none; background: none; padding: 0; cursor: pointer; }
+  .flag.question { pointer-events: auto; cursor: pointer; }
+  /* The command bar on "/": a field and its results, under the shell, and over the map's names. */
+  #command { top: 52px; z-index: 3; left: 50%; transform: translateX(-50%); width: min(540px, calc(100vw - 32px)); box-sizing: border-box; padding: 8px; }
+  #command input { display: block; width: 100%; box-sizing: border-box; padding: 7px 10px; font: 14px/1.3 var(--mono); color: var(--ink);
+    background: var(--face); border: 1px solid var(--ink); border-radius: 6px; outline: none; text-overflow: ellipsis; }
+  #command ul { list-style: none; margin: 6px 0 0; padding: 0; max-height: 50vh; overflow-y: auto; }
+  #command ul:empty { display: none; }
+  #command li { display: grid; grid-template-columns: 5.5em minmax(0, 1fr) auto; column-gap: 8px; padding: 5px 8px; border-radius: 4px; cursor: pointer; }
+  #command li .kind { grid-row: 1 / span 2; font: 10px/1.7 var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  #command li .label { font: 12px/1.4 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #command li .detail { grid-column: 2; font: 11px/1.3 var(--sans); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #command li .verb { grid-column: 3; grid-row: 1; font: 11px var(--mono); color: var(--muted); }
+  #command li.question .kind, #command li.clash .kind { color: var(--ink); font-weight: 600; }
+  #command li[aria-selected="true"] { background: var(--ink); color: #ffffff; }
+  #command li[aria-selected="true"] .kind, #command li[aria-selected="true"] .detail, #command li[aria-selected="true"] .verb { color: #d5d5d0; }
+  #command .note { margin: 6px 4px 0; font: 11px/1.4 var(--mono); color: var(--muted); }
+  #command .note:empty { display: none; }
+  #command .foot { margin: 6px 4px 0; font: 11px var(--sans); color: var(--muted); }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   #gate { position: fixed; inset: 0; display: grid; place-items: center; }
   #gate form { background: var(--card); border: 1px solid var(--rule); border-radius: 6px; padding: 16px; display: flex; gap: 8px; align-items: center; }
   #gate input { font: 12px var(--mono); padding: 4px 6px; width: 280px; }
   #gate button { font: 12px var(--mono); padding: 4px 10px; }
-  #usage { left: 12px; bottom: 12px; color: #57575a; }
+  #usage { left: 12px; bottom: 12px; color: var(--soft); padding: 4px 10px; }
+  #usage #meta-badge { display: block; margin: 0; padding: 0; font: 11px var(--mono); color: var(--ink);
+    background: none; border: none; cursor: pointer; }
+  #usage #meta-badge::after { content: " ›"; color: var(--muted); }
+  #usage #meta-badge[aria-expanded="true"]::after { content: " ⌄"; }
+  #usage.open { padding: 10px 12px; }
   #usage h3 { margin: 0 0 4px; font: 600 11px/1.2 var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
   #usage section + section { margin-top: 8px; }
+  #usage section[hidden], #usage .legend[hidden] { display: none; }
   #usage .legend, #usage .note { font: 11px/1.4 var(--sans); color: var(--muted); margin: 4px 0 0; max-width: 340px; white-space: normal; }
   #usage tr.standin td { color: var(--muted); font-style: italic; }
   #usage td.earlier { color: var(--muted); }
   table { border-collapse: collapse; font: 12px/1.4 var(--mono); }
   th, td { text-align: left; padding: 1px 16px 1px 0; white-space: nowrap; }
   th { color: var(--muted); font-weight: 500; }
-  td { color: #3c3c3a; }
+  td { color: var(--soft); }
   th.num, td.num { text-align: right; padding-right: 0; padding-left: 16px; font-variant-numeric: tabular-nums; }
-  #notice { top: 50%; left: 50%; transform: translate(-50%, -50%); color: #57575a; }
-  /* The slip: the scope of the order the order island shows. Its plots, keeps and open choices
+  #notice { top: 50%; left: 50%; transform: translate(-50%, -50%); color: var(--soft); }
+  /* The slip: the scope of the shown order. Its plots, keeps and open choices
      say what the order may change and must keep. The Seal and the Strike act on them. */
-  #slip { right: 16px; bottom: 16px; width: 340px; max-height: calc(100vh - 120px); overflow-y: auto;
-    box-sizing: border-box; padding: 10px 14px; color: var(--ink); font: 12px/1.4 var(--sans); }
+  #slip { box-sizing: border-box; color: var(--ink); font: 12px/1.4 var(--sans); }
   #slip h2 { margin: 0; font: 600 13px/1.3 var(--mono); }
   #slip h3 { margin: 10px 0 4px; font: 600 10px/1.2 var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
   #slip p { margin: 4px 0; }
@@ -133,13 +292,14 @@
   #slip .block { margin-top: 6px; }
   #slip .sub { color: var(--muted); font-size: 11px; }
   #slip .selector, #slip .mono { font-family: var(--mono); font-size: 11px; }
-  #slip .obl { border-top: none; padding: 1px 0 1px 12px; color: #3c3c3a; }
+  #slip .obl { border-top: none; padding: 1px 0 1px 12px; color: var(--soft); }
   #slip .choice { border-top: 1px solid var(--rule); padding: 5px 0; }
   #slip .ack { display: block; margin: 4px 0; font-size: 12px; }
   #slip .stamp { border: 1.5px dashed var(--muted); border-radius: 4px; padding: 6px 8px; margin: 8px 0 4px; }
   #slip .stamp span { display: block; font-size: 11px; color: var(--muted); }
-  #slip .stamp.sealed { background: var(--ink); color: #ffffff; border: 1.5px solid var(--ink); }
-  #slip .stamp.sealed span { color: #e5e5e2; }
+  #slip .stamp.sealed { background: var(--face); color: var(--ink); border: 1px solid var(--ink); border-radius: var(--radius); }
+  #slip .stamp.sealed span { color: var(--soft); }
+  #slip .stamp.sealed b { font: 600 11px/1.4 var(--mono); color: var(--ink); text-transform: uppercase; letter-spacing: 0.06em; }
   #slip .stamp b { font: 600 12px var(--mono); letter-spacing: 0.04em; }
   #slip button { font: 12px/1.3 var(--mono); background: var(--face); color: var(--ink); border: 1px solid var(--rule);
     border-radius: 4px; padding: 3px 8px; margin: 2px 0; cursor: pointer; }
@@ -147,13 +307,16 @@
   #slip button:disabled { color: var(--muted); cursor: default; border-color: var(--rule); }
   #slip button[aria-pressed="true"] { background: var(--ink); color: #ffffff; border-color: var(--ink); }
   #slip button.danger { color: var(--red); border-color: var(--red); }
+  #slip button.primary { background: var(--ink); color: #ffffff; border-color: var(--ink); padding: 4px 12px; }
+  #slip button.primary:disabled { opacity: 0.6; color: #ffffff; }
+  #slip .counts { margin: 8px 0 2px; font: 12px/1.4 var(--mono); color: var(--muted); }
+  #slip .counts b { color: var(--ink); font-weight: 600; }
   #slip .warn { border-left: 2px solid var(--red); padding: 4px 0 4px 8px; margin-top: 6px; }
   #slip .mismatch, #slip .note { font-family: var(--mono); font-size: 11px; color: var(--red); }
   #slip .foot { color: var(--muted); font-size: 11px; border-top: 1px solid var(--rule); margin-top: 10px; padding-top: 6px; }
-  /* The point of view. Riding shows these, and the order island fades out with them; each fades
-     over --pov-fade. */
-  #order, #pov-vignette, #pov-frame, #pov-reticle, #pov-chip { opacity: 0; transition: opacity var(--pov-fade) var(--pov-ease); }
-  #order.on, #pov-vignette.on, #pov-frame.on, #pov-reticle.on, #pov-chip.on { opacity: 1; }
+  /* The point of view. Riding shows these; each fades over --pov-fade. */
+  #pov-vignette, #pov-frame, #pov-reticle, #pov-chip { opacity: 0; transition: opacity var(--pov-fade) var(--pov-ease); }
+  #pov-vignette.on, #pov-frame.on, #pov-reticle.on, #pov-chip.on { opacity: 1; }
   #pov-vignette { position: fixed; inset: 0; pointer-events: none;
     background: radial-gradient(ellipse 75% 75% at 50% 50%, rgba(31, 31, 29, 0) 60%, rgba(31, 31, 29, 0.07) 100%); }
   #pov-frame { position: fixed; inset: 8px; box-sizing: border-box; border: 2px solid var(--pov); border-radius: 14px; pointer-events: none; }
@@ -169,7 +332,176 @@
   #pov-chip kbd { margin-left: 4px; }
   #pov-chip .alt { flex-basis: 100%; max-width: 56vw; overflow: hidden; text-overflow: ellipsis;
     font: 11px var(--mono); color: var(--muted); }
+  /* The receipt plate: the view's facts for the receipt of the shown order, and the admitted
+     tour over them. Every item is listed whatever the tour does. Only the item list scrolls: the
+     head, with the step's caption, never moves out of the plate. */
+  #receipt { top: 52px; left: 12px; width: 330px; max-height: calc(100vh - 72px); overflow: hidden;
+    box-sizing: border-box; padding: 10px 14px; color: var(--ink); font: 12px/1.4 var(--sans);
+    display: flex; flex-direction: column; }
+  #receipt[hidden] { display: none; }
+  #receipt > * { flex: none; }
+  #receipt h2 { margin: 0; font: 600 13px/1.3 var(--mono); display: flex; gap: 8px; align-items: center; }
+  #receipt .meta { margin: 3px 0; font: 11px/1.4 var(--mono); color: var(--muted); }
+  #receipt ul.meta { list-style: none; padding: 0; margin: 4px 0; }
+  #receipt .fixture { font: 600 10px var(--mono); letter-spacing: 0.08em; color: var(--muted);
+    border: 1px dashed var(--muted); border-radius: 3px; padding: 0 4px; }
+  #receipt .controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0 4px; }
+  #receipt .modes { display: inline-flex; gap: 0; }
+  #receipt .modes button { border-radius: 0; }
+  #receipt .modes button:first-child { border-radius: 4px 0 0 4px; }
+  #receipt .modes button:last-child { border-radius: 0 4px 4px 0; border-left: none; }
+  #receipt button { font: 12px/1.3 var(--mono); background: var(--face); color: var(--ink);
+    border: 1px solid var(--rule); border-radius: 4px; padding: 3px 8px; cursor: pointer; }
+  #receipt button:hover:not(:disabled) { border-color: var(--ink); }
+  #receipt button:disabled { color: var(--muted); cursor: default; border-color: var(--rule); }
+  #receipt button[aria-pressed="true"] { background: var(--ink); color: #ffffff; border-color: var(--ink); }
+  #receipt .tour-chip { font: 11px var(--mono); color: var(--ink); border: 1px solid var(--rule);
+    border-radius: 10px; padding: 1px 8px; white-space: nowrap; }
+  #receipt .caption { margin: 6px 0 4px; font: 13px/1.4 var(--sans); min-height: 2.8em; }
+  #receipt ul.stage { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+  #receipt ul.stage li { font: 11px var(--mono); color: var(--ink); border: 1px solid var(--rule);
+    border-radius: 3px; padding: 1px 6px; }
+  #receipt .note { font: 11px/1.4 var(--mono); color: var(--muted); margin: 4px 0; }
+  #receipt .note.error { color: var(--red); }
+  #receipt ol.items { list-style: none; margin: 6px 0 0; padding: 0; border-top: 1px solid var(--rule);
+    position: relative; flex: 1 1 auto; min-height: 4em; overflow-y: auto; }
+  #receipt ol.items.fade { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent); }
+  #receipt .more { font: 11px/1.4 var(--mono); color: var(--muted); margin: 4px 0 0; }
+  #receipt details.counts { margin: 4px 0 0; }
+  #receipt details.counts[hidden] { display: none; }
+  #receipt details.counts summary { font: 11px/1.4 var(--mono); color: var(--muted); cursor: pointer; }
+  #receipt details.counts ul.meta { margin: 2px 0 0; }
+  #receipt ol.items li { display: grid; grid-template-columns: 1fr auto; gap: 0 8px; padding: 4px 0;
+    border-bottom: 1px solid var(--rule); font: 11px/1.3 var(--mono); }
+  #receipt ol.items li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #receipt ol.items li .state, #receipt ol.items li .must { text-align: right; color: var(--muted); }
+  #receipt ol.items li .machine { color: var(--muted); }
+  #receipt ol.items li .id { grid-column: 1; }
+  #receipt ol.items li .must { grid-column: 2; }
+  #receipt ol.items li.tone-pass .class { color: var(--ink); }
+  #receipt ol.items li.tone-fail .class { color: var(--red); font-weight: 600; }
+  #receipt ol.items li.tone-residue .class { color: var(--ink); font-weight: 600; }
+  #receipt ol.items li.tone-unknown .class { color: var(--muted); font-style: italic; }
+  #receipt .foot { color: var(--muted); font-size: 11px; border-top: 1px solid var(--rule); margin-top: 8px; padding-top: 6px; }
+  /* The right rail, top right: the first-run checklist, the clash card and the slip, then who is
+     doing what, what waits on you, what happened, and the timeline. One column, so no two of them
+     overlap; the lists scroll when the window is short. A row that changed glows once. */
+  /* The rail scrolls as one column, so each panel keeps its own height and its body: no panel
+     shrinks to its head when the window is short. Long lists still cap and scroll inside. */
+  #watch { position: fixed; top: 12px; right: 12px; width: 300px; max-height: calc(100vh - 24px);
+    display: flex; flex-direction: column; gap: 8px; pointer-events: none; overflow-y: auto;
+    overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--rule) transparent; }
+  #watch > .island { position: static; flex: none; pointer-events: auto; padding: 10px 12px;
+    display: flex; flex-direction: column; }
+  #watch > .island > * { flex: none; }
+  #watch > #firstrun, #watch > #card { width: auto; }
+  /* The slip is the longest panel, so it scrolls inside a cap and the panels under it stay in view. */
+  #watch > #slip { display: block; width: auto; max-height: 58vh; overflow-y: auto; scrollbar-width: thin; }
+  #watch h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 0 4px;
+    font: 600 11px/1.2 var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  #watch h3 .keys { text-transform: none; letter-spacing: 0; font-weight: 400; }
+  #watch ol { list-style: none; margin: 0; padding: 0; overflow-y: auto; }
+  #watch .empty { margin: 0; font: 12px/1.4 var(--sans); color: var(--muted); }
+  #watch .empty code { display: block; margin-top: 4px; font: 11px/1.4 var(--mono); color: var(--ink);
+    overflow-wrap: anywhere; user-select: all; }
+  #watch li.moved { animation: watch-glow 1200ms ease-out; }
+  @keyframes watch-glow { from { background: #e6e6e1; } to { background: transparent; } }
+  @media (prefers-reduced-motion: reduce) { #watch li.moved { animation: none; } }
+  #watch .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  #inbox .badge { display: inline-block; min-width: 16px; margin-left: 4px; padding: 0 5px; box-sizing: border-box; border-radius: 8px;
+    font: 600 11px/16px var(--mono); text-align: center; letter-spacing: 0; color: var(--muted); background: var(--page); }
+  #inbox .badge.some { color: #ffffff; background: var(--ink); }
+  #inbox .badge.bump { animation: watch-bump 500ms ease-out; }
+  @keyframes watch-bump { 30% { transform: scale(1.25); } }
+  @media (prefers-reduced-motion: reduce) { #inbox .badge.bump { animation: none; } }
+  #inbox ol { max-height: 24vh; }
+  #inbox li + li { border-top: 1px solid var(--rule); }
+  #inbox button.item { display: flex; gap: 8px; align-items: baseline; width: 100%; padding: 4px 2px; background: none; border: none;
+    color: var(--ink); text-align: left; cursor: pointer; font: 12px/1.35 var(--sans); }
+  #inbox button.item:hover .text, #inbox button.item:focus-visible .text { text-decoration: underline; }
+  #inbox .item .text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* A question's six words do not fit one rail line beside its kind label, so only this kind wraps. */
+  #inbox .item.question .text { min-width: 0; white-space: normal; overflow: visible; }
+  #inbox button.item:disabled { cursor: default; }
+  #inbox .kind { flex: none; width: 56px; font: 10px/1.6 var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  #inbox .item.stopped .kind { color: var(--red); }
+  #inbox .item.vision .kind { color: var(--muted); }
+  #inbox h3.alone { margin-bottom: 0; }
+  #inbox .opt-in { font: 11px var(--mono); padding: 0 6px; background: var(--face); color: var(--muted);
+    border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+  #inbox .opt-in[hidden] { display: none; }
+  #watch > #rail-tabs { flex-direction: row; gap: 6px; padding: 6px 8px; }
+  #rail-tabs button { flex: 1; font: 11px var(--mono); padding: 2px 0; background: var(--card); color: var(--muted);
+    border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+  #rail-tabs button:hover, #rail-tabs button[aria-expanded="true"] { color: var(--ink); border-color: var(--ink); }
+  #inbox .opt-in:hover { color: var(--ink); border-color: var(--ink); }
+  #lanes ol { max-height: 30vh; }
+  #history ol { max-height: 26vh; }
+  #history li { display: flex; gap: 6px; align-items: flex-start; padding: 4px 0; }
+  #history li + li { border-top: 1px solid var(--rule); }
+  #history button.go { flex: 1; min-width: 0; padding: 0 2px; background: none; border: none; color: var(--ink);
+    text-align: left; cursor: pointer; font: 11px/1.4 var(--mono); }
+  #history button.go:hover .sentence, #history button.go:focus-visible .sentence { text-decoration: underline; }
+  #history .line { display: flex; flex-wrap: wrap; gap: 0 4px; }
+  #history .sep { color: var(--rule); }
+  #history .step { color: var(--muted); }
+  #history .step.landed { color: var(--ink); font-weight: 600; }
+  #history .step.failed { color: var(--red); overflow-wrap: anywhere; }
+  #history .step.live { color: var(--ink); }
+  #history .sentence { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--soft); font: 12px/1.35 var(--sans); }
+  #history li.cancelled .sentence { color: var(--muted); text-decoration: line-through; }
+  #history button.cancel { flex: none; font: 11px var(--mono); padding: 1px 6px; background: var(--face); color: var(--muted);
+    border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+  #history button.cancel:hover:not(:disabled) { color: var(--ink); border-color: var(--ink); }
+  #history button.cancel.armed { color: #ffffff; background: var(--ink); border-color: var(--ink); }
+  #history button.cancel:disabled { cursor: default; opacity: 0.6; }
+  #history .more, #history .note { margin: 4px 0 0; font: 11px/1.4 var(--sans); color: var(--muted); }
+  #history .note:not(:empty) { color: var(--ink); }
+  /* The timeline. While the map shows the past it is drawn paler, and the scrubber says so in
+     amber until Esc or Live. */
+  #scrub input[type=range] { display: block; width: 100%; margin: 2px 0; accent-color: var(--ink); }
+  #scrub .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 0;
+    font: 11px/1.4 var(--mono); color: var(--muted); }
+  #scrub.held { border-color: var(--ink); }
+  #scrub.held input[type=range] { accent-color: var(--ink); }
+  #scrub.held .where { color: var(--ink); font-weight: 600; }
+  #scrub .live { font: 11px var(--mono); padding: 1px 8px; background: var(--ink); color: #ffffff; border: 1px solid var(--ink);
+    border-radius: 4px; cursor: pointer; }
+  /* The one-sentence reason a control is off, such as "Go live to send." on a rewound map. */
+  .reason { margin: 4px 0 0; padding-left: 6px; border-left: 2px solid var(--ink); font: 11px/1.4 var(--sans); color: var(--ink); }
+  body.history canvas { filter: saturate(0.3) brightness(1.03); transition: filter 200ms ease-out; }
+  @media (prefers-reduced-motion: reduce) { body.history canvas { transition: none; } }
+  #lanes h3 .status { flex: 1; text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #lanes h3 .status[data-kind="no_key"], #lanes h3 .status[data-kind="none"] { color: var(--ink); }
+  #lanes .workers { margin: 0 0 4px; font: 12px/1.4 var(--sans); color: var(--ink); }
+  #lanes .set-key { display: block; margin-top: 6px; }
+  #lanes details.start { display: inline; margin-left: 6px; }
+  #lanes details.start summary { display: inline; cursor: pointer; font: 11px var(--mono); color: var(--muted); text-decoration: underline; }
+  #lanes details.start[open] { display: block; margin-left: 0; }
+  #lanes li + li { border-top: 1px solid var(--rule); }
+  #lanes li.hl { background: var(--page); box-shadow: inset 2px 0 0 var(--ink); }
+  #lanes button.lane { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 1px 8px; width: 100%;
+    padding: 4px 2px; background: none; border: none; color: var(--ink); text-align: left; cursor: pointer; font: 12px/1.3 var(--mono); }
+  #lanes button.lane:hover .name, #lanes button.lane:focus-visible .name { text-decoration: underline; }
+  #lanes .key { grid-row: 1 / 3; align-self: center; font-size: 10px; padding: 0 3px; text-align: center; }
+  #lanes .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #lanes .when { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  #lanes .when.stale { color: var(--muted); }
+  #lanes .when.away { color: var(--ink); }
+  #lanes .doing { grid-column: 2; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #lanes .chip { grid-column: 3; justify-self: end; }
+  /* The replay panel shows on a recorded run only (`?replay=1`). */
+  #replay { right: 12px; bottom: 12px; display: flex; gap: 8px; align-items: center; padding: 5px 10px; }
+  #replay button { width: 24px; height: 24px; padding: 0; font: 12px/22px var(--mono); text-align: center; background: var(--face);
+    color: var(--ink); border: 1px solid var(--rule); border-radius: 50%; cursor: pointer; }
+  #replay button:hover { border-color: var(--ink); }
+  #replay progress { width: 160px; height: 4px; appearance: none; border: none; border-radius: 2px; background: var(--rule); }
+  #replay progress::-webkit-progress-bar { background: var(--rule); border-radius: 2px; }
+  #replay progress::-webkit-progress-value { background: var(--ink); border-radius: 2px; }
+  #replay progress::-moz-progress-bar { background: var(--ink); border-radius: 2px; }
 </style>
+<link rel="stylesheet" href="review.css">
 </head>
 <body>
 <canvas id="plant" tabindex="0"></canvas>
@@ -180,32 +512,131 @@
 <div id="pov-frame" hidden></div>
 <svg id="pov-reticle" hidden aria-hidden="true"><path id="pov-bracket" d=""></path></svg>
 <div class="island" id="pov-chip" hidden><span class="dot" id="pov-dot"></span><span class="inside">inside</span><b id="pov-agent"></b><span class="line" id="pov-line"></span><kbd>Esc</kbd><span class="alt" id="pov-alt" hidden></span></div>
-<div class="island" id="shell"><span class="brand">Acan</span><span class="repo" id="repo"></span><span id="link" class="muted">starting</span><span id="stale" class="stale" hidden></span></div>
-<div class="island" id="order" hidden><span id="order-line" class="muted"></span></div>
-<div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle</div>
-<aside id="card" class="island" hidden></aside>
-<aside id="slip" class="island" hidden></aside>
+<div class="island" id="shell"><span class="brand">Acan</span><span class="repo" id="repo"></span><span id="link" class="muted quiet">starting</span><span id="stale" class="stale" hidden></span><span id="version" class="version" hidden></span><button type="button" id="command-open" class="key" aria-label="Command bar" title="Command bar (/)">/</button><button type="button" id="help-toggle" class="key" aria-expanded="false" aria-controls="hint" aria-label="Keys" title="Keys (?)">?</button></div>
+<div class="island" id="alpha" hidden><span id="setup-banner" hidden><span id="setup-banner-text"></span><button id="setup-open" type="button">Set a key</button></span><span id="update" class="update" hidden><span id="update-text"></span> <a id="update-link" target="_blank" rel="noopener">open release</a></span><span class="alpha-actions"><button id="setup-manage" type="button" hidden>Model setup</button></span><span id="bug-note" class="muted" hidden></span></div>
+<dialog id="bug-dialog" aria-labelledby="bug-heading">
+  <h2 id="bug-heading">Bug report</h2>
+  <p class="muted">This is the report the page prepared, in full. Nothing is posted: you submit the issue on GitHub.</p>
+  <p id="bug-title" class="bug-title"></p>
+  <pre id="bug-body"></pre>
+  <p id="bug-truncated" class="muted" hidden>The link leaves out older log lines. Copy the full report and paste it into the issue.</p>
+  <p id="bug-copied" class="muted" hidden></p>
+  <div class="dialog-actions">
+    <button type="button" id="bug-copy" hidden>Copy full report</button>
+    <button type="button" id="bug-cancel">Cancel</button>
+    <a id="bug-open" class="primary" target="_blank" rel="noopener">Open on GitHub</a>
+  </div>
+</dialog>
+<dialog id="setup-dialog" aria-labelledby="setup-heading">
+  <h2 id="setup-heading">Model keys and roles</h2>
+  <p class="muted">A key is checked with its provider only, saved in acan's config folder for your account, and never shown again.</p>
+  <p id="setup-status" class="setup-status" role="status"></p>
+  <section id="setup-roles-section" aria-labelledby="setup-roles-heading" hidden>
+    <h3 id="setup-roles-heading">Roles</h3>
+    <ul id="setup-roles" class="setup-list"></ul>
+  </section>
+  <section id="setup-keys-section" aria-labelledby="setup-keys-heading" hidden>
+    <h3 id="setup-keys-heading">Keys</h3>
+    <ul id="setup-keys" class="setup-list"></ul>
+  </section>
+  <p id="setup-changes" role="status" tabindex="-1"></p>
+  <form id="setup-form" autocomplete="off" hidden>
+    <fieldset>
+      <legend>Add or replace a key</legend>
+      <div id="setup-choices"></div>
+    </fieldset>
+    <label class="field" for="setup-key">API key</label>
+    <input id="setup-key" type="password" spellcheck="false" autocapitalize="off" autocomplete="off"
+      name="model-key" data-lpignore="true" data-1p-ignore="true" required>
+    <p id="setup-result" role="alert"></p>
+    <div class="dialog-actions">
+      <button type="button" id="setup-cancel">Cancel</button>
+      <button type="submit" id="setup-save" class="primary">Check and save</button>
+    </div>
+  </form>
+  <p id="setup-blocked" class="muted" hidden></p>
+</dialog>
+<div class="island" id="hint" hidden><span class="opt"><kbd>Alt</kbd> words</span><span class="opt"><kbd>0</kbd> fit</span><span><kbd>C</kbd> card</span><span><kbd>A</kbd> answer</span><span><kbd>O</kbd> order</span><span><kbd>/</kbd> command</span><button id="report-bug" type="button" hidden>Report a bug</button></div>
+<div id="watch">
+  <aside id="firstrun" class="island" hidden aria-label="first run checklist"></aside>
+  <aside id="card" class="island" hidden></aside>
+  <aside id="slip" class="island" hidden></aside>
+  <aside id="inbox" class="island" aria-label="needs you" hidden></aside>
+  <aside id="rail-tabs" class="island" aria-label="More panels"></aside>
+  <aside id="lanes" class="island" aria-label="agents" hidden></aside>
+  <aside id="history" class="island" aria-label="orders" hidden></aside>
+  <aside id="scrub" class="island" aria-label="timeline" hidden></aside>
+</div>
+<div id="pulses" aria-hidden="true"><div class="pulse target" id="compose-target" hidden></div></div>
+<aside id="compose" class="island" role="dialog" aria-labelledby="compose-title" hidden>
+  <form id="compose-form" autocomplete="off">
+    <div class="head"><h2 id="compose-title"></h2><button type="button" class="close" id="compose-close" aria-label="Close the order panel">close</button></div>
+    <p class="sub" id="compose-context"></p>
+    <label class="sr" for="compose-sentence">The order, in one sentence</label>
+    <input id="compose-sentence" type="text" maxlength="500" spellcheck="true" enterkeyhint="send" placeholder="One sentence: what should change?">
+    <div class="actions"><button type="submit" id="compose-send">Send</button><span class="muted"><kbd>Enter</kbd> send · <kbd>Esc</kbd> close</span></div>
+    <p class="note" id="compose-note" role="status" aria-live="polite"></p>
+  </form>
+</aside>
+<aside id="question" class="island" role="dialog" aria-labelledby="question-title" hidden></aside>
+<div id="command" class="island" role="dialog" aria-label="Command bar" hidden>
+  <input id="command-input" type="text" role="combobox" aria-expanded="false" aria-controls="command-list" aria-autocomplete="list"
+    aria-label="Command: a name, an order id, agent, touched, go, ride, order here or seal" autocomplete="off" spellcheck="false"
+    placeholder="auth · o-3 · agent w2 · touched auth · seal">
+  <ul id="command-list" role="listbox" aria-label="Results"></ul>
+  <p class="note" id="command-note" role="status" aria-live="polite"></p>
+  <p class="foot"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Enter</kbd> run · <kbd>Tab</kbd> fill a verb · <kbd>Esc</kbd> close</p>
+</div>
+<p id="direct-live" class="sr" role="status" aria-live="polite"></p>
+<aside id="receipt" class="island" hidden aria-label="receipt">
+  <h2><span id="receipt-title"></span><span id="receipt-fixture" class="fixture" hidden>FIXTURE</span></h2>
+  <p class="meta" id="receipt-meta"></p>
+  <p class="meta" id="receipt-shas"></p>
+  <div class="controls">
+    <button type="button" id="tour-play">play</button>
+    <button type="button" id="tour-prev" aria-label="previous step">&lsaquo;</button>
+    <button type="button" id="tour-next" aria-label="next step">&rsaquo;</button>
+    <span class="modes" role="group" aria-label="mode"><button type="button" id="mode-directed" data-mode="directed" aria-pressed="false">directed</button><button type="button" id="mode-plain" data-mode="plain" aria-pressed="true">plain</button></span>
+    <span class="tour-chip" id="tour-chip"></span>
+  </div>
+  <p class="meta" id="tour-progress"></p>
+  <p class="caption" id="tour-caption"></p>
+  <ul class="stage" id="tour-stage"></ul>
+  <p class="note" id="receipt-note" hidden></p>
+  <details class="counts" id="receipt-counts-wrap" hidden>
+    <summary id="receipt-counts-summary">counts</summary>
+    <ul class="meta" id="receipt-counts"></ul>
+  </details>
+  <ol class="items" id="receipt-items"></ol>
+  <p class="more" id="receipt-more" hidden></p>
+  <p class="foot">P play · [ ] step · T directed / plain · directed is off by default until it wins the comparison</p>
+</aside>
+<aside id="vision" class="island" hidden aria-label="vision check"></aside>
 <div id="gate" hidden>
   <form id="token-form">
-    <label for="token" class="muted">owner token</label>
-    <input id="token" type="password" autocomplete="off" spellcheck="false">
-    <button type="submit">open</button>
+    <div class="gate-row">
+      <label for="token" class="muted">owner token</label>
+      <input id="token" type="password" autocomplete="off" spellcheck="false" aria-describedby="token-hint">
+      <button type="submit">open</button>
+    </div>
+    <p id="token-hint" class="gate-hint">The first <code>acan serve</code> in a repo prints this token with a sign-in link, and keeps it in that repo's <code>.acan/tokens.json</code>.</p>
   </form>
 </div>
 <div class="island" id="usage" hidden>
-  <section>
-    <h3>Meta attribution · since server start</h3>
+  <button type="button" id="meta-badge" aria-expanded="false" aria-controls="usage-meta"></button>
+  <section id="usage-meta">
+    <h3 title="provider = config name: meta = Meta Model API, baseten = Baseten-hosted Muse Spark Open, fireworks = Fireworks-hosted Muse Spark Open">Meta attribution · since server start</h3>
     <table>
       <thead>
         <tr><th>role</th><th>provider</th><th>model</th><th class="num">calls</th><th class="num">in</th><th class="num">out</th></tr>
       </thead>
       <tbody id="meta-body"></tbody>
     </table>
-    <p class="legend">provider = config name: meta = Meta Model API, baseten = Baseten-hosted Muse Spark Open, fireworks = Fireworks-hosted Muse Spark Open</p>
+    <p class="legend" id="meta-legend" hidden>provider = config name: meta = Meta Model API, baseten = Baseten-hosted Muse Spark Open, fireworks = Fireworks-hosted Muse Spark Open</p>
     <p class="note" id="meta-note"></p>
   </section>
   <section id="usage-history" hidden>
-    <h3>history (this log)</h3>
+    <h3>Meta attribution · this log</h3>
     <table>
       <thead>
         <tr><th>step</th><th>model</th><th class="num">calls</th><th class="num">in</th><th class="num">out</th></tr>
@@ -213,6 +644,10 @@
       <tbody id="history-body"></tbody>
     </table>
   </section>
+</div>
+<div class="island" id="replay" hidden>
+  <button type="button" id="replay-toggle" aria-label="Pause">&#9208;</button>
+  <progress id="replay-progress" max="1" value="0" aria-label="Replay progress"></progress>
 </div>
 <div class="island" id="notice" hidden></div>
 <script type="module" src="main.js"></script>

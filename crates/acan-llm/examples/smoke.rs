@@ -218,7 +218,9 @@ async fn json(client: &OpenAiCompatible, role: Role, prompt: Option<String>) -> 
         .await
         .map_err(|err| describe(&err))?;
     let Traced {
-        value: Structured { value: probe, call },
+        value: Structured {
+            value: probe, call, ..
+        },
         request_id,
         reply_model,
     } = traced;

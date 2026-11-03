@@ -21,6 +21,7 @@ pub mod scene;
 pub mod seal;
 pub mod slices;
 pub mod stand;
+pub mod tour;
 
 #[cfg(target_arch = "wasm32")]
 mod app;

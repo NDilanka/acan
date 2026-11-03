@@ -4,7 +4,7 @@ This folder stages one live take of the Acan demo. Each take clones the demo rep
 
 ## Run a take
 
-Requires Windows 10 or 11 with PowerShell 7 (the scripts use `Get-NetTCPConnection` and kernel32), Git, Bun 1.4 or newer, and the Rust toolchain from `rust-toolchain.toml`. A live take also needs the `wasm32-unknown-unknown` target and the `wasm-bindgen` CLI, because the UI bundle is built in step 1.
+On Windows, this section applies. Requires Windows 10 or 11 with PowerShell 7 (the scripts use `Get-NetTCPConnection` and kernel32), Git, Bun 1.4 or newer, and the Rust toolchain from `rust-toolchain.toml`. A live take also needs the `wasm32-unknown-unknown` target and the `wasm-bindgen` CLI, because the UI bundle is built in step 1. On Linux, see [Run a take on Linux or macOS](#run-a-take-on-linux-or-macos).
 
 A live take needs provider keys. Copy `crates/acan-llm/.env.example` to `crates/acan-llm/.env` and fill in `META_API_KEY`, `BASETEN_API_KEY` and `FIREWORKS_API_KEY`. Copy `crates/acan-llm/llm.example.toml` to `crates/acan-llm/llm.toml`. Both copies are git-ignored. Without keys, the recorded artifacts in `receipts/` replay the take instead (see the top-level README).
 
@@ -16,14 +16,39 @@ A live take needs provider keys. Copy `crates/acan-llm/.env.example` to `crates/
 
 Each take gets its own run folder, `<run root>\take-<yyyyMMdd-HHmmss>`. `<run root>\current.txt` names the latest one. `run.ps1` never reuses a folder, and it stops the previous take's processes without touching that folder. So an earlier take keeps its logs, and a stale process writes only into its own take.
 
+## Run a take on Linux or macOS
+
+The POSIX scripts run the same take, in the same steps, with the same run folders and logs. They are `run.sh`, `watch.sh`, `stop.sh`, `worker-slot.sh` and `replay.sh`. `lib.sh` holds their shared helpers. `watch-lib.jq`, `watch-event.jq` and `watch-summary.jq` do the event work for `watch.sh`. The scripts need only `sh` and the tools listed below.
+
+Requires `sh`, Git, `jq`, `curl`, `nohup`, `ps` and `pgrep`, Bun 1.4 or newer, and the Rust toolchain from `rust-toolchain.toml`. The scripts were tested with jq 1.7 under dash on Ubuntu 24.04.
+
+1. Build the UI bundle with the steps in `crates/acan-render-web/build.ps1`. The repository has no POSIX build script yet.
+2. Copy the key and routing files as on Windows, or point the take at other copies with `ACAN_ENV_FILE` and `ACAN_LLM_FILE`.
+3. Start the take with `sh demo/run.sh -w -S 3`. The `-w` flag follows the take in this process until it ends. Without it, `run.sh` returns once the stack is running. To follow the take from another shell, run `sh demo/watch.sh -s 3` in a background job, as on Windows.
+4. Open the URL in `<run folder>/logs/ui-url.txt`. It holds the owner token, so do not share it.
+5. Stop the take with `sh demo/stop.sh`. With no `-d`, it stops the latest take.
+
+Replay the recorded receipts with `sh demo/replay.sh`. `-v` checks the checksums only.
+
+The POSIX options are `-d` (run folder), `-R` (demo repo), `-p` (UI and API port), `-P` (demo app port), `-m` (machine), `-n` (worker slots), `-s` (sentence), `-t` (wait seconds), `-S` (settle, used with `-w`) and `-w` (follow the take). `watch.sh` takes `-d`, `-p`, `-s`, `-t` (timeout seconds), `-i` (poll seconds) and `-m` (refused polls before it stops). The environment variables are the ones above, plus `ACAN_LLM_FILE`, `ACAN_ENV_FILE` and `CARGO_TARGET_DIR`.
+
+These differ from the PowerShell scripts.
+
+- `stop.sh` sends SIGINT to `acan serve`, so it shuts down cleanly. It sends SIGTERM to the other processes and SIGKILL after 10 seconds if one is still running. `stop.ps1` uses `taskkill /F`.
+- `watch.sh` polls once a second. `watch.ps1` polls every 500 ms. Without `-p`, `watch.sh` uses the port recorded in the run folder.
+- A failed poll reports the HTTP status, or `no answer on port N`. The PowerShell watch prints the .NET error text.
+- The take scripts under `demo/intent` (`take.ps1`, `ruling.ps1` and `control.ps1`) are Windows-only. They use Windows paths, `acan.exe` and Docker through Windows, and have no POSIX port.
+
+These checks ran on Ubuntu 24.04 with dash. The POSIX replay printed the same output as `replay.ps1` on the recorded receipts, including a changed receipt and a missing one. The POSIX watch wrote the same summary, raw events and settle commands as `watch.ps1` on one recorded event log, with settle options 1 and 3, a refused token, and a server that was down. Only the wording of a transport error differs. A full take ran without provider keys: the stack started, the order posted, the watch ran, a second watch was refused, and `stop.sh` stopped every process. A live take with provider keys has not run on the POSIX path yet. macOS has not been tested.
+
 ## Ports, paths and overrides
 
 | Setting | Default | Override |
 | --- | --- | --- |
-| UI and API (`acan serve`) | port 7311 | `-Port` |
-| Demo app (the URL shortener) | port 7312 | `-DemoPort` |
+| UI and API (`acan serve`) | port 7311 | `-Port` (`-p` in the POSIX scripts) |
+| Demo app (the URL shortener) | port 7312 | `-DemoPort` (`-P` in the POSIX scripts) |
 | Run root (holds `take-*` folders) | `target\acan-run` in this checkout | `ACAN_RUN_ROOT` |
-| Demo repo to clone | `https://github.com/NDilanka/acan-demo.git` | `ACAN_DEMO_REPO` or `-DemoRepo` (a local path works) |
+| Demo repo to clone | `https://github.com/NDilanka/acan-demo.git` | `ACAN_DEMO_REPO` or `-DemoRepo` (a local path works; `-R` in the POSIX scripts) |
 
 Port 3000 is not the take's default, because many machines already use it. Before it clones or builds anything, `run.ps1` checks both ports. If one is taken, it stops and names the process that holds it and the parameter to change, for example `-DemoPort 7413`. The demo app still listens on 3000 when you run it by hand with `bun start`.
 
@@ -74,7 +99,7 @@ The origin holds every task of the order from building while a sibling is still 
 
 ## Intent take (demo/intent)
 
-`demo/intent/take.ps1` runs one take of the intent flow on a clean clone of this repository at the pin in the script. Each run gets its own folder under `D:\dev\acan-takes`. Git runs only inside the clone, and the script checks the clone's top level before each git call. Keys come from `crates/acan-llm/.env` and reach the server through its environment only. Tokens go in the clone's ignored `.acan/tokens.json`. Every human step goes through the member HTTP API and appears in `summary.json`.
+`demo/intent/take.ps1` runs one take of the intent flow on a clean clone of this repository at the pin in the script. Each run gets its own folder under `C:\work\acan-takes`. Git runs only inside the clone, and the script checks the clone's top level before each git call. Keys come from `crates/acan-llm/.env` and reach the server through its environment only. Tokens go in the clone's ignored `.acan/tokens.json`. Every human step goes through the member HTTP API and appears in `summary.json`.
 
 Run it with `pwsh demo/intent/take.ps1 -Label <name>`. It needs Docker running, the built `acan.exe` at `C:\cargo-targets\acan-d02\debug\acan.exe`, and `crates/acan-llm/.env` and `llm.toml`. It has no offline mode. Each model call is live, and `summary.json` records the provider for each role.
 
@@ -91,6 +116,8 @@ Human edits live in `demo/intent/o-1-edits.json` (schema `acan-demo-intent-edits
 - `worker-slot.ps1`: runs `acan-worker` for one agent again after each task.
 - `watch.ps1`: follows the event log, settles clashes when asked, and writes the result.
 - `stop.ps1`: stops the processes recorded in `<run folder>\logs\run.json`.
+- `run.sh`, `watch.sh`, `stop.sh`, `worker-slot.sh` and `replay.sh`: the POSIX scripts for the same steps. `lib.sh` holds their shared helpers.
+- `watch-lib.jq`, `watch-event.jq` and `watch-summary.jq`: the timeline lines, settle choices and summary that `watch.sh` builds with jq.
 
 ## Tokens
 
@@ -133,7 +160,7 @@ Each drawn order gets one out-of-scope change: the response header `x-replay-inj
 
 The draw happens after the preflight and before the clone. The seed comes from the OS random source at live start. The drawn orders are the four with the smallest SHA-256 of `<seed>|<order id>`, in `orders.json` order. The replay then writes one injected bundle for each drawn order. `draw.json` in the run folder holds the seed, the pool, the drawn list, the injector spec, the SHA-256 of each drawn order's bundle, and the hashes of `orders.json` and `mutants.json`. Its SHA-256 goes into `summary.json` (status `drawn`) before any clone or candidate exists. The seed and the drawn list are copied into `summary.json` only at the end of the run. A dry run never shows the draw.
 
-Run folder: `<RunsRoot>\<label>-<stamp>\`, default `D:\dev\acan-demo-runs\intent`. It holds `results.jsonl`, `summary.json`, `draw.json`, `logs\`, `controls\` (the injected bundles, the injected results and the m-missing-fixture copy) and one folder per order (its `state.json` checkpoint, the scope draft, ruling drafts and receipts).
+Run folder: `<RunsRoot>\<label>-<stamp>\`, default `C:\work\acan-demo-runs\intent`. It holds `results.jsonl`, `summary.json`, `draw.json`, `logs\`, `controls\` (the injected bundles, the injected results and the m-missing-fixture copy) and one folder per order (its `state.json` checkpoint, the scope draft, ruling drafts and receipts).
 
 Each line of `results.jsonl` is one of: an order (`kind: order`), the injected candidate of a drawn order (`kind: seeded`), or a control (`kind: control`). An order line records the actor, provider, `scope` (`drafted`, `human_edits` or `delegated_edits`), `scope_decided_by`, `rulings_decided_by`, `outcome`, `receipt_hash`, `merged_sha`, `wall_seconds`, `model_calls` (the `model_used` events of that order), `resumed_after_pause`, `errors`, and three catch flags. Order outcome values are `landed`, `blocked_out_of_scope`, `blocked_obligation_failed`, `blocked_violates_ruling`, `blocked_other`, `incomplete`, `setup_failed`, `draft_not_ready`, `draft_changed`, `needs_human_scope` (raised by a take step that needs a person), `ruling_refused`, `worker_timeout` and `worker_no_build`. Seeded lines use `caught`, `landed_not_caught`, `not_caught`, `not_run` or `error`. Control lines use `as_expected`, `not_as_expected`, `not_run` or `error`, with the expected outcome from `mutants.json` beside them. An order that pauses has no line until it finishes.
 

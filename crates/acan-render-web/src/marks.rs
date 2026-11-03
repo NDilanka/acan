@@ -2,7 +2,8 @@
 //!
 //! [`Marks::build`] says where each mark stands. An agent's drone hovers over its machine, with its
 //! shadow on the plinth top below its centre. The amber ring round an agent that waits on the user,
-//! the clash pin on its stalk, the footprints the agents tint, and the flags the page labels. [`card`]
+//! the clash pin on its stalk, the faint red of a machine with an open clash, and the flags the page
+//! labels. [`card`]
 //! builds the clash card from the view and the world, so its rows follow the origin. [`Motion`] only
 //! eases marks between the positions the view gives them, and turns each drone toward its machine.
 
@@ -11,17 +12,20 @@ use std::f32::consts::{PI, TAU};
 
 use acan_core::{OrderId, TaskId, World};
 use acan_iso::{
-    BEACON_RADIUS, BODY_RADIUS, BOT_HEIGHT, EYE_DISTANCE, PIN_HEIGHT, PLINTH_TOP, STALK_HEIGHT,
+    BEACON_RADIUS, BODY_RADIUS, BOT_HEIGHT, GLOW_DROP, GLOW_RADIUS, PIN_HEIGHT, PLINTH_TOP,
+    STALK_HEIGHT, eye_point, shadow_at,
 };
 use acan_render::theme::{
-    self, AGENT_SLOTS, TINT_BODY0, TINT_FOOTPRINT0, TINT_LEN, TINT_SCOPE0, TINT_SHARED, TINT_SHELL0,
+    AGENT_SLOTS, TINT_BODY0, TINT_CLASH, TINT_DIM0, TINT_GHOST, TINT_SCOPE0, TINT_SHADOW,
+    TINT_STALE,
 };
 use acan_render::{Beam, Instance};
 use serde::Serialize;
 
-use crate::mirror::{CheckView, ClashView, View};
+use crate::mirror::{AgentView, CheckView, ClashView, View};
 use crate::plan::Plan;
 use crate::slices::{ScopeTint, Slice, slice_layout};
+use crate::tour::Spot;
 
 /// The height of a drone's centre above its machine's top when it hovers beside the machine,
 /// in world units. The drone floats level with the machine's top rather than high above it. The
@@ -52,46 +56,88 @@ const ORDER_LIFT: f32 = 4.0;
 /// The shortest a drone and a clash diamond are drawn on screen, in CSS px. The renderer grows
 /// either one that would be shorter. The drone's body is sized to be about 40 px at fit zoom, so this
 /// floor only applies when the view is zoomed out past fit.
-pub const BOT_MIN_PX: f32 = 20.0;
-pub const PIN_MIN_PX: f32 = 18.0;
-/// The shortest a beacon is drawn on screen, in CSS px, when it is at rest.
-const BEACON_PX: f32 = 6.0;
+pub const BOT_MIN_PX: f32 = 24.0;
+pub const PIN_MIN_PX: f32 = 22.0;
+/// The shortest a beacon is drawn on screen, in CSS px, when it is at rest. Only a working
+/// agent's drone has a beacon.
+const BEACON_PX: f32 = 7.0;
 /// How much a working agent's beacon swells at the top of its pulse, as a share of its rest size.
 const BEACON_SWING: f32 = 0.5;
+/// The width of the tether from a drone's eye to its target, in device px.
+const TETHER_PX: f32 = 1.5;
+/// The opacity of a drone's shadow at full strength, which [`shadow_at`] thins as the drone rises.
+const SHADOW_ALPHA: f32 = 0.28;
+/// How far a stale drone sits below its seat, in plan units, so it reads as sagging.
+const STALE_DROP: f32 = 0.25 * BODY_RADIUS;
 /// Milliseconds for one pulse of a working agent's beacon.
 pub const PULSE_MS: f32 = 1_200.0;
 /// Milliseconds a drone takes to turn to face a new machine.
 pub const TURN_MS: f32 = 400.0;
-/// The activities in which an agent is working on its task. Its beacon pulses while it works.
-const WORKING: [&str; 6] = [
-    "claimed",
-    "building",
-    "gating",
-    "landing",
-    "splitting",
-    "reading_back",
-];
+/// The activities in which an agent is working on its task, as the mirror names a claimed task's
+/// stage. Its drone bobs and its beacon pulses while it works. Every other activity (`open`,
+/// `readback`, `queued`, `landed` and `idle`) is idle.
+const WORKING: [&str; 4] = ["claimed", "declared", "building", "gating"];
 /// Plan units below which a drone and its target share a spot, so the drone has no direction.
 const FACE_EPSILON: f32 = 1e-3;
 /// Milliseconds a landed machine's dot shows its change word before it goes quiet.
 pub const LANDED_HOLD_MS: f32 = 4_000.0;
-/// Milliseconds a bot takes to ease off its machine and fade, and an order flag to fade out.
+/// Milliseconds a bot takes to rise off its machine, and an order flag to fade out.
 pub const LEAVE_MS: f32 = 400.0;
 /// How far a landed dot sits inside its plinth's corner, in plan units, so it stands on the plinth
 /// and off its edge.
 const LANDED_INSET: f32 = 2.0;
 /// The diamond's half width as a share of its height. It sets where a clash label starts.
 const DIAMOND_HALF_WIDTH: f32 = 0.42;
+/// A clash badge's diameter, and its gap from the diamond's side, in CSS px.
+pub const BADGE_PX: f32 = 16.0;
+const BADGE_GAP_PX: f32 = 3.0;
+/// The most characters a badge's initials take.
+const INITIALS_MAX: usize = 3;
 /// Gap between a bot's crown or a diamond and its flag, in CSS px.
 const FLAG_GAP_PX: f32 = 8.0;
-/// How far below its place a body starts its ease-in, and a pin its rise, in plan units.
+/// How far above its place a body starts its drop in, how far a leaving body rises, and how far
+/// below its place a pin starts its rise, in plan units.
 const RISE: f32 = 6.0;
-/// Milliseconds a body takes to ease in on arrival.
-pub const ARRIVE_MS: f32 = 200.0;
-/// Milliseconds a body takes to move between machines.
+/// Milliseconds a body takes to drop in on arrival.
+pub const ARRIVE_MS: f32 = 240.0;
+/// Milliseconds the ride's camera takes to follow its drone to a new spot.
 pub const MOVE_MS: f32 = 400.0;
+/// A move between machines takes `MOVE_BASE_MS` plus `MOVE_PER_UNIT_MS` for each plan unit it
+/// covers, held between the two bounds.
+const MOVE_BASE_MS: f32 = 350.0;
+const MOVE_PER_UNIT_MS: f32 = 0.6;
+const MOVE_BOUNDS_MS: (f32, f32) = (450.0, 900.0);
+/// How far a moving drone's centre clears the taller of its two machines at the top of its arc.
+const ARC_CLEAR: f32 = 1.5 * BODY_RADIUS;
+/// Milliseconds a moving drone takes to turn to its way of travel at the start of a move, and to
+/// its target at the end.
+const FACE_MS: f32 = 150.0;
+/// A move's trail: the pieces it is cut into, its opacity as the drone passes, and the
+/// milliseconds each piece takes to fade out after that.
+const TRAIL_PIECES: usize = 24;
+const TRAIL_ALPHA: f32 = 0.45;
+const TRAIL_FADE_MS: f32 = 2_000.0;
+/// The width of a trail in CSS px.
+const TRAIL_PX: f32 = 1.0;
+/// A working drone's bob: its height on screen in CSS px, and its period.
+const BOB_PX: f32 = 1.0;
+const BOB_PERIOD_MS: f32 = 2_400.0;
 /// Milliseconds a pin takes to rise in, or to sink out.
 pub const PIN_MS: f32 = 250.0;
+/// Milliseconds an agent that holds a task may be quiet before its drone reads stale.
+pub const STALE_MS: u64 = 2 * 60 * 1_000;
+/// Milliseconds an agent that holds a task may be quiet before its drone goes and an away dot
+/// takes its place.
+pub const AWAY_MS: u64 = 10 * 60 * 1_000;
+/// The most ghosts the plant shows at once. The latest landings keep theirs.
+pub const GHOST_MAX: usize = 12;
+/// How far a ghost's outline stands out from its machine's footprint, in plan units.
+const GHOST_OFFSET: f32 = 3.0;
+/// A ghost's opacity, and its width in CSS px.
+const GHOST_ALPHA: f32 = 0.8;
+const GHOST_PX: f32 = 1.75;
+/// Milliseconds a ghost takes to fade out once it clears.
+pub const GHOST_FADE_MS: f32 = 400.0;
 /// The dot of a declaration whose task has no agent.
 const UNCLAIMED: &str = "#7a7a72";
 
@@ -132,24 +178,30 @@ impl AgentSlots {
 }
 
 /// The hue of a palette slot, as `#rrggbb`. Every mark that shows an agent's hue reads it here,
-/// and the renderer's tint for the body and footprint come from the same palette.
+/// and the renderer's tints for the drone come from the same palette.
 #[must_use]
 pub fn hue_css(slot: usize) -> String {
-    let [r, g, b, _] = theme::agent_colour(slot).map(|c| (c * 255.0).round() as u32);
+    let [r, g, b, _] = acan_render::theme::agent_colour(slot).map(|c| (c * 255.0).round() as u32);
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
-/// The tint slot of an agent's accent: the agent's hue at full strength. The eye, the lamp, the
-/// beam and the beacon draw with it.
+/// The tint slot of an agent's hue at full strength. A working drone's eye, every drone's glow,
+/// the beam and the beacon draw with it.
 #[must_use]
 pub fn body_tint(slot: usize) -> u8 {
     u8::try_from(TINT_BODY0 as usize + slot).expect("tint slots fit in a byte")
 }
 
-/// The tint slot of an agent's shell: the agent's hue mixed toward white.
+/// The tint slot of a drone's accent, its iris, lens ring, ear hubs and antenna tip, in `state`:
+/// the full hue while it works, the hue dimmed while it idles or waits, and grey once stale.
 #[must_use]
-pub fn shell_tint(slot: usize) -> u8 {
-    u8::try_from(TINT_SHELL0 as usize + slot).expect("tint slots fit in a byte")
+pub fn eye_tint(state: DroneState, slot: usize) -> u8 {
+    let tint = match state {
+        DroneState::Working => u32::from(body_tint(slot)),
+        DroneState::Idle | DroneState::Waiting => u32::from(body_tint(slot)) + TINT_DIM0,
+        DroneState::Stale => TINT_STALE,
+    };
+    u8::try_from(tint).expect("tint slots fit in a byte")
 }
 
 /// A drone over a machine. It hovers on a spot beside the machine, its centre [`HOVER_LIFT`]
@@ -170,8 +222,8 @@ pub struct Body {
     /// its top, lifted by the beacon's radius so the beacon stands on the top.
     pub target: [f32; 3],
     pub activity: &'static str,
-    /// Whether the agent waits on the user: its task is in an open clash, or its order asks a question.
-    pub waiting: bool,
+    /// What the drone shows: working, idle, waiting on the user, or stale.
+    pub state: DroneState,
     /// The check the agent's task answers to, as the chip beside its flag shows it.
     pub check: Option<CheckView>,
 }
@@ -180,7 +232,80 @@ impl Body {
     /// Whether the agent is working on its task now, so its beacon pulses.
     #[must_use]
     pub fn working(&self) -> bool {
-        WORKING.contains(&self.activity)
+        self.state == DroneState::Working
+    }
+
+    /// Whether the agent waits on the user: its task is in an open clash, or its order asks a
+    /// question.
+    #[must_use]
+    pub fn waiting(&self) -> bool {
+        self.state == DroneState::Waiting
+    }
+}
+
+/// What a drone shows of its agent. One state shows at a time, by precedence: waiting, then
+/// stale, then working, then idle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DroneState {
+    /// On a claimed task: its eye is bright, its glow strong, it bobs and its beacon pulses.
+    Working,
+    /// On an open, read-back, queued or landed task, or none: still, its eye dim and its glow faint.
+    #[default]
+    Idle,
+    /// Its task is in an open clash, or its order asks a question: as idle, with an amber ring.
+    Waiting,
+    /// It holds a task but has been quiet for a while: still and lower, its eye grey, no glow.
+    Stale,
+}
+
+impl DroneState {
+    /// The state of an agent whose activity is `activity`. `waiting` is whether it waits on the
+    /// user, and `stale` whether it holds a task and has gone quiet.
+    #[must_use]
+    pub fn of(activity: &str, waiting: bool, stale: bool) -> Self {
+        if waiting {
+            Self::Waiting
+        } else if stale {
+            Self::Stale
+        } else if WORKING.contains(&activity) {
+            Self::Working
+        } else {
+            Self::Idle
+        }
+    }
+
+    /// The tether's opacity: strong while the agent works or waits, faint while it idles, and
+    /// fainter still once it has gone stale.
+    #[must_use]
+    pub fn tether_alpha(self) -> f32 {
+        match self {
+            Self::Working | Self::Waiting => 0.9,
+            Self::Idle => 0.3,
+            Self::Stale => 0.2,
+        }
+    }
+
+    /// The opacity of the glow under the drone: strong while the agent works, faint while it idles
+    /// or waits, and none once it has gone stale.
+    #[must_use]
+    pub fn glow_alpha(self) -> f32 {
+        match self {
+            Self::Working => 0.5,
+            Self::Idle | Self::Waiting => 0.18,
+            Self::Stale => 0.0,
+        }
+    }
+
+    /// The state in one word, as the ride chip and the flag's hover line name it.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Idle => "idle",
+            Self::Waiting => "waiting",
+            Self::Stale => "stale",
+        }
     }
 }
 
@@ -206,6 +331,129 @@ pub struct Pin {
     pub at: [f32; 3],
 }
 
+/// The round badge on one side of a clash diamond: the initials of the agent that holds one of
+/// the two tasks, on its hue, or a grey `?` for a task no agent holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Badge {
+    pub text: String,
+    pub hue: String,
+}
+
+/// A clash's two badges: task `a`'s on the diamond's left, task `b`'s on its right.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Badges {
+    /// The index of the clash in the view, so a click opens its card.
+    pub clash: usize,
+    pub a: Badge,
+    pub b: Badge,
+}
+
+/// An agent's initials, from the last segment of its id (split on `-`, `_`, space and `.`): that
+/// segment's first letter in upper case, then the id's trailing digits, at most [`INITIALS_MAX`]
+/// characters. A last segment with no letter falls back to the id's first letter. `w2` gives
+/// `W2`, `agent-a` gives `A`, `agent-b` gives `B` and `worker-12` gives `W12`.
+#[must_use]
+pub fn initials(id: &str) -> String {
+    initials_with(id, 0)
+}
+
+/// The initials of the two agents on one clash, never the same text. When they would read the
+/// same, each takes more letters of its last segment, so `agent` and `anna` give `AG` and `AN`.
+/// Ids that still match, such as two whose last segments are equal, get a digit on the second.
+#[must_use]
+pub fn pair_initials(a: &str, b: &str) -> (String, String) {
+    for more in 0..INITIALS_MAX {
+        let (first, second) = (initials_with(a, more), initials_with(b, more));
+        if first != second {
+            return (first, second);
+        }
+    }
+    let first = initials(a);
+    let stem: String = first.chars().take(INITIALS_MAX - 1).collect();
+    let second = ('2'..='9')
+        .map(|digit| format!("{stem}{digit}"))
+        .find(|text| *text != first)
+        .expect("one of eight digits differs");
+    (first, second)
+}
+
+/// The last segment of `id`, split on `-`, `_`, space and `.`.
+fn last_segment(id: &str) -> &str {
+    id.rsplit(['-', '_', ' ', '.']).next().unwrap_or(id)
+}
+
+/// The first letter of `id`'s last segment (or of `id`, when that segment has no letter), then
+/// `more` of the letters after it, then the id's trailing digits, in upper case and cut to
+/// [`INITIALS_MAX`] characters.
+fn initials_with(id: &str, more: usize) -> String {
+    let digits: String = {
+        let tail: Vec<char> = id.chars().rev().take_while(char::is_ascii_digit).collect();
+        tail.into_iter().rev().collect()
+    };
+    let segment = last_segment(id);
+    let source = if segment.chars().any(char::is_alphabetic) {
+        segment
+    } else {
+        id
+    };
+    let letters = source
+        .chars()
+        .filter(|c| c.is_alphabetic())
+        .take(1 + more)
+        .flat_map(char::to_uppercase);
+    let mut out: String = letters.chain(digits.chars()).take(INITIALS_MAX).collect();
+    if out.is_empty() {
+        out.push('?');
+    }
+    out
+}
+
+/// The badges of each pin's clash, in pin order.
+#[must_use]
+pub fn clash_badges(view: &View, pins: &[Pin], slots: &AgentSlots) -> Vec<Badges> {
+    let holder = |task: TaskId| {
+        view.tasks
+            .iter()
+            .find(|candidate| candidate.id == task)
+            .and_then(|candidate| candidate.agent.as_ref())
+            .map(ToString::to_string)
+    };
+    pins.iter()
+        .filter_map(|pin| {
+            let clash = view.clashes.get(pin.clash)?;
+            let (a, b) = (holder(clash.a), holder(clash.b));
+            let (a_text, b_text) = match (&a, &b) {
+                (Some(a), Some(b)) => pair_initials(a, b),
+                _ => (
+                    a.as_deref().map_or_else(|| "?".to_owned(), initials),
+                    b.as_deref().map_or_else(|| "?".to_owned(), initials),
+                ),
+            };
+            let badge = |agent: &Option<String>, text: String| Badge {
+                text,
+                hue: agent
+                    .as_deref()
+                    .map_or_else(|| UNCLAIMED.to_owned(), |id| hue_css(slots.slot(id))),
+            };
+            Some(Badges {
+                clash: pin.clash,
+                a: badge(&a, a_text),
+                b: badge(&b, b_text),
+            })
+        })
+        .collect()
+}
+
+/// The centres of a diamond's two badges on screen, in CSS px, left then right, given the
+/// diamond's foot in world units.
+#[must_use]
+pub fn badge_centres(foot: [f32; 3], project: impl Fn([f32; 3]) -> [f32; 2]) -> [[f32; 2]; 2] {
+    let (base, height) = visual_extent(foot, PIN_HEIGHT, PIN_MIN_PX, &project);
+    let y = base[1] - height * 0.5;
+    let reach = height * DIAMOND_HALF_WIDTH + BADGE_GAP_PX + BADGE_PX * 0.5;
+    [[base[0] - reach, y], [base[0] + reach, y]]
+}
+
 /// What a flag's anchor follows while the marks move.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Follow {
@@ -228,9 +476,28 @@ pub enum FlagKind {
     Clash,
     Question,
     Landed,
+    /// An agent quiet for [`AWAY_MS`] or more: a hollow ring in its hue and how long it has been
+    /// quiet, on the back corner of its machine's plinth, where its drone was.
+    Away,
     /// One scope lane's plots and keeps on one machine.
     Plot,
+    /// A mark a tour step stages, as a chip on the machine the mark sits on.
+    Stage,
 }
+
+/// What an agent's flag says of its drone, beyond its short text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DroneFlag {
+    /// The agent id in full, as `acan:drone-hover` and the ride name it.
+    pub agent: String,
+    /// The drone's state, as [`DroneState::word`] gives it.
+    pub state: &'static str,
+    /// How long a stale agent has been quiet, such as `3m`.
+    pub quiet: Option<String>,
+}
+
+/// The most characters of an agent id its flag shows.
+const FLAG_ID_CHARS: usize = 12;
 
 /// A label the page draws over the plant, with its anchor in world units.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -252,6 +519,11 @@ pub struct Flag {
     pub detail: Vec<String>,
     /// On a clash flag, the confirmed scope the clash sits inside, in words.
     pub scope: Option<String>,
+    /// On an agent's flag, the drone it names.
+    pub drone: Option<DroneFlag>,
+    /// The machine an order, clash or plot flag marks, as the plan names it. The page shows such
+    /// a flag's words only while that machine, or the flag's own mark, is hovered.
+    pub on: Option<String>,
     /// The plan index of the machine an agent's flag stacks on, so the page groups them.
     #[serde(skip)]
     pub machine: Option<usize>,
@@ -297,6 +569,31 @@ pub struct Card {
     pub resolved: Option<String>,
 }
 
+/// The page's clock, as the marks read it. Every time is in log milliseconds. A frozen or
+/// replayed page gives no `now`, so nothing there reads stale or has a ghost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Clock {
+    /// The time now, on a live page.
+    pub now: Option<u64>,
+    /// The reader's last time away, once they come back to the page after a while.
+    pub away: Option<Away>,
+}
+
+/// A time the reader was away from the page: when they last saw it, and when they came back.
+/// Only what landed between the two has a ghost, so work that lands while they watch has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Away {
+    pub seen: u64,
+    pub back: u64,
+}
+
+impl Clock {
+    /// How long `agent` has been quiet, or `None` with no clock or when it was never heard.
+    fn quiet(self, agent: &AgentView) -> Option<u64> {
+        Some(self.now?.saturating_sub(agent.heard_at?))
+    }
+}
+
 /// What the marks need from a plan machine's model: the height of its top, and the free spots on
 /// its plinth top, in world XY, front first.
 #[derive(Debug, Clone, PartialEq)]
@@ -312,34 +609,73 @@ pub struct Marks {
     pub bodies: Vec<Body>,
     pub pins: Vec<Pin>,
     pub flags: Vec<Flag>,
-    /// For each plan machine, the hue slots of the agents whose footprints cover it, sorted.
-    pub footprints: Vec<Vec<usize>>,
-    /// The plan machines that live tasks' declared files sit on, each with the tint of the agent
-    /// holding the task. Sorted and without repeats.
-    pub belt_hues: Vec<(usize, u8)>,
-    /// For each plan machine, the scope tint its footprint takes when no agent tints it.
+    /// For each plan machine, whether it is abnormal: an unsettled clash sits on it. Only an
+    /// abnormal machine takes a colour from the live work. A working, waiting or stale agent
+    /// leaves its machine grey, and the drone carries the state.
+    pub abnormal: Vec<bool>,
+    /// For each plan machine, the scope tint its footprint takes when it is not abnormal.
     pub scope_tints: Vec<Option<ScopeTint>>,
     /// Scope machine names the plan does not have, so the page can say they are not drawn.
     pub unplaced: Vec<String>,
+    /// The machines where work landed while the reader was away, latest first.
+    pub ghosts: Vec<Ghost>,
+}
+
+/// A machine where work landed while the reader was away, drawn as a grey outline round its
+/// footprint on the ground until the reader looks at it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ghost {
+    /// The plan machine.
+    pub machine: usize,
+    /// How many of its tasks landed since the reader last saw the page.
+    pub count: usize,
+    /// When the latest of them landed, in log milliseconds.
+    pub at: u64,
+    /// The outline, as `[x, y, w, h]` in world units on the ground.
+    pub rect: [f32; 4],
+}
+
+impl Ghost {
+    /// The outline's corners on the ground, in turn round the rectangle.
+    #[must_use]
+    pub fn corners(&self) -> [[f32; 3]; 4] {
+        let [x, y, w, h] = self.rect;
+        [
+            [x, y, 0.0],
+            [x + w, y, 0.0],
+            [x + w, y + h, 0.0],
+            [x, y + h, 0.0],
+        ]
+    }
 }
 
 impl Marks {
-    /// Places the marks for `view` on `plan`. `stands` gives each plan machine's model, in plan
-    /// order. `slots` gives each agent its hue, so it must already cover the view's agents.
+    /// Places the marks for `view` on `plan`, with no clock. `stands` gives each plan machine's
+    /// model, in plan order. `slots` gives each agent its hue, so it must already cover the
+    /// view's agents.
     #[must_use]
     pub fn build(view: &View, plan: &Plan, stands: &[Stand], slots: &AgentSlots) -> Self {
+        Self::build_at(view, plan, stands, slots, Clock::default())
+    }
+
+    /// Places the marks for `view` on `plan` at the time `clock` gives, so a quiet agent's
+    /// drone can read stale.
+    #[must_use]
+    pub fn build_at(
+        view: &View,
+        plan: &Plan,
+        stands: &[Stand],
+        slots: &AgentSlots,
+        clock: Clock,
+    ) -> Self {
         let waiting = waiting_agents(view);
-        let (bodies, pins) = place(view, plan, stands, slots, &waiting);
-        let mut footprints = vec![Vec::new(); plan.machines.len()];
-        for body in &bodies {
-            let hues: &mut Vec<usize> = &mut footprints[body.machine];
-            if !hues.contains(&body.slot) {
-                hues.push(body.slot);
-                hues.sort_unstable();
-            }
-        }
+        let (bodies, pins) = place(view, plan, stands, slots, &waiting, clock);
+        let abnormal = (0..plan.machines.len())
+            .map(|i| view.machines.get(i).is_some_and(|machine| machine.abnormal))
+            .collect();
         let scope = slice_layout(&view.lanes, plan);
-        let mut flags = flags(view, plan, stands, &bodies, &pins);
+        let mut flags = flags(view, plan, stands, &bodies, &pins, clock);
+        flags.extend(away_flags(view, plan, slots, &waiting, clock));
         flags.extend(
             scope
                 .slices
@@ -350,51 +686,166 @@ impl Marks {
             bodies,
             pins,
             flags,
-            footprints,
-            belt_hues: live_hues(view, plan, slots),
+            abnormal,
             scope_tints: scope.tints,
             unplaced: scope.unplaced,
+            ghosts: ghosts(view, plan, clock),
         }
     }
 
-    /// The tint slot of a plan machine's footprint: one agent's mix, the shared mix, or with no
-    /// agent on it, its scope tint or none. Live work outranks the scope underneath it.
+    /// The tint slot of a plan machine's footprint: the faint clash red when it is abnormal,
+    /// otherwise its scope tint or none. An open clash outranks the scope underneath it.
     #[must_use]
     pub fn footprint_tint(&self, machine: usize) -> u8 {
-        let tint = match self.footprints.get(machine).map(Vec::as_slice) {
-            None | Some([]) => match self.scope_tints.get(machine).copied().flatten() {
+        let tint = if self.abnormal.get(machine).copied().unwrap_or(false) {
+            TINT_CLASH
+        } else {
+            match self.scope_tints.get(machine).copied().flatten() {
                 Some(scope) => TINT_SCOPE0 + scope as u32,
                 None => 0,
-            },
-            Some([slot]) => TINT_FOOTPRINT0 + *slot as u32,
-            Some(_) => TINT_SHARED,
+            }
         };
         u8::try_from(tint).expect("tint slots fit in a byte")
     }
+}
 
-    /// The renderer's tint table: the defaults, with the shared slot holding the mix of every
-    /// hue that shares a machine.
-    #[must_use]
-    pub fn tint_table(&self) -> [[f32; 4]; TINT_LEN] {
-        let mut table = theme::tints();
-        let shared: BTreeSet<usize> = self
-            .footprints
+/// The tint slot an instance takes while a tour step is staged. A machine the step stages keeps its
+/// slot, and any other takes its dimmed slot, so the step's marks stand out. With no stage, every
+/// machine keeps its slot.
+#[must_use]
+pub fn emphasised(tint: u8, staged: bool) -> u8 {
+    if staged {
+        tint
+    } else {
+        let dimmed = u32::from(tint) + TINT_DIM0;
+        u8::try_from(dimmed).expect("dimmed tint slots fit in a byte")
+    }
+}
+
+/// Which plan machines a tour step stages, in plan order, from the spots it names. `None` when no
+/// named machine is on the plant, so nothing is dimmed.
+#[must_use]
+pub fn staged_plan(machine_names: &[String], spots: &[Spot]) -> Option<Vec<bool>> {
+    let staged: Vec<bool> = machine_names
+        .iter()
+        .map(|name| spots.iter().any(|spot| spot.machine_id.as_str() == name))
+        .collect();
+    staged.iter().any(|&on| on).then_some(staged)
+}
+
+/// The chips a tour step stages: one per mark, stacked over the plan machine the mark sits on. A
+/// spot whose machine is not on the plant has no chip.
+#[must_use]
+pub fn stage_flags(spots: &[Spot], plan: &Plan, stands: &[Stand]) -> Vec<Flag> {
+    let mut flags = Vec::new();
+    for spot in spots {
+        let Some(machine) = plan
+            .machines
             .iter()
-            .filter(|slots| slots.len() > 1)
-            .flatten()
-            .copied()
-            .collect();
-        if !shared.is_empty() {
-            let count = shared.len() as f32;
-            let mut mix = [0.0_f32; 4];
-            for &slot in &shared {
-                for (total, channel) in mix.iter_mut().zip(theme::agent_colour(slot)) {
-                    *total += channel / count;
-                }
-            }
-            table[TINT_SHARED as usize] = theme::footprint_mix(mix);
+            .position(|plan_machine| plan_machine.name == spot.machine_id.as_str())
+        else {
+            continue;
+        };
+        let centre = plan.machines[machine].center();
+        let top = stands.get(machine).map_or(PLINTH_TOP, |stand| stand.top);
+        for label in &spot.labels {
+            flags.push(Flag {
+                kind: FlagKind::Stage,
+                text: label.clone(),
+                hue: None,
+                waiting: false,
+                clash: None,
+                check: None,
+                leaving: false,
+                detail: Vec::new(),
+                scope: None,
+                machine: Some(machine),
+                at: [centre[0], centre[1], top + ORDER_LIFT],
+                drone: None,
+                on: None,
+                follow: Follow::Still,
+            });
         }
-        table
+    }
+    flags
+}
+
+/// The tint slot a plan machine's instance takes now: its footprint slot, dimmed while a step is
+/// staged and the machine is not one of its marks. `staged` is by plan index, and `None` when no
+/// step is staged.
+#[must_use]
+pub fn machine_tint(marks: &Marks, plan_index: usize, staged: Option<&[bool]>) -> u8 {
+    let tint = marks.footprint_tint(plan_index);
+    match staged {
+        None => tint,
+        Some(staged) => emphasised(tint, staged.get(plan_index).copied().unwrap_or(true)),
+    }
+}
+
+#[cfg(test)]
+mod stage_tests {
+    use super::*;
+
+    fn spot(machine: &str) -> Spot {
+        Spot {
+            machine_id: serde_json::from_str(&format!("\"{machine}\"")).expect("a machine id"),
+            labels: vec![format!("bounced: {machine}")],
+        }
+    }
+
+    #[test]
+    fn a_staged_machine_keeps_its_slot_and_any_other_takes_the_dimmed_one() {
+        let dim0 = u8::try_from(TINT_DIM0).expect("fits");
+        assert_eq!(emphasised(7, true), 7);
+        assert_eq!(emphasised(7, false), 7 + dim0);
+        assert_eq!(emphasised(0, false), dim0);
+    }
+
+    #[test]
+    fn a_step_stages_only_the_machines_it_names_and_none_when_none_is_on_the_plant() {
+        let names = [
+            "auth".to_owned(),
+            "links".to_owned(),
+            "ratelimit".to_owned(),
+        ];
+        assert_eq!(
+            staged_plan(&names, &[spot("ratelimit")]),
+            Some(vec![false, false, true])
+        );
+        assert_eq!(staged_plan(&names, &[spot("elsewhere")]), None);
+        assert_eq!(staged_plan(&names, &[]), None);
+    }
+
+    #[test]
+    fn a_step_dims_the_machines_it_does_not_stage_and_clearing_restores_them() {
+        let marks = Marks {
+            abnormal: vec![true, false],
+            ..Marks::default()
+        };
+        let staged = [true, false];
+        let clash = u8::try_from(TINT_CLASH).expect("fits");
+        let dim0 = u8::try_from(TINT_DIM0).expect("fits");
+        assert_eq!(machine_tint(&marks, 0, Some(&staged)), clash);
+        assert_eq!(machine_tint(&marks, 1, Some(&staged)), dim0);
+        // With no step staged, each machine keeps the slot its footprint gives it.
+        assert_eq!(machine_tint(&marks, 0, None), marks.footprint_tint(0));
+        assert_eq!(machine_tint(&marks, 1, None), marks.footprint_tint(1));
+    }
+
+    #[test]
+    fn each_dimmed_slot_is_its_plain_colour_at_the_dim_share() {
+        let table = acan_render::theme::tints();
+        for slot in 0..TINT_DIM0 as usize {
+            let plain = table[slot];
+            let dimmed = table[TINT_DIM0 as usize + slot];
+            for channel in 0..3 {
+                assert!(
+                    (dimmed[channel] - plain[channel] * acan_render::theme::DIM_SHARE).abs() < 1e-6,
+                    "slot {slot} channel {channel}"
+                );
+            }
+            assert_eq!(dimmed[3], plain[3], "slot {slot} keeps its alpha");
+        }
     }
 }
 
@@ -453,6 +904,16 @@ pub fn card(view: &View, world: &World, index: usize, slots: &AgentSlots) -> Opt
     })
 }
 
+/// How a body's glide eases.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Path {
+    /// A drop straight down onto its place, easing out.
+    Arrive,
+    /// An arc between machines whose top is at `apex`, easing in and out. The drone faces
+    /// `travel` on the way, turning from `start` at the outset and to its target at the end.
+    Move { apex: f32, travel: f32, start: f32 },
+}
+
 /// A body's glide, from where it was to where the view puts it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Glide {
@@ -460,29 +921,56 @@ struct Glide {
     to: [f32; 3],
     elapsed: f32,
     duration: f32,
+    path: Path,
     /// The agent's palette slot, kept so the body can still draw once it has left.
     slot: usize,
+    /// The top of the machine the body glides to, in world units. The next move arcs over it.
+    top: f32,
 }
 
 impl Glide {
-    fn new(from: [f32; 3], to: [f32; 3], duration: f32, slot: usize) -> Self {
+    /// A drop onto `to` from [`RISE`] above it.
+    fn arrive(to: [f32; 3], slot: usize, top: f32) -> Self {
+        Self {
+            from: [to[0], to[1], to[2] + RISE],
+            to,
+            elapsed: 0.0,
+            duration: ARRIVE_MS,
+            path: Path::Arrive,
+            slot,
+            top,
+        }
+    }
+
+    /// An arc from `from` to `to` over the taller of the two machine tops, facing the way it
+    /// travels. `start` is the heading the drone faces as it sets off.
+    fn moving(from: [f32; 3], to: [f32; 3], tops: (f32, f32), start: f32, slot: usize) -> Self {
+        let travel = heading(from, to).unwrap_or(start);
         Self {
             from,
             to,
             elapsed: 0.0,
-            duration,
+            duration: move_ms(distance([from[0], from[1]], [to[0], to[1]])),
+            path: Path::Move {
+                apex: tops.0.max(tops.1) + ARC_CLEAR,
+                travel,
+                start,
+            },
             slot,
+            top: tops.1,
         }
     }
 
     /// The glide already at its end, for a mark that must not move.
-    fn settled(to: [f32; 3], slot: usize) -> Self {
+    fn settled(to: [f32; 3], slot: usize, top: f32) -> Self {
         Self {
             from: to,
             to,
             elapsed: 0.0,
             duration: 0.0,
+            path: Path::Arrive,
             slot,
+            top,
         }
     }
 
@@ -490,13 +978,89 @@ impl Glide {
         if !self.running() {
             return self.to;
         }
-        let t = ease(self.elapsed / self.duration);
-        std::array::from_fn(|axis| self.from[axis] + (self.to[axis] - self.from[axis]) * t)
+        let share = self.elapsed / self.duration;
+        let lerp = |axis: usize, t: f32| self.from[axis] + (self.to[axis] - self.from[axis]) * t;
+        match self.path {
+            Path::Arrive => {
+                let t = cubic_out(share);
+                std::array::from_fn(|axis| lerp(axis, t))
+            }
+            Path::Move { apex, .. } => {
+                let t = cubic_in_out(share);
+                let middle = 0.5 * (self.from[2] + self.to[2]);
+                let lift = (apex - middle).max(0.0) * 4.0 * t * (1.0 - t);
+                [lerp(0, t), lerp(1, t), lerp(2, t) + lift]
+            }
+        }
+    }
+
+    /// The heading a moving drone faces now, toward `face` at the end, or `None` when the glide
+    /// is not a move under way.
+    fn heading(&self, face: f32) -> Option<f32> {
+        let Path::Move { travel, start, .. } = self.path else {
+            return None;
+        };
+        if !self.running() {
+            return None;
+        }
+        let left = self.duration - self.elapsed;
+        Some(if self.elapsed < FACE_MS {
+            start + wrap(travel - start) * ease(self.elapsed / FACE_MS)
+        } else if left > FACE_MS {
+            travel
+        } else {
+            travel + wrap(face - travel) * ease(1.0 - left / FACE_MS)
+        })
     }
 
     fn running(&self) -> bool {
         self.elapsed < self.duration
     }
+}
+
+/// The pen line a move leaves on the plinth plane, under the path the drone flew. Each piece
+/// inks in as the drone passes over it and fades out over [`TRAIL_FADE_MS`].
+#[derive(Debug, Clone, PartialEq)]
+struct Trail {
+    agent: String,
+    slot: usize,
+    from: [f32; 2],
+    to: [f32; 2],
+    duration: f32,
+    elapsed: f32,
+}
+
+impl Trail {
+    /// The pieces drawn now, as their ends and their opacity.
+    fn pieces(&self) -> Vec<([f32; 2], [f32; 2], f32)> {
+        let point = |share: f32| {
+            [
+                self.from[0] + (self.to[0] - self.from[0]) * share,
+                self.from[1] + (self.to[1] - self.from[1]) * share,
+            ]
+        };
+        (0..TRAIL_PIECES)
+            .filter_map(|i| {
+                let (start, end) = (
+                    i as f32 / TRAIL_PIECES as f32,
+                    (i + 1) as f32 / TRAIL_PIECES as f32,
+                );
+                let passed = self.duration * cubic_in_out_inverse(end);
+                let age = self.elapsed - passed;
+                let alpha = TRAIL_ALPHA * (1.0 - age / TRAIL_FADE_MS);
+                (age >= 0.0 && alpha > 0.0).then(|| (point(start), point(end), alpha))
+            })
+            .collect()
+    }
+
+    fn running(&self) -> bool {
+        self.elapsed < self.duration + TRAIL_FADE_MS
+    }
+}
+
+/// Milliseconds a move of `units` plan units takes.
+fn move_ms(units: f32) -> f32 {
+    (MOVE_BASE_MS + MOVE_PER_UNIT_MS * units).clamp(MOVE_BOUNDS_MS.0, MOVE_BOUNDS_MS.1)
 }
 
 /// A drone's turn toward its machine, from the heading it starts from along the shorter arc to the
@@ -553,8 +1117,7 @@ fn wrap(a: f32) -> f32 {
     (a + PI).rem_euclid(TAU) - PI
 }
 
-/// A body that has left its machine: it eases down into the plinth and shrinks away over
-/// [`LEAVE_MS`].
+/// A body that has left its machine: it rises [`RISE`] off it over [`LEAVE_MS`] and is gone.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Leave {
     at: [f32; 3],
@@ -564,11 +1127,11 @@ struct Leave {
 }
 
 impl Leave {
-    /// Where the body stands now: it has sunk part way into its plinth.
+    /// Where the body stands now: it has risen part way off its machine.
     fn now(&self) -> Leaving {
-        let t = ease(self.elapsed / LEAVE_MS);
+        let t = cubic_out(self.elapsed / LEAVE_MS);
         Leaving {
-            at: [self.at[0], self.at[1], self.at[2] - RISE * t],
+            at: [self.at[0], self.at[1], self.at[2] + RISE * t],
             slot: self.slot,
             heading: self.heading,
         }
@@ -626,10 +1189,12 @@ impl Rise {
 /// The eases the marks run between the view's positions. Nothing here is read back into the view.
 ///
 /// A still motion, from `?freeze=1`, lands every ease at once: a bot does not glide, a bot that
-/// left is gone, no flag fades, and a landed dot keeps its word because its hold never runs.
+/// left is gone, no flag fades, and a landed dot keeps its word because its hold never runs. Under
+/// reduced motion the drones jump to their places and do not bob, while flags still fade.
 #[derive(Debug, Default)]
 pub struct Motion {
     still: bool,
+    reduced: bool,
     bodies: BTreeMap<String, Glide>,
     turns: BTreeMap<String, Turn>,
     leaving: BTreeMap<String, Leave>,
@@ -642,6 +1207,27 @@ pub struct Motion {
     pulsing: bool,
     /// Where the pulse is, in milliseconds through its cycle. It stays at zero while still.
     pulse_ms: f32,
+    /// Where the working drones' bob is, in milliseconds through its period.
+    bob_ms: f32,
+    /// World units per CSS px at the drones, so the bob is [`BOB_PX`] on screen. Zero until the
+    /// page sets it, which keeps every drone level.
+    px_units: f32,
+    /// The trails of recent moves, oldest first.
+    trails: Vec<Trail>,
+    /// Whether the next sync lands every drone at once, as after a replay seek.
+    cut: bool,
+    /// The ghosts shown, by plan machine.
+    ghosts: BTreeMap<usize, Haunt>,
+    /// The ghosts the reader cleared, by plan machine, with the landing each showed. A cleared
+    /// ghost stays gone until a newer task lands there.
+    cleared: BTreeMap<usize, u64>,
+}
+
+/// A ghost on show: the landing it shows, and how far its fade out has run once it clears.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Haunt {
+    at: u64,
+    fade: Option<f32>,
 }
 
 impl Motion {
@@ -653,27 +1239,65 @@ impl Motion {
         }
     }
 
-    /// Points each ease at the marks the view now gives. A body that moves glides from where it
-    /// is, a body that leaves eases off its machine, and a pin that leaves sinks out.
+    /// Holds the drones' glides and bob still under reduced motion. Flags still fade.
+    pub fn set_reduced(&mut self, reduced: bool) {
+        self.reduced = reduced;
+    }
+
+    /// Lands every drone at its place at the next sync, with no glide and no trail, and clears the
+    /// trails there are. The page calls it when the log is replaced, as a replay seek does.
+    pub fn cut(&mut self) {
+        self.cut = true;
+        self.trails.clear();
+    }
+
+    /// Sets how many world units a CSS px covers at the drones, which sizes the bob.
+    pub fn set_px_units(&mut self, units: f32) {
+        self.px_units = if units.is_finite() {
+            units.max(0.0)
+        } else {
+            0.0
+        };
+    }
+
+    /// Points each ease at the marks the view now gives. A body that arrives drops in, a body that
+    /// moves arcs from where it is, a body that leaves rises off its machine, and a pin that leaves
+    /// sinks out.
     pub fn sync(&mut self, marks: &Marks) {
+        let jump = self.still || self.reduced || std::mem::take(&mut self.cut);
         for body in &marks.bodies {
-            self.sync_turn(body);
+            let top = body.target[2] - BEACON_RADIUS;
             let glide = match self.bodies.get(&body.agent) {
-                Some(glide) if glide.to == body.at => continue,
-                Some(glide) => Glide::new(glide.at(), body.at, MOVE_MS, body.slot),
-                None => Glide::new(
-                    [body.at[0], body.at[1], body.at[2] - RISE],
-                    body.at,
-                    ARRIVE_MS,
-                    body.slot,
-                ),
+                Some(glide) if glide.to == body.at => {
+                    self.sync_turn(body);
+                    continue;
+                }
+                _ if jump => Glide::settled(body.at, body.slot, top),
+                Some(glide) => {
+                    let start = self.heading_of(&body.agent).unwrap_or(0.0);
+                    Glide::moving(glide.at(), body.at, (glide.top, top), start, body.slot)
+                }
+                None => Glide::arrive(body.at, body.slot, top),
             };
-            let glide = if self.still {
-                Glide::settled(glide.to, glide.slot)
-            } else {
-                glide
-            };
+            let moves = matches!(glide.path, Path::Move { .. });
+            if moves {
+                self.trails.push(Trail {
+                    agent: body.agent.clone(),
+                    slot: body.slot,
+                    from: [glide.from[0], glide.from[1]],
+                    to: [glide.to[0], glide.to[1]],
+                    duration: glide.duration,
+                    elapsed: 0.0,
+                });
+            }
             self.bodies.insert(body.agent.clone(), glide);
+            if moves {
+                // The move's own heading carries the turn, so the drone ends facing its target.
+                let face = heading(body.at, body.target).unwrap_or(0.0);
+                self.turns.insert(body.agent.clone(), Turn::settled(face));
+            } else {
+                self.sync_turn(body);
+            }
             self.leaving.remove(&body.agent);
         }
         let live: BTreeSet<&str> = marks
@@ -692,8 +1316,10 @@ impl Motion {
             .collect();
         self.bodies.retain(|agent, _| live.contains(agent.as_str()));
         self.turns.retain(|agent, _| live.contains(agent.as_str()));
+        self.trails
+            .retain(|trail| live.contains(trail.agent.as_str()));
         for (agent, glide, heading) in gone {
-            if !self.still {
+            if !self.still && !self.reduced {
                 self.leaving.insert(
                     agent,
                     Leave {
@@ -733,6 +1359,57 @@ impl Motion {
 
         self.sync_landed(marks);
         self.sync_order(marks);
+        self.sync_ghosts(marks);
+    }
+
+    /// Shows each ghost the marks give that the reader has not cleared. A ghost whose landing
+    /// changes shows again.
+    fn sync_ghosts(&mut self, marks: &Marks) {
+        let shown: BTreeMap<usize, u64> = marks
+            .ghosts
+            .iter()
+            .map(|ghost| (ghost.machine, ghost.at))
+            .collect();
+        self.cleared
+            .retain(|machine, at| shown.get(machine) == Some(at));
+        self.ghosts
+            .retain(|machine, haunt| shown.get(machine) == Some(&haunt.at));
+        for (&machine, &at) in &shown {
+            if !self.cleared.contains_key(&machine) {
+                self.ghosts
+                    .entry(machine)
+                    .or_insert(Haunt { at, fade: None });
+            }
+        }
+    }
+
+    /// Starts the fade out of the ghost on plan machine `machine`. Returns whether one was there
+    /// and had not begun to fade.
+    pub fn clear_ghost(&mut self, machine: usize) -> bool {
+        let Some(haunt) = self.ghosts.get_mut(&machine) else {
+            return false;
+        };
+        if haunt.fade.is_some() {
+            return false;
+        }
+        haunt.fade = Some(0.0);
+        true
+    }
+
+    /// Starts the fade out of every ghost. Returns whether any began to fade.
+    pub fn clear_ghosts(&mut self) -> bool {
+        let machines: Vec<usize> = self.ghosts.keys().copied().collect();
+        machines
+            .into_iter()
+            .fold(false, |any, machine| self.clear_ghost(machine) | any)
+    }
+
+    /// The opacity of the ghost on plan machine `machine` now, or `None` when it shows none.
+    #[must_use]
+    pub fn ghost_alpha(&self, machine: usize) -> Option<f32> {
+        let haunt = self.ghosts.get(&machine)?;
+        let left = haunt.fade.map_or(1.0, |fade| 1.0 - fade / GHOST_FADE_MS);
+        (left > 0.0).then_some(GHOST_ALPHA * left)
     }
 
     /// Points a drone at its machine. A drone turns when the spot it faces changes, and a still
@@ -746,7 +1423,7 @@ impl Motion {
         };
         let turn = match self.turns.get(&body.agent) {
             Some(turn) if turn.face == face => return,
-            Some(turn) if !self.still => Turn::between(turn.at(), face),
+            Some(turn) if !self.still && !self.reduced => Turn::between(turn.at(), face),
             _ => Turn::settled(face),
         };
         self.turns.insert(body.agent.clone(), turn);
@@ -811,6 +1488,10 @@ impl Motion {
         for leave in self.leaving.values_mut() {
             leave.elapsed += dt;
         }
+        for trail in &mut self.trails {
+            trail.elapsed += dt;
+        }
+        self.trails.retain(Trail::running);
         self.leaving.retain(|_, leave| leave.elapsed < LEAVE_MS);
         for rise in self.pins.values_mut() {
             rise.elapsed += dt;
@@ -833,6 +1514,9 @@ impl Motion {
         }
         if self.pulsing {
             self.pulse_ms = (self.pulse_ms + dt) % PULSE_MS;
+            if !self.reduced {
+                self.bob_ms = (self.bob_ms + dt) % BOB_PERIOD_MS;
+            }
         }
         let bodies = self.bodies.values().any(Glide::running);
         let turning = self.turns.values().any(Turn::running);
@@ -843,7 +1527,36 @@ impl Motion {
             .values()
             .any(|landing| landing.elapsed < LANDED_HOLD_MS);
         let fading = !self.fades.is_empty();
-        bodies || turning || pins || leaving || holding || fading || self.pulsing
+        let trailing = !self.trails.is_empty();
+        let ghosting = self.advance_ghosts(dt);
+        bodies
+            || turning
+            || pins
+            || leaving
+            || holding
+            || fading
+            || trailing
+            || ghosting
+            || self.pulsing
+    }
+
+    /// Moves each ghost's fade on, and drops the ghosts that have faded. Returns whether any is
+    /// still fading.
+    fn advance_ghosts(&mut self, dt: f32) -> bool {
+        let mut gone = Vec::new();
+        for (&machine, haunt) in &mut self.ghosts {
+            if let Some(fade) = haunt.fade.as_mut() {
+                *fade += dt;
+                if *fade >= GHOST_FADE_MS {
+                    gone.push((machine, haunt.at));
+                }
+            }
+        }
+        for (machine, at) in gone {
+            self.ghosts.remove(&machine);
+            self.cleared.insert(machine, at);
+        }
+        self.ghosts.values().any(|haunt| haunt.fade.is_some())
     }
 
     /// How far a working agent's beacon has swollen now, from 0 at rest to 1 at the top of a pulse.
@@ -852,10 +1565,26 @@ impl Motion {
         0.5 - 0.5 * (TAU * self.pulse_ms / PULSE_MS).cos()
     }
 
-    /// The heading a drone faces now, in radians from +x.
+    /// How far a working drone in palette slot `slot` has bobbed now, in world units. Each slot
+    /// starts at its own phase, so the drones on one machine do not bob together.
+    #[must_use]
+    pub fn bob(&self, slot: usize) -> f32 {
+        if self.still || self.reduced {
+            return 0.0;
+        }
+        let phase = self.bob_ms / BOB_PERIOD_MS + slot as f32 / AGENT_SLOTS as f32;
+        0.5 * BOB_PX * self.px_units * (TAU * phase).sin()
+    }
+
+    /// The heading a drone faces now, in radians from +x. A drone on the move faces the way it
+    /// travels and turns to its target in the move's last [`FACE_MS`].
     #[must_use]
     pub fn heading_of(&self, agent: &str) -> Option<f32> {
-        self.turns.get(agent).map(Turn::at)
+        let turn = self.turns.get(agent).map(Turn::at);
+        self.bodies
+            .get(agent)
+            .and_then(|glide| glide.heading(turn.unwrap_or(0.0)))
+            .or(turn)
     }
 
     /// Whether a flag listing changed while time passed, such as a landed dot going quiet. Reading
@@ -943,42 +1672,33 @@ impl Motion {
 /// The model kinds of the marks, after the machine kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MarkKinds {
-    /// A drone's shell.
+    /// A drone's white body.
     pub body: u16,
-    /// A drone's glass and lamp, at full hue.
+    /// A drone's iris, lens ring, ear hubs and antenna tip, in its state's tint.
     pub accent: u16,
-    /// A drone's shadow on the plinth top.
-    pub shadow: u16,
     pub ring: u16,
     pub pin: u16,
     pub stalk: u16,
     pub beacon: u16,
 }
 
-/// A drone's instances: its shell and its accent at its centre, and its shadow on the ground
-/// under the centre. The shadow keeps its plan size, since it lies on the ground.
-fn drone(kinds: MarkKinds, at: [f32; 3], slot: usize, turn: f32, bot: [f32; 2]) -> [Instance; 3] {
+/// A drone's instances: its white body and its accent at its centre, the accent in `accent`,
+/// which [`eye_tint`] gives for the drone's state. Its glow and shadow are [`spots`].
+fn drone(kinds: MarkKinds, at: [f32; 3], accent: u8, turn: f32, bot: [f32; 2]) -> [Instance; 2] {
     [
         Instance {
             offset: at,
             kind: kinds.body,
-            tint: shell_tint(slot),
+            tint: 0,
             grow: bot,
             turn,
         },
         Instance {
             offset: at,
             kind: kinds.accent,
-            tint: body_tint(slot),
+            tint: accent,
             grow: bot,
             turn,
-        },
-        Instance {
-            offset: [at[0], at[1], 0.0],
-            kind: kinds.shadow,
-            tint: 0,
-            grow: [0.0; 2],
-            turn: 0.0,
         },
     ]
 }
@@ -989,11 +1709,12 @@ fn drone_grow(dpr: f32) -> [f32; 2] {
     [BOT_MIN_PX * dpr, BOT_HEIGHT]
 }
 
-/// The instances of the marks now. They are every drone, the ring round each waiting drone, each drone that
-/// is leaving, each drone's beacon at its target, and each pin's stalk and diamond. A drone, its
-/// ring, a beacon and a diamond grow to their screen floor, which `dpr` turns from CSS px into
-/// device px. A stalk keeps its plan size. A working agent's beacon swells with its pulse. The
-/// riding agent's drone has no shell, accent or shadow, but its ring and beacon still draw.
+/// The instances of the marks now. They are every drone, the ring round each waiting drone at its
+/// body's height, each drone that is leaving, each working drone's beacon at its target, and each
+/// pin's stalk and diamond. A drone, its ring, a beacon and a diamond grow to their screen floor,
+/// which `dpr` turns from CSS px into device px. A stalk keeps its plan size. A working agent's
+/// beacon swells with its pulse. A drone's accent takes its state's tint. The riding agent's drone
+/// has no body or accent, but its ring and beacon still draw.
 #[must_use]
 pub fn mark_instances(
     motion: &Motion,
@@ -1010,23 +1731,23 @@ pub fn mark_instances(
             continue;
         };
         let turn = motion.heading_of(&body.agent).unwrap_or(0.0);
+        let at = bobbed(motion, body, at);
         if riding != Some(body.agent.as_str()) {
-            out.extend(drone(kinds, at, body.slot, turn, bot));
+            out.extend(drone(kinds, at, eye_tint(body.state, body.slot), turn, bot));
         }
-        if body.waiting {
+        if body.waiting() {
             out.push(Instance {
-                offset: [at[0], at[1], PLINTH_TOP],
+                offset: at,
                 kind: kinds.ring,
                 tint: 0,
                 grow: bot,
                 turn: 0.0,
             });
         }
-        let swell = if body.working() {
-            1.0 + BEACON_SWING * motion.pulse()
-        } else {
-            1.0
-        };
+        if !body.working() {
+            continue;
+        }
+        let swell = 1.0 + BEACON_SWING * motion.pulse();
         out.push(Instance {
             offset: body.target,
             kind: kinds.beacon,
@@ -1040,7 +1761,8 @@ pub fn mark_instances(
             continue;
         }
         let leaving = leave.now();
-        out.extend(drone(kinds, leaving.at, leaving.slot, leaving.heading, bot));
+        let accent = eye_tint(DroneState::Idle, leaving.slot);
+        out.extend(drone(kinds, leaving.at, accent, leaving.heading, bot));
     }
     for (foot, head) in motion.pins_now() {
         out.push(Instance {
@@ -1061,25 +1783,156 @@ pub fn mark_instances(
     out
 }
 
-/// The beams now run from each drone's eye to its target. The eye is on the nose, in the drone's
-/// own frame, so the beam turns and grows with the drone and starts on the eye at any size. A drone
-/// that is leaving has none, and neither has the riding agent's drone.
+/// A working drone's centre lifted by its bob. Any other drone keeps its place.
+fn bobbed(motion: &Motion, body: &Body, at: [f32; 3]) -> [f32; 3] {
+    if body.working() {
+        [at[0], at[1], at[2] + motion.bob(body.slot)]
+    } else {
+        at
+    }
+}
+
+/// The beams now run from each drone's eye to its target. The eye is on the nose, looking a little
+/// down, in the drone's own frame, so the beam turns and grows with the drone and starts on the eye
+/// at any size. A drone
+/// that is leaving has none, and neither has the riding agent's drone. The hovered drone's tether
+/// inks in fully.
 #[must_use]
-pub fn beams(motion: &Motion, marks: &Marks, dpr: f32, riding: Option<&str>) -> Vec<Beam> {
+pub fn beams(
+    motion: &Motion,
+    marks: &Marks,
+    dpr: f32,
+    riding: Option<&str>,
+    hovered: Option<&str>,
+) -> Vec<Beam> {
     marks
         .bodies
         .iter()
         .filter(|body| riding != Some(body.agent.as_str()))
         .filter_map(|body| {
-            let at = motion.body_at(&body.agent)?;
+            let at = bobbed(motion, body, motion.body_at(&body.agent)?);
             let facing = motion.heading_of(&body.agent)?;
             Some(Beam {
-                from: [EYE_DISTANCE, 0.0, 0.0],
+                from: eye_point(),
                 to: body.target,
                 origin: at,
                 grow: drone_grow(dpr),
                 turn: facing,
                 tint: body_tint(body.slot),
+                alpha: if hovered == Some(body.agent.as_str()) {
+                    1.0
+                } else {
+                    body.state.tether_alpha()
+                },
+                width_px: TETHER_PX * dpr,
+                spot: 0.0,
+            })
+        })
+        .collect()
+}
+
+/// The soft spots now: the glow under each drone, in its agent's hue at its state's strength, and
+/// its shadow on the plinth top under its centre, which shrinks and fades as the drone rises. A
+/// glow hangs from the drone's centre in its own frame, so it bobs and grows with the drone, and a
+/// shadow grows with the drone too. A stale drone has no glow, a leaving drone glows as an idle
+/// one does, and the riding agent's drone has neither.
+#[must_use]
+pub fn spots(motion: &Motion, marks: &Marks, dpr: f32, riding: Option<&str>) -> Vec<Beam> {
+    let glow = |at: [f32; 3], slot: usize, alpha: f32| Beam {
+        from: [0.0, 0.0, -GLOW_DROP],
+        to: at,
+        origin: at,
+        grow: drone_grow(dpr),
+        turn: 0.0,
+        tint: body_tint(slot),
+        alpha,
+        width_px: 0.0,
+        spot: GLOW_RADIUS,
+    };
+    let shadow = |at: [f32; 3]| {
+        let (radius, strength) = shadow_at(at[2] - PLINTH_TOP);
+        let ground = [at[0], at[1], PLINTH_TOP];
+        Beam {
+            from: [0.0; 3],
+            to: ground,
+            origin: ground,
+            grow: drone_grow(dpr),
+            turn: 0.0,
+            tint: u8::try_from(TINT_SHADOW).expect("tint slots fit in a byte"),
+            alpha: SHADOW_ALPHA * strength,
+            width_px: 0.0,
+            spot: radius,
+        }
+    };
+    let bodies = marks
+        .bodies
+        .iter()
+        .filter(|body| riding != Some(body.agent.as_str()))
+        .filter_map(|body| {
+            let at = bobbed(motion, body, motion.body_at(&body.agent)?);
+            Some((at, body.slot, body.state.glow_alpha()))
+        });
+    let leaving = motion
+        .leaving
+        .iter()
+        .filter(|(agent, _)| riding != Some(agent.as_str()))
+        .map(|(_, leave)| {
+            let now = leave.now();
+            (now.at, now.slot, DroneState::Idle.glow_alpha())
+        });
+    bodies
+        .chain(leaving)
+        .flat_map(|(at, slot, alpha)| {
+            let glow = (alpha > 0.0).then(|| glow(at, slot, alpha));
+            [Some(shadow(at)), glow].into_iter().flatten()
+        })
+        .collect()
+}
+
+/// The trails now, as fine pen lines in each agent's hue on the plinth plane under the paths the
+/// drones flew. The riding agent leaves none, since the ride's camera flies the path itself.
+#[must_use]
+pub fn trail_beams(motion: &Motion, dpr: f32, riding: Option<&str>) -> Vec<Beam> {
+    motion
+        .trails
+        .iter()
+        .filter(|trail| riding != Some(trail.agent.as_str()))
+        .flat_map(|trail| {
+            let tint = body_tint(trail.slot);
+            trail.pieces().into_iter().map(move |(a, b, alpha)| Beam {
+                from: [a[0], a[1], PLINTH_TOP],
+                to: [b[0], b[1], PLINTH_TOP],
+                origin: [0.0; 3],
+                grow: [0.0; 2],
+                turn: 0.0,
+                tint,
+                alpha,
+                width_px: TRAIL_PX * dpr,
+                spot: 0.0,
+            })
+        })
+        .collect()
+}
+
+/// The ghosts now, each a grey loop of four strokes round its machine's footprint on the ground.
+#[must_use]
+pub fn ghost_beams(motion: &Motion, marks: &Marks, dpr: f32) -> Vec<Beam> {
+    let tint = u8::try_from(TINT_GHOST).expect("tint slots fit in a byte");
+    marks
+        .ghosts
+        .iter()
+        .filter_map(|ghost| Some((ghost.corners(), motion.ghost_alpha(ghost.machine)?)))
+        .flat_map(|(corners, alpha)| {
+            (0..4).map(move |i| Beam {
+                from: corners[i],
+                to: corners[(i + 1) % 4],
+                origin: [0.0; 3],
+                grow: [0.0; 2],
+                turn: 0.0,
+                tint,
+                alpha,
+                width_px: GHOST_PX * dpr,
+                spot: 0.0,
             })
         })
         .collect()
@@ -1098,20 +1951,59 @@ pub fn flag_anchor(flag: &Flag, at: [f32; 3], project: impl Fn([f32; 3]) -> [f32
             [centre[0], centre[1] - height * 0.5 - FLAG_GAP_PX]
         }
         FlagKind::Clash => {
-            let (foot, height) = visual_extent(at, PIN_HEIGHT, PIN_MIN_PX, &project);
-            [
-                foot[0] + height * DIAMOND_HALF_WIDTH + FLAG_GAP_PX,
-                foot[1] - height * 0.5,
-            ]
+            let [_, right] = badge_centres(at, &project);
+            [right[0] + BADGE_PX * 0.5 + FLAG_GAP_PX, right[1]]
         }
         FlagKind::Landed => {
             let [x, y] = project(at);
             [x + FLAG_GAP_PX, y]
         }
-        FlagKind::Order | FlagKind::Question | FlagKind::Plot => project(at),
+        FlagKind::Away => project(at),
+        FlagKind::Order | FlagKind::Question | FlagKind::Plot | FlagKind::Stage => project(at),
     }
 }
 
+/// How far past a drone's disc the pointer still hovers it, in CSS px.
+pub const HOVER_PAD_PX: f32 = 6.0;
+
+/// The index of the disc the CSS point `p` hovers: within its radius and [`HOVER_PAD_PX`], and
+/// the nearest centre when two reach. Each disc is its centre and radius, as [`drone_disc`] gives.
+#[must_use]
+pub fn disc_under(discs: &[([f32; 2], f32)], p: [f32; 2]) -> Option<usize> {
+    discs
+        .iter()
+        .enumerate()
+        .map(|(i, (centre, radius))| (i, distance(*centre, p), *radius))
+        .filter(|&(_, gap, radius)| gap <= radius + HOVER_PAD_PX)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _, _)| i)
+}
+
+/// Each working drone's beacon on screen, as its centre in CSS px and its radius there, at the
+/// size the renderer draws it now, pulse included. The page rings each in paper, so the hue dot
+/// still reads on a grey machine top.
+#[must_use]
+pub fn beacon_discs(
+    motion: &Motion,
+    marks: &Marks,
+    project: impl Fn([f32; 3]) -> [f32; 2],
+) -> Vec<([f32; 2], f32)> {
+    let swell = 1.0 + BEACON_SWING * motion.pulse();
+    marks
+        .bodies
+        .iter()
+        .filter(|body| body.working() && motion.body_at(&body.agent).is_some())
+        .map(|body| {
+            let (centre, height) = visual_extent(
+                body.target,
+                2.0 * BEACON_RADIUS,
+                BEACON_PX * swell,
+                &project,
+            );
+            (centre, height * 0.5)
+        })
+        .collect()
+}
 /// A drone's centre on screen, in CSS px, and its radius there. The radius is half the drone's
 /// screen height, which the screen floor sets when the drone is small.
 #[must_use]
@@ -1144,6 +2036,31 @@ fn visual_extent(
 fn ease(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+fn cubic_out(t: f32) -> f32 {
+    let u = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - u * u * u
+}
+
+/// The share of a move's time at which [`cubic_in_out`] reaches `y`.
+fn cubic_in_out_inverse(y: f32) -> f32 {
+    let y = y.clamp(0.0, 1.0);
+    if y < 0.5 {
+        (y / 4.0).cbrt()
+    } else {
+        1.0 - (2.0 * (1.0 - y)).cbrt() / 2.0
+    }
+}
+
+fn cubic_in_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        let u = -2.0 * t + 2.0;
+        1.0 - u * u * u / 2.0
+    }
 }
 
 fn is_open(clash: &ClashView) -> bool {
@@ -1186,6 +2103,7 @@ fn place(
     stands: &[Stand],
     slots: &AgentSlots,
     waiting: &BTreeSet<String>,
+    clock: Clock,
 ) -> (Vec<Body>, Vec<Pin>) {
     let homes: Vec<Option<usize>> = view
         .agents
@@ -1203,6 +2121,9 @@ fn place(
         let Some(machine) = home else {
             continue;
         };
+        if away_for(agent, waiting, clock).is_some() {
+            continue;
+        }
         let centre = plan.machines[machine].center();
         let top = stands.get(machine).map_or(PLINTH_TOP, |stand| stand.top);
         let spots: &[[f32; 2]] = stands
@@ -1219,13 +2140,15 @@ fn place(
             hover_height(top)
         };
         let id = agent.id.to_string();
+        let state = DroneState::of(agent.activity, waiting.contains(&id), stale(agent, clock));
+        let z = seat_height(z, state);
         let check = agent
             .task
             .and_then(|task| view.tasks.iter().find(|candidate| candidate.id == task))
             .and_then(|candidate| candidate.check.clone());
         bodies.push(Body {
             slot: slots.slot(&id),
-            waiting: waiting.contains(&id),
+            state,
             agent: id,
             machine,
             at: [spot[0], spot[1], z],
@@ -1235,6 +2158,138 @@ fn place(
         });
     }
     (bodies, pins(view, plan, stands))
+}
+
+/// The machines where a task landed while the reader was away, latest first and at most
+/// [`GHOST_MAX`]. Only a live page that knows when it was last seen has any.
+fn ghosts(view: &View, plan: &Plan, clock: Clock) -> Vec<Ghost> {
+    let (Some(_), Some(away)) = (clock.now, clock.away) else {
+        return Vec::new();
+    };
+    let while_away = |at: &&u64| **at > away.seen && **at <= away.back;
+    let mut ghosts: Vec<Ghost> = plan
+        .machines
+        .iter()
+        .zip(&view.machines)
+        .enumerate()
+        .filter_map(|(machine, (plan_machine, seen_machine))| {
+            let count = seen_machine.landings.iter().filter(while_away).count();
+            let at = *seen_machine.landings.iter().rfind(while_away)?;
+            let [x, y] = plan_machine.min;
+            let [w, h] = plan_machine.size;
+            (count > 0).then_some(Ghost {
+                machine,
+                count,
+                at,
+                rect: [
+                    x - GHOST_OFFSET,
+                    y - GHOST_OFFSET,
+                    w + 2.0 * GHOST_OFFSET,
+                    h + 2.0 * GHOST_OFFSET,
+                ],
+            })
+        })
+        .collect();
+    ghosts.sort_by(|a, b| b.at.cmp(&a.at).then(a.machine.cmp(&b.machine)));
+    ghosts.truncate(GHOST_MAX);
+    ghosts
+}
+
+/// Whether the screen point `p` lies inside the polygon `quad`, by the even-odd rule.
+#[must_use]
+pub fn inside_quad(quad: &[[f32; 2]], p: [f32; 2]) -> bool {
+    let mut inside = false;
+    let mut j = quad.len().wrapping_sub(1);
+    for (i, &[xi, yi]) in quad.iter().enumerate() {
+        let [xj, yj] = quad[j];
+        if (yi > p[1]) != (yj > p[1]) && p[0] < (xj - xi) * (p[1] - yi) / (yj - yi) + xi {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Whether an agent's drone reads stale: it holds a task and has been quiet for [`STALE_MS`],
+/// but not yet for [`AWAY_MS`].
+fn stale(agent: &AgentView, clock: Clock) -> bool {
+    holds_task(agent)
+        && clock
+            .quiet(agent)
+            .is_some_and(|quiet| (STALE_MS..AWAY_MS).contains(&quiet))
+}
+
+/// How long an agent that holds a task has been quiet, once that is [`AWAY_MS`] or more. An
+/// agent that waits on the user is quiet because of the user, so it keeps its drone and ring.
+fn away_for(agent: &AgentView, waiting: &BTreeSet<String>, clock: Clock) -> Option<u64> {
+    let quiet = clock.quiet(agent)?;
+    let away = holds_task(agent) && quiet >= AWAY_MS && !waiting.contains(&agent.id.to_string());
+    away.then_some(quiet)
+}
+
+fn holds_task(agent: &AgentView) -> bool {
+    agent.task.is_some() && agent.activity != "readback"
+}
+
+/// How long an away dot says its agent has been quiet: whole minutes, then whole hours from an
+/// hour on, such as `12m` or `2h`.
+#[must_use]
+pub fn away_stamp(quiet_ms: u64) -> String {
+    let minutes = quiet_ms / 60_000;
+    if minutes < 60 {
+        format!("{minutes}m")
+    } else {
+        format!("{}h", minutes / 60)
+    }
+}
+
+/// One away dot for each agent on a machine that has been quiet for [`AWAY_MS`] or more. It
+/// stands on the plinth's back corner, opposite the landed dot.
+fn away_flags(
+    view: &View,
+    plan: &Plan,
+    slots: &AgentSlots,
+    waiting: &BTreeSet<String>,
+    clock: Clock,
+) -> Vec<Flag> {
+    view.agents
+        .iter()
+        .filter_map(|agent| {
+            let quiet = away_for(agent, waiting, clock)?;
+            let machine = plan.index_of(agent.machine.as_deref()?)?;
+            let footprint = &plan.machines[machine];
+            let id = agent.id.to_string();
+            Some(Flag {
+                kind: FlagKind::Away,
+                text: away_stamp(quiet),
+                hue: Some(hue_css(slots.slot(&id))),
+                waiting: false,
+                clash: None,
+                check: None,
+                leaving: false,
+                detail: Vec::new(),
+                scope: None,
+                machine: None,
+                at: [
+                    footprint.min[0] + footprint.size[0] - LANDED_INSET,
+                    footprint.min[1] + footprint.size[1] - LANDED_INSET,
+                    PLINTH_TOP,
+                ],
+                drone: None,
+                on: None,
+                follow: Follow::Still,
+            })
+        })
+        .collect()
+}
+
+/// The height a drone's centre takes over its seat: a stale drone sags below it.
+fn seat_height(z: f32, state: DroneState) -> f32 {
+    if state == DroneState::Stale {
+        z - STALE_DROP
+    } else {
+        z
+    }
 }
 
 /// The spot an agent takes on a machine: the first free spot a seat's step from the agents
@@ -1283,26 +2338,20 @@ fn pins(view: &View, plan: &Plan, stands: &[Stand]) -> Vec<Pin> {
         .collect()
 }
 
-fn flags(view: &View, plan: &Plan, stands: &[Stand], bodies: &[Body], pins: &[Pin]) -> Vec<Flag> {
+fn flags(
+    view: &View,
+    plan: &Plan,
+    stands: &[Stand],
+    bodies: &[Body],
+    pins: &[Pin],
+    clock: Clock,
+) -> Vec<Flag> {
     let mut out = Vec::new();
     for body in bodies {
-        out.push(Flag {
-            kind: FlagKind::Agent,
-            text: format!("{} · {}", body.agent, body.activity),
-            hue: Some(hue_css(body.slot)),
-            waiting: body.waiting,
-            clash: None,
-            check: body.check.clone(),
-            leaving: false,
-            detail: Vec::new(),
-            scope: None,
-            machine: Some(body.machine),
-            at: body.at,
-            follow: Follow::Body(body.agent.clone()),
-        });
+        out.push(agent_flag(view, body, clock));
     }
     out.extend(landed_flags(view, plan));
-    // One flag for the order in progress, the same one the page's order strip names.
+    // One flag for the order in progress. The page shows it only while its machine is hovered.
     let active = view
         .orders
         .iter()
@@ -1329,6 +2378,8 @@ fn flags(view: &View, plan: &Plan, stands: &[Stand], bodies: &[Body], pins: &[Pi
             scope: None,
             machine: None,
             at: [centre[0], centre[1], top + ORDER_LIFT],
+            drone: None,
+            on: Some(plan.machines[machine].name.clone()),
             follow: Follow::Still,
         });
     }
@@ -1341,10 +2392,12 @@ fn flags(view: &View, plan: &Plan, stands: &[Stand], bodies: &[Body], pins: &[Pi
             clash: Some(pin.clash),
             check: None,
             leaving: false,
-            detail: Vec::new(),
+            detail: clash_agents(view, &view.clashes[pin.clash]),
             scope: view.clashes[pin.clash].scope.clone(),
             machine: None,
             at: [pin.at[0], pin.at[1], pin.at[2] + STALK_HEIGHT],
+            drone: None,
+            on: Some(plan.machines[pin.machine].name.clone()),
             follow: Follow::Pin(pin.id.clone()),
         });
     }
@@ -1364,10 +2417,29 @@ fn flags(view: &View, plan: &Plan, stands: &[Stand], bodies: &[Body], pins: &[Pi
             scope: None,
             machine: None,
             at: [at[0], at[1], PLINTH_TOP + ORDER_LIFT],
+            drone: None,
+            on: None,
             follow: Follow::Still,
         });
     }
     out
+}
+
+/// The two agents of a clash, task `a`'s first, each as `agent-a · t-0`. A task no agent holds
+/// reads `unclaimed · t-1`.
+fn clash_agents(view: &View, clash: &ClashView) -> Vec<String> {
+    [clash.a, clash.b]
+        .into_iter()
+        .map(|task| {
+            let holder = view
+                .tasks
+                .iter()
+                .find(|candidate| candidate.id == task)
+                .and_then(|candidate| candidate.agent.as_ref())
+                .map_or_else(|| "unclaimed".to_owned(), ToString::to_string);
+            format!("{holder} · {task}")
+        })
+        .collect()
 }
 
 /// The flag of one lane's slice, above its machine. Alt lists its plots and keeps.
@@ -1388,28 +2460,48 @@ fn plot_flag(slice: &Slice, plan: &Plan, stands: &[Stand]) -> Flag {
         scope: None,
         machine: None,
         at: [centre[0], centre[1], top + ORDER_LIFT],
+        drone: None,
+        on: Some(plan.machines[slice.machine].name.clone()),
         follow: Follow::Still,
     }
 }
 
-/// The plan machines that live tasks' declared files sit on, each with the tint of the agent that
-/// holds the task. A task that has no agent yet, or has landed, names no machine.
-fn live_hues(view: &View, plan: &Plan, slots: &AgentSlots) -> Vec<(usize, u8)> {
-    let mut hues = Vec::new();
-    for task in &view.tasks {
-        let Some(agent) = &task.agent else {
-            continue;
-        };
-        let tint = body_tint(slots.slot(&agent.to_string()));
-        for path in &task.paths {
-            if let Some(machine) = plan.machine_of_path(path) {
-                hues.push((machine, tint));
-            }
-        }
+/// An agent's flag: its id cut to [`FLAG_ID_CHARS`], with its activity and task title as the
+/// detail that hover or Alt adds. A stale agent's flag says how long it has been quiet.
+fn agent_flag(view: &View, body: &Body, clock: Clock) -> Flag {
+    let agent = view
+        .agents
+        .iter()
+        .find(|agent| agent.id.to_string() == body.agent);
+    let title = agent
+        .and_then(|agent| agent.task)
+        .and_then(|task| view.tasks.iter().find(|candidate| candidate.id == task))
+        .map(|task| task.title.clone());
+    let quiet = (body.state == DroneState::Stale)
+        .then(|| agent.and_then(|agent| clock.quiet(agent)).map(away_stamp))
+        .flatten();
+    Flag {
+        kind: FlagKind::Agent,
+        text: body.agent.chars().take(FLAG_ID_CHARS).collect(),
+        hue: Some(hue_css(body.slot)),
+        waiting: body.waiting(),
+        clash: None,
+        check: body.check.clone(),
+        leaving: false,
+        detail: std::iter::once(body.activity.to_owned())
+            .chain(title)
+            .collect(),
+        scope: None,
+        drone: Some(DroneFlag {
+            agent: body.agent.clone(),
+            state: body.state.word(),
+            quiet,
+        }),
+        machine: Some(body.machine),
+        at: body.at,
+        on: None,
+        follow: Follow::Body(body.agent.clone()),
     }
-    hues.sort_unstable();
-    hues.dedup();
-    hues
 }
 
 /// One landed dot per machine that has a landed task. Its text is `landed` and the change word of
@@ -1442,6 +2534,8 @@ fn landed_flags(view: &View, plan: &Plan) -> Vec<Flag> {
                 scope: None,
                 machine: None,
                 at: [x + LANDED_INSET, y + LANDED_INSET, PLINTH_TOP],
+                drone: None,
+                on: None,
                 follow: Follow::Landed { machine, count },
             }
         })
@@ -1608,9 +2702,9 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_footprint_outranks_the_scope_tint_underneath() {
+    fn an_open_clash_outranks_the_scope_tint_underneath() {
         let marks = Marks {
-            footprints: vec![Vec::new(), vec![0], Vec::new()],
+            abnormal: vec![false, true, false],
             scope_tints: vec![Some(ScopeTint::Keep), Some(ScopeTint::Plot), None],
             ..Marks::default()
         };
@@ -1618,7 +2712,7 @@ mod tests {
             u32::from(marks.footprint_tint(0)),
             TINT_SCOPE0 + ScopeTint::Keep as u32
         );
-        assert_eq!(u32::from(marks.footprint_tint(1)), TINT_FOOTPRINT0);
+        assert_eq!(u32::from(marks.footprint_tint(1)), TINT_CLASH);
         assert_eq!(marks.footprint_tint(2), 0);
     }
 
@@ -1635,6 +2729,8 @@ mod tests {
             scope: None,
             machine: None,
             at: [0.0; 3],
+            drone: None,
+            on: None,
             follow: Follow::Still,
         }
     }
@@ -1730,7 +2826,7 @@ mod tests {
     }
 
     #[test]
-    fn a_landed_bot_sinks_into_its_plinth_then_leaves_and_the_order_flag_fades() {
+    fn a_landed_bot_rises_off_its_machine_then_leaves_and_the_order_flag_fades() {
         let plan = plan();
         let stands = stands(&plan);
         let before = mirror_before_land().view(&plan);
@@ -1758,10 +2854,10 @@ mod tests {
             .bodies
             .iter()
             .map(|body| body.at[2])
-            .fold(f32::INFINITY, f32::min);
+            .fold(f32::NEG_INFINITY, f32::max);
         assert!(
-            motion.leaving_now().iter().all(|bot| bot.at[2] < hover),
-            "a leaving bot sinks from its hover"
+            motion.leaving_now().iter().all(|bot| bot.at[2] > hover),
+            "a leaving bot rises from its hover"
         );
         let fading = |flags: &[Flag]| {
             flags
@@ -1815,11 +2911,10 @@ mod tests {
         let kinds = MarkKinds {
             body: 40,
             accent: 41,
-            shadow: 42,
-            ring: 43,
-            pin: 44,
-            stalk: 45,
-            beacon: 46,
+            ring: 42,
+            pin: 43,
+            stalk: 44,
+            beacon: 45,
         };
         for dpr in [1.0_f32, 2.0] {
             let bot = mark_instances(&motion, &marks, kinds, dpr, None)
@@ -1828,7 +2923,10 @@ mod tests {
                 .expect("a bot is drawn");
             assert_eq!(bot.grow[0], BOT_MIN_PX * dpr, "the floor is in device px");
         }
-        assert_eq!(BOT_MIN_PX, 20.0, "a bot reads at fit zoom only from 20 px");
+        assert_eq!(
+            BOT_MIN_PX, 24.0,
+            "a bot reads as a dot with ears from 24 px"
+        );
     }
 
     #[test]
@@ -1841,8 +2939,8 @@ mod tests {
         let ids: Vec<String> = view.agents.iter().map(|a| a.id.to_string()).collect();
         assert_eq!(slots.slot(&ids[0]), 0, "the first agent takes slot 0");
         assert_eq!(slots.slot(&ids[1]), 1, "the second agent takes slot 1");
-        assert_eq!(hue_css(0), "#1f9e8f", "teal");
-        assert_eq!(hue_css(1), "#7a5cd6", "violet");
+        assert_eq!(hue_css(0), "#0f7a6e", "teal");
+        assert_eq!(hue_css(1), "#6a45c8", "violet");
         let before = slots.clone();
         slots.assign(&view);
         assert_eq!(slots, before, "a slot stays with its agent");
@@ -1938,14 +3036,97 @@ mod tests {
         );
 
         assert_eq!(
-            marks.bodies.iter().filter(|body| body.waiting).count(),
+            marks.bodies.iter().filter(|body| body.waiting()).count(),
             2,
             "both agents wait on the open clash"
         );
         assert_eq!(
-            marks.footprint_tint(api),
-            u8::try_from(TINT_SHARED).expect("fits")
+            u32::from(marks.footprint_tint(api)),
+            TINT_CLASH,
+            "the clashed machine takes the faint red"
         );
+        let ui = machine(&plan, "src/ui");
+        assert_eq!(marks.footprint_tint(ui), 0, "a quiet machine stays grey");
+    }
+
+    #[test]
+    fn a_clash_flag_holds_its_id_overlap_and_two_agents_for_the_hover() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let marks = Marks::build(&view, &plan, &stands(&plan), &slots_for(&view));
+        let clash = &view.clashes[0];
+        let flag = marks
+            .flags
+            .iter()
+            .find(|flag| flag.kind == FlagKind::Clash)
+            .expect("the pin has a flag");
+        assert!(
+            flag.text.starts_with(&clash.id.to_string()),
+            "{}",
+            flag.text
+        );
+        assert_eq!(
+            flag.on.as_deref(),
+            Some("src/api"),
+            "it marks the clashed machine"
+        );
+        let agents: Vec<String> = view
+            .agents
+            .iter()
+            .map(|agent| agent.id.to_string())
+            .collect();
+        let [a, b] = flag.detail.as_slice() else {
+            panic!("the detail names two agents: {:?}", flag.detail);
+        };
+        assert!(a.ends_with(&format!(" · {}", clash.a)), "{a}");
+        assert!(b.ends_with(&format!(" · {}", clash.b)), "{b}");
+        let holder = |line: &str| line.split(" · ").next().unwrap_or_default().to_owned();
+        assert!(
+            agents.contains(&holder(a)) && agents.contains(&holder(b)),
+            "{agents:?}"
+        );
+        assert_ne!(holder(a), holder(b), "the two agents differ");
+    }
+
+    #[test]
+    fn an_order_flag_names_the_machine_whose_hover_shows_it() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let marks = Marks::build(&view, &plan, &stands(&plan), &slots_for(&view));
+        let order = marks
+            .flags
+            .iter()
+            .find(|flag| flag.kind == FlagKind::Order)
+            .expect("the live order has a flag");
+        assert_eq!(order.on.as_deref(), Some(view.orders[0].machine.as_str()));
+        for flag in marks
+            .flags
+            .iter()
+            .filter(|flag| flag.kind == FlagKind::Agent)
+        {
+            assert_eq!(
+                flag.on, None,
+                "an agent's pill is not a machine's hover text"
+            );
+        }
+    }
+
+    #[test]
+    fn a_machine_with_working_agents_and_no_clash_stays_grey() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let mut view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        view.clashes.clear();
+        for machine in &mut view.machines {
+            machine.abnormal = false;
+        }
+        let marks = Marks::build(&view, &plan, &stands(&plan), &slots_for(&view));
+        assert!(!marks.bodies.is_empty(), "the agents still have drones");
+        for body in &marks.bodies {
+            assert_eq!(marks.footprint_tint(body.machine), 0);
+        }
     }
 
     #[test]
@@ -2068,17 +3249,25 @@ mod tests {
         let kinds = MarkKinds {
             body: 40,
             accent: 41,
-            shadow: 42,
-            ring: 43,
-            pin: 44,
-            stalk: 45,
-            beacon: 46,
+            ring: 42,
+            pin: 43,
+            stalk: 44,
+            beacon: 45,
         };
         let instances = mark_instances(&motion, &marks, kinds, 1.0, None);
         let count = |kind: u16| instances.iter().filter(|i| i.kind == kind).count();
-        assert_eq!(count(kinds.body), 2, "each drone has a shell");
+        assert_eq!(count(kinds.body), 2, "each drone has a body");
         assert_eq!(count(kinds.accent), 2, "each drone has an accent");
-        assert_eq!(count(kinds.shadow), 2, "each drone has a shadow");
+        let shadow = u8::try_from(TINT_SHADOW).expect("fits");
+        let shadows: Vec<Beam> = spots(&motion, &marks, 1.0, None)
+            .into_iter()
+            .filter(|spot| spot.tint == shadow)
+            .collect();
+        assert_eq!(shadows.len(), 2, "each drone has a shadow");
+        assert!(
+            shadows.iter().all(|s| s.origin[2] == PLINTH_TOP),
+            "a shadow lies on the plinth top"
+        );
         assert_eq!(count(kinds.ring), 2, "each waiting agent has a ring");
         assert_eq!(count(kinds.pin), 1);
         assert_eq!(count(kinds.stalk), 1, "each diamond has its stalk");
@@ -2103,9 +3292,348 @@ mod tests {
 
         let clash = flag(FlagKind::Clash);
         let label = flag_anchor(&clash, centre, project);
+        let [left, right] = badge_centres(centre, project);
+        assert!(left[0] < centre[0] && right[0] > centre[0]);
+        assert_eq!(left[1], right[1], "the badges sit level");
+        let half = PIN_MIN_PX * DIAMOND_HALF_WIDTH;
         assert!(
-            label[0] > centre[0],
-            "the label starts right of the diamond"
+            right[0] - BADGE_PX * 0.5 > centre[0] + half,
+            "the badge is clear of the diamond"
+        );
+        assert_eq!(
+            label,
+            [right[0] + BADGE_PX * 0.5 + FLAG_GAP_PX, right[1]],
+            "the label starts right of the right badge"
+        );
+    }
+
+    #[test]
+    fn a_long_quiet_agent_is_away_its_drone_gone_and_a_dot_on_its_plinth() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let mut view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let waiting_view = view.clone();
+        view.clashes.clear();
+        let heard = view.agents[0].heard_at.expect("the agent was heard");
+        let agent = view.agents[0].id.to_string();
+        let slots = slots_for(&view);
+        let stands = stands(&plan);
+        let at = |now: Option<u64>| {
+            let clock = Clock { now, away: None };
+            Marks::build_at(&view, &plan, &stands, &slots, clock)
+        };
+        let aways = |marks: &Marks| -> Vec<Flag> {
+            marks
+                .flags
+                .iter()
+                .filter(|flag| flag.kind == FlagKind::Away)
+                .cloned()
+                .collect()
+        };
+        let has_drone = |marks: &Marks| marks.bodies.iter().any(|body| body.agent == agent);
+
+        let frozen = at(None);
+        assert!(
+            has_drone(&frozen) && aways(&frozen).is_empty(),
+            "no clock, no away"
+        );
+        let stale = at(Some(heard + AWAY_MS - 1));
+        assert!(has_drone(&stale) && aways(&stale).is_empty());
+        let body = stale.bodies.iter().find(|body| body.agent == agent);
+        assert_eq!(body.map(|body| body.state), Some(DroneState::Stale));
+
+        let away = at(Some(heard + 12 * 60_000));
+        assert!(!has_drone(&away), "the drone is gone");
+        assert!(
+            away.flags
+                .iter()
+                .all(|flag| flag.follow != Follow::Body(agent.clone())),
+            "and its flag with it"
+        );
+        let dots = aways(&away);
+        let hue = Some(hue_css(slots.slot(&agent)));
+        let dot = dots
+            .iter()
+            .find(|dot| dot.hue == hue)
+            .expect("the agent has an away dot in its hue");
+        assert_eq!(dots.len(), away.bodies.len().abs_diff(view.agents.len()));
+        assert_eq!(dot.text, "12m");
+        let name = view.agents[0]
+            .machine
+            .as_deref()
+            .expect("the agent has a machine");
+        let footprint = &plan.machines[machine(&plan, name)];
+        assert_eq!(
+            dot.at,
+            [
+                footprint.min[0] + footprint.size[0] - LANDED_INSET,
+                footprint.min[1] + footprint.size[1] - LANDED_INSET,
+                PLINTH_TOP,
+            ],
+            "the back corner, opposite the landed dot"
+        );
+        let project = |p: [f32; 3]| [p[0], -p[2]];
+        assert_eq!(flag_anchor(dot, dot.at, project), project(dot.at));
+
+        let waiting = Marks::build_at(
+            &waiting_view,
+            &plan,
+            &stands,
+            &slots,
+            Clock {
+                now: Some(heard + 12 * 60_000),
+                away: None,
+            },
+        );
+        let body = waiting.bodies.iter().find(|body| body.agent == agent);
+        assert_eq!(
+            body.map(|body| body.state),
+            Some(DroneState::Waiting),
+            "an agent that waits on the user is never away"
+        );
+    }
+
+    #[test]
+    fn an_agent_flag_names_its_drone_short_and_says_how_long_a_stale_one_is_quiet() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let mut view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        view.clashes.clear();
+        let heard = view.agents[0].heard_at.expect("the agent was heard");
+        let agent = view.agents[0].id.to_string();
+        let slots = slots_for(&view);
+        let stands = stands(&plan);
+        let flag_at = |now: Option<u64>| {
+            let clock = Clock { now, away: None };
+            Marks::build_at(&view, &plan, &stands, &slots, clock)
+                .flags
+                .into_iter()
+                .find(|flag| flag.follow == Follow::Body(agent.clone()))
+                .expect("the agent has a flag")
+        };
+        let fresh = flag_at(None);
+        assert_eq!(
+            fresh.text,
+            agent.chars().take(FLAG_ID_CHARS).collect::<String>()
+        );
+        let drone = fresh.drone.clone().expect("an agent flag names its drone");
+        assert_eq!(drone.agent, agent);
+        assert_eq!(drone.state, "working");
+        assert_eq!(drone.quiet, None);
+        let title = view.agents[0]
+            .task
+            .and_then(|task| view.tasks.iter().find(|candidate| candidate.id == task))
+            .map(|task| task.title.clone())
+            .expect("the agent holds a task");
+        assert_eq!(
+            fresh.detail,
+            vec![view.agents[0].activity.to_owned(), title],
+            "hover or Alt adds the activity and the task title"
+        );
+        let stale = flag_at(Some(heard + 3 * 60_000));
+        let drone = stale.drone.expect("an agent flag names its drone");
+        assert_eq!(drone.state, "stale");
+        assert_eq!(drone.quiet.as_deref(), Some("3m"));
+
+        let long = Body {
+            agent: "a-very-long-agent-name".to_owned(),
+            ..Marks::build(&view, &plan, &stands, &slots).bodies[0].clone()
+        };
+        let flag = agent_flag(&view, &long, Clock::default());
+        assert_eq!(flag.text, "a-very-long-", "cut to twelve characters");
+        assert_eq!(
+            flag.drone.map(|drone| drone.agent).as_deref(),
+            Some("a-very-long-agent-name")
+        );
+    }
+
+    #[test]
+    fn the_pointer_hovers_the_nearest_drone_within_its_radius_and_six_px() {
+        let discs = [([100.0, 100.0], 12.0), ([130.0, 100.0], 12.0)];
+        assert_eq!(disc_under(&discs, [100.0, 100.0]), Some(0));
+        assert_eq!(
+            disc_under(&discs, [100.0, 100.0 + 12.0 + HOVER_PAD_PX]),
+            Some(0)
+        );
+        assert_eq!(
+            disc_under(&discs, [100.0, 100.0 + 12.0 + HOVER_PAD_PX + 0.5]),
+            None
+        );
+        assert_eq!(
+            disc_under(&discs, [114.0, 100.0]),
+            Some(0),
+            "nearer the first"
+        );
+        assert_eq!(
+            disc_under(&discs, [116.0, 100.0]),
+            Some(1),
+            "nearer the second"
+        );
+        assert_eq!(disc_under(&[], [0.0, 0.0]), None);
+    }
+
+    #[test]
+    fn a_hovered_drone_is_named_as_the_page_names_its_agent_in_the_view() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let marks = Marks::build(&view, &plan, &stands(&plan), &slots_for(&view));
+        let json = serde_json::to_value(&view).expect("the view serializes");
+        let ids: Vec<&str> = json["agents"]
+            .as_array()
+            .expect("the view lists its agents")
+            .iter()
+            .map(|agent| agent["id"].as_str().expect("an agent id is a string"))
+            .collect();
+        assert!(!marks.bodies.is_empty());
+        for body in &marks.bodies {
+            assert!(
+                ids.contains(&body.agent.as_str()),
+                "acan:drone-hover names {} as view.agents[].id does",
+                body.agent
+            );
+        }
+    }
+
+    #[test]
+    fn a_hovered_drone_inks_its_tether_in_fully() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let marks = Marks::build(&view, &plan, &stands(&plan), &slots_for(&view));
+        let mut motion = Motion::new(true);
+        motion.sync(&marks);
+        let agent = marks.bodies[0].agent.clone();
+        let rest = beams(&motion, &marks, 1.0, None, None);
+        let hovered = beams(&motion, &marks, 1.0, None, Some(&agent));
+        assert_eq!(rest.len(), hovered.len());
+        assert_eq!(hovered[0].alpha, 1.0);
+        assert_eq!(rest[0].alpha, marks.bodies[0].state.tether_alpha());
+        assert_eq!(&hovered[1..], &rest[1..], "the other tethers keep theirs");
+    }
+
+    #[test]
+    fn an_away_stamp_counts_minutes_then_hours() {
+        assert_eq!(away_stamp(AWAY_MS), "10m");
+        assert_eq!(away_stamp(59 * 60_000 + 59_999), "59m");
+        assert_eq!(away_stamp(60 * 60_000), "1h");
+        assert_eq!(away_stamp(150 * 60_000), "2h");
+    }
+
+    #[test]
+    fn initials_are_the_first_letter_of_the_last_segment_and_the_trailing_digits() {
+        assert_eq!(initials("w2"), "W2");
+        assert_eq!(initials("agent-a"), "A");
+        assert_eq!(initials("agent-b"), "B");
+        assert_eq!(initials("worker-12"), "W12");
+        assert_eq!(initials("worker-1234"), "W12", "at most three characters");
+        assert_eq!(initials("team_blue"), "B");
+        assert_eq!(
+            initials("ci.runner 7"),
+            "C7",
+            "a last segment of digits only"
+        );
+        assert_eq!(initials("42"), "42");
+        assert_eq!(initials(""), "?");
+        assert_eq!(
+            pair_initials("agent-a", "agent-b"),
+            ("A".to_owned(), "B".to_owned())
+        );
+        assert_eq!(
+            pair_initials("agent", "anna"),
+            ("AG".to_owned(), "AN".to_owned())
+        );
+        assert_eq!(
+            pair_initials("w2", "w3"),
+            ("W2".to_owned(), "W3".to_owned())
+        );
+    }
+
+    #[test]
+    fn two_agents_on_one_clash_never_share_initials() {
+        let ids = [
+            "agent-a",
+            "agent-b",
+            "agent",
+            "anna",
+            "w2",
+            "w3",
+            "worker-12",
+            "worker-1234",
+            "worker-1299",
+            "team1-a",
+            "team2-a",
+            "x-ab",
+            "y-ab",
+            "42",
+            "43",
+            "",
+            "-",
+            "a-12",
+            "b-12",
+            "alpha",
+            "alps",
+        ];
+        for a in ids {
+            for b in ids {
+                if a == b {
+                    continue;
+                }
+                let (first, second) = pair_initials(a, b);
+                assert_ne!(first, second, "{a} and {b}");
+                assert!(first.chars().count() <= INITIALS_MAX, "{a} and {b}");
+                assert!(second.chars().count() <= INITIALS_MAX, "{a} and {b}");
+            }
+        }
+    }
+    #[test]
+    fn a_clash_has_a_badge_in_each_agents_hue_and_a_grey_query_for_no_agent() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let mut view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let slots = slots_for(&view);
+        let marks = Marks::build(&view, &plan, &stands(&plan), &slots);
+        assert!(!marks.pins.is_empty(), "the script has a clash");
+        let badges = clash_badges(&view, &marks.pins, &slots);
+        assert_eq!(badges.len(), marks.pins.len());
+        let clash = &view.clashes[badges[0].clash];
+        let holder = |task: TaskId| {
+            view.tasks
+                .iter()
+                .find(|candidate| candidate.id == task)
+                .and_then(|candidate| candidate.agent.as_ref())
+                .map(ToString::to_string)
+                .expect("the script claims both tasks")
+        };
+        let (a, b) = (holder(clash.a), holder(clash.b));
+        let (a_text, b_text) = pair_initials(&a, &b);
+        assert_eq!(
+            badges[0].a,
+            Badge {
+                text: a_text,
+                hue: hue_css(slots.slot(&a))
+            }
+        );
+        assert_eq!(
+            badges[0].b,
+            Badge {
+                text: b_text,
+                hue: hue_css(slots.slot(&b))
+            }
+        );
+        let task_b = clash.b;
+        for task in &mut view.tasks {
+            if task.id == task_b {
+                task.agent = None;
+            }
+        }
+        let badges = clash_badges(&view, &marks.pins, &slots);
+        assert_eq!(
+            badges[0].b,
+            Badge {
+                text: "?".to_owned(),
+                hue: UNCLAIMED.to_owned()
+            }
         );
     }
 
@@ -2132,31 +3660,6 @@ mod tests {
                 [x + LANDED_INSET, y + LANDED_INSET, PLINTH_TOP],
                 "the dot sits on the plinth top at the machine's corner"
             );
-        }
-    }
-
-    #[test]
-    fn a_live_task_hues_the_belts_of_the_machines_its_declared_files_sit_on() {
-        let plan = plan();
-        let (_origin, log, _index) = scripted();
-        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
-        let slots = slots_for(&view);
-        let marks = Marks::build(&view, &plan, &stands(&plan), &slots);
-        assert!(!marks.belt_hues.is_empty(), "the claimed tasks hue a belt");
-        for task in &view.tasks {
-            let Some(agent) = &task.agent else {
-                continue;
-            };
-            let tint = body_tint(slots.slot(&agent.to_string()));
-            for path in &task.paths {
-                let machine = plan
-                    .machine_of_path(path)
-                    .expect("a declared file sits on a machine");
-                assert!(
-                    marks.belt_hues.contains(&(machine, tint)),
-                    "{path} hues its machine in its agent's tint"
-                );
-            }
         }
     }
 
@@ -2197,9 +3700,102 @@ mod tests {
             at,
             target,
             activity,
-            waiting: false,
+            state: DroneState::of(activity, false, false),
             check: None,
         }
+    }
+
+    #[test]
+    fn a_quiet_agent_holding_a_task_reads_stale_only_on_a_live_clock() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let mut view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        view.clashes.clear();
+        for machine in &mut view.machines {
+            machine.abnormal = false;
+        }
+        let heard = view.agents[0].heard_at.expect("the agent was heard");
+        let slots = slots_for(&view);
+        let stands = stands(&plan);
+        let at = |now: Option<u64>| {
+            let clock = Clock { now, away: None };
+            Marks::build_at(&view, &plan, &stands, &slots, clock).bodies[0].state
+        };
+        assert_eq!(
+            at(None),
+            DroneState::Working,
+            "no clock, as frozen or replayed"
+        );
+        assert_eq!(at(Some(heard + STALE_MS - 1)), DroneState::Working);
+        assert_eq!(at(Some(heard + STALE_MS)), DroneState::Stale);
+        let stale = Marks::build_at(
+            &view,
+            &plan,
+            &stands,
+            &slots,
+            Clock {
+                now: Some(heard + STALE_MS),
+                away: None,
+            },
+        );
+        let fresh = Marks::build(&view, &plan, &stands, &slots);
+        assert_eq!(
+            stale.bodies[0].at[2],
+            fresh.bodies[0].at[2] - STALE_DROP,
+            "a stale drone sags"
+        );
+        assert_eq!(
+            stale.footprint_tint(stale.bodies[0].machine),
+            0,
+            "and its machine stays grey"
+        );
+    }
+
+    #[test]
+    fn a_claimed_stage_works_and_every_other_activity_is_idle() {
+        for activity in ["claimed", "declared", "building", "gating"] {
+            assert_eq!(DroneState::of(activity, false, false), DroneState::Working);
+        }
+        for activity in ["open", "readback", "queued", "landed", "idle"] {
+            assert_eq!(DroneState::of(activity, false, false), DroneState::Idle);
+        }
+    }
+
+    #[test]
+    fn waiting_outranks_stale_which_outranks_working() {
+        assert_eq!(DroneState::of("building", true, true), DroneState::Waiting);
+        assert_eq!(DroneState::of("building", false, true), DroneState::Stale);
+        assert_eq!(DroneState::of("open", false, true), DroneState::Stale);
+        assert_eq!(
+            DroneState::of("building", false, false),
+            DroneState::Working
+        );
+    }
+
+    #[test]
+    fn every_activity_the_mirror_names_has_a_state() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let marks = Marks::build(&view, &plan, &stands(&plan), &slots_for(&view));
+        for body in &marks.bodies {
+            assert_eq!(
+                body.waiting(),
+                body.state == DroneState::Waiting,
+                "{}",
+                body.agent
+            );
+        }
+        let words: BTreeSet<&str> = [
+            DroneState::Working,
+            DroneState::Idle,
+            DroneState::Waiting,
+            DroneState::Stale,
+        ]
+        .map(DroneState::word)
+        .into_iter()
+        .collect();
+        assert_eq!(words.len(), 4, "each state has its own word");
     }
 
     fn marks_of(bodies: Vec<Body>) -> Marks {
@@ -2212,11 +3808,10 @@ mod tests {
     const KINDS: MarkKinds = MarkKinds {
         body: 40,
         accent: 41,
-        shadow: 42,
-        ring: 43,
-        pin: 44,
-        stalk: 45,
-        beacon: 46,
+        ring: 42,
+        pin: 43,
+        stalk: 44,
+        beacon: 45,
     };
 
     #[test]
@@ -2285,6 +3880,210 @@ mod tests {
     }
 
     #[test]
+    fn an_arriving_drone_drops_onto_its_place_easing_out() {
+        let at = [0.0, 0.0, 40.0];
+        let mut motion = Motion::default();
+        motion.sync(&marks_of(vec![drone("a", at, [9.0, 0.0, 9.0], "idle")]));
+        let start = motion.body_at("a").expect("the drone arrives");
+        assert_eq!(start[2], at[2] + RISE, "it starts above its place");
+        motion.advance(ARRIVE_MS / 2.0);
+        let half = motion.body_at("a").expect("it drops")[2];
+        assert!(
+            half - at[2] < RISE * 0.5,
+            "an ease out covers most of the drop by half time: {half}"
+        );
+        motion.advance(ARRIVE_MS / 2.0);
+        assert_eq!(motion.body_at("a"), Some(at));
+    }
+
+    #[test]
+    fn a_move_arcs_over_the_taller_machine_and_faces_the_way_it_travels() {
+        let low = |x: f32, top: f32| {
+            drone(
+                "a",
+                [x, 0.0, top + HOVER_LIFT],
+                [x, 30.0, top + BEACON_RADIUS],
+                "idle",
+            )
+        };
+        let mut motion = Motion::default();
+        motion.sync(&marks_of(vec![low(0.0, 10.0)]));
+        motion.advance(ARRIVE_MS + TURN_MS);
+        motion.sync(&marks_of(vec![low(200.0, 30.0)]));
+        let duration = move_ms(200.0);
+        assert_eq!(duration, 470.0, "350 ms and 0.6 ms a unit");
+        motion.advance(duration / 2.0);
+        let mid = motion.body_at("a").expect("it moves");
+        assert!(
+            (mid[2] - (30.0 + ARC_CLEAR)).abs() < 1e-3,
+            "the top of the arc clears the taller machine: {mid:?}"
+        );
+        let facing = motion.heading_of("a").expect("it faces");
+        assert!(
+            facing.abs() < 1e-4,
+            "it faces east, the way it goes: {facing}"
+        );
+        motion.advance(duration / 2.0);
+        let face = motion.heading_of("a").expect("it faces");
+        assert!(
+            (face - PI / 2.0).abs() < 1e-4,
+            "it ends facing its target: {face}"
+        );
+        assert_eq!(motion.body_at("a").map(|at| at[0]), Some(200.0));
+        assert_eq!(move_ms(0.0), 450.0, "a short move takes at least 450 ms");
+        assert_eq!(move_ms(5_000.0), 900.0, "a long one at most 900 ms");
+    }
+
+    #[test]
+    fn a_still_or_reduced_motion_lands_a_move_at_once_and_holds_the_bob() {
+        for (still, reduced) in [(true, false), (false, true)] {
+            let mut motion = Motion::new(still);
+            motion.set_reduced(reduced);
+            motion.set_px_units(2.0);
+            let first = drone("a", [0.0, 0.0, 40.0], [0.0, 9.0, 9.0], "building");
+            let second = drone("a", [90.0, 0.0, 40.0], [90.0, 9.0, 9.0], "building");
+            motion.sync(&marks_of(vec![first]));
+            assert_eq!(motion.body_at("a"), Some([0.0, 0.0, 40.0]));
+            motion.sync(&marks_of(vec![second]));
+            assert_eq!(motion.body_at("a"), Some([90.0, 0.0, 40.0]), "it jumps");
+            motion.advance(BOB_PERIOD_MS / 4.0);
+            assert_eq!(motion.bob(0), 0.0, "and does not bob");
+        }
+    }
+
+    /// A drone that has settled on one machine and then moves to another, 200 units east.
+    fn moved(motion: &mut Motion) {
+        let at = |x: f32| drone("a", [x, 0.0, 40.0], [x, 30.0, 9.0], "idle");
+        motion.sync(&marks_of(vec![at(0.0)]));
+        motion.advance(ARRIVE_MS + TURN_MS);
+        motion.sync(&marks_of(vec![at(200.0)]));
+    }
+
+    #[test]
+    fn a_move_leaves_a_trail_that_inks_in_behind_the_drone_and_fades_over_two_seconds() {
+        let mut motion = Motion::default();
+        motion.sync(&marks_of(vec![drone(
+            "a",
+            [0.0, 0.0, 40.0],
+            [0.0, 30.0, 9.0],
+            "idle",
+        )]));
+        assert!(
+            trail_beams(&motion, 1.0, None).is_empty(),
+            "an arrival leaves no trail"
+        );
+        motion.advance(ARRIVE_MS + TURN_MS);
+        motion.sync(&marks_of(vec![drone(
+            "a",
+            [200.0, 0.0, 40.0],
+            [200.0, 30.0, 9.0],
+            "idle",
+        )]));
+        let duration = move_ms(200.0);
+        motion.advance(duration / 2.0);
+        let half = trail_beams(&motion, 2.0, None);
+        assert_eq!(half.len(), TRAIL_PIECES / 2, "half the way is inked");
+        assert!(
+            half.iter()
+                .all(|beam| beam.from[2] == PLINTH_TOP && beam.width_px == 2.0)
+        );
+        assert!(
+            half.iter()
+                .all(|beam| beam.alpha <= TRAIL_ALPHA && beam.alpha > 0.0)
+        );
+        assert_eq!(half[0].tint, body_tint(0), "the trail is the agent's hue");
+        motion.advance(duration / 2.0);
+        let full = trail_beams(&motion, 1.0, None);
+        assert_eq!(full.len(), TRAIL_PIECES, "at most 24 pieces");
+        assert!(
+            full[0].alpha < full[TRAIL_PIECES - 1].alpha,
+            "the oldest piece is the faintest"
+        );
+        assert!(
+            motion.advance(TRAIL_FADE_MS - 1.0),
+            "the fade keeps frames coming"
+        );
+        motion.advance(1.0);
+        assert!(trail_beams(&motion, 1.0, None).is_empty(), "gone after 2 s");
+        assert!(!motion.advance(16.0), "and the page goes idle");
+    }
+
+    #[test]
+    fn no_trail_under_freeze_reduced_motion_a_seek_or_a_ride() {
+        let mut still = Motion::new(true);
+        moved(&mut still);
+        assert!(trail_beams(&still, 1.0, None).is_empty(), "freeze");
+        let mut reduced = Motion::default();
+        reduced.set_reduced(true);
+        moved(&mut reduced);
+        assert!(
+            trail_beams(&reduced, 1.0, None).is_empty(),
+            "reduced motion"
+        );
+        let mut seek = Motion::default();
+        seek.sync(&marks_of(vec![drone(
+            "a",
+            [0.0, 0.0, 40.0],
+            [0.0, 30.0, 9.0],
+            "idle",
+        )]));
+        seek.advance(ARRIVE_MS);
+        seek.cut();
+        seek.sync(&marks_of(vec![drone(
+            "a",
+            [200.0, 0.0, 40.0],
+            [200.0, 30.0, 9.0],
+            "idle",
+        )]));
+        assert_eq!(seek.body_at("a"), Some([200.0, 0.0, 40.0]), "a seek jumps");
+        seek.advance(100.0);
+        assert!(
+            trail_beams(&seek, 1.0, None).is_empty(),
+            "a seek leaves no trail"
+        );
+        let mut ride = Motion::default();
+        moved(&mut ride);
+        ride.advance(move_ms(200.0));
+        assert!(!trail_beams(&ride, 1.0, None).is_empty());
+        assert!(
+            trail_beams(&ride, 1.0, Some("a")).is_empty(),
+            "the ride's drone leaves none"
+        );
+    }
+
+    #[test]
+    fn a_working_drone_bobs_one_px_and_each_slot_has_its_own_phase() {
+        let mut motion = Motion::default();
+        motion.set_px_units(2.0);
+        let marks = marks_of(vec![drone(
+            "a",
+            [0.0, 0.0, 40.0],
+            [9.0, 0.0, 9.0],
+            "building",
+        )]);
+        motion.sync(&marks);
+        motion.advance(ARRIVE_MS);
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for _ in 0..48 {
+            motion.advance(BOB_PERIOD_MS / 48.0);
+            lo = lo.min(motion.bob(0));
+            hi = hi.max(motion.bob(0));
+        }
+        assert!(
+            ((hi - lo) - BOB_PX * 2.0).abs() < 0.05,
+            "the bob spans 1 CSS px: {lo} to {hi}"
+        );
+        assert_ne!(motion.bob(0), motion.bob(1), "slots bob apart");
+        let idle = marks_of(vec![drone("a", [0.0, 0.0, 40.0], [9.0, 0.0, 9.0], "idle")]);
+        let shell = mark_instances(&motion, &idle, KINDS, 1.0, None)
+            .into_iter()
+            .find(|i| i.kind == KINDS.body)
+            .expect("the drone draws");
+        assert_eq!(shell.offset[2], 40.0, "an idle drone does not bob");
+    }
+
+    #[test]
     fn a_drone_on_its_machines_centre_keeps_the_heading_it_had() {
         let at = [0.0, 0.0, PLINTH_TOP];
         let mut motion = Motion::new(true);
@@ -2306,7 +4105,7 @@ mod tests {
         let marks = marks_of(vec![drone("a", at, target, "building")]);
         let mut motion = Motion::new(true);
         motion.sync(&marks);
-        let beams = beams(&motion, &marks, 2.0, None);
+        let beams = beams(&motion, &marks, 2.0, None, None);
         assert_eq!(beams.len(), 1, "one beam per drone");
         let beam = &beams[0];
         assert_eq!(beam.to, target, "the beam ends on the target");
@@ -2321,11 +4120,75 @@ mod tests {
         );
         let facing = motion.heading_of("a").expect("the drone faces east");
         assert_eq!(beam.turn, facing, "the beam turns as the drone does");
-        assert_eq!(
-            beam.from,
-            [EYE_DISTANCE, 0.0, 0.0],
-            "the eye is on the nose"
+        assert_eq!(beam.from, eye_point(), "the beam starts on the lens");
+    }
+
+    #[test]
+    fn the_eye_aims_at_the_machine_the_drone_works_on() {
+        let at = [0.0, 0.0, 40.0];
+        let target = [30.0, 40.0, 9.0];
+        let marks = marks_of(vec![drone("a", at, target, "building")]);
+        let mut motion = Motion::new(true);
+        motion.sync(&marks);
+        let beam = beams(&motion, &marks, 1.0, None, None)[0];
+        let body = mark_instances(&motion, &marks, KINDS, 1.0, None)
+            .into_iter()
+            .find(|i| i.kind == KINDS.body)
+            .expect("the drone draws");
+        assert_eq!(body.turn, beam.turn, "the tether turns with the body");
+        let (s, c) = beam.turn.sin_cos();
+        let [x, y, z] = beam.from;
+        let eye = [c * x - s * y, s * x + c * y, z];
+        let ahead = [target[0] - at[0], target[1] - at[1]];
+        let reach = ahead[0].hypot(ahead[1]);
+        let flat = eye[0].hypot(eye[1]);
+        let along = (eye[0] * ahead[0] + eye[1] * ahead[1]) / (flat * reach);
+        assert!(
+            (along - 1.0).abs() < 1e-5,
+            "the eye faces the target: {along}"
         );
+        assert!(eye[2] < 0.0, "and looks down at it from above");
+        let gap = |p: [f32; 3]| {
+            (0..3)
+                .map(|k| (p[k] - target[k]).powi(2))
+                .sum::<f32>()
+                .sqrt()
+        };
+        let eye_at = [at[0] + eye[0], at[1] + eye[1], at[2] + eye[2]];
+        assert!(
+            gap(eye_at) < gap(at),
+            "the eye is the near side of the body"
+        );
+    }
+
+    #[test]
+    fn a_drone_at_map_zoom_keeps_to_three_instances_and_eight_strokes() {
+        let at = [0.0, 0.0, 40.0];
+        let target = [9.0, 0.0, 9.0];
+        let always = |model: &acan_render::Model| {
+            model
+                .lines
+                .iter()
+                .filter(|l| l.detail == acan_render::Detail::Always)
+                .count()
+                + model
+                    .dots
+                    .iter()
+                    .filter(|d| d.detail == acan_render::Detail::Always)
+                    .count()
+        };
+        let model_strokes = always(&acan_iso::agent_body()) + always(&acan_iso::agent_accent());
+        for activity in ["building", "idle"] {
+            let marks = marks_of(vec![drone("a", at, target, activity)]);
+            let mut motion = Motion::new(true);
+            motion.sync(&marks);
+            let instances = mark_instances(&motion, &marks, KINDS, 1.0, None).len();
+            let strokes = model_strokes
+                + beams(&motion, &marks, 1.0, None, None).len()
+                + spots(&motion, &marks, 1.0, None).len();
+            assert!(instances <= 3, "{activity}: {instances} instances");
+            assert!(strokes <= 8, "{activity}: {strokes} strokes");
+        }
     }
 
     #[test]
@@ -2344,13 +4207,113 @@ mod tests {
             .filter(|instance| instance.kind == KINDS.beacon)
             .map(|instance| instance.grow[0])
             .collect();
-        assert_eq!(beacons.len(), 2);
-        assert_eq!(beacons[0], BEACON_PX, "an idle beacon stays at rest");
+        assert_eq!(beacons.len(), 1, "only the working drone has a beacon");
         assert!(
-            beacons[1] > BEACON_PX,
+            beacons[0] > BEACON_PX,
             "a working beacon swells: {}",
-            beacons[1]
+            beacons[0]
         );
+    }
+
+    #[test]
+    fn a_working_beacon_has_a_disc_for_its_paper_ring_and_an_idle_drone_none() {
+        let at = [0.0, 0.0, PLINTH_TOP];
+        let target = [4.0, 0.0, 9.0];
+        let marks = marks_of(vec![
+            drone("idle", at, target, "idle"),
+            drone("busy", at, target, "building"),
+        ]);
+        let mut motion = Motion::default();
+        motion.sync(&marks);
+        let flat = |p: [f32; 3]| [p[0], -p[2]];
+        let rest = beacon_discs(&motion, &marks, flat);
+        assert_eq!(rest.len(), 1, "only the working drone has a beacon");
+        assert_eq!(rest[0].0, [4.0, -9.0], "the disc is centred on the beacon");
+        assert!(
+            (rest[0].1 - BEACON_PX / 2.0).abs() < 1e-4,
+            "at rest it is the floor"
+        );
+        motion.advance(PULSE_MS / 2.0);
+        let swollen = beacon_discs(&motion, &marks, flat);
+        assert!(swollen[0].1 > rest[0].1, "the ring follows the pulse");
+    }
+
+    #[test]
+    fn each_state_sets_its_tether_eye_and_glow_and_a_stale_drone_sits_lower() {
+        let at = [0.0, 0.0, 40.0];
+        let target = [4.0, 0.0, 9.0];
+        let with = |agent: &str, state: DroneState| Body {
+            state,
+            ..drone(agent, at, target, "building")
+        };
+        let marks = marks_of(vec![
+            with("work", DroneState::Working),
+            with("idle", DroneState::Idle),
+            with("wait", DroneState::Waiting),
+            with("stale", DroneState::Stale),
+        ]);
+        let mut motion = Motion::new(true);
+        motion.sync(&marks);
+        let alphas: Vec<f32> = beams(&motion, &marks, 2.0, None, None)
+            .iter()
+            .map(|beam| beam.alpha)
+            .collect();
+        assert_eq!(alphas, [0.9, 0.3, 0.9, 0.2]);
+        assert!(
+            beams(&motion, &marks, 2.0, None, None)
+                .iter()
+                .all(|beam| beam.width_px == TETHER_PX * 2.0),
+            "the tether is 1.5 CSS px"
+        );
+        let instances = mark_instances(&motion, &marks, KINDS, 1.0, None);
+        let tints = |kind: u16| -> Vec<u8> {
+            instances
+                .iter()
+                .filter(|i| i.kind == kind)
+                .map(|i| i.tint)
+                .collect()
+        };
+        assert_eq!(
+            tints(KINDS.body),
+            [0; 4],
+            "the body is white in every state"
+        );
+        let dim = u8::try_from(TINT_DIM0 + TINT_BODY0).expect("fits");
+        assert_eq!(
+            tints(KINDS.accent),
+            [
+                body_tint(0),
+                dim,
+                dim,
+                u8::try_from(TINT_STALE).expect("fits")
+            ],
+            "the eye is bright at work, dim at idle and while waiting, and grey once stale"
+        );
+        let shadow = u8::try_from(TINT_SHADOW).expect("fits");
+        let all = spots(&motion, &marks, 1.0, None);
+        let glows: Vec<f32> = all
+            .iter()
+            .filter(|spot| spot.tint != shadow)
+            .map(|spot| spot.alpha)
+            .collect();
+        assert_eq!(glows, [0.5, 0.18, 0.18], "a stale drone has no glow");
+        assert_eq!(
+            all.iter().filter(|spot| spot.tint == shadow).count(),
+            4,
+            "every drone has a shadow, a stale one too"
+        );
+        let ring = instances
+            .iter()
+            .find(|i| i.kind == KINDS.ring)
+            .expect("the waiting drone has a ring");
+        assert_eq!(ring.offset, at, "the ring sits at the body's height");
+        assert_eq!(
+            instances.iter().filter(|i| i.kind == KINDS.beacon).count(),
+            1,
+            "only the working drone has a beacon"
+        );
+        assert_eq!(seat_height(40.0, DroneState::Stale), 40.0 - STALE_DROP);
+        assert_eq!(seat_height(40.0, DroneState::Working), 40.0);
     }
 
     #[test]
@@ -2361,10 +4324,10 @@ mod tests {
         let mut motion = Motion::new(true);
         motion.sync(&marks);
         let before = mark_instances(&motion, &marks, KINDS, 1.0, None);
-        let beams_before = beams(&motion, &marks, 1.0, None);
+        let beams_before = beams(&motion, &marks, 1.0, None, None);
         assert!(!motion.advance(PULSE_MS / 3.0), "nothing moves while still");
         assert_eq!(mark_instances(&motion, &marks, KINDS, 1.0, None), before);
-        assert_eq!(beams(&motion, &marks, 1.0, None), beams_before);
+        assert_eq!(beams(&motion, &marks, 1.0, None, None), beams_before);
     }
 
     #[test]
@@ -2379,12 +4342,213 @@ mod tests {
         motion.sync(&marks);
         let instances = mark_instances(&motion, &marks, KINDS, 1.0, Some("a"));
         let count = |kind: u16| instances.iter().filter(|i| i.kind == kind).count();
-        assert_eq!(count(KINDS.body), 1, "only the other drone has a shell");
+        assert_eq!(count(KINDS.body), 1, "only the other drone has a body");
         assert_eq!(count(KINDS.accent), 1, "only the other drone has an accent");
-        assert_eq!(count(KINDS.shadow), 1, "only the other drone has a shadow");
-        assert_eq!(count(KINDS.beacon), 2, "both beacons stay");
-        let ridden = beams(&motion, &marks, 1.0, Some("a"));
+        assert_eq!(
+            count(KINDS.beacon),
+            1,
+            "the riding drone keeps its beacon, and the idle one has none"
+        );
+        let ridden = beams(&motion, &marks, 1.0, Some("a"), None);
         assert_eq!(ridden.len(), 1, "the riding drone has no beam");
         assert_eq!(ridden[0].origin, [9.0, 3.0, 40.0]);
+        let spots = spots(&motion, &marks, 1.0, Some("a"));
+        assert_eq!(spots.len(), 2, "the riding drone has no glow or shadow");
+        assert!(spots.iter().all(|s| s.origin[..2] == [9.0, 3.0]));
+    }
+
+    #[test]
+    fn a_higher_drone_casts_a_smaller_fainter_shadow_under_its_centre() {
+        let target = [5.0, 3.0, 9.0];
+        let low = [2.0, 3.0, PLINTH_TOP + 1.5 * BODY_RADIUS];
+        let high = [20.0, 3.0, PLINTH_TOP + 4.0 * BODY_RADIUS];
+        let marks = marks_of(vec![
+            drone("low", low, target, "idle"),
+            drone("high", high, target, "idle"),
+        ]);
+        let mut motion = Motion::new(true);
+        motion.sync(&marks);
+        let shadow = u8::try_from(TINT_SHADOW).expect("fits");
+        let shadows: Vec<Beam> = spots(&motion, &marks, 1.0, None)
+            .into_iter()
+            .filter(|spot| spot.tint == shadow)
+            .collect();
+        assert_eq!(shadows.len(), 2);
+        let (under_low, under_high) = (&shadows[0], &shadows[1]);
+        assert_eq!(under_low.origin, [low[0], low[1], PLINTH_TOP]);
+        assert_eq!(under_high.origin, [high[0], high[1], PLINTH_TOP]);
+        assert!(
+            under_high.spot < under_low.spot,
+            "the higher shadow is smaller"
+        );
+        assert!(under_high.alpha < under_low.alpha, "and fainter");
+        assert!(under_low.spot <= acan_iso::SHADOW_RADIUS);
+        assert_eq!(
+            under_low.grow,
+            drone_grow(1.0),
+            "a shadow grows with its drone at the screen floor"
+        );
+    }
+
+    /// The scripted view with tasks landed on src/api at `api` and on src/ui at `ui`.
+    fn landed_view(plan: &Plan, api: &[u64], ui: &[u64]) -> View {
+        let (_origin, log, _index) = scripted();
+        let mut view = Mirror::from_log(log).expect("the log replays").view(plan);
+        view.machines[machine(plan, "src/api")].landings = api.to_vec();
+        view.machines[machine(plan, "src/ui")].landings = ui.to_vec();
+        view
+    }
+
+    fn ghosts_at(view: &View, plan: &Plan, now: Option<u64>, seen: Option<u64>) -> Vec<Ghost> {
+        let slots = slots_for(view);
+        let away = seen.map(|seen| Away { seen, back: 20_000 });
+        Marks::build_at(view, plan, &stands(plan), &slots, Clock { now, away }).ghosts
+    }
+
+    #[test]
+    fn a_machine_where_work_landed_while_the_reader_was_away_has_a_ghost() {
+        let plan = plan();
+        let view = landed_view(&plan, &[5_000, 9_000, 12_000], &[7_000]);
+        let ghosts = ghosts_at(&view, &plan, Some(30_000), Some(8_000));
+        assert_eq!(ghosts.len(), 1, "only src/api landed after last seen");
+        let ghost = ghosts[0];
+        assert_eq!(ghost.machine, machine(&plan, "src/api"));
+        assert_eq!(ghost.count, 2, "two of its tasks landed since");
+        assert_eq!(ghost.at, 12_000);
+        let footprint = &plan.machines[ghost.machine];
+        assert_eq!(
+            ghost.rect,
+            [
+                footprint.min[0] - GHOST_OFFSET,
+                footprint.min[1] - GHOST_OFFSET,
+                footprint.size[0] + 2.0 * GHOST_OFFSET,
+                footprint.size[1] + 2.0 * GHOST_OFFSET,
+            ],
+            "the outline stands out from the footprint"
+        );
+        assert!(ghost.corners().iter().all(|corner| corner[2] == 0.0));
+        let later = landed_view(&plan, &[5_000, 9_000, 12_000], &[7_000, 25_000]);
+        let ghosts = ghosts_at(&later, &plan, Some(30_000), Some(8_000));
+        assert_eq!(
+            ghosts.len(),
+            1,
+            "work that lands after the reader is back has no ghost"
+        );
+        let both = ghosts_at(&view, &plan, Some(20_000), Some(6_000));
+        assert_eq!(
+            both.iter().map(|ghost| ghost.at).collect::<Vec<_>>(),
+            [12_000, 7_000],
+            "latest first"
+        );
+    }
+
+    #[test]
+    fn a_frozen_or_replayed_page_or_one_never_left_has_no_ghosts() {
+        let plan = plan();
+        let view = landed_view(&plan, &[9_000], &[9_000]);
+        assert!(
+            ghosts_at(&view, &plan, None, Some(1_000)).is_empty(),
+            "no clock"
+        );
+        assert!(
+            ghosts_at(&view, &plan, Some(20_000), None).is_empty(),
+            "never away"
+        );
+        assert!(
+            ghosts_at(&view, &plan, Some(20_000), Some(9_000)).is_empty(),
+            "seen since"
+        );
+    }
+
+    #[test]
+    fn ghosts_keep_the_latest_dozen() {
+        let small = plan();
+        let template = landed_view(&small, &[], &[]).machines[0].clone();
+        let mut plan = Plan::default();
+        let mut view = landed_view(&small, &[], &[]);
+        view.machines.clear();
+        for i in 0..20_u64 {
+            let name = format!("m{i}");
+            plan.machines.push(crate::plan::PlanMachine {
+                name: name.clone(),
+                min: [i as f32 * 100.0, 0.0],
+                size: [80.0, 80.0],
+            });
+            view.machines.push(crate::mirror::MachineView {
+                name,
+                landings: vec![2_000 + i],
+                ..template.clone()
+            });
+        }
+        let clock = Clock {
+            now: Some(20_000),
+            away: Some(Away {
+                seen: 1_000,
+                back: 20_000,
+            }),
+        };
+        let ghosts = ghosts(&view, &plan, clock);
+        assert_eq!(ghosts.len(), GHOST_MAX);
+        assert_eq!(ghosts[0].machine, 19, "the latest landing first");
+        assert_eq!(ghosts[GHOST_MAX - 1].machine, 20 - GHOST_MAX);
+    }
+
+    #[test]
+    fn a_ghost_is_a_grey_loop_that_fades_once_cleared_and_stays_gone() {
+        let plan = plan();
+        let view = landed_view(&plan, &[9_000], &[]);
+        let clock = Clock {
+            now: Some(20_000),
+            away: Some(Away {
+                seen: 1_000,
+                back: 20_000,
+            }),
+        };
+        let marks = Marks::build_at(&view, &plan, &stands(&plan), &slots_for(&view), clock);
+        let api = machine(&plan, "src/api");
+        let mut motion = Motion::new(false);
+        motion.sync(&marks);
+        let loop_ = ghost_beams(&motion, &marks, 2.0);
+        assert_eq!(loop_.len(), 4, "one stroke loop");
+        assert!(loop_.iter().all(|beam| {
+            u32::from(beam.tint) == TINT_GHOST
+                && beam.alpha == GHOST_ALPHA
+                && beam.width_px == GHOST_PX * 2.0
+                && beam.from[2] == 0.0
+        }));
+        for (i, beam) in loop_.iter().enumerate() {
+            assert_eq!(beam.to, loop_[(i + 1) % 4].from, "the sides close");
+        }
+        assert!(!motion.advance(1_000.0), "a ghost at rest needs no frames");
+        assert!(motion.clear_ghost(api));
+        assert!(!motion.clear_ghost(api), "it is already fading");
+        assert!(motion.advance(GHOST_FADE_MS / 2.0), "the fade runs");
+        let half = motion.ghost_alpha(api).expect("still fading");
+        assert!((half - GHOST_ALPHA / 2.0).abs() < 1e-4);
+        assert!(!motion.advance(GHOST_FADE_MS));
+        assert_eq!(motion.ghost_alpha(api), None);
+        assert!(ghost_beams(&motion, &marks, 2.0).is_empty());
+        motion.sync(&marks);
+        assert_eq!(motion.ghost_alpha(api), None, "a cleared ghost stays gone");
+        let newer = landed_view(&plan, &[9_000, 15_000], &[]);
+        let marks = Marks::build_at(&newer, &plan, &stands(&plan), &slots_for(&newer), clock);
+        motion.sync(&marks);
+        assert_eq!(
+            motion.ghost_alpha(api),
+            Some(GHOST_ALPHA),
+            "a newer landing brings it back"
+        );
+        assert!(motion.clear_ghosts());
+        assert!(!motion.advance(GHOST_FADE_MS));
+        assert_eq!(motion.ghost_alpha(api), None);
+    }
+
+    #[test]
+    fn a_point_is_inside_a_quad_by_the_even_odd_rule() {
+        let quad = [[0.0, 0.0], [10.0, 2.0], [12.0, 12.0], [-2.0, 10.0]];
+        assert!(inside_quad(&quad, [5.0, 5.0]));
+        assert!(!inside_quad(&quad, [11.0, 1.0]));
+        assert!(!inside_quad(&quad, [-5.0, 5.0]));
+        assert!(!inside_quad(&[], [0.0, 0.0]));
     }
 }

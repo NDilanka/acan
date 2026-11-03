@@ -2,7 +2,7 @@
   "schema": "acan-demo-intent-edits/2",
   "order": "o-8",
   "decided_by": "coordinator, delegated by the owner",
-  "note": "Written for the o-8 draft in run D:\\dev\\acan-takes\\d02m-fresh7-20261101-091941 (scope-draft-o-8.json, rev 1, base 4f9bccb), under the D02R decisions (coordinator, delegated by the owner). Nothing here is a verdict: the edits state the order rules and the gate checks them.",
+  "note": "Written for the o-8 draft in run C:\\work\\acan-takes\\d02m-fresh7-20261101-091941 (scope-draft-o-8.json, rev 1, base 4f9bccb), under the D02R decisions (coordinator, delegated by the owner). Nothing here is a verdict: the edits state the order rules and the gate checks them.",
   "choice_rules": [
     {
       "id": "cr-retry-fallback",
@@ -530,8 +530,8 @@
     }
   ],
   "draft_mapping": {
-    "run": "D:\\dev\\acan-takes\\d02m-fresh7-20261101-091941",
-    "draft_file": "D:\\dev\\acan-takes\\d02m-fresh7-20261101-091941\\scope-draft-o-8.json",
+    "run": "C:\\work\\acan-takes\\d02m-fresh7-20261101-091941",
+    "draft_file": "C:\\work\\acan-takes\\d02m-fresh7-20261101-091941\\scope-draft-o-8.json",
     "draft_rev": 1,
     "decided_by": "coordinator, delegated by the owner",
     "notes": [

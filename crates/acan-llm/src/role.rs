@@ -17,12 +17,35 @@ pub enum Role {
     Fast,
     /// Image input. Compares page screenshots in the advisory vision witness.
     Vision,
+    /// Orders the tour of a plant view. Falls back to the foreman's route when not routed.
+    Director,
     /// Muse Wonder. Takes the advisory second look at a vision check the first call found
     /// inconsistent or unclear.
     Wonder,
 }
 
 impl Role {
+    /// Every role, in the order the setup page lists them.
+    pub const ALL: [Self; 6] = [
+        Self::Foreman,
+        Self::Worker,
+        Self::Fast,
+        Self::Vision,
+        Self::Director,
+        Self::Wonder,
+    ];
+
+    /// Whether the role needs a Meta model. Such a role is off without a Meta key, and no other
+    /// provider stands in for it. Vision, the director and wonder need Meta. The other roles run
+    /// on any provider.
+    #[must_use]
+    pub fn needs_meta(self) -> bool {
+        match self {
+            Self::Foreman | Self::Worker | Self::Fast => false,
+            Self::Vision | Self::Director | Self::Wonder => true,
+        }
+    }
+
     /// The name used in config files, CLI flags, and reports.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -30,6 +53,7 @@ impl Role {
             Self::Worker => "worker",
             Self::Fast => "fast",
             Self::Vision => "vision",
+            Self::Director => "director",
             Self::Wonder => "wonder",
         }
     }
@@ -50,6 +74,7 @@ impl FromStr for Role {
             "worker" => Ok(Self::Worker),
             "fast" => Ok(Self::Fast),
             "vision" => Ok(Self::Vision),
+            "director" => Ok(Self::Director),
             "wonder" => Ok(Self::Wonder),
             other => Err(UnknownRole(other.to_owned())),
         }

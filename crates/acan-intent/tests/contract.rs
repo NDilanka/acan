@@ -256,11 +256,13 @@ fn fixture_names() -> Vec<String> {
 
 #[test]
 fn every_fixture_is_covered() {
-    let source = include_str!("contract.rs");
+    // A fixture is covered when a test file names it: a round trip here, or a tour test.
+    let sources = [include_str!("contract.rs"), include_str!("tour.rs")];
     for name in fixture_names() {
+        let named = format!("{name}\"");
         assert!(
-            source.contains(&format!("\"{name}\"")),
-            "{name} has no round-trip test"
+            sources.iter().any(|source| source.contains(&named)),
+            "{name} has no test"
         );
     }
 }
@@ -624,20 +626,41 @@ fn a_cross_item_reference_rejects_the_whole_tour() {
 }
 
 #[test]
-fn a_number_in_a_text_slot_rejects_the_whole_tour() {
+fn a_text_in_a_status_slot_rejects_the_whole_tour() {
+    let catalog: CaptionCatalog = load("caption-catalog.json");
+    let mut value = raw("plant-view-v1.json");
+    let item = value["items"]
+        .as_array_mut()
+        .expect("items")
+        .iter_mut()
+        .find(|item| item["item_id"] == "chk-signup-store")
+        .expect("the error item");
+    let row = item["evidence"]
+        .as_array_mut()
+        .expect("evidence")
+        .iter_mut()
+        .find(|row| row["slot"] == "base_a")
+        .expect("a base row");
+    row["value"] = json!({ "state": "present", "value": "created" });
+    let view: PlantView = serde_json::from_value(value).expect("decoding the view");
+    let Some(TourView::Directed { tour, .. }) = &view.tour else {
+        panic!("the fixture has a directed tour");
+    };
+    let at = tour
+        .steps
+        .iter()
+        .position(|step| step.item_id.as_str() == "chk-signup-store")
+        .expect("a step about the error item");
+    assert_eq!(
+        admit::tour(&view, &catalog, tour),
+        Err(slot_fault(at, "base_a", SlotMismatch::Type))
+    );
+}
+
+#[test]
+fn a_caption_for_another_class_rejects_the_whole_tour() {
     let catalog: CaptionCatalog = load("caption-catalog.json");
     let mut at = 0;
-    let rejected = admit_tour_with(&catalog, |steps| {
-        at = step_about(steps, "i-login-limit");
-        steps[at]["caption"] = json!({
-            "template_id": "residue.changed_value",
-            "slots": {
-                "base": reference("i-login-limit", "base_a", "s6", "status"),
-                "candidate": reference("i-login-limit", "candidate", "s6", "status"),
-            }
-        });
-    });
-    assert_eq!(rejected, Err(slot_fault(at, "base", SlotMismatch::Type)));
     let rejected = admit_tour_with(&catalog, |steps| {
         at = step_about(steps, "d-login-error-body");
         steps[at]["caption"] = json!({
@@ -645,7 +668,15 @@ fn a_number_in_a_text_slot_rejects_the_whole_tour() {
             "slots": { "base_a": reference("d-login-error-body", "base_a", "s6", "body.error") }
         });
     });
-    assert_eq!(rejected, Err(slot_fault(at, "base_a", SlotMismatch::Type)));
+    assert_eq!(
+        rejected,
+        Err(TourRejection::Step {
+            tour_step: at,
+            fault: StepFault::TemplateDoesNotFit {
+                template_id: "unknown.error".parse().expect("a template id"),
+            },
+        })
+    );
 }
 
 #[test]
@@ -819,6 +850,20 @@ fn selectors_refuse_inconsistent_field_paths() {
     assert!(with("side_effect", Some("users[*].name")).is_err());
     assert!(with("side_effect", None).is_err());
     assert!("links[*].code".parse::<FieldPattern>().is_ok());
+}
+
+#[test]
+fn the_selector_schema_states_the_side_effect_path_rule() {
+    let schema =
+        serde_json::to_value(schemars::schema_for!(Selector)).expect("encoding the schema");
+    let description = schema["properties"]["field_path"]["description"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        description.contains("`side_effect` path is required")
+            && description.contains("`store` or `outbound_http`"),
+        "the field_path description states the rule: {description:?}"
+    );
 }
 
 #[test]

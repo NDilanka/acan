@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::chat::{ChatRequest, ChatResponse, Message, ToolCall, ToolKind, ToolSpec};
-use crate::client::{ModelClient, Structured, parse_structured, with_schema};
+use crate::client::{Destination, ModelClient, Structured, parse_structured, with_schema};
 use crate::config::{ConfigError, LlmConfig, ProviderConfig, StructuredOutput, TokenLimitField};
 use crate::error::LlmError;
 use crate::key::{ApiKey, ApiKeys};
@@ -160,8 +160,9 @@ impl OpenAiCompatible {
     /// # Errors
     ///
     /// Returns the errors of [`ModelClient::chat_json`]. A reply that does not parse as `T`
-    /// is a [`LlmError::SchemaValidation`], which carries no trace fields. A reply that stopped
-    /// at the output cap is a [`LlmError::OutputCapped`].
+    /// is a [`LlmError::SchemaValidation`], and a reply that stopped at the output cap is a
+    /// [`LlmError::OutputCapped`]. Both carry the call's trace, with the request id the provider
+    /// sent.
     pub async fn chat_json_traced<T>(
         &self,
         role: Role,
@@ -176,7 +177,9 @@ impl OpenAiCompatible {
             request_id,
             reply_model,
         } = self.chat_traced(role, with_schema::<T>(request)).await?;
-        let structured = parse_structured(value, cap, |text| self.keys.redact(text))?;
+        let trace_request_id = request_id.as_ref().map(|id| id.value.clone());
+        let structured =
+            parse_structured(value, cap, trace_request_id, |text| self.keys.redact(text))?;
         Ok(Traced {
             value: structured,
             request_id,
@@ -301,6 +304,14 @@ impl ModelClient for OpenAiCompatible {
         self.chat_traced(role, request)
             .await
             .map(|traced| traced.value)
+    }
+
+    fn destination(&self, role: Role) -> Option<Destination> {
+        let route = self.config.resolve(role).ok()?;
+        Some(Destination {
+            provider: route.provider.name.clone(),
+            model: route.model.to_owned(),
+        })
     }
 
     async fn chat_json<T>(

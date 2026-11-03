@@ -18,8 +18,9 @@ use crate::git::Workspace;
 use crate::index::Scan;
 use crate::jobs;
 use crate::store::EventStore;
+use crate::tour::TourCache;
 use crate::vision::Vision;
-use crate::writer::{Snapshot, Writer};
+use crate::writer::{Guard, Snapshot, Writer};
 
 /// How many events a live subscriber may fall behind before the server disconnects it.
 ///
@@ -98,7 +99,11 @@ struct Inner<C> {
     /// checks and installs.
     landing: tokio::sync::Mutex<()>,
     #[cfg(test)]
-    stream_hold: crate::stream::StreamHold,
+    stream_hold: crate::stream::Hold,
+    /// The director's answer for each receipt the plant view has asked about.
+    tours: TourCache,
+    #[cfg(test)]
+    ruling_hold: crate::stream::Hold,
 }
 
 impl<C> Clone for Host<C> {
@@ -158,9 +163,17 @@ impl<C: ModelClient> Host<C> {
                 vision: parts.vision,
                 landing: tokio::sync::Mutex::new(()),
                 #[cfg(test)]
-                stream_hold: crate::stream::StreamHold::default(),
+                stream_hold: crate::stream::Hold::default(),
+                tours: TourCache::default(),
+                #[cfg(test)]
+                ruling_hold: crate::stream::Hold::default(),
             }),
         }
+    }
+
+    /// The director's answers, one per receipt.
+    pub(crate) fn tours(&self) -> &TourCache {
+        &self.inner.tours
     }
 
     /// The git workspace, or `None` when the served directory is not a usable repository.
@@ -271,12 +284,36 @@ impl<C: ModelClient> Host<C> {
     /// Returns [`SubmitError::Rejected`] when the origin refuses the command, and
     /// [`SubmitError::Internal`] when the events cannot be stored or the writer is gone.
     pub async fn submit(&self, command: Command) -> Result<Vec<Stamped>, SubmitError> {
+        self.submit_with(command, None).await
+    }
+
+    /// Like [`Host::submit`], but the writer first runs `guard` against the committed world, in
+    /// the same turn that it decides `command`. A guard that refuses records nothing, so a check
+    /// made from a read of the world cannot be overtaken by a write that lands in between.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubmitError::Rejected`] when the guard or the origin refuses the command, and
+    /// [`SubmitError::Internal`] when the events cannot be stored or the writer is gone.
+    pub(crate) async fn submit_guarded(
+        &self,
+        command: Command,
+        guard: Guard,
+    ) -> Result<Vec<Stamped>, SubmitError> {
+        self.submit_with(command, Some(guard)).await
+    }
+
+    async fn submit_with(
+        &self,
+        command: Command,
+        guard: Option<Guard>,
+    ) -> Result<Vec<Stamped>, SubmitError> {
         let _fence = if invalidates_landing(&command) {
             Some(self.inner.landing.lock().await)
         } else {
             None
         };
-        let events = self.inner.writer.submit(command).await?;
+        let events = self.inner.writer.submit_with(command, guard).await?;
         // A confirmation records the protected inputs it was confirmed under, at its base. When
         // recording fails the confirmation stands with no record, so a re-bind of its scope refuses.
         for stamped in &events {
@@ -367,8 +404,13 @@ impl<C: ModelClient> Host<C> {
     }
 
     #[cfg(test)]
-    pub(crate) fn stream_hold(&self) -> &crate::stream::StreamHold {
+    pub(crate) fn stream_hold(&self) -> &crate::stream::Hold {
         &self.inner.stream_hold
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ruling_hold(&self) -> &crate::stream::Hold {
+        &self.inner.ruling_hold
     }
 
     /// The set of live stream tasks, joined during shutdown.
@@ -405,4 +447,71 @@ pub(crate) fn now() -> Timestamp {
         .expect("system clock is before the unix epoch")
         .as_millis();
     Timestamp::from_millis(u64::try_from(millis).expect("clock is within u64 milliseconds"))
+}
+
+/// Test helpers for a host over a repository.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::path::Path;
+    use std::str::FromStr;
+
+    use acan_core::{MemberId, Origin, Timestamp, WorldId, WorldRef};
+    use acan_llm::{ModelClient, UsageLedger};
+    use tokio::sync::watch;
+
+    use super::{Host, HostParts};
+    use crate::auth::Tokens;
+    use crate::index::scan;
+    use crate::store::EventStore;
+    use crate::{DEFAULT_PROBE_CONCURRENCY, DEFAULT_WITNESS_CONCURRENCY};
+
+    /// A host over the repository at `repo`, which holds only the world's opening event, with
+    /// `client` as its model client and no git workspace.
+    pub(crate) async fn host_with<C: ModelClient + 'static>(repo: &Path, client: C) -> Host<C> {
+        host_signalled(repo, client).await.0
+    }
+
+    /// [`host_with`], and the sender that signals the host's shutdown. Dropping the sender leaves
+    /// the host unsignalled for good.
+    pub(crate) async fn host_signalled<C: ModelClient + 'static>(
+        repo: &Path,
+        client: C,
+    ) -> (Host<C>, watch::Sender<bool>) {
+        let state = repo.join(".acan");
+        std::fs::create_dir_all(&state).expect("the state dir");
+        let store = EventStore::open(&state.join("world.db"))
+            .await
+            .expect("the event store");
+        let owner = MemberId::from_str("owner").expect("a member id");
+        let (origin, opened) = Origin::open(
+            WorldRef {
+                id: WorldId::from_str("test").expect("a world id"),
+                repo: repo.display().to_string(),
+            },
+            owner.clone(),
+            Timestamp::from_millis(1),
+        );
+        store
+            .append(&[opened])
+            .await
+            .expect("the open event stores");
+        let (tokens, _) = Tokens::load_or_create(&state, &owner).expect("the tokens");
+        let (shutdown_tx, shutdown) = watch::channel(false);
+        let host = Host::new(HostParts {
+            origin,
+            store,
+            tokens,
+            scan: scan(repo).expect("the scan"),
+            ledger: UsageLedger::default(),
+            client,
+            repo: repo.to_path_buf(),
+            shutdown,
+            git: None,
+            witness_http_base_url: None,
+            witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
+            probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
+            vision: None,
+        });
+        (host, shutdown_tx)
+    }
 }

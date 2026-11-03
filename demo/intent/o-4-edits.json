@@ -111,8 +111,8 @@
     }
   ],
   "draft_mapping": {
-    "run": "D:\\dev\\acan-demo-runs\\intent\\x01-r7-20261103-104241",
-    "draft_file": "D:\\dev\\acan-demo-runs\\intent\\x01-r7-20261103-104241\\o-4\\scope-draft.json",
+    "run": "C:\\work\\acan-demo-runs\\intent\\x01-r7-20261103-104241",
+    "draft_file": "C:\\work\\acan-demo-runs\\intent\\x01-r7-20261103-104241\\o-4\\scope-draft.json",
     "draft_rev": 1,
     "decided_by": "coordinator, delegated by the owner",
     "items": [

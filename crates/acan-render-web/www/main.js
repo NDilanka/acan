@@ -4,9 +4,21 @@
 // asks for no frames. Other modules import `requestRender` from here; the cycle is safe
 // because no module runs code from another at load time.
 import init, { App } from "./pkg/acan_render_web.js";
-import { openCard, settleByKey, toggleCard } from "./cards.js";
-import { paintMarks, pinAt, placeLabels } from "./marks.js";
-import { paintOrderLine, paintRide, paintStale, paintUsage } from "./panels.js";
+import { backendPlan, createOnFirst, replaceCanvas } from "./backend.js";
+import {
+  closeClashCard,
+  closeQuestionCard,
+  openCard,
+  pressDigit,
+  questionOpen,
+  toggleCard,
+  toggleQuestionCard,
+} from "./cards.js";
+import { closeCommand, commandOpen, openCommand } from "./commandbar.js";
+import { clickMachine, closeCompose, composeOpen, orderHere } from "./compose.js";
+import { keyAction } from "./keys.js";
+import { droneHover, paintMarks, pinAt, placeLabels } from "./marks.js";
+import { paintRide, paintStale, paintUsage, toggleHelp } from "./panels.js";
 import { syncSeals } from "./seal.js";
 import { paintSlip } from "./slip.js";
 import {
@@ -19,13 +31,37 @@ import {
   noticeEl,
   params,
   repoEl,
+  replay,
+  setCanvas,
   state,
 } from "./state.js";
-import { syncPlantViews } from "./plant.js";
-import { get, setLink, start } from "./stream.js";
+import { playOf, syncPlantViews } from "./plant.js";
+import { bindPlate, paintPlate, stepBy, toggleMode, togglePlay } from "./plate.js";
+import { startReplay } from "./replay.js";
+import { bindShell, startShell } from "./shell.js";
+import {
+  clock,
+  feed,
+  forgetToken,
+  get,
+  hold,
+  installFeed,
+  isLive,
+  loadEvents,
+  onHoldEvent,
+  setLink,
+  showHold,
+  start,
+} from "./stream.js";
 import { requestUsage } from "./usage.js";
-
-const PAN_KEY_PX = 80;
+import { goKeys, installLanes } from "./lanes.js";
+import { installRailTabs } from "./rail.js";
+import { installInbox } from "./inbox.js";
+import { installHistory } from "./history.js";
+import { installScrub } from "./scrub.js";
+import { installFirstRun, paintFirstRun } from "./firstrun-panel.js";
+import { onWorkers, refreshWorkers, workersAnswer } from "./workers.js";
+import { closeViewer, installVision, placeVisionPins, syncVision, viewerOpen, viewerTakesEscape } from "./vision-pins.js";
 
 const ZOOM_KEY = 1.25;
 
@@ -42,6 +78,34 @@ const DRONE_PICK_PX = 6;
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 const timing = { started: performance.now() };
+
+// The registration point for the watch panels (lanes, inbox, history, scrubber). Each paint
+// hook runs when the view changes. The keys are all in keys.js, so they have one order; a key hook
+// is asked only about a key the table does not use, and returning true takes it. A panel that
+// answers a key the table names sets its action on the kit instead: `rideLane(index)` for G and
+// a digit, `goLive()` for Esc on a rewound map.
+const paintHooks = [];
+const keyHooks = [];
+const kit = {
+  state,
+  feed,
+  clock,
+  isLive,
+  freeze,
+  replay,
+  hold,
+  loadEvents,
+  onHoldEvent,
+  showHold,
+  forgetToken,
+  get,
+  setLink,
+  requestRender,
+  // The shared GET /api/workers answer, which the first-run checklist reads too.
+  workers: { answer: workersAnswer, refresh: refreshWorkers, onChange: onWorkers },
+  onPaint: (hook) => paintHooks.push(hook),
+  onKey: (hook) => keyHooks.push(hook),
+};
 
 export function requestRender() {
   if (state.scheduled || state.app === null) return;
@@ -64,6 +128,7 @@ function drawFrame(now = performance.now()) {
     syncView();
     paintRide();
     placeLabels();
+    placeVisionPins();
     if (turning) {
       requestRender();
     } else {
@@ -89,14 +154,17 @@ function syncView() {
 }
 
 function paint() {
-  paintOrderLine();
   paintMarks();
   paintUsage();
   paintStale();
-  syncPlantViews(state, get);
+  syncPlantViews(state, get, paintPlate);
+  paintPlate();
   syncSeals(state, get, paintSlip);
   paintSlip();
   requestUsage(state, get, paintUsage);
+  syncVision();
+  paintFirstRun();
+  for (const hook of paintHooks) hook();
 }
 
 // Sets the drawing buffer to the CSS box times the device pixel ratio. The wasm side rounds
@@ -161,7 +229,7 @@ function bindCanvas() {
   });
 
   canvas.addEventListener("pointermove", (event) => {
-    if (state.drag === null) return;
+    if (state.drag === null) return void droneHover(event.clientX - canvas.getBoundingClientRect().left, event.clientY - canvas.getBoundingClientRect().top);
     if (state.drag.orbit) {
       state.app.orbit(event.clientX - state.drag.x, event.clientY - state.drag.y);
     } else {
@@ -178,10 +246,9 @@ function bindCanvas() {
     requestRender();
   });
 
-  // A press that did not move is a click. A click near a clash pin's tip opens its card; the
-  // camera stays where it is.
-  // A click on a clash pin opens its card. A click on a drone rides it, or switches the ride to
-  // the drone nearest the click.
+  // A press that did not move is a click, and the camera stays where it is. A click on a clash
+  // pin opens its card. A click on a drone rides it, or switches the ride to the drone nearest the
+  // click. A click on a machine opens the compose panel there, to post an order on it.
   const endDrag = (event) => {
     const pressed = state.press;
     state.press = null;
@@ -198,6 +265,8 @@ function bindCanvas() {
     } else if (droneAt(x, y)) {
       state.app.ride_nearest(x, y);
       requestRender();
+    } else {
+      clickMachine(x, y);
     }
   };
   canvas.addEventListener("pointerup", endDrag);
@@ -220,13 +289,6 @@ function bindCanvas() {
   );
 }
 
-const ARROW_PAN = {
-  ArrowLeft: [PAN_KEY_PX, 0],
-  ArrowRight: [-PAN_KEY_PX, 0],
-  ArrowUp: [0, PAN_KEY_PX],
-  ArrowDown: [0, -PAN_KEY_PX],
-};
-
 function setAlt(down) {
   if (state.altDown === down) return;
   state.altDown = down;
@@ -237,78 +299,139 @@ function setAlt(down) {
   requestRender();
 }
 
+// Whether the key went to a text field, which keeps its keys.
+function typingIn(target) {
+  return target instanceof Element && (target.matches("input, textarea, select") || target.isContentEditable);
+}
+
+// Runs the action keys.js named for a key.
+function runKey(action, event) {
+  switch (action.kind) {
+    case "arm-go":
+      break;
+    case "ride-lane":
+      kit.rideLane?.(action.index);
+      break;
+    case "go":
+      goKeys.get(action.letter)?.();
+      break;
+    case "close":
+      CLOSERS[action.panel]();
+      break;
+    case "go-live":
+      kit.goLive?.();
+      break;
+    case "leave-ride":
+      state.app.leave();
+      requestRender();
+      break;
+    case "open-command":
+      openCommand();
+      break;
+    case "toggle-help":
+      toggleHelp();
+      break;
+    case "toggle-question":
+      toggleQuestionCard();
+      break;
+    case "order-here":
+      orderHere();
+      break;
+    case "toggle-card":
+      toggleCard();
+      break;
+    case "digit":
+      pressDigit(action.n);
+      break;
+    case "pan":
+      state.app.pan(action.dx, action.dy);
+      requestRender();
+      break;
+    case "projection":
+      state.app.toggle_projection();
+      requestRender();
+      break;
+    case "zoom":
+      zoomAtCentre(action.dir > 0 ? ZOOM_KEY : 1 / ZOOM_KEY);
+      break;
+    case "fit":
+      state.app.fit();
+      requestRender();
+      break;
+    case "ride-centre": {
+      const rect = canvas.getBoundingClientRect();
+      state.app.ride_nearest(rect.width / 2, rect.height / 2);
+      requestRender();
+      break;
+    }
+    case "ride-step":
+      state.app.ride_step(action.dir);
+      requestRender();
+      break;
+    case "turn":
+      turn(action.dir * TURN_DEG);
+      break;
+    case "play":
+      togglePlay();
+      break;
+    case "mode":
+      toggleMode();
+      break;
+    case "step":
+      stepBy(action.delta);
+      break;
+    default:
+      console.warn("no handler for key action", action.kind, event.key);
+  }
+}
+
+const CLOSERS = {
+  command: () => closeCommand(),
+  compose: closeCompose,
+  viewer: closeViewer,
+  question: closeQuestionCard,
+  clash: closeClashCard,
+};
+
+// When G was pressed, while the chord waits for its digit or letter.
+let goArmed = null;
+
 function bindKeys() {
   window.addEventListener("keydown", (event) => {
-    if (event.target instanceof HTMLInputElement) return;
+    // A text field keeps its keys, except that Esc in a field of the vision viewer closes it.
+    if (typingIn(event.target) && !(event.key === "Escape" && viewerTakesEscape(event))) return;
     if (event.key === "Alt") {
       event.preventDefault();
       setAlt(true);
       return;
     }
+    // A modal dialog, such as the key setup, keeps its own keys and its own Esc.
+    if (document.querySelector("dialog[open]") !== null) return;
     if (state.app === null || event.ctrlKey || event.metaKey) return;
-    if (ARROW_PAN[event.key]) {
-      event.preventDefault();
-      state.app.pan(...ARROW_PAN[event.key]);
-      requestRender();
+    const step = keyAction(
+      { key: event.key, code: event.code, repeat: event.repeat, shift: event.shiftKey },
+      {
+        armed: goArmed,
+        now: performance.now(),
+        letters: goKeys,
+        held: hold.on,
+        riding: state.ridden !== "",
+        open: {
+          command: commandOpen(),
+          compose: composeOpen(),
+          viewer: viewerOpen(),
+          question: questionOpen(),
+          clash: Boolean(state.markState.card),
+        },
+      },
+    );
+    goArmed = step.armed;
+    if (step.prevent) event.preventDefault();
+    if (step.action !== null) {
+      runKey(step.action, event);
       return;
     }
-    if (event.key === "5" || event.code === "Numpad5") {
-      if (!event.repeat) {
-        state.app.toggle_projection();
-        requestRender();
-      }
-      return;
-    }
-    if (/^[1-3]$/.test(event.key)) {
-      settleByKey(Number(event.key));
-      return;
-    }
-    switch (event.key) {
-      case "c":
-      case "C":
-        if (!event.repeat) toggleCard();
-        break;
-      case "+":
-      case "=":
-        zoomAtCentre(ZOOM_KEY);
-        break;
-      case "-":
-      case "_":
-        zoomAtCentre(1 / ZOOM_KEY);
-        break;
-      case "0":
-        state.app.fit();
-        requestRender();
-        break;
-      case "f":
-      case "F":
-        if (!event.repeat) {
-          const rect = canvas.getBoundingClientRect();
-          state.app.ride_nearest(rect.width / 2, rect.height / 2);
-          requestRender();
-        }
-        break;
-      case "Tab":
-        event.preventDefault();
-        state.app.ride_step(event.shiftKey ? -1 : 1);
-        requestRender();
-        break;
-      case "Escape":
-        if (state.ridden !== "") {
-          state.app.leave();
-          requestRender();
-        }
-        break;
-      case "q":
-      case "Q":
-        if (!event.repeat) turn(-TURN_DEG);
-        break;
-      case "e":
-      case "E":
-        if (!event.repeat) turn(TURN_DEG);
-        break;
-      default:
-    }
+    keyHooks.some((hook) => hook(event));
   });
 
   window.addEventListener("keyup", (event) => {
@@ -324,6 +447,7 @@ function bindKeys() {
     sessionStorage.setItem(TOKEN_KEY, value);
     state.token = value;
     gate.hidden = true;
+    startShell();
     start().catch((err) => {
       console.error(err);
       setLink("failed");
@@ -343,22 +467,31 @@ function adoptToken() {
 }
 
 async function createApp() {
-  const backend = params.get("backend") || (navigator.gpu ? "webgpu" : "webgl");
-  try {
-    return await App.create(canvas, backend);
-  } catch (err) {
-    if (backend === "webgl") throw err;
-    console.error(err);
-    return App.create(canvas, "webgl");
-  }
+  const plan = backendPlan(params.get("backend"), Boolean(navigator.gpu));
+  const made = await createOnFirst(plan, canvas, {
+    create: (target, backend) => App.create(target, backend),
+    freshCanvas: (old) => {
+      setCanvas(replaceCanvas(old));
+      setDrawingSize();
+      return canvas;
+    },
+    onFail: (backend, err) => console.warn(`${backend} renderer failed:`, err),
+  });
+  console.info(`renderer: ${made.backend} (${made.app.backend()})`);
+  return made.app;
 }
 
-// The page loads its plant one of three ways. `?plant=stress&machines=N` builds a generated
-// plant for the benchmark. `?plant=fixture` loads the demo plant with no log. Otherwise the
-// page reads the live origin, which needs the owner token.
+// The page loads its plant one of four ways. `?replay=1` plays a recorded run from `replay/`,
+// with no server, and holds no token. `?plant=stress&machines=N` builds a generated plant for the
+// benchmark. `?plant=fixture` loads the demo plant with no log. Otherwise the page reads the live
+// origin, which needs the owner token.
 async function loadPlant() {
+  // The token is adopted in every other mode, so the shell's calls can use it, even over a fixture.
+  state.token = replay ? null : adoptToken();
   const source = params.get("plant");
-  if (source === "stress") {
+  if (replay) {
+    await startReplay();
+  } else if (source === "stress") {
     const machines = Number(params.get("machines") || 2000);
     const started = performance.now();
     state.app.set_stress(machines);
@@ -368,7 +501,6 @@ async function loadPlant() {
     if (!response.ok) throw new Error(`fixture HTTP ${response.status}`);
     state.app.set_plant(await response.text());
   } else {
-    state.token = adoptToken();
     if (!state.token) {
       gate.hidden = false;
       setLink("sign in");
@@ -389,6 +521,25 @@ function followReducedMotion() {
   requestRender();
 }
 
+const PLATE_FIXTURES = {
+  fixture: "fixtures/plant-view-v1.json",
+  plain: "fixtures/plant-view-v1-plain.json",
+};
+
+// Shows the receipt plate over a fixture plant view, marked FIXTURE, as if the origin had served it.
+async function loadPlateFixture(name) {
+  const file = PLATE_FIXTURES[name];
+  if (!file) throw new Error(`no plate fixture named ${name}`);
+  const response = await fetch(file);
+  if (!response.ok) throw new Error(`fixture HTTP ${response.status}`);
+  const text = await response.text();
+  const order = JSON.parse(text).order.id;
+  const { play, playError, items } = playOf(state.app, text);
+  const summary = JSON.parse(state.app.plant_view_summary(text));
+  state.plantViews.set(order, { recorded: -1, summary, error: null, play, playError, items, fixture: true });
+  paintPlate();
+}
+
 async function boot() {
   const started = performance.now();
   await init();
@@ -396,16 +547,33 @@ async function boot() {
   setDrawingSize();
   const createStarted = performance.now();
   state.app = await createApp();
+  installFeed(state.app);
   timing.create = performance.now() - createStarted;
   sizeCanvas();
   bindCanvas();
   bindKeys();
+  installRailTabs(kit);
+  installLanes(kit);
+  installInbox(kit);
+  installHistory(kit);
+  installScrub(kit);
   window.addEventListener("resize", sizeCanvas);
   state.app.set_still(freeze);
   // Reduced motion turns the hover bob off, and the page follows the setting as it changes.
   followReducedMotion();
   reducedMotion.addEventListener("change", followReducedMotion);
   await loadPlant();
+  bindPlate();
+  await installVision();
+  // The replay page makes no API call, so the shell (version, update, bug report, setup) stays off.
+  if (!replay) {
+    bindShell();
+    startShell();
+    installFirstRun();
+  }
+  // `?plate=fixture` or `?plate=plain` shows the receipt plate over a fixture plant view, without
+  // the origin. The plate is watermarked FIXTURE.
+  if (params.has("plate")) await loadPlateFixture(params.get("plate"));
   // `?view=azimuth,elevation` turns to a camera angle in degrees, such as a low tilt.
   if (params.has("view")) {
     const [azimuth, elevation] = params.get("view").split(",").map(Number);

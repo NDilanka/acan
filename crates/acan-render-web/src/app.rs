@@ -26,6 +26,7 @@ use crate::pov::{self, Ride};
 use crate::scene;
 use crate::seal;
 use crate::stand;
+use crate::tour;
 
 /// Space around the plant at fit, in CSS pixels.
 const FIT_MARGIN_CSS: f32 = 24.0;
@@ -56,6 +57,11 @@ pub struct App {
     kind_spots: Vec<Vec<[f32; 2]>>,
     dpr: f32,
     turn: Option<Turn>,
+    /// The camera's move to the tour step on screen, while one runs.
+    tour_move: Option<TourMove>,
+    /// The machines the shown tour step stages, with the chip labels on each. Empty when no step
+    /// is shown, so every machine keeps its normal tint.
+    stage: Vec<tour::Spot>,
     plant: Option<Loaded>,
     plan: Option<Plan>,
     mirror: Option<Mirror>,
@@ -85,12 +91,25 @@ pub struct App {
     view_json: String,
     view_version: u32,
     dirty: bool,
+    /// The page's clock for the marks: the time now on a live page, and when the reader last saw
+    /// it. A still page keeps no time, so nothing on it reads stale.
+    clock: marks::Clock,
+    /// The agent whose drone the pointer is over, if any.
+    hovered: Option<String>,
 }
 
 /// An ease from one azimuth to another, in degrees. `to` is not wrapped, so repeated turns add up.
 struct Turn {
     from: f32,
     to: f32,
+    elapsed_ms: f32,
+}
+
+/// An eased move of the camera's pivot and zoom to a tour step, from where it was when the step
+/// began. See [`tour::progress`].
+struct TourMove {
+    from: tour::Pose,
+    to: tour::Pose,
     elapsed_ms: f32,
 }
 
@@ -110,8 +129,6 @@ struct Loaded {
     rest: Vec<bool>,
     /// The machines and belts as the layout places them, before any mark is added.
     base: Scene,
-    /// The belts that draw, with the instance index of the machines they join.
-    belts: Vec<scene::BeltLine>,
     /// For each plan machine, its instance in `base`.
     plan_instance: Vec<usize>,
     /// For each plan machine, its model's top and the free spots on its plinth top.
@@ -164,6 +181,8 @@ impl App {
             kind_spots,
             dpr: 1.0,
             turn: None,
+            tour_move: None,
+            stage: Vec::new(),
             plant: None,
             plan: None,
             mirror: None,
@@ -179,6 +198,8 @@ impl App {
             fit_after_leave: false,
             bob_enabled: true,
             bob_ms: 0.0,
+            clock: marks::Clock::default(),
+            hovered: None,
             view_json: String::new(),
             view_version: 0,
             dirty: false,
@@ -220,6 +241,99 @@ impl App {
         Ok(plant_view::summarize(&view).to_string())
     }
 
+    /// Checks one `plant-view/1` view and returns what the page plays over it, as JSON: the view's
+    /// own counts and items, the mode, the chip's model, why the order plays, and each step's
+    /// camera, staged marks and caption. Every caption is filled from bound evidence. The view's
+    /// tour is admitted or the deterministic order is built and admitted, and the page says which.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON is not a `plant-view/1` view, its counts do not match its
+    /// items, or no order can be admitted.
+    pub fn tour_load(&self, json: &str) -> Result<String, JsError> {
+        let play = tour::play(json).map_err(js_err)?;
+        serde_json::to_string(&play).map_err(js_err)
+    }
+
+    /// Eases the camera to the pivot and zoom of a tour step: the machine `machine_id` (its name in
+    /// the plant) at the zoom `zoom` (`fit`, `machine` or `close`). With `reduced`, or on a still
+    /// page, the camera jumps. Returns false when the page cannot go there: no plant, no such
+    /// machine, a ride on, or an unknown zoom. A step replaces the move in progress.
+    pub fn tour_go(&mut self, machine_id: &str, zoom: &str, reduced: bool) -> bool {
+        if self.ride.is_some() {
+            return false;
+        }
+        let Some(to) = self.tour_pose(machine_id, zoom) else {
+            return false;
+        };
+        if reduced || self.still {
+            self.tour_move = None;
+            self.camera.set_pivot(to.0);
+            self.camera.set_zoom(to.1);
+        } else {
+            let from = (self.camera.pivot(), self.camera.zoom());
+            self.tour_move = Some(TourMove {
+                from,
+                to,
+                elapsed_ms: 0.0,
+            });
+        }
+        true
+    }
+
+    /// Stops the move to a tour step in progress, where the camera stands. Does nothing without one.
+    pub fn tour_stop(&mut self) {
+        self.tour_move = None;
+    }
+
+    /// Stages a tour step from its `spots`, as JSON `[{"machine_id", "labels"}]`: each machine
+    /// they name keeps its tint, every other machine is dimmed, and each label shows as a chip on
+    /// its machine. An empty text clears the stage, as leaving the tour does.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the text is not a list of spots.
+    pub fn tour_stage(&mut self, spots_json: &str) -> Result<(), JsError> {
+        self.stage = if spots_json.trim().is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str(spots_json).map_err(js_err)?
+        };
+        self.sync_scene();
+        Ok(())
+    }
+
+    /// Which plan machines the shown tour step stages, in plan order, or `None` when no step is
+    /// shown or none of its machines is on the plant.
+    fn staged(&self) -> Option<Vec<bool>> {
+        if self.stage.is_empty() {
+            return None;
+        }
+        let plan = self.plan.as_ref()?;
+        let names: Vec<String> = plan
+            .machines
+            .iter()
+            .map(|machine| machine.name.clone())
+            .collect();
+        marks::staged_plan(&names, &self.stage)
+    }
+
+    /// The chips of the shown tour step, one per mark it stages.
+    fn stage_chips(&self) -> Vec<marks::Flag> {
+        match (&self.plan, &self.plant) {
+            (Some(plan), Some(loaded)) => marks::stage_flags(&self.stage, plan, &loaded.stands),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The flags the page labels: the marks' flags as the motion has them, then the chips of the
+    /// shown tour step. `marks_json` and `flag_layout` both list them in this order.
+    fn all_flags(&self) -> Vec<marks::Flag> {
+        let mut flags = self.motion.flags_now(&self.marks.flags);
+        flags.extend(self.stage_chips());
+        flags
+    }
+
     /// Checks the origin's `scope/confirmation` body for `order` (`o-N`) against the scope this
     /// page holds, and returns the check as JSON. The page shows a Seal only when the verdict is
     /// `match`.
@@ -246,8 +360,36 @@ impl App {
     /// lands at once, a leaving bot is gone, no flag fades, and a landed dot keeps its word.
     pub fn set_still(&mut self, still: bool) {
         self.still = still;
-        self.motion = Motion::new(still);
+        if still {
+            self.clock = marks::Clock::default();
+        }
+        self.motion = self.new_motion();
         self.dirty = true;
+    }
+
+    /// Tells the marks the time now, in epoch milliseconds, so a quiet agent's drone can read
+    /// stale. Zero or less clears the clock, as a page that stops being live does. A still page
+    /// ignores it.
+    pub fn set_now(&mut self, ms: f64) {
+        let now = (ms > 0.0 && !self.still).then_some(ms as u64);
+        if now != self.clock.now {
+            self.clock.now = now;
+            self.dirty = true;
+        }
+    }
+
+    /// Tells the marks when the reader last saw the page and when they came back to it, in epoch
+    /// milliseconds, once they were away a while. What landed between the two shows as ghosts.
+    /// A time of zero or less clears it. A still page ignores it.
+    pub fn set_seen(&mut self, seen_ms: f64, back_ms: f64) {
+        let away = (seen_ms > 0.0 && back_ms >= seen_ms && !self.still).then_some(marks::Away {
+            seen: seen_ms as u64,
+            back: back_ms as u64,
+        });
+        if away != self.clock.away {
+            self.clock.away = away;
+            self.dirty = true;
+        }
     }
 
     /// Whether a flag listing changed while time passed, such as a landed dot going quiet or a
@@ -271,6 +413,8 @@ impl App {
     pub fn load_log(&mut self, json: &str) -> Result<(), JsError> {
         let entries = feed::entries(json).map_err(js_err)?;
         self.mirror = Some(Mirror::from_entries(entries).map_err(js_err)?);
+        // A replaced log is a seek: the drones land where the new log puts them.
+        self.motion.cut();
         self.dirty = true;
         Ok(())
     }
@@ -348,6 +492,7 @@ impl App {
         if self.ride.is_some() {
             return;
         }
+        self.tour_move = None;
         self.camera.drag_ground(
             [x0 * self.dpr, y0 * self.dpr],
             [x1 * self.dpr, y1 * self.dpr],
@@ -360,6 +505,7 @@ impl App {
         if self.ride.is_some() {
             return;
         }
+        self.tour_move = None;
         let [vw, vh] = self.camera.viewport();
         let from = [vw * 0.5, vh * 0.5];
         self.camera
@@ -386,6 +532,7 @@ impl App {
             return;
         }
         self.turn = None;
+        self.tour_move = None;
         self.camera
             .orbit(dx * ORBIT_DEG_PER_PX, -dy * TILT_DEG_PER_PX);
     }
@@ -410,6 +557,7 @@ impl App {
     /// still moving, so the page asks for another frame only then.
     pub fn advance(&mut self, dt_ms: f32) -> bool {
         let turning = self.advance_turn(dt_ms);
+        let touring = self.advance_tour_move(dt_ms);
         let moving = self.motion.advance(dt_ms);
         // The frame an ease ends on still uploads, so the marks land on their final places.
         if moving || self.moving {
@@ -417,7 +565,7 @@ impl App {
         }
         self.moving = moving;
         let riding = self.advance_ride(dt_ms);
-        turning || moving || riding
+        turning || touring || moving || riding
     }
 
     /// Follows the ride's drone, moves the ride's ease on, and leaves the ride once its drone has
@@ -473,17 +621,56 @@ impl App {
         true
     }
 
+    /// Moves the camera's pivot and zoom toward a tour step's target, by the ease of the step. The
+    /// move lands exactly on its target, then clears.
+    fn advance_tour_move(&mut self, dt_ms: f32) -> bool {
+        let Some(movement) = self.tour_move.as_mut() else {
+            return false;
+        };
+        movement.elapsed_ms += dt_ms.max(0.0);
+        let (pivot, zoom) = tour::progress(movement.from, movement.to, movement.elapsed_ms);
+        self.camera.set_pivot(pivot);
+        self.camera.set_zoom(zoom);
+        if movement.elapsed_ms >= tour::MOVE_MS {
+            self.tour_move = None;
+            return false;
+        }
+        true
+    }
+
+    /// The pose a tour step goes to: the fit pose for `fit`, otherwise the pivot over the machine
+    /// named `machine_id` at its zoom. `None` for an unknown zoom or a machine the plant lacks.
+    fn tour_pose(&self, machine_id: &str, zoom: &str) -> Option<tour::Pose> {
+        let zoom = tour::zoom_named(zoom)?;
+        let Some(ratio) = tour::zoom_ratio(zoom) else {
+            return self.fit_pose();
+        };
+        let loaded = self.plant.as_ref()?;
+        let index = loaded
+            .machines
+            .iter()
+            .position(|machine| machine.name == machine_id)?;
+        let placed = loaded.layout.machines.get(index)?;
+        let (w, d) = placed.kind.footprint();
+        Some((
+            [placed.x + w / 2.0, placed.y + d / 2.0],
+            ratio * self.fit_zoom(),
+        ))
+    }
+
     /// Zooms by `factor` around the CSS point `(x, y)`, which stays under the pointer.
     pub fn zoom_at(&mut self, x: f32, y: f32, factor: f32) {
         if self.ride.is_some() {
             return;
         }
+        self.tour_move = None;
         self.camera.zoom_at([x * self.dpr, y * self.dpr], factor);
     }
 
     /// Turns to the given angles in degrees and fits the plant there, centred on screen.
     pub fn view(&mut self, azimuth: f32, elevation: f32) {
         self.turn = None;
+        self.tour_move = None;
         self.camera.set_angles(azimuth, elevation);
         if let Some(loaded) = &self.plant {
             self.camera
@@ -513,6 +700,7 @@ impl App {
             return false;
         };
         self.turn = None;
+        self.tour_move = None;
         self.fit_after_leave = false;
         if let Some(ride) = self.ride.as_mut().filter(|ride| ride.is_leaving()) {
             ride.resume(snapshot, self.camera);
@@ -588,14 +776,24 @@ impl App {
         }
     }
 
-    /// Turns the hover bob on or off. The page turns it off under reduced motion.
+    /// Turns the hover bob on or off. The page turns it off under reduced motion, which also
+    /// lands the drones' moves at once and holds their bob.
     pub fn set_bob(&mut self, enabled: bool) {
         self.bob_enabled = enabled;
+        self.motion.set_reduced(!enabled);
+    }
+
+    /// A fresh motion for the page's freeze and reduced-motion settings.
+    fn new_motion(&self) -> Motion {
+        let mut motion = Motion::new(self.still);
+        motion.set_reduced(!self.bob_enabled);
+        motion
     }
 
     /// Returns to the default angles and fits the plant.
     fn fit_view(&mut self) {
         self.turn = None;
+        self.tour_move = None;
         if let Some(loaded) = &self.plant {
             self.camera.set_angles(DEFAULT_AZIMUTH, DEFAULT_ELEVATION);
             self.camera
@@ -760,26 +958,31 @@ impl App {
             .collect()
     }
 
-    /// The flags, the open clash card and the scope machine names the plant lacks, as JSON:
-    /// `{"flags": [...], "card": {...} | null, "unplaced": [...]}`. The
-    /// page reads it when the view changes or a card opens. Flag `i` anchors where `flag_layout`
-    /// puts index `i`.
+    /// The flags, the open clash card, the scope machine names the plant lacks and each clash's
+    /// badges, as JSON: `{"flags": [...], "card": {...} | null, "unplaced": [...], "badges":
+    /// [...]}`. The page reads it when the view changes or a card opens. Flag `i` anchors where
+    /// `flag_layout` puts index `i`, and a clash's badges where `badge_layout` puts its clash.
     pub fn marks_json(&self) -> String {
         #[derive(serde::Serialize)]
         struct Out<'a> {
             flags: Vec<marks::Flag>,
             card: Option<marks::Card>,
             unplaced: &'a [String],
+            badges: Vec<marks::Badges>,
         }
+        let badges = self.view.as_ref().map_or_else(Vec::new, |view| {
+            marks::clash_badges(view, &self.marks.pins, &self.slots)
+        });
         let card = self.card_clash.and_then(|index| {
             let view = self.view.as_ref()?;
             let mirror = self.mirror.as_ref()?;
             marks::card(view, mirror.world(), index, &self.slots)
         });
         serde_json::to_string(&Out {
-            flags: self.motion.flags_now(&self.marks.flags),
+            flags: self.all_flags(),
             card,
             unplaced: &self.marks.unplaced,
+            badges,
         })
         .expect("marks serialize as JSON")
     }
@@ -789,8 +992,7 @@ impl App {
     /// and -1 is a flag that stands alone. The anchors follow the bodies and diamonds while they
     /// move.
     pub fn flag_layout(&self) -> Vec<f32> {
-        self.motion
-            .flags_now(&self.marks.flags)
+        self.all_flags()
             .iter()
             .enumerate()
             .flat_map(|(index, flag)| {
@@ -816,6 +1018,118 @@ impl App {
             .collect()
     }
 
+    /// The agent whose drone the CSS point `(x, y)` is over, within its radius and a few px, or
+    /// the empty string. The riding agent's drone has no body on screen, so it is never hovered.
+    pub fn drone_at(&self, x: f32, y: f32) -> String {
+        let riding = self.riding_agent();
+        let bodies: Vec<&marks::Body> = self
+            .marks
+            .bodies
+            .iter()
+            .filter(|body| riding != Some(body.agent.as_str()))
+            .collect();
+        let discs: Vec<([f32; 2], f32)> = bodies
+            .iter()
+            .map(|body| {
+                let at = self.motion.body_at(&body.agent).unwrap_or(body.at);
+                marks::drone_disc(at, |p| self.screen(p))
+            })
+            .collect();
+        marks::disc_under(&discs, [x, y]).map_or_else(String::new, |i| bodies[i].agent.clone())
+    }
+
+    /// The disc of `agent`'s drone on screen, as `[css x, css y, css radius]`, or empty when it
+    /// has no drone. The page rings the hovered drone with it.
+    pub fn drone_disc_of(&self, agent: &str) -> Vec<f32> {
+        self.marks
+            .bodies
+            .iter()
+            .find(|body| body.agent == agent)
+            .map_or_else(Vec::new, |body| {
+                let at = self.motion.body_at(&body.agent).unwrap_or(body.at);
+                let ([x, y], radius) = marks::drone_disc(at, |p| self.screen(p));
+                vec![x, y, radius]
+            })
+    }
+
+    /// Marks the drone of `agent` as hovered, or none for the empty string, so its tether inks in
+    /// fully. Returns whether that changed.
+    pub fn set_hovered(&mut self, agent: &str) -> bool {
+        let hovered = (!agent.is_empty()).then(|| agent.to_owned());
+        if hovered == self.hovered {
+            return false;
+        }
+        self.hovered = hovered;
+        self.sync_scene();
+        true
+    }
+
+    /// Each clash's badge centres on screen, as flat `[clash index, left css x, right css x, css
+    /// y]` quads, following the diamonds as they rise and sink.
+    pub fn badge_layout(&self) -> Vec<f32> {
+        self.marks
+            .pins
+            .iter()
+            .flat_map(|pin| {
+                let foot = self.motion.pin_at(&pin.id).unwrap_or(pin.at);
+                let [left, right] = marks::badge_centres(foot, |p| self.screen(p));
+                [pin.clash as f32, left[0], right[0], left[1]]
+            })
+            .collect()
+    }
+
+    /// Each ghost on show, as flat `[css x, css y, landed count]` triples, at the corner of its
+    /// outline lowest on screen. Alt labels each with how many tasks landed there.
+    pub fn ghost_layout(&self) -> Vec<f32> {
+        self.marks
+            .ghosts
+            .iter()
+            .filter(|ghost| self.motion.ghost_alpha(ghost.machine).is_some())
+            .flat_map(|ghost| {
+                let [x, y] = ghost
+                    .corners()
+                    .map(|corner| self.screen(corner))
+                    .into_iter()
+                    .fold([0.0, f32::NEG_INFINITY], |low, p| {
+                        if p[1] > low[1] { p } else { low }
+                    });
+                [x, y, ghost.count as f32]
+            })
+            .collect()
+    }
+
+    /// Clears the ghost whose outline holds the CSS point `(x, y)`, as the reader's pointer
+    /// passing over it or a click on it does. Returns whether one began to fade.
+    pub fn clear_ghost_at(&mut self, x: f32, y: f32) -> bool {
+        let shown = self
+            .marks
+            .ghosts
+            .iter()
+            .filter(|ghost| self.motion.ghost_alpha(ghost.machine).is_some());
+        let hit = shown.into_iter().find(|ghost| {
+            let quad = ghost.corners().map(|corner| self.screen(corner));
+            marks::inside_quad(&quad, [x, y])
+        });
+        let Some(machine) = hit.map(|ghost| ghost.machine) else {
+            return false;
+        };
+        self.motion.clear_ghost(machine)
+    }
+
+    /// Clears every ghost, as the page does a while after the reader comes back. Returns whether
+    /// any began to fade.
+    pub fn clear_ghosts(&mut self) -> bool {
+        self.motion.clear_ghosts()
+    }
+
+    /// Each working drone's beacon on screen, as flat `[css x, css y, css radius]` triples, at its
+    /// pulse now. The page rings each in paper.
+    pub fn beacon_layout(&self) -> Vec<f32> {
+        marks::beacon_discs(&self.motion, &self.marks, |p| self.screen(p))
+            .into_iter()
+            .flat_map(|([x, y], radius)| [x, y, radius])
+            .collect()
+    }
     /// Each drone's disc on screen, as flat `[css x, css y, css radius]` triples, in the order the
     /// marks list the drones. The page keeps flags and names clear of them.
     pub fn drone_layout(&self) -> Vec<f32> {
@@ -875,6 +1189,17 @@ impl App {
             .as_ref()
             .and_then(|loaded| loaded.machines.get(index as usize))
             .map_or(0, |machine| machine.files as u32)
+    }
+
+    /// The height of machine `name`'s model top, in world units, or -1 when the plant has no such
+    /// machine. The page picks the machine under the pointer by its true outline with it.
+    pub fn machine_top(&self, name: &str) -> f32 {
+        let (Some(plan), Some(loaded)) = (self.plan.as_ref(), self.plant.as_ref()) else {
+            return -1.0;
+        };
+        plan.index_of(name)
+            .and_then(|index| loaded.stands.get(index))
+            .map_or(-1.0, |stand| stand.top)
     }
 
     pub fn machine_count(&self) -> u32 {
@@ -942,12 +1267,12 @@ impl App {
         self.plan = Some(plan);
         self.view = None;
         self.marks = Marks::default();
-        self.motion = Motion::new(self.still);
+        self.motion = self.new_motion();
         self.card_clash = None;
+        self.tour_move = None;
         self.ride = None;
         self.fit_after_leave = false;
         self.dirty = true;
-        let belts = scene::belt_lines(&laid.belts);
         let drone_reach = stand::reach(&self.models[usize::from(scene::mark_kinds().body)]);
         let framing = scene::fit_boxes(&laid, &self.models, &self.kind_spots, drone_reach);
         let machine_bounds = scene::machine_model_boxes(&laid, &self.models);
@@ -971,7 +1296,6 @@ impl App {
             framing,
             occluders,
             base: scene,
-            belts,
             plan_instance,
             stands,
         });
@@ -989,7 +1313,7 @@ impl App {
         };
         let view = mirror.view(plan);
         self.slots.assign(&view);
-        let marks = Marks::build(&view, plan, &loaded.stands, &self.slots);
+        let marks = Marks::build_at(&view, plan, &loaded.stands, &self.slots, self.clock);
         self.view_json = serde_json::to_string(&view).map_err(js_err)?;
         self.view_version += 1;
         self.motion.sync(&marks);
@@ -1001,24 +1325,30 @@ impl App {
     }
 
     /// Uploads the plant with the marks: each machine's footprint tint, then the body, ring and
-    /// pin instances as the motion has them now. The tint table follows the footprints.
+    /// pin instances as the motion has them now.
     fn sync_scene(&mut self) {
         let Some(loaded) = &self.plant else {
             return;
         };
         let mut scene = loaded.base.clone();
+        let staged = self.staged();
         for (plan_index, &instance) in loaded.plan_instance.iter().enumerate() {
-            scene.instances[instance].tint = self.marks.footprint_tint(plan_index);
+            scene.instances[instance].tint =
+                marks::machine_tint(&self.marks, plan_index, staged.as_deref());
         }
-        let hues: Vec<(usize, u8)> = self
-            .marks
-            .belt_hues
-            .iter()
-            .map(|&(plan_index, tint)| (loaded.plan_instance[plan_index], tint))
-            .collect();
-        scene.hue_lines = scene::hue_lines(&loaded.belts, &hues);
+        self.motion.set_px_units(self.dpr / self.camera.zoom());
         let riding = self.riding_agent();
-        scene.beams = marks::beams(&self.motion, &self.marks, self.dpr, riding);
+        let hovered = self.hovered.as_deref();
+        scene.beams = marks::beams(&self.motion, &self.marks, self.dpr, riding, hovered);
+        scene
+            .beams
+            .extend(marks::spots(&self.motion, &self.marks, self.dpr, riding));
+        scene
+            .beams
+            .extend(marks::trail_beams(&self.motion, self.dpr, riding));
+        scene
+            .beams
+            .extend(marks::ghost_beams(&self.motion, &self.marks, self.dpr));
         scene.instances.extend(marks::mark_instances(
             &self.motion,
             &self.marks,
@@ -1027,7 +1357,7 @@ impl App {
             riding,
         ));
         self.renderer.set_scene(&scene);
-        self.renderer.set_tints(&self.marks.tint_table());
+        self.renderer.set_tints(&acan_render::theme::tints());
     }
 
     /// A world point on screen, in CSS px.
@@ -1054,15 +1384,16 @@ impl App {
     /// projection. Level of detail is measured against this, so orbiting never changes the
     /// detail.
     fn fit_zoom(&self) -> f32 {
-        match &self.plant {
-            Some(loaded) => {
-                let mut probe = self.camera;
-                probe.set_angles(DEFAULT_AZIMUTH, DEFAULT_ELEVATION);
-                probe.fit_boxes_room(&loaded.framing, FIT_MARGIN_CSS * self.dpr, self.fit_room());
-                probe.zoom()
-            }
-            None => 1.0,
-        }
+        self.fit_pose().map_or(1.0, |(_, zoom)| zoom)
+    }
+
+    /// The pivot and zoom of the fit at the default angles, or `None` before a plant loads.
+    fn fit_pose(&self) -> Option<tour::Pose> {
+        let loaded = self.plant.as_ref()?;
+        let mut probe = self.camera;
+        probe.set_angles(DEFAULT_AZIMUTH, DEFAULT_ELEVATION);
+        probe.fit_boxes_room(&loaded.framing, FIT_MARGIN_CSS * self.dpr, self.fit_room());
+        Some((probe.pivot(), probe.zoom()))
     }
 
     fn lod(&self) -> Lod {

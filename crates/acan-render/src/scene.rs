@@ -18,8 +18,9 @@ pub struct Instance {
     pub turn: f32,
 }
 
-/// A straight thin line in space, in one tint, drawn like a hue line. It is for a mark that links
-/// two points, such as a drone's beam to its target. Its start is measured from `origin` and turns
+/// A straight thin line in space, or a soft spot, in one tint, drawn like a hue line. It is for a mark that links
+/// two points, such as a drone's beam to its target, a piece of a drone's trail, or a side of a
+/// ghost's outline. Each carries its own width and opacity, so a trail can fade piece by piece. Its start is measured from `origin` and turns
 /// and grows about it as an instance does, so a beam that starts on a drone stays on the drone's
 /// eye while the drone grows. A beam between two world points has zero `origin`, zero `grow` and
 /// zero `turn`.
@@ -37,6 +38,15 @@ pub struct Beam {
     pub turn: f32,
     /// Index into the theme's tint slots, as an instance's tint is.
     pub tint: u8,
+    /// The stroke's opacity, from 0 to 1. The tint's own alpha is not read.
+    pub alpha: f32,
+    /// The stroke's width in device px, before the shader's thinnest-stroke floor.
+    pub width_px: f32,
+    /// When above zero, the beam is a soft spot instead of a stroke: a flat round disc of this
+    /// radius in plan units, lying level and centred on the start, that fades from its middle to
+    /// its rim. It grows with the start, and `to` and `width_px` are not read. A drone's glow and
+    /// its shadow are spots.
+    pub spot: f32,
 }
 
 /// A belt: a flat opaque ribbon lying on the ground along a centre line, with a fine line

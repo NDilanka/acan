@@ -17,8 +17,8 @@ use acan_core::{
     TaskId, TaskSpec, WitnessId,
 };
 use acan_intent::{
-    AppContract, Fixture, HumanRef, HumanSpec, ModelRef, ProbeCorpus, ProbeProposal, RouteEntry,
-    RunLimits, ScopeBody, UnixMillis,
+    AppContract, CorpusProbe, Fixture, HumanRef, HumanSpec, ModelRef, ProbeCorpus, ProbeProposal,
+    RouteEntry, RunLimits, ScopeBody, UnixMillis,
 };
 use acan_llm::{
     ApiKey, ApiKeys, ChatRequest, LlmConfig, LlmError, Message, ModelClient, OpenAiCompatible, Role,
@@ -325,6 +325,7 @@ struct Plant {
     machines: Vec<MachineKey>,
     routes: Vec<RouteEntry>,
     fixtures: Vec<Fixture>,
+    probes: Vec<CorpusProbe>,
 }
 
 fn corpus() -> ProbeCorpus {
@@ -337,6 +338,7 @@ fn plant_with(machines: Vec<MachineKey>) -> Plant {
         machines,
         routes: corpus.routes,
         fixtures: corpus.fixtures,
+        probes: corpus.probes,
     }
 }
 
@@ -354,6 +356,7 @@ impl Plant {
             machines: &self.machines,
             routes: &self.routes,
             fixtures: &self.fixtures,
+            probes: &self.probes,
             limits: RunLimits {
                 max_requests,
                 max_output_bytes: 65_536,
@@ -489,6 +492,99 @@ fn a_scope_that_names_a_machine_off_the_plant_is_refused() {
         matches!(&err, DraftError::UnknownMachine(machine) if machine == "db"),
         "got {err:?}"
     );
+}
+
+#[test]
+fn a_scope_that_names_a_step_the_corpus_does_not_define_is_refused() {
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["may"][0]["selector"]["step_context"] =
+        json!({ "kind": "step", "step_id": "login-step" });
+
+    let err = check_scope_json(scope, &plant).expect_err("login-step is not a corpus step");
+
+    assert!(
+        matches!(&err, DraftError::UndefinedStep(step) if step == "login-step"),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_scope_whose_example_names_an_undefined_step_is_refused() {
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["may"][0]["example"]["step_id"] = json!("audit-step");
+
+    let err = check_scope_json(scope, &plant).expect_err("audit-step is not a corpus step");
+
+    assert!(
+        matches!(&err, DraftError::UndefinedStep(step) if step == "audit-step"),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_predicate_that_reads_an_undefined_step_is_refused() {
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["may"][0]["acceptance"][0]["predicate"] = json!({
+        "predicate": "equals_base",
+        "step_id": "login-step",
+        "path": "body",
+        "anchor": { "kind": "fresh" }
+    });
+
+    let err = check_scope_json(scope, &plant).expect_err("login-step is not a corpus step");
+
+    assert!(
+        matches!(&err, DraftError::UndefinedStep(step) if step == "login-step"),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_side_effect_no_probe_observes_after_its_route_is_refused() {
+    // The corpus reads the store only after POST /api/signup, never after GET /api/links.
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["may"][0]["selector"] = json!({
+        "surface": "http",
+        "method": "GET",
+        "route_template": "/api/links",
+        "step_context": { "kind": "any" },
+        "principal": { "kind": "any" },
+        "channel": "side_effect",
+        "field_path": "store.audit[*].route"
+    });
+
+    let err = check_scope_json(scope, &plant).expect_err("no probe reads the store after GET");
+
+    assert!(
+        matches!(
+            &err,
+            DraftError::UnwitnessedSideEffect { sink, route }
+                if sink == "store" && route == "/api/links"
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_side_effect_a_probe_observes_after_its_route_is_accepted() {
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["may"][0]["selector"] = json!({
+        "surface": "http",
+        "method": "POST",
+        "route_template": "/api/signup",
+        "step_context": { "kind": "step", "step_id": "s2" },
+        "principal": { "kind": "any" },
+        "channel": "side_effect",
+        "field_path": "store.users[*].email"
+    });
+
+    check_scope_json(scope, &plant)
+        .expect("the signup probe reads the store after POST /api/signup");
 }
 
 #[test]
@@ -699,7 +795,7 @@ async fn an_unreachable_provider_never_turns_a_scope_draft_into_an_offline_one()
     let url = unreachable_url().await;
     let models = Models::live(config(&url), keys(true)).expect("the client builds");
     let plant = plant_with(fixed_machines());
-    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5));
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
 
     let err = models
         .chat_json::<DraftReply>(Role::Foreman, request)
@@ -713,11 +809,83 @@ async fn an_unreachable_provider_never_turns_a_scope_draft_into_an_offline_one()
     );
 }
 
+#[test]
+fn the_scope_request_lists_the_steps_and_side_effects_the_corpus_defines() {
+    let plant = plant_with(fixed_machines());
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
+    let content = request
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            Message::User { content } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("the request has a user message");
+    let context: Value = serde_json::from_str(&content).expect("the context is JSON");
+
+    let steps = context["steps"].as_array().expect("the steps are a list");
+    assert!(
+        steps.contains(&json!("s2")),
+        "the signup probe's step: {steps:?}"
+    );
+    assert!(
+        !steps.contains(&json!("login-step")),
+        "an undefined step is never offered: {steps:?}"
+    );
+    let effects = context["side_effects"]
+        .as_array()
+        .expect("the side effects are a list");
+    assert!(
+        effects.contains(&json!({
+            "step_id": "s2",
+            "sink": "store",
+            "after": { "method": "POST", "route_template": "/api/signup" }
+        })),
+        "the signup store read is offered with its request: {effects:?}"
+    );
+}
+
+#[test]
+fn the_scope_request_states_the_side_effect_rule_and_carries_the_last_error() {
+    let plant = plant_with(fixed_machines());
+    let refusal = "selector is malformed: \"channel SideEffect with field_path None\"";
+    let retry = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), Some(refusal));
+    let first = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
+
+    assert!(
+        model::SCOPE_PROMPT.contains(
+            "A side_effect selector needs a field_path that starts with store or outbound_http."
+        ),
+        "the prompt states the rule"
+    );
+    let context = |request: &acan_llm::ChatRequest| -> Value {
+        let content = request
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                acan_llm::Message::User { content } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("the request has a user message");
+        serde_json::from_str(&content).expect("the context is JSON")
+    };
+    let schema = context(&retry)["schema"].to_string();
+    assert!(
+        schema.contains("starts with its sink, `store` or `outbound_http`"),
+        "the schema states the side_effect path rule: {schema}"
+    );
+    assert_eq!(context(&retry)["previous_error"], refusal);
+    assert!(
+        context(&first)["previous_error"].is_null(),
+        "a first attempt carries no error"
+    );
+}
+
 #[tokio::test]
 async fn an_offline_client_gives_no_scope_draft() {
     let models = Models::load(Path::new("no-such-routing-file.toml")).expect("the offline client");
     let plant = plant_with(fixed_machines());
-    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5));
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
 
     let err = models
         .chat_json::<DraftReply>(Role::Foreman, request)
@@ -735,7 +903,7 @@ async fn an_empty_scope_reply_is_a_provider_error_and_not_an_empty_scope() {
     let url = serve_reply("").await;
     let models = Models::live(config(&url), keys(true)).expect("the client builds");
     let plant = plant_with(fixed_machines());
-    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5));
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
 
     let err = models
         .chat_json::<DraftReply>(Role::Foreman, request)
@@ -755,7 +923,7 @@ async fn a_scope_draft_cut_at_the_output_cap_fails_the_foreman_call_and_names_th
     let url = serve_reply_capped(r#"{"may": [{"id": "limit-get-links""#).await;
     let models = Models::live(config(&url), keys(true)).expect("the client builds");
     let plant = plant_with(fixed_machines());
-    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5));
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
 
     let err = models
         .chat_json::<DraftReply>(Role::Foreman, request)
@@ -788,7 +956,7 @@ async fn a_draft_request_reaches_the_provider_with_a_generous_output_cap() {
     let (url, sent) = serve_reply_recording(&fixture_scope().to_string()).await;
     let models = Models::live(config(&url), keys(true)).expect("the client builds");
     let plant = plant_with(fixed_machines());
-    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5));
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
 
     models
         .chat_json::<DraftReply>(Role::Foreman, request)
@@ -811,7 +979,7 @@ async fn an_explicit_empty_scope_reply_is_refused_by_acan() {
     let url = serve_reply(&content).await;
     let models = Models::live(config(&url), keys(true)).expect("the client builds");
     let plant = plant_with(fixed_machines());
-    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5));
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
 
     let structured = models
         .chat_json::<DraftReply>(Role::Foreman, request)
@@ -830,7 +998,7 @@ async fn a_scope_reply_that_sets_a_count_is_refused() {
     let url = serve_reply(&scope.to_string()).await;
     let models = Models::live(config(&url), keys(true)).expect("the client builds");
     let plant = plant_with(fixed_machines());
-    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5));
+    let request = model::scope_request(RATE_LIMIT_ORDER, &plant.bounds(5), None);
 
     let structured = models
         .chat_json::<DraftReply>(Role::Foreman, request)
@@ -1018,9 +1186,10 @@ async fn muse_spark_drafts_the_scope_of_the_rate_limit_order() {
         machines: &machines,
         routes: &corpus.routes,
         fixtures: &corpus.fixtures,
+        probes: &corpus.probes,
         limits: app.limits,
     };
-    let request = model::scope_request(RATE_LIMIT_ORDER, &bounds);
+    let request = model::scope_request(RATE_LIMIT_ORDER, &bounds, None);
 
     let traced = client
         .chat_json_traced::<DraftReply>(Role::Foreman, request)

@@ -16,18 +16,20 @@ use acan_intent::admit::{self, AdmitError};
 use acan_intent::{
     ActorName, AdvanceTimeStep, AppContract, ArtifactHash, CanonicalError, CaptureKind,
     CaptureName, CaptureOutcome, CaptureStep, Channels, ClientName, ClockControl, CommitSha,
-    Completeness, ContainerPolicy, ContentHash, CorpusProbe, EvidenceHash, Fixture, FixtureHash,
-    HttpStep, IncompleteReason, MissingCapture, NonEmpty, Observation, ObservationHash,
-    ObservationV1, ObservedRun, ProbeHash, RedirectPolicy, RequestRecord, RouteEntry, Run, RunEnv,
-    RunId, RunOutcome, RunRole, RunV1, RunnerBuild, RunnerHash, RunnerManifest, SideEffectStep,
-    Step, StepId, TrustedSink, UnixMillis,
+    Completeness, ContainerPolicy, ContentHash, CorpusProbe, Driver, EvidenceHash, Fixture,
+    FixtureHash, HttpStep, IncompleteReason, MAX_SEQUENCE_TIMEOUT_MS, MissingCapture, NonEmpty,
+    Observation, ObservationHash, ObservationV1, ObservedRun, ProbeHash, RedirectPolicy,
+    RequestRecord, RouteEntry, Run, RunEnv, RunId, RunOutcome, RunRole, RunV1, RunnerBuild,
+    RunnerHash, RunnerManifest, SideEffectStep, Step, StepId, TrustedSink, UnixMillis,
 };
 use serde_json::Value;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 
 use crate::docker::{self, MountSources};
-use crate::driver::{self, CallError, Container, CreateError, DRIVER_SOURCE, Op, Ready, Reply};
+use crate::driver::{
+    self, CallError, Container, CreateError, DRIVER_SOURCE, NODE_DRIVER_SOURCE, Op, Ready, Reply,
+};
 use crate::record::{self, MAX_REDIRECTS, method_text, route_template, same_origin_path};
 
 /// Directory under the run's workspace that holds the harness mounted at `/harness`.
@@ -36,6 +38,9 @@ const HARNESS_DIR: &str = "harness";
 const EMPTY_DIR: &str = "empty";
 /// How long cleanup waits for a container create that is still in flight.
 const CREATE_GRACE: Duration = Duration::from_secs(10);
+/// How long past its readiness budget the start call may wait for the driver's reply. A probe in
+/// flight can run a second past the budget before the driver gives up.
+const READY_REPLY_GRACE: Duration = Duration::from_secs(5);
 /// The store snapshot path the boot fixture serves to the runner.
 const STORE_PATH: &str = "/__acan/store";
 /// Stderr markers of a container runtime that cannot run the pinned image: the daemon is not
@@ -111,6 +116,9 @@ pub struct SequenceInput<'a> {
     pub worktree: &'a Path,
     /// The directory the protected paths are mounted from, read-only.
     pub snapshot: &'a Path,
+    /// The install phase's `node_modules` for this run's lockfile, mounted read-only at the
+    /// policy's dependency path. Present exactly when the app has an install.
+    pub dependencies: Option<&'a Path>,
     /// How the host reaches docker and the app.
     pub config: &'a RunnerConfig,
 }
@@ -265,11 +273,15 @@ struct Workspace {
 }
 
 impl Workspace {
-    fn create(run_id: &str) -> std::io::Result<Self> {
+    fn create(run_id: &str, driver: Driver) -> std::io::Result<Self> {
         let root = std::env::temp_dir().join(format!("acan-witness-{run_id}"));
         std::fs::create_dir_all(root.join(HARNESS_DIR))?;
         std::fs::create_dir_all(root.join(EMPTY_DIR))?;
-        std::fs::write(root.join(HARNESS_DIR).join("driver.ts"), DRIVER_SOURCE)?;
+        let (file, source) = match driver {
+            Driver::Bun => ("driver.ts", DRIVER_SOURCE),
+            Driver::Node => ("driver.mjs", NODE_DRIVER_SOURCE),
+        };
+        std::fs::write(root.join(HARNESS_DIR).join(file), source)?;
         Ok(Self { root })
     }
 
@@ -318,10 +330,9 @@ impl<'a> Sequence<'a> {
     fn new(input: &'a SequenceInput<'a>, identity: Identity, keep: &'a [StepId]) -> Self {
         let started = Instant::now();
         let cap_ms = input
-            .policy
-            .timeout_ms
-            .get()
-            .min(input.app.limits.sequence_timeout_ms);
+            .app
+            .limits
+            .sequence_cap_ms(input.policy.timeout_ms.get());
         let steps = input
             .fixture
             .recipe
@@ -402,8 +413,10 @@ impl<'a> Sequence<'a> {
             }
         }
         let workspace =
-            Workspace::create(self.run_id.as_str()).map_err(|err| RunOutcome::Error {
-                detail: format!("cannot prepare the run directory: {err}"),
+            Workspace::create(self.run_id.as_str(), input.policy.driver).map_err(|err| {
+                RunOutcome::Error {
+                    detail: format!("cannot prepare the run directory: {err}"),
+                }
             })?;
         let mounts = docker::mount_values(
             input.policy,
@@ -412,6 +425,7 @@ impl<'a> Sequence<'a> {
                 snapshot: input.snapshot,
                 harness: &workspace.harness(),
                 empty: &workspace.empty(),
+                dependencies: input.dependencies,
             },
         )
         .map_err(setup_failed)?;
@@ -481,6 +495,10 @@ impl<'a> Sequence<'a> {
                 timeout_ms: input.app.ready.timeout_ms,
             },
         };
+        // Readiness has its own budget. The start call waits for all of it, even when the sequence
+        // deadline comes first, and the deadline moves to cover it, so the steps keep their time.
+        self.deadline =
+            readiness_deadline(self.deadline, Instant::now(), input.app.ready.timeout_ms);
         let limit = self.limit(None);
         match self.call_driver(&op, limit).await {
             Ok(reply) if reply.ok => Ok(()),
@@ -1110,9 +1128,46 @@ fn unix_millis() -> UnixMillis {
     UnixMillis(millis)
 }
 
+/// The deadline a sequence has once its app has `ready_ms` to become ready, counted from `now`. The
+/// budget is clamped to the sequence maximum, and a deadline that already lies later is kept.
+fn readiness_deadline(deadline: Instant, now: Instant, ready_ms: u64) -> Instant {
+    let budget = Duration::from_millis(ready_ms.min(MAX_SEQUENCE_TIMEOUT_MS)) + READY_REPLY_GRACE;
+    now.checked_add(budget)
+        .map_or(deadline, |ready_until| deadline.max(ready_until))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_keeps_its_whole_budget_past_a_sequence_deadline_that_comes_first() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(30);
+        // A 120 s budget that starts 2 s in is not cut at the 30 s deadline.
+        let moved = readiness_deadline(deadline, now + Duration::from_secs(2), 120_000);
+        assert!(
+            moved >= now + Duration::from_secs(2 + 120),
+            "the budget is whole: {moved:?}"
+        );
+    }
+
+    #[test]
+    fn a_readiness_budget_that_fits_leaves_the_deadline_where_it_was() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(120);
+        assert_eq!(readiness_deadline(deadline, now, 10_000), deadline);
+    }
+
+    #[test]
+    fn a_readiness_budget_is_clamped_to_the_sequence_maximum() {
+        let now = Instant::now();
+        let moved = readiness_deadline(now, now, u64::MAX);
+        assert_eq!(
+            moved,
+            now + Duration::from_millis(MAX_SEQUENCE_TIMEOUT_MS) + READY_REPLY_GRACE
+        );
+    }
 
     fn reply(value: serde_json::Value) -> Reply {
         serde_json::from_value(value).expect("a driver reply")

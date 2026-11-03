@@ -20,4 +20,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 dotenvy = "0.15"
+tempfile = "3"
 wiremock = "0.6"

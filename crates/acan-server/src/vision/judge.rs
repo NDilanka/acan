@@ -3,7 +3,9 @@
 //! first look the vision role found inconsistent or unclear gets one second look from the wonder
 //! role, with the same request and no word of the first verdict.
 
-use acan_llm::{CallRecord, ChatRequest, ContentPart, LlmError, Message, ModelClient, Role};
+use acan_llm::{
+    CallRecord, ChatRequest, ContentPart, LlmError, Message, ModelClient, Role, RoleStatus,
+};
 use serde::Deserialize;
 
 use super::{MustKeepItem, Verdict, clip};
@@ -130,8 +132,17 @@ fn request(look: Look, pair: &Pair<'_>) -> ChatRequest {
     }
 }
 
+/// Why vision cannot be called, when its role is off: the sentence the record shows, such as
+/// "vision is off: it needs a Meta key". `None` when a provider serves the role.
+pub(crate) fn off_reason<C: ModelClient>(client: &C, role: Role) -> Option<String> {
+    client
+        .key_status()
+        .role(role)
+        .and_then(RoleStatus::off_message)
+}
+
 /// Asks `client` to compare `pair` as the vision role. A failed call is `not_checked`, never a
-/// verdict.
+/// verdict. An off role is not called at all.
 pub(crate) async fn judge<C: ModelClient>(client: &C, pair: &Pair<'_>) -> Judgement {
     look(client, Look::First, pair).await
 }
@@ -151,6 +162,9 @@ pub(crate) async fn second_look<C: ModelClient>(
 }
 
 async fn look<C: ModelClient>(client: &C, look: Look, pair: &Pair<'_>) -> Judgement {
+    if let Some(reason) = off_reason(client, look.role()) {
+        return unchecked(reason);
+    }
     match client.chat_traced(look.role(), request(look, pair)).await {
         Ok(traced) => {
             let response = traced.value;
@@ -172,11 +186,15 @@ async fn look<C: ModelClient>(client: &C, look: Look, pair: &Pair<'_>) -> Judgem
 }
 
 fn not_checked(look: Look, err: &LlmError) -> Judgement {
+    unchecked(format!("{} failed: {err}", look.what()))
+}
+
+fn unchecked(reason: String) -> Judgement {
     Judgement {
         verdict: Verdict::NotChecked,
         reason: None,
         raw_reply: None,
-        not_checked_reason: Some(clip(&format!("{} failed: {err}", look.what()))),
+        not_checked_reason: Some(clip(&reason)),
         request_id: None,
         model: None,
         call: None,
@@ -209,12 +227,100 @@ fn json_object(raw: &str) -> &str {
     }
 }
 
+/// A test client that reports the vision role as off or on, and counts the calls made to it. A
+/// call that is made fails, so an on role ends as `not_checked` with that failure.
+#[cfg(test)]
+pub(crate) mod counting {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use acan_llm::{ChatRequest, ChatResponse, KeyStatus, LlmError, ModelClient, Role, RoleStatus};
+
+    pub(crate) struct CountingClient {
+        vision_off: bool,
+        calls: AtomicUsize,
+    }
+
+    impl CountingClient {
+        pub(crate) fn new(vision_off: bool) -> Self {
+            Self {
+                vision_off,
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        pub(crate) fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ModelClient for CountingClient {
+        async fn chat(&self, role: Role, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(LlmError::NoScriptedReply { role })
+        }
+
+        fn key_status(&self) -> KeyStatus {
+            let vision = if self.vision_off {
+                RoleStatus {
+                    role: Role::Vision,
+                    provider: None,
+                    picked: false,
+                    off_reason: Some("it needs a Meta key"),
+                    meta_only: true,
+                }
+            } else {
+                RoleStatus {
+                    role: Role::Vision,
+                    provider: Some("meta".to_owned()),
+                    picked: false,
+                    off_reason: None,
+                    meta_only: true,
+                }
+            };
+            KeyStatus {
+                roles: vec![vision],
+                ..KeyStatus::default()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use acan_llm::{Reply, Stub};
     use serde_json::{Value, json};
 
+    use super::counting::CountingClient;
     use super::*;
+
+    #[tokio::test]
+    async fn an_off_vision_role_is_not_called_and_says_why() {
+        let client = CountingClient::new(true);
+        let items = items();
+        let judged = judge(&client, &pair(&items, Some(b"b"))).await;
+        assert_eq!(judged.verdict, Verdict::NotChecked);
+        assert_eq!(
+            judged.not_checked_reason.as_deref(),
+            Some("vision is off: it needs a Meta key")
+        );
+        assert!(judged.call.is_none());
+        assert_eq!(client.calls(), 0, "no request is sent for an off role");
+    }
+
+    #[tokio::test]
+    async fn an_on_vision_role_is_called_once() {
+        let client = CountingClient::new(false);
+        let items = items();
+        let judged = judge(&client, &pair(&items, None)).await;
+        assert_eq!(client.calls(), 1);
+        assert_eq!(judged.verdict, Verdict::NotChecked);
+        assert!(
+            judged
+                .not_checked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("the vision call failed"))
+        );
+    }
 
     fn items() -> Vec<MustKeepItem> {
         vec![MustKeepItem {

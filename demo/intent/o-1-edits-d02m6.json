@@ -2,7 +2,7 @@
   "schema": "acan-demo-intent-edits/2",
   "order": "o-1",
   "decided_by": "coordinator, delegated by the owner",
-  "note": "Written for the draft in run D:\\dev\\acan-takes\\d02m-fresh6-20261101-081113 (scope-draft-o-1.json, rev 1), under the D02N ruling, the D02N 07:17 answers and the D02P 07:58 rulings (coordinator, delegated by the owner). Derived from o-1-edits-d02m5.json (the d02m-fresh5 draft) with the same rules and labels. The d02m-fresh6 draft differs in ids and wording: keep-login is drafted on step login-once (re-anchored to s11 as D9); keep-signup and keep-redirect are not drafted, so they are added (in fresh5 they were replaced); the open questions are limit-scope-shared (was q-bucket) and window-reset; the anonymous question is not asked in this draft, so its choice rule is not carried. Each edit names the draft item it acts on by id; draft_mapping maps each drafted id to the decision it follows. Nothing here is a verdict: the edits state the order rules and the gate checks them.",
+  "note": "Written for the draft in run C:\\work\\acan-takes\\d02m-fresh6-20261101-081113 (scope-draft-o-1.json, rev 1), under the D02N ruling, the D02N 07:17 answers and the D02P 07:58 rulings (coordinator, delegated by the owner). Derived from o-1-edits-d02m5.json (the d02m-fresh5 draft) with the same rules and labels. The d02m-fresh6 draft differs in ids and wording: keep-login is drafted on step login-once (re-anchored to s11 as D9); keep-signup and keep-redirect are not drafted, so they are added (in fresh5 they were replaced); the open questions are limit-scope-shared (was q-bucket) and window-reset; the anonymous question is not asked in this draft, so its choice rule is not carried. Each edit names the draft item it acts on by id; draft_mapping maps each drafted id to the decision it follows. Nothing here is a verdict: the edits state the order rules and the gate checks them.",
   "choice_rules": [
     {
       "id": "cr-bucket-scope",
@@ -1829,8 +1829,8 @@
     }
   ],
   "draft_mapping": {
-    "run": "D:\\dev\\acan-takes\\d02m-fresh6-20261101-081113",
-    "draft_file": "D:\\dev\\acan-takes\\d02m-fresh6-20261101-081113\\scope-draft-o-1.json",
+    "run": "C:\\work\\acan-takes\\d02m-fresh6-20261101-081113",
+    "draft_file": "C:\\work\\acan-takes\\d02m-fresh6-20261101-081113\\scope-draft-o-1.json",
     "draft_rev": 1,
     "decided_by": "coordinator, delegated by the owner",
     "items": [

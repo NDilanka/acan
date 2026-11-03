@@ -89,6 +89,9 @@ struct SelectorWire {
     step_context: StepContext,
     principal: Principal,
     channel: Channel,
+    /// The field within the channel, or none for `status` and `any`.
+    /// A `side_effect` path is required and starts with its sink, `store` or `outbound_http`,
+    /// for example `store.users[*].name`.
     #[serde(default)]
     field_path: Option<FieldPattern>,
 }

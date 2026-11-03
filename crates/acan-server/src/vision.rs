@@ -512,6 +512,35 @@ pub(crate) async fn witness<C: ModelClient>(
     }
 }
 
+/// The check of a vision role that is off, or `None` when the call may be made. An off role makes
+/// no call and renders no screenshot. Its one check is `not_checked`, with the reason.
+pub(crate) fn off_check<C: ModelClient>(
+    client: &C,
+    route: &str,
+    must_keep: &[MustKeepItem],
+) -> Option<VisionCheck> {
+    let reason = judge::off_reason(client, acan_llm::Role::Vision)?;
+    Some(VisionCheck {
+        index: 0,
+        route: route.to_owned(),
+        comparison: Comparison::CandidateOnly,
+        must_keep: must_keep.to_vec(),
+        baseline_image_sha256: None,
+        candidate_image_sha256: None,
+        width: None,
+        height: None,
+        verdict: Verdict::NotChecked,
+        reason: None,
+        raw_reply: None,
+        request_id: None,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        latency_ms: 0,
+        not_checked_reason: Some(clip(&reason)),
+        second_look: None,
+    })
+}
+
 /// The checks of `run`, and the model and provider of the call that answered them, when one
 /// returned. `Err` is why the witness could not run.
 async fn checks<C: ModelClient>(
@@ -535,6 +564,9 @@ async fn checks<C: ModelClient>(
         .collect();
     if must_keep.is_empty() {
         return Err("the scope has no must_keep items to check".to_owned());
+    }
+    if let Some(check) = off_check(host.client(), &route, &must_keep) {
+        return Ok((vec![check], None, None));
     }
     let dir = plan.scratch;
     let (baseline, candidate) = tokio::join!(
@@ -736,6 +768,35 @@ async fn record_usage<C: ModelClient>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_off_vision_role_records_one_not_checked_check_and_makes_no_call() {
+        let client = judge::counting::CountingClient::new(true);
+        let must_keep = vec![MustKeepItem {
+            id: "keep-totals".to_owned(),
+            text: "The total clicks column stays.".to_owned(),
+        }];
+        let check = off_check(&client, "/dashboard", &must_keep).expect("an off role has a check");
+        assert_eq!(check.verdict, Verdict::NotChecked);
+        assert_eq!(
+            check.not_checked_reason.as_deref(),
+            Some("vision is off: it needs a Meta key")
+        );
+        assert_eq!(check.route, "/dashboard");
+        assert_eq!(check.must_keep, must_keep);
+        assert_eq!(
+            check.candidate_image_sha256, None,
+            "no screenshot is rendered"
+        );
+        assert_eq!(client.calls(), 0);
+    }
+
+    #[test]
+    fn an_on_vision_role_has_no_off_check() {
+        let client = judge::counting::CountingClient::new(false);
+        assert!(off_check(&client, "/dashboard", &[]).is_none());
+        assert_eq!(client.calls(), 0, "the check itself sends nothing");
+    }
 
     fn ids() -> (TaskId, GateRunId) {
         (

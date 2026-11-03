@@ -653,3 +653,48 @@ async fn tools_list_offers_the_fourteen_tools_and_no_human_scope_tool() {
     );
     running.stop().await.expect("the server stops");
 }
+
+#[tokio::test]
+async fn the_plant_view_is_for_members_and_names_what_an_order_lacks() {
+    let dir = temp_repo();
+    let (running, order, _, _) = confirmed_order(dir.path()).await;
+    let path = format!("/api/orders/{order}/plant-view");
+
+    let response = client()
+        .get(url(&running, &path))
+        .send()
+        .await
+        .expect("the request is sent");
+    let (status, body) = answer(response).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "no token is refused");
+    assert_eq!(body, json!({ "error": "unauthorized" }));
+
+    let (status, _) = get_json(&running, &path, "acan_unknown").await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "an unknown token is refused"
+    );
+
+    let (status, body) = get_json(&running, &path, AGENT_TOKEN).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "an agent is refused");
+    assert_eq!(body["error"], json!("forbidden"));
+
+    // The order is confirmed, but no gate run has produced a receipt for its scope.
+    let (status, body) = get_json(&running, &path, OWNER_TOKEN).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        body,
+        json!({ "error": "not_found", "what": "no receipt for this order yet" })
+    );
+
+    let (status, body) = get_json(&running, "/api/orders/o-99/plant-view", OWNER_TOKEN).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({ "error": "not_found", "what": "order" }));
+
+    let (status, body) =
+        get_json(&running, "/api/orders/not-an-order/plant-view", OWNER_TOKEN).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({ "error": "not_found", "what": "order" }));
+    running.stop().await.expect("the server stops");
+}

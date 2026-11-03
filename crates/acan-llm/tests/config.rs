@@ -132,6 +132,30 @@ fn debug_output_never_contains_the_key() {
     assert!(!format!("{client:?}").contains(CANARY));
 }
 
+#[test]
+fn director_has_a_config_name_and_round_trips() {
+    assert_eq!(Role::Director.as_str(), "director");
+    assert_eq!("director".parse::<Role>(), Ok(Role::Director));
+}
+
+#[test]
+fn director_route_is_optional_and_checked_when_present() {
+    let config = LlmConfig::from_toml_str(CONFIG).expect("config without a director row is valid");
+    assert!(
+        format!("{config:?}").contains("director: None"),
+        "the director row is absent, so it falls back to the foreman"
+    );
+
+    let text = format!("{CONFIG}\n[routing.director]\nprovider = \"fireworks\"\n");
+    match LlmConfig::from_toml_str(&text).expect_err("fireworks is not defined") {
+        ConfigError::UnknownProvider { role, provider } => {
+            assert_eq!(role, Role::Director);
+            assert_eq!(provider, "fireworks");
+        }
+        other => panic!("expected UnknownProvider, got {other}"),
+    }
+}
+
 #[tokio::test]
 async fn an_unrouted_wonder_role_sends_nothing() {
     let config = LlmConfig::from_toml_str(CONFIG).expect("config is valid without a wonder route");
@@ -166,6 +190,47 @@ fn a_wonder_route_must_name_a_known_provider() {
         }
         other => panic!("expected UnknownProvider, got {other}"),
     }
+}
+
+/// The client for `text`, with the keys the environment holds.
+fn client_from(text: &str) -> OpenAiCompatible {
+    let config = LlmConfig::from_toml_str(text).expect("config is valid");
+    let keys = ApiKeys::from_env(&config);
+    OpenAiCompatible::new(config, keys).expect("the client builds")
+}
+
+#[test]
+fn an_unrouted_director_is_muse_spark_on_the_foremans_route() {
+    let destination = client_from(CONFIG)
+        .destination(Role::Director)
+        .expect("the director inherits the foreman's route");
+
+    assert_eq!(destination.provider, "meta");
+    assert_eq!(destination.model, "muse-spark-1.3");
+    assert!(destination.is_muse_spark());
+}
+
+#[test]
+fn a_director_routed_off_meta_or_to_another_model_is_not_muse_spark() {
+    let off_meta = format!("{CONFIG}\n[routing.director]\nprovider = \"baseten\"\n");
+    let other_model =
+        format!("{CONFIG}\n[routing.director]\nprovider = \"meta\"\nmodel = \"muse-spark-open\"\n");
+
+    let destination = client_from(&off_meta)
+        .destination(Role::Director)
+        .expect("the director has a route");
+    assert!(
+        !destination.is_muse_spark(),
+        "{destination:?} is on baseten"
+    );
+
+    let destination = client_from(&other_model)
+        .destination(Role::Director)
+        .expect("the director has a route");
+    assert!(
+        !destination.is_muse_spark(),
+        "{destination:?} is not an allowed model"
+    );
 }
 
 #[test]

@@ -1,0 +1,114 @@
+name: Pages
+
+# Publishes the web UI and the recorded run to GitHub Pages. The recording lives in `replay/` on the
+# default branch. It is written by `acan export-replay`, which already removes keys, tokens and
+# private paths. This workflow checks the same text again before it uploads anything. With no
+# recording it skips the build and the deploy, so nothing half-built goes out.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "replay/**"
+      - "crates/acan-render-web/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  recording:
+    name: look for the recording
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      present: ${{ steps.check.outputs.present }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Look for the recording
+        id: check
+        run: |
+          if [ -f replay/manifest.json ] && [ -f replay/plant.json ] && [ -f replay/events.json ]; then
+            echo "The recording is in replay/."
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=Pages skipped::replay/ has no recording, so there is no site to publish. Export one with: acan export-replay --repo <repo> --out replay"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: build the Pages site
+    needs: recording
+    if: needs.recording.outputs.present == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.129
+      - uses: Swatinem/rust-cache@v2
+      # The same size-tuned profile as the release workflow.
+      - name: Build the wasm module
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: s
+          CARGO_PROFILE_RELEASE_LTO: "true"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+          CARGO_PROFILE_RELEASE_PANIC: abort
+        run: cargo build -p acan-render-web --release --locked --target wasm32-unknown-unknown
+      - name: Generate the JavaScript bindings
+        run: |
+          wasm-bindgen --target web --no-typescript \
+            --out-dir crates/acan-render-web/www/pkg \
+            target/wasm32-unknown-unknown/release/acan_render_web.wasm
+      - name: Assemble the site
+        run: |
+          mkdir -p _site
+          cp -r crates/acan-render-web/www/. _site/
+          rm -f _site/.gitignore
+          mkdir -p _site/replay
+          cp replay/manifest.json replay/plant.json replay/events.json _site/replay/
+          touch _site/.nojekyll
+          ls -la _site _site/replay
+      - name: Check the recording for private text
+        # The same kinds of text the bug report removes: keys, tokens, home and user-folder paths,
+        # Windows user paths, and the private repository name. A match fails the deploy.
+        run: |
+          pattern='acan_[a-z_]*[0-9a-f]{32}|sk-[A-Za-z0-9_-]{16,}|Bearer [A-Za-z0-9._-]{16,}|/home/|/Users/|/root/|/tmp/|[A-Za-z]:\\Users\\'
+          if grep -rnE "$pattern" _site/replay; then
+            echo "The recording holds private text. Re-export it after removing the cause." >&2
+            exit 1
+          fi
+          echo "The recording holds no private text."
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
