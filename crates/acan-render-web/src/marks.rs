@@ -4106,6 +4106,68 @@ mod tests {
     }
 
     #[test]
+    fn the_eye_aims_at_the_machine_the_drone_works_on() {
+        let at = [0.0, 0.0, 40.0];
+        let target = [30.0, 40.0, 9.0];
+        let marks = marks_of(vec![drone("a", at, target, "building")]);
+        let mut motion = Motion::new(true);
+        motion.sync(&marks);
+        let beam = beams(&motion, &marks, 1.0, None, None)[0];
+        let body = mark_instances(&motion, &marks, KINDS, 1.0, None)
+            .into_iter()
+            .find(|i| i.kind == KINDS.body)
+            .expect("the drone draws");
+        assert_eq!(body.turn, beam.turn, "the tether turns with the body");
+        let (s, c) = beam.turn.sin_cos();
+        let [x, y, z] = beam.from;
+        let eye = [c * x - s * y, s * x + c * y, z];
+        let ahead = [target[0] - at[0], target[1] - at[1]];
+        let reach = ahead[0].hypot(ahead[1]);
+        let flat = eye[0].hypot(eye[1]);
+        let along = (eye[0] * ahead[0] + eye[1] * ahead[1]) / (flat * reach);
+        assert!((along - 1.0).abs() < 1e-5, "the eye faces the target: {along}");
+        assert!(eye[2] < 0.0, "and looks down at it from above");
+        let gap = |p: [f32; 3]| {
+            (0..3)
+                .map(|k| (p[k] - target[k]).powi(2))
+                .sum::<f32>()
+                .sqrt()
+        };
+        let eye_at = [at[0] + eye[0], at[1] + eye[1], at[2] + eye[2]];
+        assert!(gap(eye_at) < gap(at), "the eye is the near side of the body");
+    }
+
+    #[test]
+    fn a_drone_at_map_zoom_keeps_to_three_instances_and_eight_strokes() {
+        let at = [0.0, 0.0, 40.0];
+        let target = [9.0, 0.0, 9.0];
+        let always = |model: &acan_render::Model| {
+            model
+                .lines
+                .iter()
+                .filter(|l| l.detail == acan_render::Detail::Always)
+                .count()
+                + model
+                    .dots
+                    .iter()
+                    .filter(|d| d.detail == acan_render::Detail::Always)
+                    .count()
+        };
+        let model_strokes = always(&acan_iso::agent_body()) + always(&acan_iso::agent_accent());
+        for activity in ["building", "idle"] {
+            let marks = marks_of(vec![drone("a", at, target, activity)]);
+            let mut motion = Motion::new(true);
+            motion.sync(&marks);
+            let instances = mark_instances(&motion, &marks, KINDS, 1.0, None).len();
+            let strokes = model_strokes
+                + beams(&motion, &marks, 1.0, None, None).len()
+                + spots(&motion, &marks, 1.0, None).len();
+            assert!(instances <= 3, "{activity}: {instances} instances");
+            assert!(strokes <= 8, "{activity}: {strokes} strokes");
+        }
+    }
+
+    #[test]
     fn only_a_working_agents_beacon_pulses() {
         let at = [0.0, 0.0, PLINTH_TOP];
         let target = [4.0, 0.0, 9.0];

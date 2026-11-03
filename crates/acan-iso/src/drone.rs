@@ -36,6 +36,7 @@ pub const EYE_TILT_DEG: f32 = 15.0;
 /// written out, and a test holds them to the tilt.
 const LOOK: V = [0.965_926, 0.0, -0.258_819];
 const LIFT: V = [0.258_819, 0.0, 0.965_926];
+const _: () = assert!(LIFT[2] > 0.0, "the lift leans back over the crown");
 /// The shadow's radius on the plinth top when the drone is low. It is a soft halo, so it reads as
 /// light on the ground.
 pub const SHADOW_RADIUS: f32 = 0.9 * BODY_RADIUS;
@@ -707,7 +708,6 @@ mod tests {
         assert!((dot3(LOOK, LOOK) - 1.0).abs() < 1e-5 && (dot3(LIFT, LIFT) - 1.0).abs() < 1e-5);
         assert!(dot3(LOOK, LIFT).abs() < 1e-5 && dot3(LOOK, SIDE) == 0.0);
         assert!((LOOK[0] - tilt.cos()).abs() < 1e-5 && (LOOK[2] + tilt.sin()).abs() < 1e-5);
-        assert!(LIFT[2] > 0.0, "the lift leans back over the crown");
         let eye = eye_point();
         assert!(
             (dot3(eye, eye).sqrt() - EYE_DISTANCE).abs() < 1e-4,
