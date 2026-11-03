@@ -2,6 +2,7 @@
 // Strike send, what the slip says of the route's answer, and what it says of a refusal. The wasm
 // side checks the route's hash against the page's own. This module has no DOM imports, so Node can
 // test it.
+import { apiPath, target } from "./projects.js";
 
 // Orders whose route is being fetched. A sync skips them, so a slow fetch is not repeated.
 const inFlight = new Set();
@@ -78,7 +79,7 @@ async function fetchSeal(ctx, lane) {
 // scope. The check throws when the body is not the route's shape or the page holds no such scope.
 export async function askRoute(state, fetchText, order) {
   const id = `o-${order}`;
-  const text = await fetchText(`/api/orders/${id}/scope/confirmation`);
+  const text = await fetchText(apiPath(target(), `/api/orders/${id}/scope/confirmation`));
   const check = JSON.parse(state.app.seal_check(id, text));
   return { body: JSON.parse(text), check };
 }

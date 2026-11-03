@@ -2,6 +2,7 @@
 // every model call the server has made since it started, with the role, provider and model of
 // each. The page reads it with the owner token. Calls the offline stand-in answered are recorded
 // with the provider `offline`: they are shown as a stand-in and left out of the live total.
+import { apiPath, target } from "./projects.js";
 
 export const OFFLINE_PROVIDER = "offline";
 
@@ -36,7 +37,7 @@ export function requestUsage(state, fetchText, onChange) {
   if (state.usageInFlight || !state.token) return;
   state.usageDirty = false;
   state.usageInFlight = true;
-  fetchText("/api/usage")
+  fetchText(apiPath(target(), "/api/usage"))
     .then((text) => {
       const rows = JSON.parse(text);
       if (!Array.isArray(rows)) throw new Error("the usage answer is not a list");

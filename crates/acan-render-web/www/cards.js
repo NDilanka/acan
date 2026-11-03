@@ -18,6 +18,7 @@ import { $, canvas, card, freeBand, freeze, replay, state } from "./state.js";
 import { historyBlock } from "./guard.js";
 import { shortLine } from "./chrome.js";
 import { forgetToken, hold } from "./stream.js";
+import { apiPath, target } from "./projects.js";
 
 // A settled card shows its one line this long, then fades out over FADE_MS.
 const FADE_HOLD_MS = 1500;
@@ -208,7 +209,7 @@ async function settle(clash, option) {
   state.note = "";
   paintCard();
   try {
-    const res = await fetch("/api/commands", {
+    const res = await fetch(apiPath(target(), "/api/commands"), {
       method: "POST",
       headers: { Authorization: `Bearer ${state.token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ cmd: "settle_clash", clash: clash.id, choice: option.choice }),
@@ -418,7 +419,7 @@ async function answer(key) {
   let note = "";
   let answered = null;
   try {
-    const res = await fetch("/api/commands", {
+    const res = await fetch(apiPath(target(), "/api/commands"), {
       method: "POST",
       headers: { Authorization: `Bearer ${state.token}`, "Content-Type": "application/json" },
       body: JSON.stringify(command),

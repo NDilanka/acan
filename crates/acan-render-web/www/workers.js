@@ -4,6 +4,7 @@
 // is not used. What the answer means is decided by `workerSummary` in firstrun.js.
 import { workersState } from "./firstrun.js";
 import { state } from "./state.js";
+import { apiPath, target } from "./projects.js";
 
 // While the workers wait (no key, or none running), they are read again at most this often.
 const EVERY_MS = 5000;
@@ -28,7 +29,7 @@ export async function loadWorkers() {
   inFlight = true;
   askedAt = Date.now();
   try {
-    const res = await fetch("/api/workers", { headers: { Authorization: `Bearer ${state.token}` } });
+    const res = await fetch(apiPath(target(), "/api/workers"), { headers: { Authorization: `Bearer ${state.token}` } });
     answer = { status: res.status, body: res.ok ? await res.json().catch(() => null) : null };
   } catch {
     answer = { status: 0, body: null };

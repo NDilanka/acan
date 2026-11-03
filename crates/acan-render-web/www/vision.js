@@ -2,6 +2,7 @@
 // GET /api/tasks/{task}/vision with the record of the task's latest gate run (`vision_witness/1`);
 // this file says what each record means. Every verdict is advisory: the gate and the land never read
 // it, so no verdict here is a pass or a fail, and `not_checked` is never shown as `consistent`.
+import { apiPath, target } from "./projects.js";
 
 export const ADVISORY = "Advisory only: a model compared these pages, and the gate never reads its verdict.";
 
@@ -119,7 +120,7 @@ export function secondLook(check) {
 
 // The routes of a check's two screenshots, or null for a side the check has no image of.
 export function imagePaths(task, check) {
-  const base = `/api/tasks/${encodeURIComponent(task)}/vision/${check.index}`;
+  const base = apiPath(target(), `/api/tasks/${encodeURIComponent(task)}/vision/${check.index}`);
   return {
     before: check.baseline_image_sha256 ? `${base}/baseline.png` : null,
     after: check.candidate_image_sha256 ? `${base}.png` : null,
