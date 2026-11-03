@@ -4,6 +4,7 @@
 // that found something inconsistent or unclear. A click flies to the machine. The list logic has
 // no DOM, so Node can test it. `installInbox` binds it to the page.
 import { flyTo, goKeys } from "./lanes.js";
+import { countsByProject, entityKey } from "./projects.js";
 
 export const NOTIFY_KEY = "acan.notify";
 
@@ -105,6 +106,23 @@ export function inboxItems(view, plantViews = new Map(), doubts = new Map()) {
   return [...items.values()].sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.id - b.id);
 }
 
+// The items of several projects as one list, for a canvas of several. `lists` are
+// `{ project, items }` in the canvas order. Ids repeat across projects, so each key is named by
+// its project, and each row starts with the project's id. The list sorts by kind, then project,
+// then id.
+export function mergeInbox(lists) {
+  const merged = [];
+  lists.forEach(({ project, items }, rank) => {
+    for (const item of items) {
+      merged.push({ ...item, project, rank, key: entityKey(project, item.key),
+        line: `${project} · ${item.line}`, text: `${project}: ${item.text}` });
+    }
+  });
+  return merged
+    .sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.rank - b.rank || a.id - b.id)
+    .map(({ rank, ...item }) => item);
+}
+
 // The items in `items` whose key `seen` does not hold.
 export function freshItems(seen, items) {
   return items.filter((item) => !seen.has(item.key));
@@ -187,11 +205,21 @@ export function installInbox(kit) {
   const paint = () => {
     const view = kit.state.view;
     if (view === null) return;
-    const now = { version: kit.state.renderedVersion, feed: kit.feed.version, views: viewStamp(kit.state.plantViews) };
-    if (now.version === last.version && now.feed === last.feed && now.views === last.views) return;
+    const many = kit.projects?.on() ?? false;
+    const now = { version: kit.state.renderedVersion, feed: kit.feed.version, views: viewStamp(kit.state.plantViews),
+      projects: many ? kit.projects.version() : 0 };
+    if (now.version === last.version && now.feed === last.feed && now.views === last.views
+      && now.projects === last.projects) return;
     last = now;
     panel.hidden = false;
-    const items = inboxItems(view, kit.state.plantViews, visionDoubts(kit.feed.events));
+    const own = inboxItems(view, kit.state.plantViews, visionDoubts(kit.feed.events));
+    const items = many
+      ? mergeInbox([{ project: kit.projects.active(), items: own }, ...kit.projects.others().map((other) => ({
+        project: other.project,
+        items: inboxItems(other.view, other.plantViews, visionDoubts(other.events)),
+      }))])
+      : own;
+    if (many) kit.projects.counts(countsByProject(items));
     // What is new is judged against the last live list only, so rewinding the map and coming back
     // announces nothing twice.
     const live = kit.isLive();
@@ -216,8 +244,12 @@ export function installInbox(kit) {
       button.append(element("span", "kind", KIND_WORDS[item.kind]), element("span", "text", item.line));
       button.title = item.detail;
       button.setAttribute("aria-label", item.machine ? `${item.text}. Go to ${item.machine}.` : item.text);
-      if (item.machine === null) button.disabled = true;
-      button.addEventListener("click", () => flyTo(kit, item.machine));
+      // On a canvas of several, a row of another project puts it on screen first, and a row with
+      // no machine there still flies to its project.
+      const elsewhere = many && item.project !== kit.projects.active();
+      if (item.machine === null && !elsewhere) button.disabled = true;
+      if (elsewhere) button.addEventListener("click", () => visitProject(kit, item));
+      else button.addEventListener("click", () => flyTo(kit, item.machine));
       li.append(button);
       if (fresh.includes(item)) li.classList.add("moved");
       return li;
@@ -252,6 +284,13 @@ export function installInbox(kit) {
   // rather than at the next event.
   setInterval(paint, PLANT_VIEW_CHECK_MS);
   goKeys.set("i", () => list.querySelector("button:not(:disabled)")?.focus());
+}
+
+// Puts the row's project on screen and flies to its machine, or to the project when the row has
+// no machine or the project cannot go on screen.
+function visitProject(kit, item) {
+  if (item.machine !== null && kit.projects.select(item.project)) flyTo(kit, item.machine);
+  else kit.projects.fly(item.project);
 }
 
 // A number that moves when a plant view arrives or its receipt count moves.

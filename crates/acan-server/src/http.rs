@@ -21,9 +21,10 @@ use acan_intent::{
 use acan_llm::{ModelClient, Role, RoleStatus, UsageTotals};
 use acan_scan::Plant;
 use axum::body::Bytes;
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
@@ -37,68 +38,165 @@ use crate::jobs;
 use crate::mcp;
 use crate::plant_view;
 use crate::public::{self, PublicRoot};
+use crate::registry::{self, Registry};
 use crate::release::{self, BugReport, UpdateStatus, VersionInfo};
 use crate::ruling::{self, RulingBody, RulingDraftView};
 use crate::vision::{self, Side, VisionWitness};
 use crate::workers::{Board, WorkersView};
-use crate::{STATE_DIR, observe, redact, setup, stream};
+use crate::{STATE_DIR, observe, redact, setup, stream, stream_all};
 
-/// Builds the router. The public files are served for every path the API does not claim.
-pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<PublicRoot>) -> Router {
-    let router = Router::new()
-        .route("/health", get(health))
-        .route("/version", get(version))
-        .route("/mcp", post(mcp::post::<C>))
-        .route("/api/commands", post(post_command::<C>))
-        .route("/api/events", get(get_events::<C>))
-        .route("/api/plant", get(get_plant::<C>))
-        .route("/api/contract", get(get_contract::<C>))
-        .route("/api/scan", post(post_scan::<C>))
-        .route("/api/usage", get(get_usage::<C>))
-        .route("/api/workers", get(get_workers::<C>))
-        .route("/api/update", get(get_update::<C>))
-        .route("/api/bug-report", get(get_bug_report::<C>))
-        .route("/setup", get(setup::page))
-        .route("/api/setup", get(setup::get_status::<C>))
-        .route("/api/setup/keys", post(setup::post_key::<C>))
-        .route("/api/setup/keys/{provider}", delete(setup::delete_key::<C>))
-        .route("/api/setup/roles/{role}", put(setup::put_role::<C>))
-        .route("/api/stream", get(stream::upgrade::<C>))
-        .route("/api/tasks/{task}/worktree", get(get_worktree::<C>))
-        .route("/api/tasks/{task}/scope", get(get_scope::<C>))
-        .route("/api/tasks/{task}/rulings", get(get_rulings::<C>))
-        .route("/api/tasks/{task}/receipt", get(get_receipt::<C>))
-        .route("/api/orders/{order}/plant-view", get(get_plant_view::<C>))
-        .route("/api/orders/{order}/scope-draft", get(get_scope_draft::<C>))
+/// Where one project's routes are mounted: the prefix of its API paths, and the path of its MCP
+/// endpoint. The default project is mounted at `/api` and `/mcp`, and every project at
+/// `/api/p/{id}` and `/api/p/{id}/mcp`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Mount<'a> {
+    pub(crate) api: &'a str,
+    pub(crate) mcp: &'a str,
+}
+
+/// The routes one project's host answers under `mount`. The board is this project's own local
+/// workers, which `GET .../workers` reports.
+fn project_routes<C: ModelClient + 'static>(
+    mount: Mount<'_>,
+    host: Host<C>,
+    board: Board,
+) -> Router {
+    let api = mount.api;
+    Router::new()
+        .route(mount.mcp, post(mcp::post::<C>))
+        .route(&format!("{api}/commands"), post(post_command::<C>))
+        .route(&format!("{api}/events"), get(get_events::<C>))
+        .route(&format!("{api}/plant"), get(get_plant::<C>))
+        .route(&format!("{api}/contract"), get(get_contract::<C>))
+        .route(&format!("{api}/scan"), post(post_scan::<C>))
+        .route(&format!("{api}/usage"), get(get_usage::<C>))
+        .route(&format!("{api}/workers"), get(get_workers::<C>))
+        .route(&format!("{api}/update"), get(get_update::<C>))
+        .route(&format!("{api}/bug-report"), get(get_bug_report::<C>))
+        .route(&format!("{api}/setup"), get(setup::get_status::<C>))
+        .route(&format!("{api}/setup/keys"), post(setup::post_key::<C>))
         .route(
-            "/api/orders/{order}/scope/confirmation",
+            &format!("{api}/setup/keys/{{provider}}"),
+            delete(setup::delete_key::<C>),
+        )
+        .route(
+            &format!("{api}/setup/roles/{{role}}"),
+            put(setup::put_role::<C>),
+        )
+        .route(&format!("{api}/stream"), get(stream::upgrade::<C>))
+        .route(
+            &format!("{api}/tasks/{{task}}/worktree"),
+            get(get_worktree::<C>),
+        )
+        .route(&format!("{api}/tasks/{{task}}/scope"), get(get_scope::<C>))
+        .route(
+            &format!("{api}/tasks/{{task}}/rulings"),
+            get(get_rulings::<C>),
+        )
+        .route(
+            &format!("{api}/tasks/{{task}}/receipt"),
+            get(get_receipt::<C>),
+        )
+        .route(
+            &format!("{api}/orders/{{order}}/plant-view"),
+            get(get_plant_view::<C>),
+        )
+        .route(
+            &format!("{api}/orders/{{order}}/scope-draft"),
+            get(get_scope_draft::<C>),
+        )
+        .route(
+            &format!("{api}/orders/{{order}}/scope/confirmation"),
             get(get_scope_confirmation::<C>),
         )
         .route(
-            "/api/orders/{order}/episodes/{episode}/ruling-draft",
+            &format!("{api}/orders/{{order}}/episodes/{{episode}}/ruling-draft"),
             get(get_ruling_draft::<C>),
         )
         .route(
-            "/api/orders/{order}/episodes/{episode}/ruling",
+            &format!("{api}/orders/{{order}}/episodes/{{episode}}/ruling"),
             post(post_ruling::<C>),
         )
-        .route("/api/tasks/{task}/vision", get(get_vision::<C>))
         .route(
-            "/api/tasks/{task}/vision/{file}",
+            &format!("{api}/tasks/{{task}}/vision"),
+            get(get_vision::<C>),
+        )
+        .route(
+            &format!("{api}/tasks/{{task}}/vision/{{file}}"),
             get(get_vision_image::<C>),
         )
         .route(
-            "/api/tasks/{task}/vision/{index}/baseline.png",
+            &format!("{api}/tasks/{{task}}/vision/{{index}}/baseline.png"),
             get(get_vision_baseline::<C>),
+        )
+        .layer(Extension(board))
+        .layer(middleware::from_fn_with_state(
+            host.clone(),
+            refuse_when_stopped::<C>,
+        ))
+        .with_state(host)
+}
+
+/// Refuses a request to a project whose writer has stopped, before any route runs. The other
+/// projects are not affected: each one has its own writer.
+async fn refuse_when_stopped<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if host.writer_stopped() {
+        return ApiError::ProjectUnavailable.into_response();
+    }
+    next.run(request).await
+}
+
+/// Builds the router for every project. Each project answers under `/api/p/{id}`, and the default
+/// project also answers at the unprefixed paths, which the setup page and older clients use. The
+/// server's own health and version are not any project's. The public files are served for every
+/// path the API does not claim.
+pub(crate) fn router<C: ModelClient + 'static>(
+    projects: Arc<Registry<C>>,
+    web: Option<PublicRoot>,
+) -> Router {
+    let mut router = Router::new()
+        .route("/health", get(health))
+        .route("/version", get(version))
+        .route("/setup", get(setup::page))
+        .merge(
+            Router::new()
+                .route("/api/projects", get(registry::list_projects::<C>))
+                .route("/api/stream/all", get(stream_all::upgrade::<C>))
+                .with_state(Arc::clone(&projects)),
         );
-    let router = match web {
+    for entry in projects.entries() {
+        let api = format!("/api/p/{}", entry.id);
+        let mcp = format!("{api}/mcp");
+        router = router.merge(project_routes(
+            Mount {
+                api: &api,
+                mcp: &mcp,
+            },
+            entry.host.clone(),
+            entry.board.clone(),
+        ));
+        if entry.id == projects.default_id() {
+            router = router.merge(project_routes(
+                Mount {
+                    api: "/api",
+                    mcp: "/mcp",
+                },
+                entry.host.clone(),
+                entry.board.clone(),
+            ));
+        }
+    }
+    match web {
         Some(root) => {
             let root = Arc::new(root);
             router.fallback(move |request| public::serve(Arc::clone(&root), request))
         }
         None => router,
-    };
-    router.with_state(host)
+    }
 }
 
 /// A failed request, with the status it maps to.
@@ -118,6 +216,8 @@ pub enum ApiError {
     Rejected(Rejection),
     /// The scope-first lane refused the call with a closed code. The body is the [`McpError`].
     Refused(McpError),
+    /// The project's writer has stopped, so the project cannot take a request.
+    ProjectUnavailable,
     /// Something on the server failed. The detail goes to the log, not the response.
     Internal(anyhow::Error),
 }
@@ -152,6 +252,11 @@ impl IntoResponse for ApiError {
                 .into_response(),
             Self::Rejected(rejection) => (StatusCode::CONFLICT, Json(rejection)).into_response(),
             Self::Refused(err) => (refusal_status(&err.error), Json(err)).into_response(),
+            Self::ProjectUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "project_unavailable", "what": "project" })),
+            )
+                .into_response(),
             Self::Internal(err) => {
                 tracing::error!(error = ?err, "request failed");
                 (

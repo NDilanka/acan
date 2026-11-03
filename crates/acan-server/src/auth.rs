@@ -10,7 +10,7 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const TOKENS_FILE: &str = "tokens.json";
+pub(crate) const TOKENS_FILE: &str = "tokens.json";
 
 /// Who a token acts for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,10 +78,93 @@ impl Tokens {
         Ok((Self::from_entries(entries)?, Some(token)))
     }
 
+    /// Loads the tokens of every project one process serves, and gives them one human token.
+    ///
+    /// The human token is the first owner entry found across the files, in order, or a new token
+    /// when no file has one. It is written into every file that lacks it, so one browser token
+    /// opens every project. Agent tokens are never shared: each stays in its project's file. A
+    /// file that does not exist yet is created with the human token alone.
+    ///
+    /// Returns the tokens of each directory, in the order given, and the token minted now, if
+    /// one was minted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a file cannot be read, written or parsed, or when a file already
+    /// lists the human token for some other principal.
+    pub fn load_shared(
+        dirs: &[&Path],
+        founder: &MemberId,
+    ) -> anyhow::Result<(Vec<Self>, Option<Token>)> {
+        let owner = Principal::Member(founder.clone());
+        let mut files = Vec::with_capacity(dirs.len());
+        for dir in dirs {
+            let path = dir.join(TOKENS_FILE);
+            let entries = if path.exists() {
+                let text = fs::read_to_string(&path)
+                    .with_context(|| format!("reading {}", path.display()))?;
+                serde_json::from_str::<Vec<Entry>>(&text)
+                    .with_context(|| format!("parsing {}", path.display()))?
+            } else {
+                Vec::new()
+            };
+            files.push((path, entries));
+        }
+        let existing = files
+            .iter()
+            .flat_map(|(_, entries)| entries)
+            .find(|entry| entry.principal == owner)
+            .map(|entry| entry.token.clone());
+        let (human, minted) = match existing {
+            Some(token) => (token, None),
+            None => {
+                let token = Token(format!("acan_{}", Uuid::new_v4().simple()));
+                (token.0.clone(), Some(token))
+            }
+        };
+        let mut tokens = Vec::with_capacity(files.len());
+        for (path, mut entries) in files {
+            let held = entries
+                .iter()
+                .find(|entry| entry.token == human)
+                .map(|entry| entry.principal == owner);
+            match held {
+                Some(true) => {}
+                Some(false) => bail!(
+                    "the tokens file {} lists the human token for another principal",
+                    path.display()
+                ),
+                None => {
+                    entries.push(Entry {
+                        token: human.clone(),
+                        principal: owner.clone(),
+                    });
+                    fs::write(&path, serde_json::to_string_pretty(&entries)?)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                }
+            }
+            tokens.push(Self::from_entries(entries)?);
+        }
+        Ok((tokens, minted))
+    }
+
     /// The principal a token acts for, or `None` for an unknown token.
     #[must_use]
     pub fn principal(&self, token: &str) -> Option<&Principal> {
         self.by_token.get(token)
+    }
+
+    /// How many distinct agents the tokens act for. An agent with two tokens counts once.
+    #[must_use]
+    pub fn agent_count(&self) -> usize {
+        self.by_token
+            .values()
+            .filter_map(|principal| match principal {
+                Principal::Agent(agent) => Some(agent),
+                Principal::Member(_) => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
     }
 
     /// The token of agent `agent`. A token the file does not hold yet is minted and written to

@@ -13,6 +13,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
 use crate::api;
+use crate::canvas;
 use crate::feed;
 use crate::kind::{self, ALL, PlanFootprint};
 use crate::labels::{self, LabelSpot};
@@ -23,6 +24,7 @@ use crate::plan::Plan;
 use crate::plant::{Plant, PlantMachine, from_scan_json, rest_labels, stress};
 use crate::plant_view;
 use crate::pov::{self, Ride};
+use crate::project::{self, ProjectMarks};
 use crate::scene;
 use crate::seal;
 use crate::stand;
@@ -47,6 +49,21 @@ const ORBIT_DEG_PER_PX: f32 = 0.4;
 const TILT_DEG_PER_PX: f32 = 0.25;
 /// Duration of a Q or E turn, in milliseconds.
 const TURN_MS: f32 = 180.0;
+/// The gap between frames, in ms, while only the idle bob runs: about 20 frames a second. The bob
+/// moves a few hundredths of a pixel in that time, so the lower rate does not show.
+const CALM_FRAME_MS: f32 = 50.0;
+/// How far a drone reaches from its centre, its waiting ring included, in world units. A close-up
+/// keeps this much of each drone clear of the page's side panels.
+const FOCUS_REACH: f32 = 1.4 * acan_iso::BODY_RADIUS;
+
+/// A close-up's hold: the CSS band its drones keep within, the world point it centres on, and
+/// the camera as it left it, so a move by the reader ends the hold.
+#[derive(Debug, Clone, Copy)]
+struct FocusHold {
+    band: [f32; 2],
+    centre: [f32; 3],
+    camera: Camera,
+}
 
 #[wasm_bindgen]
 pub struct App {
@@ -73,13 +90,17 @@ pub struct App {
     slots: AgentSlots,
     /// Whether the marks' eases were moving on the last frame.
     moving: bool,
+    /// Whether the last frame ran only for the idle bob, see [`App::frame_gap_ms`].
+    calm: bool,
     /// Whether the marks hold still, as `?freeze=1` asks. Set once before a plant loads.
     still: bool,
     /// The index of the clash whose card is open, if any.
     card_clash: Option<usize>,
-    /// An agent to close up on, and the zoom as a share of the fit zoom. It applies once the view
-    /// places the agent's drone, then clears.
-    focus: Option<(String, f32)>,
+    /// An agent to close up on, the zoom as a share of the fit zoom, and the CSS band the page's
+    /// panels leave free. It applies once the view places the agent's drone, then clears.
+    focus: Option<(String, f32, Option<[f32; 2]>)>,
+    /// A close-up that keeps its drones clear of the side panels until the reader moves it.
+    focus_hold: Option<FocusHold>,
     /// The ride, while the page shows one agent's drone from inside.
     ride: Option<Ride>,
     /// Whether the fit runs once the ride has eased back, as the `0` key asks.
@@ -96,6 +117,33 @@ pub struct App {
     clock: marks::Clock,
     /// The agent whose drone the pointer is over, if any.
     hovered: Option<String>,
+    /// The id of the project on screen when the canvas holds several, or empty for one plant.
+    project: String,
+    /// The other projects on the canvas. Each keeps its own marks state, so its agents, hue slots
+    /// and eases never meet the ones on screen, and draws them at its place.
+    parked: Vec<Parked>,
+    /// Every project's id in the order it came onto the canvas. An entry of an every-project
+    /// overlay names its project by its place here.
+    order: Vec<String>,
+    /// Moves when a parked project's marks or level of detail change, so the page redraws their
+    /// flags.
+    parked_version: u32,
+    /// Each plant's layout from the origin, by `canvas::layout_key`.
+    layouts: HashMap<u64, Layout>,
+}
+
+/// A project on the canvas that is not on screen: its plant at its place and its log folded, so
+/// the page can list what waits there and switch to it without fetching again.
+struct Parked {
+    id: String,
+    loaded: Loaded,
+    plan: Plan,
+    mirror: Option<Mirror>,
+    /// The view as JSON, until the next event changes it.
+    view_json: Option<String>,
+    marks: ProjectMarks,
+    /// Whether its marks draw at the far level of detail. See `canvas::far`.
+    far: bool,
 }
 
 /// An ease from one azimuth to another, in degrees. `to` is not wrapped, so repeated turns add up.
@@ -136,6 +184,9 @@ struct Loaded {
     /// Each machine's model box, which a ride sizes its distance from, in the layout's machine
     /// order. See `scene::machine_model_boxes`.
     machine_bounds: Vec<Aabb>,
+    /// The plant as it arrived and its layout from the origin, so a move rebuilds it in place.
+    source: Plant,
+    at_origin: Layout,
 }
 
 #[wasm_bindgen]
@@ -191,9 +242,11 @@ impl App {
             motion: Motion::default(),
             slots: AgentSlots::default(),
             moving: false,
+            calm: false,
             still: false,
             card_clash: None,
             focus: None,
+            focus_hold: None,
             ride: None,
             fit_after_leave: false,
             bob_enabled: true,
@@ -203,6 +256,11 @@ impl App {
             view_json: String::new(),
             view_version: 0,
             dirty: false,
+            project: String::new(),
+            parked: Vec::new(),
+            order: Vec::new(),
+            parked_version: 0,
+            layouts: HashMap::new(),
         })
     }
 
@@ -266,18 +324,7 @@ impl App {
         let Some(to) = self.tour_pose(machine_id, zoom) else {
             return false;
         };
-        if reduced || self.still {
-            self.tour_move = None;
-            self.camera.set_pivot(to.0);
-            self.camera.set_zoom(to.1);
-        } else {
-            let from = (self.camera.pivot(), self.camera.zoom());
-            self.tour_move = Some(TourMove {
-                from,
-                to,
-                elapsed_ms: 0.0,
-            });
-        }
+        self.ease_to(to, reduced);
         true
     }
 
@@ -365,6 +412,12 @@ impl App {
         }
         self.motion = self.new_motion();
         self.dirty = true;
+        for index in 0..self.parked.len() {
+            let motion = self.new_motion();
+            let own = &mut self.parked[index].marks;
+            own.motion = motion;
+            own.dirty = true;
+        }
     }
 
     /// Tells the marks the time now, in epoch milliseconds, so a quiet agent's drone can read
@@ -375,6 +428,7 @@ impl App {
         if now != self.clock.now {
             self.clock.now = now;
             self.dirty = true;
+            self.parked_dirty();
         }
     }
 
@@ -389,6 +443,7 @@ impl App {
         if away != self.clock.away {
             self.clock.away = away;
             self.dirty = true;
+            self.parked_dirty();
         }
     }
 
@@ -559,13 +614,38 @@ impl App {
         let turning = self.advance_turn(dt_ms);
         let touring = self.advance_tour_move(dt_ms);
         let moving = self.motion.advance(dt_ms);
+        let (parked_upload, parked_moving) = self.advance_parked(dt_ms);
         // The frame an ease ends on still uploads, so the marks land on their final places.
-        if moving || self.moving {
+        if moving || self.moving || parked_upload {
             self.sync_scene();
         }
         self.moving = moving;
         let riding = self.advance_ride(dt_ms);
-        turning || touring || moving || riding
+        self.calm =
+            moving && self.motion.calm() && !(turning || touring || riding || parked_moving);
+        turning || touring || moving || riding || parked_moving
+    }
+
+    /// Moves every parked project's eases on, far ones too, so their state is current when the
+    /// camera comes back. Returns whether the scene needs their marks again and whether any moves.
+    fn advance_parked(&mut self, dt_ms: f32) -> (bool, bool) {
+        let (mut upload, mut moving, mut flags) = (false, false, false);
+        for parked in &mut self.parked {
+            let (up, still_moving) = parked.marks.advance(dt_ms);
+            upload |= up;
+            moving |= still_moving;
+            flags |= parked.marks.motion.take_flags_changed();
+        }
+        if flags {
+            self.parked_version += 1;
+        }
+        (upload, moving)
+    }
+
+    /// How long the page may wait before the next frame, in ms, after [`App::advance`] asked for
+    /// one: zero for the next display frame, or [`CALM_FRAME_MS`] while only the idle bob runs.
+    pub fn frame_gap_ms(&self) -> f32 {
+        if self.calm { CALM_FRAME_MS } else { 0.0 }
     }
 
     /// Follows the ride's drone, moves the ride's ease on, and leaves the ride once its drone has
@@ -781,6 +861,9 @@ impl App {
     pub fn set_bob(&mut self, enabled: bool) {
         self.bob_enabled = enabled;
         self.motion.set_reduced(!enabled);
+        for parked in &mut self.parked {
+            parked.marks.motion.set_reduced(!enabled);
+        }
     }
 
     /// A fresh motion for the page's freeze and reduced-motion settings.
@@ -858,16 +941,23 @@ impl App {
     }
 
     /// Closes up on agent `name`'s drone: the drone sits at the screen centre, and the zoom is
-    /// `ratio` times the fit zoom. The page asks for it with `?focus=`. It waits until the view
-    /// places the drone, so it may be called before the log loads.
-    pub fn focus_agent(&mut self, name: &str, ratio: f32) {
-        self.focus = Some((name.to_owned(), ratio));
+    /// `ratio` times the fit zoom. `band` is the CSS x range `[left, right]` the page's panels
+    /// leave free: when a drone on screen would sit under a panel past it, the view slides left
+    /// just enough to clear it, as long as that does not push a drone off the band's left edge.
+    /// The page asks for it with `?focus=`. It waits until the view places the drone, so it may
+    /// be called before the log loads.
+    pub fn focus_agent(&mut self, name: &str, ratio: f32, band: &[f32]) {
+        let band = match band {
+            [left, right] if left < right => Some([*left, *right]),
+            _ => None,
+        };
+        self.focus = Some((name.to_owned(), ratio, band));
         self.apply_focus();
     }
 
     /// Applies a pending focus once the agent's drone is placed, then clears it.
     fn apply_focus(&mut self) {
-        let Some((name, ratio)) = self.focus.as_ref() else {
+        let Some((name, ratio, band)) = self.focus.as_ref() else {
             return;
         };
         let Some(body) = self.marks.bodies.iter().find(|body| &body.agent == name) else {
@@ -875,9 +965,91 @@ impl App {
         };
         let at = self.motion.body_at(&body.agent).unwrap_or(body.at);
         let zoom = ratio * self.fit_zoom();
+        let band = *band;
         self.camera.centre_on(at);
         self.camera.set_zoom(zoom);
         self.focus = None;
+        self.focus_hold = band.map(|band| FocusHold {
+            band,
+            centre: at,
+            camera: self.camera,
+        });
+        self.hold_clear();
+    }
+
+    /// Slides a close-up the reader has not moved so its drones keep clear of the side panels.
+    /// The log may place a drone after the close-up, so each view rebuild checks again.
+    fn hold_clear(&mut self) {
+        let Some(hold) = self.focus_hold else {
+            return;
+        };
+        if self.camera != hold.camera {
+            self.focus_hold = None;
+            return;
+        }
+        let slide = self.slide_clear(hold.band);
+        if slide == 0.0 {
+            return;
+        }
+        let centre = self.slid_centre(hold.centre, slide);
+        self.camera.centre_on(centre);
+        self.focus_hold = Some(FocusHold {
+            centre,
+            camera: self.camera,
+            ..hold
+        });
+    }
+
+    /// The point to centre on so the scene at `centre`'s depth moves `slide` CSS px across the
+    /// screen. It is worked out at that depth, since a ground pan moves the drones, nearer the
+    /// eye, further than the ground under a low perspective camera.
+    fn slid_centre(&self, centre: [f32; 3], slide: f32) -> [f32; 3] {
+        let at = self.camera.world_to_screen(centre);
+        let step = |axis: usize| {
+            let mut moved = centre;
+            moved[axis] += 1.0;
+            let [x, y] = self.camera.world_to_screen(moved);
+            [x - at[0], y - at[1]]
+        };
+        let (sx, sy) = (step(0), step(1));
+        let det = sx[0] * sy[1] - sy[0] * sx[1];
+        if det.abs() < 1e-6 {
+            return centre;
+        }
+        // The plan step d with J d = (-slide, 0) in device px, so the point now at the screen
+        // centre less the slide takes the centre.
+        let b = -slide * self.dpr;
+        [
+            centre[0] + b * sy[1] / det,
+            centre[1] - b * sx[1] / det,
+            centre[2],
+        ]
+    }
+
+    /// How far, in CSS px, to slide the view sideways so every drone on screen keeps out past
+    /// `band[1]` without one leaving past `band[0]`. Zero when none sits past the right edge.
+    fn slide_clear(&self, band: [f32; 2]) -> f32 {
+        // A drone's reach from its centre, ring and ears included, in CSS px.
+        let reach = FOCUS_REACH * self.camera.zoom() / self.dpr;
+        let xs: Vec<f32> = self
+            .marks
+            .bodies
+            .iter()
+            .filter_map(|body| self.motion.body_at(&body.agent))
+            .filter_map(|at| pov::target_on_screen(&self.camera, at, self.dpr))
+            .map(|[x, _]| x)
+            .collect();
+        let (lo, hi) = xs
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &x| {
+                (lo.min(x), hi.max(x))
+            });
+        let over = hi + reach - band[1];
+        if xs.is_empty() || over <= 0.0 {
+            return 0.0;
+        }
+        let room = (lo - reach - band[0]).max(0.0);
+        -over.min(room)
     }
 
     /// Level of detail now: 0 far, 1 near, 2 close.
@@ -892,8 +1064,11 @@ impl App {
     ///
     /// Returns an error when the surface is lost or the view cannot be encoded.
     pub fn render(&mut self) -> Result<bool, JsError> {
+        let parked = self.refresh_parked();
         if self.dirty {
             self.rebuild_view()?;
+        } else if parked {
+            self.sync_scene();
         }
         let camera = self.drawn_camera();
         self.renderer.render(&camera, self.lod()).map_err(js_err)
@@ -906,9 +1081,14 @@ impl App {
     /// every machine large enough on screen. Otherwise the machines named at rest are, plus the
     /// largest few on screen, so a far plant still shows some names.
     pub fn label_layout(&self, all: bool) -> Vec<f32> {
-        let Some(loaded) = &self.plant else {
-            return Vec::new();
-        };
+        match &self.plant {
+            Some(loaded) => self.labels_of(loaded, all),
+            None => Vec::new(),
+        }
+    }
+
+    /// The label quads of one plant, as `label_layout` lists them.
+    fn labels_of(&self, loaded: &Loaded, all: bool) -> Vec<f32> {
         let named: Vec<bool> = if all {
             vec![true; loaded.machines.len()]
         } else {
@@ -992,15 +1172,9 @@ impl App {
     /// and -1 is a flag that stands alone. The anchors follow the bodies and diamonds while they
     /// move.
     pub fn flag_layout(&self) -> Vec<f32> {
-        self.all_flags()
-            .iter()
-            .enumerate()
-            .flat_map(|(index, flag)| {
-                let at = self.motion.flag_at(flag);
-                let [x, y] = marks::flag_anchor(flag, at, |p| self.screen(p));
-                let machine = flag.machine.map_or(-1.0, |machine| machine as f32);
-                [index as f32, machine, x, y]
-            })
+        project::flag_quads(&self.all_flags(), &self.motion, |p| self.screen(p))
+            .into_iter()
+            .flatten()
             .collect()
     }
 
@@ -1119,7 +1293,11 @@ impl App {
     /// Clears every ghost, as the page does a while after the reader comes back. Returns whether
     /// any began to fade.
     pub fn clear_ghosts(&mut self) -> bool {
-        self.motion.clear_ghosts()
+        let mut any = self.motion.clear_ghosts();
+        for parked in &mut self.parked {
+            any |= parked.marks.motion.clear_ghosts();
+        }
+        any
     }
 
     /// Each working drone's beacon on screen, as flat `[css x, css y, css radius]` triples, at its
@@ -1133,14 +1311,9 @@ impl App {
     /// Each drone's disc on screen, as flat `[css x, css y, css radius]` triples, in the order the
     /// marks list the drones. The page keeps flags and names clear of them.
     pub fn drone_layout(&self) -> Vec<f32> {
-        self.marks
-            .bodies
-            .iter()
-            .flat_map(|body| {
-                let at = self.motion.body_at(&body.agent).unwrap_or(body.at);
-                let ([x, y], radius) = marks::drone_disc(at, |p| self.screen(p));
-                [x, y, radius]
-            })
+        project::drone_discs(&self.marks, &self.motion, None, |p| self.screen(p))
+            .into_iter()
+            .flat_map(|(_, disc)| disc)
             .collect()
     }
 
@@ -1214,8 +1387,38 @@ impl App {
     fn load(&mut self, plant: Plant) -> u32 {
         let (kinds, edges) = plant.layout_input();
         let laid = layout(&kinds, &edges);
+        let count = plant.machines.len() as u32;
+        self.show(plant, laid, [0.0; 2]);
+        count
+    }
+
+    /// Puts `plant` on screen with its layout from the origin moved to `offset`, and fits it.
+    fn show(&mut self, plant: Plant, at_origin: Layout, offset: [f32; 2]) {
+        let (loaded, plan) = self.build(plant, at_origin, offset);
+        self.plan = Some(plan);
+        self.view = None;
+        self.marks = Marks::default();
+        self.motion = self.new_motion();
+        self.card_clash = None;
+        self.tour_move = None;
+        self.ride = None;
+        self.fit_after_leave = false;
+        self.dirty = true;
+        self.plant = Some(loaded);
+        self.refresh_fog();
+        self.fit();
+        self.sync_scene();
+    }
+
+    /// The plant's scene, framing and plan, with its layout from the origin moved to `offset`.
+    fn build(&self, plant: Plant, at_origin: Layout, offset: [f32; 2]) -> (Loaded, Plan) {
+        let source = plant.clone();
+        let laid = if offset == [0.0; 2] {
+            at_origin.clone()
+        } else {
+            at_origin.translated(offset)
+        };
         let scene = scene::plant_scene(&laid, &self.models);
-        self.camera.set_fog_bounds(scene.bounds);
         let occluders = scene
             .instances
             .iter()
@@ -1235,7 +1438,6 @@ impl App {
             .zip(&laid.machines)
             .map(|(machine, placed)| (machine.name.as_str(), placed.footprint()))
             .collect();
-        let count = plant.machines.len() as u32;
         let plan = Plan::new(&plant, |name| {
             footprints.get(name).copied().unwrap_or([0.0; 4])
         });
@@ -1264,19 +1466,10 @@ impl App {
                 }
             })
             .collect();
-        self.plan = Some(plan);
-        self.view = None;
-        self.marks = Marks::default();
-        self.motion = self.new_motion();
-        self.card_clash = None;
-        self.tour_move = None;
-        self.ride = None;
-        self.fit_after_leave = false;
-        self.dirty = true;
         let drone_reach = stand::reach(&self.models[usize::from(scene::mark_kinds().body)]);
         let framing = scene::fit_boxes(&laid, &self.models, &self.kind_spots, drone_reach);
         let machine_bounds = scene::machine_model_boxes(&laid, &self.models);
-        self.plant = Some(Loaded {
+        let loaded = Loaded {
             machine_bounds,
             repo: plant.repo,
             rest: {
@@ -1298,10 +1491,10 @@ impl App {
             base: scene,
             plan_instance,
             stands,
-        });
-        self.fit();
-        self.sync_scene();
-        count
+            source,
+            at_origin,
+        };
+        (loaded, plan)
     }
 
     /// Folds the log into the view, and places the marks it calls for on the plant.
@@ -1320,6 +1513,7 @@ impl App {
         self.marks = marks;
         self.view = Some(view);
         self.apply_focus();
+        self.hold_clear();
         self.sync_scene();
         Ok(())
     }
@@ -1356,6 +1550,42 @@ impl App {
             self.dpr,
             riding,
         ));
+        let px_units = self.dpr / self.camera.zoom();
+        let dpr = self.dpr;
+        for parked in &mut self.parked {
+            let base = &parked.loaded.base;
+            let start = scene.instances.len();
+            scene.ribbons.extend(base.ribbons.iter().cloned());
+            scene.instances.extend(base.instances.iter().copied());
+            let own = &mut parked.marks;
+            for (plan_index, &instance) in parked.loaded.plan_instance.iter().enumerate() {
+                scene.instances[start + instance].tint =
+                    marks::machine_tint(&own.marks, plan_index, None);
+            }
+            own.motion.set_px_units(px_units);
+            if !parked.far {
+                scene
+                    .beams
+                    .extend(marks::beams(&own.motion, &own.marks, dpr, None, None));
+                scene
+                    .beams
+                    .extend(marks::spots(&own.motion, &own.marks, dpr, None));
+                scene
+                    .beams
+                    .extend(marks::trail_beams(&own.motion, dpr, None));
+                scene
+                    .beams
+                    .extend(marks::ghost_beams(&own.motion, &own.marks, dpr));
+            }
+            scene.instances.extend(marks::mark_instances(
+                &own.motion,
+                &own.marks,
+                scene::mark_kinds(),
+                dpr,
+                None,
+            ));
+            scene.bounds = joined(scene.bounds, base.bounds);
+        }
         self.renderer.set_scene(&scene);
         self.renderer.set_tints(&acan_render::theme::tints());
     }
@@ -1399,6 +1629,657 @@ impl App {
     fn lod(&self) -> Lod {
         Lod::for_ratio(self.camera.zoom() / self.fit_zoom())
     }
+
+    /// Eases the camera's pivot and zoom to `to`, as a tour step does. With `reduced`, or on a
+    /// still page, the camera jumps.
+    fn ease_to(&mut self, to: tour::Pose, reduced: bool) {
+        if reduced || self.still {
+            self.tour_move = None;
+            self.camera.set_pivot(to.0);
+            self.camera.set_zoom(to.1);
+        } else {
+            let from = (self.camera.pivot(), self.camera.zoom());
+            self.tour_move = Some(TourMove {
+                from,
+                to,
+                elapsed_ms: 0.0,
+            });
+        }
+    }
+
+    /// Keeps the fog clear of every plant on the canvas, so a neighbour is not fogged out.
+    fn refresh_fog(&mut self) {
+        let Some(loaded) = &self.plant else {
+            return;
+        };
+        let bounds = self.parked.iter().fold(loaded.base.bounds, |acc, parked| {
+            joined(acc, parked.loaded.base.bounds)
+        });
+        self.camera.set_fog_bounds(bounds);
+    }
+
+    /// The pivot and zoom that fit `framing` at the default angles.
+    fn pose_of(&self, framing: &[Aabb]) -> tour::Pose {
+        let mut probe = self.camera;
+        probe.set_angles(DEFAULT_AZIMUTH, DEFAULT_ELEVATION);
+        probe.fit_boxes_room(framing, FIT_MARGIN_CSS * self.dpr, self.fit_room());
+        (probe.pivot(), probe.zoom())
+    }
+
+    /// The plant's layout from the origin, from the cache when the same kinds and belts were laid
+    /// out before.
+    fn laid_out(&mut self, plant: &Plant) -> Layout {
+        let key = canvas::layout_key(plant);
+        if let Some(laid) = self.layouts.get(&key) {
+            return laid.clone();
+        }
+        let (kinds, edges) = plant.layout_input();
+        let laid = layout(&kinds, &edges);
+        self.layouts.insert(key, laid.clone());
+        laid
+    }
+
+    /// Every project's marks and eases with its overlay index and id: the one on screen, then the
+    /// parked ones, leaving out the far ones unless `far`.
+    fn every_project(&self, far: bool) -> Vec<(f32, &Marks, &Motion, &str)> {
+        let mut out = Vec::new();
+        if self.plant.is_some() {
+            out.push((
+                self.project_index(&self.project),
+                &self.marks,
+                &self.motion,
+                self.project.as_str(),
+            ));
+        }
+        for parked in self.parked.iter().filter(|parked| far || !parked.far) {
+            out.push((
+                self.project_index(&parked.id),
+                &parked.marks.marks,
+                &parked.marks.motion,
+                parked.id.as_str(),
+            ));
+        }
+        out
+    }
+
+    /// The overlay index of project `id`: its place in `order`, or 0 on a page with one plant.
+    fn project_index(&self, id: &str) -> f32 {
+        self.order.iter().position(|known| known == id).unwrap_or(0) as f32
+    }
+
+    /// Asks every parked project to fold its marks again, as the clock moving does.
+    fn parked_dirty(&mut self) {
+        for parked in &mut self.parked {
+            parked.marks.dirty = true;
+        }
+    }
+
+    /// Folds each parked project whose log moved, and sets each one's level of detail from where
+    /// the camera stands. Returns whether either changed, so the scene uploads again.
+    fn refresh_parked(&mut self) -> bool {
+        if self.parked.is_empty() {
+            return false;
+        }
+        let camera = self.drawn_camera();
+        let dpr = self.dpr;
+        let [vw, vh] = camera.viewport();
+        let viewport = [vw / dpr, vh / dpr];
+        let clock = self.clock;
+        let mut changed = false;
+        for parked in &mut self.parked {
+            if parked.marks.dirty {
+                match &parked.mirror {
+                    Some(mirror) => {
+                        let stands = &parked.loaded.stands;
+                        parked.marks.rebuild(mirror, &parked.plan, stands, clock);
+                        parked.view_json = None;
+                        changed = true;
+                    }
+                    None => parked.marks.dirty = false,
+                }
+            }
+            let seen = screen_box(&camera, parked.loaded.layout.bounds, dpr);
+            let far = canvas::far(seen, viewport);
+            if far != parked.far {
+                parked.far = far;
+                changed = true;
+            }
+        }
+        if changed {
+            self.parked_version += 1;
+        }
+        changed
+    }
+
+    fn parked_mut(&mut self, id: &str) -> Result<&mut Parked, JsError> {
+        self.parked
+            .iter_mut()
+            .find(|parked| parked.id == id)
+            .ok_or_else(|| js_err("the canvas holds no such project"))
+    }
+
+    fn parked_index(&self, id: &str) -> Option<usize> {
+        self.parked.iter().position(|parked| parked.id == id)
+    }
+}
+
+/// The canvas of several projects. A page with one plant never calls these.
+#[wasm_bindgen]
+impl App {
+    /// The bounds `[min x, min y, max x, max y]` of a plant from `GET /api/p/{id}/plant`, as its
+    /// layout places it from the origin: everything it draws, models and belts included. The page
+    /// packs the plants with them. They reach the page as a `Float32Array`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON is not the plant's shape.
+    pub fn plant_bounds(&mut self, json: &str) -> Result<Vec<f32>, JsError> {
+        let plant = from_scan_json(json).map_err(js_err)?;
+        let laid = self.laid_out(&plant);
+        Ok(canvas::drawn_bounds(&laid, &self.models).to_vec())
+    }
+
+    /// Puts project `id`'s plant on the canvas with its layout's origin at `(x, y)`. The first
+    /// project goes on screen and is fitted; a later one is parked beside it. A project the canvas
+    /// holds already takes the new plant in place and keeps its log. Returns the machine count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON is not the plant's shape.
+    pub fn add_project(&mut self, id: &str, json: &str, x: f32, y: f32) -> Result<u32, JsError> {
+        let plant = from_scan_json(json).map_err(js_err)?;
+        let count = plant.machines.len() as u32;
+        let at_origin = self.laid_out(&plant);
+        if !self.order.iter().any(|known| known == id) {
+            self.order.push(id.to_owned());
+        }
+        if self.plant.is_none() || self.project == id {
+            self.project = id.to_owned();
+            self.show(plant, at_origin, [x, y]);
+            return Ok(count);
+        }
+        let (loaded, plan) = self.build(plant, at_origin, [x, y]);
+        let motion = self.new_motion();
+        match self.parked_index(id) {
+            Some(index) => {
+                let parked = &mut self.parked[index];
+                parked.loaded = loaded;
+                parked.plan = plan;
+                parked.view_json = None;
+                parked.marks.dirty = true;
+                parked.marks.motion.cut();
+            }
+            None => self.parked.push(Parked {
+                id: id.to_owned(),
+                loaded,
+                plan,
+                mirror: None,
+                view_json: None,
+                marks: ProjectMarks::new(motion),
+                far: false,
+            }),
+        }
+        self.refresh_fog();
+        self.sync_scene();
+        Ok(count)
+    }
+
+    /// Moves project `id`'s plant so its layout's origin sits at `(x, y)`. The marks of the
+    /// project on screen follow on the next frame. Returns false for a project the canvas lacks.
+    pub fn move_project(&mut self, id: &str, x: f32, y: f32) -> bool {
+        if id == self.project {
+            let Some(old) = self.plant.take() else {
+                return false;
+            };
+            let (loaded, plan) = self.build(old.source, old.at_origin, [x, y]);
+            self.plant = Some(loaded);
+            self.plan = Some(plan);
+            self.dirty = true;
+        } else if let Some(index) = self.parked_index(id) {
+            let old = &self.parked[index].loaded;
+            let (loaded, plan) = self.build(old.source.clone(), old.at_origin.clone(), [x, y]);
+            let parked = &mut self.parked[index];
+            parked.loaded = loaded;
+            parked.plan = plan;
+            parked.view_json = None;
+            parked.marks.dirty = true;
+            parked.marks.motion.cut();
+        } else {
+            return false;
+        }
+        self.refresh_fog();
+        self.sync_scene();
+        true
+    }
+
+    /// Puts project `id` on screen: its marks, names, flags and view take over, and the project
+    /// that was on screen is parked as plain plant. The camera does not move. Returns false when
+    /// the canvas lacks the project or its log has not loaded.
+    pub fn activate(&mut self, id: &str) -> bool {
+        if id == self.project {
+            return self.plant.is_some();
+        }
+        let Some(index) = self.parked_index(id) else {
+            return false;
+        };
+        if self.parked[index].mirror.is_none() {
+            return false;
+        }
+        let next = self.parked.remove(index);
+        if let (Some(loaded), Some(plan)) = (self.plant.take(), self.plan.take()) {
+            let view_json = (self.view.is_some() && !self.dirty).then(|| self.view_json.clone());
+            let marks = ProjectMarks {
+                view: self.view.take(),
+                marks: std::mem::take(&mut self.marks),
+                motion: std::mem::take(&mut self.motion),
+                slots: std::mem::take(&mut self.slots),
+                dirty: self.dirty,
+                moving: self.moving,
+            };
+            self.parked.insert(
+                index,
+                Parked {
+                    id: std::mem::take(&mut self.project),
+                    loaded,
+                    plan,
+                    mirror: self.mirror.take(),
+                    view_json,
+                    marks,
+                    far: false,
+                },
+            );
+        }
+        self.project = next.id;
+        self.plant = Some(next.loaded);
+        self.plan = Some(next.plan);
+        self.mirror = next.mirror;
+        // The project keeps the marks it had while parked, so its drones do not drop in again.
+        self.view = next.marks.view;
+        self.marks = next.marks.marks;
+        self.motion = next.marks.motion;
+        self.slots = next.marks.slots;
+        self.moving = next.marks.moving;
+        self.hovered = None;
+        self.parked_version += 1;
+        self.card_clash = None;
+        self.stage.clear();
+        self.focus = None;
+        self.ride = None;
+        self.fit_after_leave = false;
+        self.dirty = true;
+        self.sync_scene();
+        true
+    }
+
+    /// The id of the project on screen, or an empty string on a page with one plant.
+    pub fn active_project(&self) -> String {
+        self.project.clone()
+    }
+
+    /// Folds project `id`'s log, as `load_log` does for the project on screen.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a project the canvas lacks, or a log that does not parse or replay.
+    pub fn project_load_log(&mut self, id: &str, json: &str) -> Result<(), JsError> {
+        if id == self.project {
+            return self.load_log(json);
+        }
+        let entries = feed::entries(json).map_err(js_err)?;
+        let mirror = Mirror::from_entries(entries).map_err(js_err)?;
+        let parked = self.parked_mut(id)?;
+        parked.mirror = Some(mirror);
+        parked.view_json = None;
+        parked.marks.dirty = true;
+        parked.marks.motion.cut();
+        Ok(())
+    }
+
+    /// Applies one streamed event of project `id`, as `ingest` does for the project on screen.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a project the canvas lacks or whose log is not loaded, or an event
+    /// that does not apply.
+    pub fn project_ingest(&mut self, id: &str, json: &str) -> Result<(), JsError> {
+        if id == self.project {
+            return self.ingest(json);
+        }
+        let entry = feed::entry(json).map_err(js_err)?;
+        let parked = self.parked_mut(id)?;
+        let mirror = parked
+            .mirror
+            .as_mut()
+            .ok_or_else(|| js_err("no log is loaded"))?;
+        mirror.ingest_entry(entry).map_err(js_err)?;
+        parked.view_json = None;
+        parked.marks.dirty = true;
+        Ok(())
+    }
+
+    /// The seq project `id`'s next event will carry, or 0 before its log loads.
+    pub fn project_next_seq(&self, id: &str) -> f64 {
+        if id == self.project {
+            return self.next_seq();
+        }
+        self.parked
+            .iter()
+            .find(|parked| parked.id == id)
+            .and_then(|parked| parked.mirror.as_ref())
+            .map_or(0.0, |mirror| mirror.next_seq().get() as f64)
+    }
+
+    /// Project `id`'s view as JSON, or an empty string before its log loads. A parked project's
+    /// view is folded when it is asked for after a change.
+    pub fn project_view_json(&mut self, id: &str) -> String {
+        if id == self.project {
+            return self.view_json.clone();
+        }
+        let Some(index) = self.parked_index(id) else {
+            return String::new();
+        };
+        let parked = &mut self.parked[index];
+        if parked.view_json.is_none() {
+            parked.view_json = parked
+                .mirror
+                .as_ref()
+                .and_then(|mirror| serde_json::to_string(&mirror.view(&parked.plan)).ok());
+        }
+        parked.view_json.clone().unwrap_or_default()
+    }
+
+    /// Eases the camera to fit project `id`'s plant at the current angles, as a tour step moves.
+    /// Returns false for a project the canvas lacks, or while riding, so the page leaves the
+    /// ride first.
+    pub fn fly_to(&mut self, id: &str, reduced: bool) -> bool {
+        if self.ride.is_some() {
+            return false;
+        }
+        let framing = if id == self.project {
+            self.plant.as_ref().map(|loaded| loaded.framing.clone())
+        } else {
+            self.parked
+                .iter()
+                .find(|parked| parked.id == id)
+                .map(|parked| parked.loaded.framing.clone())
+        };
+        let Some(framing) = framing else {
+            return false;
+        };
+        self.turn = None;
+        let to = self.pose_of(&framing);
+        self.ease_to(to, reduced);
+        true
+    }
+
+    /// The project whose plant holds the ground under the CSS point, or the nearest one. Empty
+    /// when the canvas holds no project or the point is above the horizon.
+    pub fn project_under(&self, css_x: f32, css_y: f32) -> String {
+        let Some(point) = self.camera.ground_at([css_x * self.dpr, css_y * self.dpr]) else {
+            return String::new();
+        };
+        let mut ids = Vec::new();
+        let mut boxes = Vec::new();
+        if let Some(loaded) = &self.plant {
+            ids.push(self.project.as_str());
+            boxes.push(loaded.layout.bounds);
+        }
+        for parked in &self.parked {
+            ids.push(parked.id.as_str());
+            boxes.push(parked.loaded.layout.bounds);
+        }
+        canvas::nearest(&boxes, point).map_or_else(String::new, |index| ids[index].to_owned())
+    }
+
+    /// The plan point on the ground under the CSS point, as `[x, y]`, or empty above the horizon.
+    pub fn screen_to_ground(&self, css_x: f32, css_y: f32) -> Vec<f32> {
+        self.camera
+            .ground_at([css_x * self.dpr, css_y * self.dpr])
+            .map_or_else(Vec::new, |point| point.to_vec())
+    }
+}
+
+/// Every project's marks on the canvas. Each entry names its project by its place in
+/// `canvas_order`. The one-project exports above keep their shapes and list the project on screen
+/// only; these list it too, then every parked project. A parked project at the far level of
+/// detail lists its drones and pins only.
+#[wasm_bindgen]
+impl App {
+    /// The project ids as JSON, in the order the overlay entries index them.
+    pub fn canvas_order(&self) -> String {
+        serde_json::to_string(&self.order).expect("ids serialize as JSON")
+    }
+
+    /// Moves when a parked project's marks or level of detail change. The page reads
+    /// `all_marks_json` again then.
+    pub fn parked_version(&self) -> u32 {
+        self.parked_version
+    }
+
+    /// Every project's flags and clash badges, as JSON `[{"project", "id", "far", "flags",
+    /// "badges"}]`, in the shapes `marks_json` gives them. Flag `i` of project `p` anchors where
+    /// `all_flag_layout` puts `[p, i]`.
+    pub fn all_marks_json(&self) -> String {
+        #[derive(serde::Serialize)]
+        struct Entry<'a> {
+            project: f32,
+            id: &'a str,
+            far: bool,
+            flags: Vec<marks::Flag>,
+            badges: Vec<marks::Badges>,
+        }
+        let mut out = Vec::new();
+        if self.plant.is_some() {
+            let badges = self.view.as_ref().map_or_else(Vec::new, |view| {
+                marks::clash_badges(view, &self.marks.pins, &self.slots)
+            });
+            out.push(Entry {
+                project: self.project_index(&self.project),
+                id: &self.project,
+                far: false,
+                flags: self.all_flags(),
+                badges,
+            });
+        }
+        for parked in &self.parked {
+            let own = &parked.marks;
+            let badges = own.view.as_ref().map_or_else(Vec::new, |view| {
+                marks::clash_badges(view, &own.marks.pins, &own.slots)
+            });
+            out.push(Entry {
+                project: self.project_index(&parked.id),
+                id: &parked.id,
+                far: parked.far,
+                flags: own.motion.flags_now(&own.marks.flags),
+                badges,
+            });
+        }
+        serde_json::to_string(&out).expect("marks serialize as JSON")
+    }
+
+    /// Every near project's flag anchors, as flat `[project, flag index, machine or -1, css x,
+    /// css y]` quints. See `flag_layout`.
+    pub fn all_flag_layout(&self) -> Vec<f32> {
+        let screen = |p| self.screen(p);
+        let mut out = Vec::new();
+        if self.plant.is_some() {
+            let front = self.project_index(&self.project);
+            for quad in project::flag_quads(&self.all_flags(), &self.motion, screen) {
+                out.push(front);
+                out.extend(quad);
+            }
+        }
+        for parked in self.parked.iter().filter(|parked| !parked.far) {
+            let own = &parked.marks;
+            let index = self.project_index(&parked.id);
+            let flags = own.motion.flags_now(&own.marks.flags);
+            for quad in project::flag_quads(&flags, &own.motion, screen) {
+                out.push(index);
+                out.extend(quad);
+            }
+        }
+        out
+    }
+
+    /// Every project's clash diamonds, far ones too, as flat `[project, clash index, css x, css
+    /// y]` quads. See `pin_layout`.
+    pub fn all_pin_layout(&self) -> Vec<f32> {
+        let screen = |p| self.screen(p);
+        let mut out = Vec::new();
+        for (index, marks, motion, _) in self.every_project(true) {
+            for triple in project::pin_triples(marks, motion, screen) {
+                out.push(index);
+                out.extend(triple);
+            }
+        }
+        out
+    }
+
+    /// Every near project's clash badges, as flat `[project, clash index, left css x, right css
+    /// x, css y]` quints. See `badge_layout`.
+    pub fn all_badge_layout(&self) -> Vec<f32> {
+        let screen = |p| self.screen(p);
+        let mut out = Vec::new();
+        for (index, marks, motion, _) in self.every_project(false) {
+            for quad in project::badge_quads(marks, motion, screen) {
+                out.push(index);
+                out.extend(quad);
+            }
+        }
+        out
+    }
+
+    /// Every project's drone discs, far ones too, as flat `[project, css x, css y, css radius]`
+    /// quads. See `drone_layout`.
+    pub fn all_drone_layout(&self) -> Vec<f32> {
+        let screen = |p| self.screen(p);
+        let mut out = Vec::new();
+        for (index, marks, motion, _) in self.every_project(true) {
+            for (_, disc) in project::drone_discs(marks, motion, None, screen) {
+                out.push(index);
+                out.extend(disc);
+            }
+        }
+        out
+    }
+
+    /// The drone under the CSS point `(x, y)` on any plant, as JSON `{"project", "id", "agent"}`,
+    /// or the empty string. The riding agent's drone is left out, as `drone_at` leaves it.
+    pub fn all_drone_at(&self, x: f32, y: f32) -> String {
+        let screen = |p| self.screen(p);
+        let riding = self.riding_agent();
+        let mut hits: Vec<(f32, &str, &str)> = Vec::new();
+        let mut discs: Vec<([f32; 2], f32)> = Vec::new();
+        for (index, marks, motion, id) in self.every_project(true) {
+            let skip = if id == self.project { riding } else { None };
+            for (agent, [cx, cy, radius]) in project::drone_discs(marks, motion, skip, screen) {
+                hits.push((index, id, agent));
+                discs.push(([cx, cy], radius));
+            }
+        }
+        marks::disc_under(&discs, [x, y]).map_or_else(String::new, |i| {
+            let (project, id, agent) = hits[i];
+            serde_json::json!({ "project": project, "id": id, "agent": agent }).to_string()
+        })
+    }
+
+    /// Every near project's ghosts, as flat `[project, css x, css y, landed count]` quads. See
+    /// `ghost_layout`.
+    pub fn all_ghost_layout(&self) -> Vec<f32> {
+        let screen = |p| self.screen(p);
+        let mut out = Vec::new();
+        for (index, marks, motion, _) in self.every_project(false) {
+            for triple in project::ghost_triples(marks, motion, screen) {
+                out.push(index);
+                out.extend(triple);
+            }
+        }
+        out
+    }
+
+    /// Every near project's working beacons, as flat `[project, css x, css y, css radius]` quads.
+    /// See `beacon_layout`.
+    pub fn all_beacon_layout(&self) -> Vec<f32> {
+        let screen = |p| self.screen(p);
+        let mut out = Vec::new();
+        for (index, marks, motion, _) in self.every_project(false) {
+            for ([x, y], radius) in marks::beacon_discs(motion, marks, screen) {
+                out.extend([index, x, y, radius]);
+            }
+        }
+        out
+    }
+
+    /// Every near project's machine names, as flat `[project, machine index, css x, css y,
+    /// opacity]` quints. See `label_layout`.
+    pub fn all_label_layout(&self, all: bool) -> Vec<f32> {
+        let mut out = Vec::new();
+        let mut add = |index: f32, quads: Vec<f32>| {
+            for quad in quads.as_chunks::<4>().0 {
+                out.push(index);
+                out.extend_from_slice(quad);
+            }
+        };
+        if let Some(loaded) = &self.plant {
+            add(
+                self.project_index(&self.project),
+                self.labels_of(loaded, all),
+            );
+        }
+        for parked in self.parked.iter().filter(|parked| !parked.far) {
+            add(
+                self.project_index(&parked.id),
+                self.labels_of(&parked.loaded, all),
+            );
+        }
+        out
+    }
+
+    /// The name of machine `index` on project `id`'s plant, or an empty string.
+    pub fn project_machine_name(&self, id: &str, index: u32) -> String {
+        let loaded = if id == self.project {
+            self.plant.as_ref()
+        } else {
+            self.parked
+                .iter()
+                .find(|parked| parked.id == id)
+                .map(|parked| &parked.loaded)
+        };
+        loaded
+            .and_then(|loaded| loaded.machines.get(index as usize))
+            .map_or_else(String::new, |machine| machine.name.clone())
+    }
+}
+
+/// The box `[min x, min y, max x, max y]` in CSS px that a plan box covers on the ground.
+fn screen_box(camera: &Camera, b: [f32; 4], dpr: f32) -> [f32; 4] {
+    let corners = [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]]
+        .map(|[x, y]| camera.world_to_screen([x, y, 0.0]).map(|v| v / dpr));
+    corners.iter().fold(
+        [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ],
+        |acc, p| {
+            [
+                acc[0].min(p[0]),
+                acc[1].min(p[1]),
+                acc[2].max(p[0]),
+                acc[3].max(p[1]),
+            ]
+        },
+    )
+}
+/// The box round two boxes. An empty box adds nothing.
+fn joined(a: Aabb, b: Aabb) -> Aabb {
+    let mut out = a;
+    if b.min[0] <= b.max[0] {
+        out.include(b.min);
+        out.include(b.max);
+    }
+    out
 }
 
 fn js_err(err: impl std::fmt::Display) -> JsError {

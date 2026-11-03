@@ -14,8 +14,8 @@ use crate::hash::{
 };
 use crate::scope::{Change, Principal, Selector, StepContext};
 use crate::types::{
-    AgentRef, CommitSha, ContestId, Evidence, ObligationId, ObservationPath, OrderRef, Scalar,
-    ScopeRev, StepId, TaskRef, UnixMillis,
+    AgentRef, Channel, CommitSha, ContestId, Evidence, ObligationId, ObservationPath, OrderRef,
+    Scalar, ScopeRev, StepId, TaskRef, UnixMillis,
 };
 use crate::verdict::ItemClass;
 use crate::version::{ContestV1, EpisodeV1};
@@ -58,6 +58,19 @@ pub fn canonical_episode_selector(selector: &Selector) -> Selector {
     canonical.step_context = StepContext::Any {};
     if matches!(canonical.principal, Principal::Actor { .. }) {
         canonical.principal = Principal::Authenticated {};
+    }
+    canonical
+}
+
+/// The selector an out-of-scope episode is keyed by: the canonical selector with its field
+/// dropped for the body, header and cookie channels. Every changed field of one channel on one
+/// route is then one finding, so eight changed fields are one episode. A side-effect path is
+/// kept, because the decoder requires it.
+#[must_use]
+pub fn canonical_out_of_scope_selector(selector: &Selector) -> Selector {
+    let mut canonical = canonical_episode_selector(selector);
+    if canonical.channel != Channel::SideEffect {
+        canonical.field_path = None;
     }
     canonical
 }
@@ -276,4 +289,49 @@ pub struct ProposedValue {
     pub value: Scalar,
     /// Why, in one sentence.
     pub rationale: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn selector(channel: &str, field: Option<&str>) -> Selector {
+        let mut value = json!({
+            "surface": "http",
+            "method": "POST",
+            "route_template": "/api/links",
+            "step_context": {"kind": "step", "step_id": "s6"},
+            "principal": {"kind": "actor", "name": "alice"},
+            "channel": channel,
+        });
+        if let Some(field) = field {
+            value["field_path"] = json!(field);
+        }
+        serde_json::from_value(value).expect("the selector decodes")
+    }
+
+    #[test]
+    fn a_body_field_collapses_to_its_channel() {
+        let collapsed = canonical_out_of_scope_selector(&selector("body", Some("clicks")));
+        assert_eq!(
+            collapsed,
+            canonical_out_of_scope_selector(&selector("body", Some("error")))
+        );
+        assert_eq!(collapsed.field_path, None);
+        assert_eq!(collapsed.channel, Channel::Body);
+        assert_eq!(collapsed.step_context, StepContext::Any {});
+        assert_eq!(collapsed.principal, Principal::Authenticated {});
+    }
+
+    #[test]
+    fn a_side_effect_path_is_kept_because_the_decoder_requires_it() {
+        let path = "store.audit[*].route";
+        let collapsed = canonical_out_of_scope_selector(&selector("side_effect", Some(path)));
+        assert_eq!(
+            collapsed.field_path.as_ref().map(|field| field.as_str()),
+            Some(path)
+        );
+    }
 }

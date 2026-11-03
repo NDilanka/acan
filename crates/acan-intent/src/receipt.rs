@@ -38,7 +38,10 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::compare::{self, CompareError, Contrast};
-use crate::episode::{Contest, DiscrepancyEpisode, EpisodeState, canonical_episode_selector};
+use crate::episode::{
+    Contest, DiscrepancyEpisode, EpisodeState, canonical_episode_selector,
+    canonical_out_of_scope_selector,
+};
 use crate::expr::{EventFilter, Operand, Predicate, ValueRef};
 use crate::gate::{FixtureSetManifest, PreparedCommit, ProbeSetManifest};
 use crate::hash::{CanonicalError, ContentHash, ProbeHash};
@@ -1493,7 +1496,9 @@ fn out_of_scope(
     episodes: &[DiscrepancyEpisode],
 ) -> Result<ReceiptItem, ReceiptError> {
     let result = &inputs.results[claim.probe];
-    let selector = selector_of(&claim.difference.path, claim.request.as_ref())?;
+    // One episode per route, method, principal and channel: see `canonical_out_of_scope_selector`.
+    let selector = selector_of(&claim.difference.path, claim.request.as_ref())?
+        .map(|selector| canonical_out_of_scope_selector(&selector));
     let episode = selector
         .as_ref()
         .and_then(|selector| episode_for(episodes, selector, &[]));

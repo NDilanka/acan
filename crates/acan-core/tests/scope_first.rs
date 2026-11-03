@@ -212,7 +212,7 @@ impl LaneFx for Fx {
             "broad_grants": binding.broad_items.iter().map(|(item, hash)| json!({
                 "item_id": item, "selector_hash": hash, "by": "owner", "at": 1000
             })).collect::<Vec<_>>(),
-            "budget": {"repair_rounds": 2, "wall_time_ms": 1_800_000, "model_cost_micros": 2_000_000, "max_episodes": 6},
+            "budget": {"repair_rounds": 2, "wall_time_ms": 1_800_000, "model_cost_micros": 2_000_000, "max_episodes": 4},
             "by": "owner",
             "at": 1000
         }))
@@ -1655,6 +1655,189 @@ fn a_repeat_is_judged_with_its_bounce_count_and_state() {
     fx.assert_replays();
 }
 
+/// A receipt in which each of `episodes` fails on its own item, all from one probe.
+fn many_failing(fx: &Fx, scope: &Scope, prepared: &Value, episodes: &[u8], probe: u8) -> Value {
+    let items: Vec<Value> = episodes
+        .iter()
+        .map(|&episode| {
+            let mut item = failing_item(episode, probe);
+            item["item_id"] = json!(format!("i-{episode}"));
+            item
+        })
+        .collect();
+    let failed = u32::try_from(episodes.len()).expect("a few episodes");
+    fx.receipt(
+        scope,
+        prepared,
+        items,
+        counts(&[("obligation_failed", failed)]),
+        json!({"obligations_total": failed, "passed": 0, "failed": failed, "unknown": 0}),
+        vec![],
+    )
+}
+
+/// Nine bounceable episodes against a cap of four: the first round bounces four, and the rest
+/// stay open, unstopped, for a later round.
+#[test]
+fn a_round_bounces_at_most_the_cap_and_the_rest_stay_open() {
+    let mut fx = Fx::new();
+    let scope = fx.open_lane();
+    fx.readback(fx.task1, &scope, vec![]);
+    let (run, prepared) = fx.prepared_run(&scope, fx.task1);
+    let episodes: Vec<u8> = (10..19).collect();
+    let receipt = many_failing(&fx, &scope, &prepared, &episodes, 7);
+    fx.send_receipt(run, receipt).expect("recorded");
+    let world = fx.origin.world();
+    let lane = world.lane(fx.order).expect("lane");
+    assert_eq!(lane.rounds.len(), 1, "the failures open one round");
+    assert_eq!(
+        lane.rounds[0].episodes.as_slice().len(),
+        4,
+        "the round bounces the cap and no more"
+    );
+    let count = |state: EpisodeState| {
+        lane.episodes
+            .values()
+            .filter(|episode| episode.state == state)
+            .count()
+    };
+    assert_eq!(
+        (count(EpisodeState::Bounced), count(EpisodeState::Open)),
+        (4, 5),
+        "the other five episodes wait for a later round"
+    );
+    assert!(!lane.stopped, "the cap alone never stops the order");
+    assert!(
+        matches!(
+            lane.latest_receipt().map(|record| &record.verdict),
+            Some(LaneVerdict::Blocked { .. })
+        ),
+        "the open episodes block a pass without stopping the lane"
+    );
+    fx.assert_replays();
+}
+
+/// The cap bounds each round, not the order: the rounds budget still stops the lane when it runs
+/// out with bounceable work left.
+#[test]
+fn the_rounds_budget_still_stops_a_lane_with_bounceable_work_left() {
+    let mut fx = Fx::new();
+    let scope = fx.open_lane();
+    fx.readback(fx.task1, &scope, vec![]);
+    let episodes: Vec<u8> = (10..19).collect();
+    for probe in [7, 8, 9] {
+        let (run, prepared) = fx.prepared_run(&scope, fx.task1);
+        let receipt = many_failing(&fx, &scope, &prepared, &episodes, probe);
+        fx.send_receipt(run, receipt).expect("recorded");
+    }
+    let world = fx.origin.world();
+    let lane = world.lane(fx.order).expect("lane");
+    assert_eq!(lane.rounds.len(), 2, "two rounds open, and no third");
+    assert!(lane.stopped, "the rounds ran out with work left");
+    assert!(
+        lane.episodes
+            .values()
+            .all(|episode| episode.state == EpisodeState::Stopped),
+        "every unresolved episode is stopped, including those past the cap"
+    );
+    assert!(
+        matches!(
+            lane.latest_receipt().map(|record| &record.verdict),
+            Some(LaneVerdict::Stopped { episodes }) if episodes.len() == 9
+        ),
+        "exhaustion shows as stopped, with all nine episodes"
+    );
+    fx.assert_replays();
+}
+
+/// Residue waits for a human. With no bounceable episode left, no round opens and the lane is
+/// blocked, not stopped, so a human ruling can still resume it.
+#[test]
+fn residue_alone_opens_no_round_and_leaves_the_lane_for_the_human() {
+    let mut fx = Fx::new();
+    let scope = fx.open_lane();
+    fx.readback(fx.task1, &scope, vec![]);
+    let (run, prepared) = fx.prepared_run(&scope, fx.task1);
+    let mut residue = failing_item(10, 7);
+    residue["class"] = json!("incomparable");
+    residue["evaluation"]["obligations"] = json!([]);
+    let receipt = fx.receipt(
+        &scope,
+        &prepared,
+        vec![residue],
+        counts(&[("incomparable", 1)]),
+        json!({"obligations_total": 1, "passed": 0, "failed": 0, "unknown": 1}),
+        vec![],
+    );
+    fx.send_receipt(run, receipt).expect("recorded");
+    let (_, state) = fx.lane_episode(10);
+    assert_eq!(
+        state,
+        EpisodeState::Residue,
+        "the incomparable item is residue"
+    );
+    let world = fx.origin.world();
+    let lane = world.lane(fx.order).expect("lane");
+    assert!(lane.rounds.is_empty(), "no round opens for residue");
+    assert!(!lane.stopped, "the lane waits for the human, unstopped");
+    assert!(
+        matches!(
+            lane.latest_receipt().map(|record| &record.verdict),
+            Some(LaneVerdict::Blocked { .. })
+        ),
+        "residue blocks the pass"
+    );
+    fx.assert_replays();
+}
+
+/// An out-of-scope difference is fixed once a clean receipt no longer shows it. Without this, a
+/// bounced out-of-scope episode could never be fixed, since no item carries it any more.
+#[test]
+fn an_out_of_scope_difference_no_clean_receipt_shows_is_fixed() {
+    let mut fx = Fx::new();
+    let scope = fx.open_lane();
+    fx.readback(fx.task1, &scope, vec![]);
+    let (run, prepared) = fx.prepared_run(&scope, fx.task1);
+    let mut stray = item(
+        "out_of_scope",
+        Some(20),
+        7,
+        changed(7),
+        json!({"result": "pass"}),
+    );
+    stray["item_id"] = json!("oos-1");
+    stray["evaluation"]["authorization"] = json!({"kind": "none"});
+    let receipt = fx.receipt(
+        &scope,
+        &prepared,
+        vec![stray],
+        counts(&[("out_of_scope", 1)]),
+        passed_behavior(),
+        vec![],
+    );
+    fx.send_receipt(run, receipt).expect("recorded");
+    let (_, state) = fx.lane_episode(20);
+    assert_eq!(state, EpisodeState::Bounced, "the stray difference bounces");
+
+    let (run2, prepared2) = fx.prepared_run(&scope, fx.task1);
+    let clean = fx.passing_receipt(&scope, &prepared2);
+    fx.send_receipt(run2, clean).expect("recorded");
+    let (_, state) = fx.lane_episode(20);
+    assert_eq!(
+        state,
+        EpisodeState::Fixed,
+        "a clean receipt shows nothing outside the scope"
+    );
+    let world = fx.origin.world();
+    let lane = world.lane(fx.order).expect("lane");
+    assert_eq!(
+        lane.latest_receipt().map(|record| &record.verdict),
+        Some(&LaneVerdict::Passed),
+        "the order passes once the stray difference is gone"
+    );
+    fx.assert_replays();
+}
+
 #[test]
 fn a_contest_asks_the_human_and_never_widens_scope() {
     let mut fx = Fx::new();
@@ -1687,6 +1870,11 @@ fn a_contest_asks_the_human_and_never_widens_scope() {
         .expect("a contest was recorded");
     let (_, state) = fx.lane_episode(10);
     assert_eq!(state, EpisodeState::Contested);
+    assert_eq!(
+        fx.origin.world().needs_you().contests,
+        1,
+        "the open contest is counted for the human"
+    );
     // While the human is asked, no receipt can pass.
     let (run2, prepared2) = fx.prepared_run(&scope, fx.task1);
     let second = fx.passing_receipt(&scope, &prepared2);
@@ -1740,6 +1928,11 @@ fn a_contest_asks_the_human_and_never_widens_scope() {
         state,
         EpisodeState::Residue,
         "an upheld contest leaves residue"
+    );
+    assert_eq!(
+        fx.origin.world().needs_you().contests,
+        0,
+        "a decided contest is no longer counted"
     );
     // A rejected contest restores the state it interrupted.
     let (run3, prepared3) = fx.prepared_run(&scope, fx.task1);
@@ -2279,6 +2472,30 @@ fn a_failed_draft_is_recorded_and_the_job_stays_derived() {
         "a restart asks the foreman again"
     );
     fx.assert_replays();
+}
+
+#[test]
+fn a_scope_with_open_choices_is_counted_until_they_are_settled() {
+    let mut fx = Fx::new();
+    assert_eq!(fx.origin.world().needs_you().open_choices, 0);
+    let mut value = fx.scope_json(1, narrow_selector());
+    value["body"]["open"] = json!([{
+        "id": "c-retry",
+        "machine_id": "api",
+        "question": "Should a 429 be retried?",
+        "options": [
+            {"key": "never", "label": "Never retry"},
+            {"key": "once", "label": "Retry once"}
+        ]
+    }]);
+    let scope: Scope = from(value);
+    fx.revise(&scope);
+    let needs = fx.origin.world().needs_you();
+    assert_eq!(
+        needs.open_choices, 1,
+        "the scope with a question is counted"
+    );
+    assert_eq!(needs.total(), 1, "and nothing else is");
 }
 
 #[test]

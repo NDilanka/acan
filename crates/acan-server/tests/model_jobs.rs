@@ -542,6 +542,78 @@ fn a_predicate_that_reads_an_undefined_step_is_refused() {
     );
 }
 
+/// A must-keep rule on `/api/signup` whose one status predicate reads `step`.
+fn keep_rule_reading(step: &str) -> Value {
+    let mut scope = fixture_scope();
+    scope["must_keep"][0]["selector"]["route_template"] = json!("/api/signup");
+    scope["must_keep"][0]["selector"]["step_context"] = json!({ "kind": "any" });
+    scope["must_keep"][0]["obligations"] = json!([{
+        "obligation_id": "obl-keep",
+        "predicate": {
+            "predicate": "equals_base",
+            "step_id": step,
+            "path": "status",
+            "anchor": { "kind": "fresh" }
+        },
+        "text": "Status stays as before."
+    }]);
+    scope
+}
+
+#[test]
+fn a_status_predicate_on_a_step_off_the_rule_route_is_refused() {
+    // The corpus sends s3 as a request to /api/login and to /api/links, never to /api/signup.
+    let plant = plant_with(fixed_machines());
+    let err = check_scope_json(keep_rule_reading("s3"), &plant)
+        .expect_err("s3 never sends a request to /api/signup");
+
+    assert!(
+        matches!(&err, DraftError::StepOffRoute { step, route }
+            if step == "s3" && route == "/api/signup"),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_status_predicate_on_a_step_that_sends_the_rule_route_is_accepted() {
+    // s1 sends POST /api/login in the login probe, and the rule is for POST /api/login.
+    let plant = plant_with(fixed_machines());
+    let mut scope = keep_rule_reading("s1");
+    scope["must_keep"][0]["selector"]["route_template"] = json!("/api/login");
+
+    check_scope_json(scope, &plant).expect("s1 sends a login request in the login probe");
+}
+
+#[test]
+fn an_example_expecting_a_rejected_status_inside_the_allowed_count_is_refused() {
+    // The window allows its first five logins, so the first login must not get the 429 the
+    // example expects.
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["may"][0]["acceptance"][0]["predicate"]["policy"]["obligations"] =
+        json!([{ "kind": "first_allowed" }]);
+    scope["may"][0]["example"]["step_id"] = json!("s1");
+
+    let err = check_scope_json(scope, &plant).expect_err("s1 is within the first five logins");
+
+    assert!(
+        matches!(&err, DraftError::ExampleContradictsAcceptance { step, status, allowed }
+            if step == "s1" && *status == 429 && *allowed == 5),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn an_example_expecting_a_rejected_status_past_the_allowed_count_is_accepted() {
+    // s6 is the sixth login in its probe, so the window may reject it.
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["may"][0]["acceptance"][0]["predicate"]["policy"]["obligations"] =
+        json!([{ "kind": "first_allowed" }]);
+
+    check_scope_json(scope, &plant).expect("the sixth login may get 429");
+}
+
 #[test]
 fn a_side_effect_no_probe_observes_after_its_route_is_refused() {
     // The corpus reads the store only after POST /api/signup, never after GET /api/links.

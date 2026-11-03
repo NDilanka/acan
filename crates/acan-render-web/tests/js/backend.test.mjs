@@ -6,16 +6,15 @@ import { test } from "node:test";
 
 import { NO_BACKEND_LINE, backendPlan, createOnFirst, replaceCanvas } from "../../www/backend.js";
 
-test("with no override the page tries WebGPU first when the browser has it", () => {
-  assert.deepEqual(backendPlan(null, true), ["webgpu", "webgl"]);
-  assert.deepEqual(backendPlan("", true), ["webgpu", "webgl"]);
-  assert.deepEqual(backendPlan(null, false), ["webgl"]);
+test("with no override the page draws with WebGL, even where the browser has WebGPU", () => {
+  assert.deepEqual(backendPlan(null), ["webgl"]);
+  assert.deepEqual(backendPlan(""), ["webgl"]);
 });
 
-test("?backend= picks the backend whether or not the browser has WebGPU", () => {
-  assert.deepEqual(backendPlan("webgl", true), ["webgl"]);
-  assert.deepEqual(backendPlan("webgpu", false), ["webgpu", "webgl"]);
-  assert.throws(() => backendPlan("vulkan", true), /unknown backend "vulkan"/);
+test("?backend= picks the backend, and a forced WebGPU still falls back to WebGL", () => {
+  assert.deepEqual(backendPlan("webgl"), ["webgl"]);
+  assert.deepEqual(backendPlan("webgpu"), ["webgpu", "webgl"]);
+  assert.throws(() => backendPlan("vulkan"), /unknown backend "vulkan"/);
 });
 
 // A fake canvas that remembers which context type it handed out, as a browser canvas does.

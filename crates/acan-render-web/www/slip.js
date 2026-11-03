@@ -24,6 +24,7 @@ import { DRAFT_RETRY_MS, adoptCommand, draftSummary, wantsDraft } from "./draft.
 import { freeze, replay, slipEl, state } from "./state.js";
 import { historyBlock } from "./guard.js";
 import { forgetToken, get, hold } from "./stream.js";
+import { apiPath, target } from "./projects.js";
 
 // A failed draft is retried by the server's job loop, so the slip asks again, but seldom.
 const FAILED_RETRY_MS = 30000;
@@ -90,7 +91,7 @@ async function fetchDraft(id, entry) {
   entry.inFlight = true;
   let wait = DRAFT_RETRY_MS;
   try {
-    entry.answer = JSON.parse(await get(`/api/orders/o-${id}/scope-draft`));
+    entry.answer = JSON.parse(await get(apiPath(target(), `/api/orders/o-${id}/scope-draft`)));
     if (entry.answer.state === "failed") wait = FAILED_RETRY_MS;
   } catch {
     // A 404 says the foreman has not drafted yet; the slip asks again shortly.
@@ -403,7 +404,7 @@ async function strike(lane, item) {
 // refusal is shown as a plain sentence, never as the server's JSON. In a frozen page the stream is
 // not heard, so the command's own events are folded here, as the clash card's settle does.
 async function post(command) {
-  const res = await fetch("/api/commands", {
+  const res = await fetch(apiPath(target(), "/api/commands"), {
     method: "POST",
     headers: { Authorization: `Bearer ${state.token}`, "Content-Type": "application/json" },
     body: JSON.stringify(command),

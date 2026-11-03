@@ -41,10 +41,11 @@ const _: () = assert!(LIFT[2] > 0.0, "the lift leans back over the crown");
 /// light on the ground.
 pub const SHADOW_RADIUS: f32 = 0.9 * BODY_RADIUS;
 /// The height of the drone's centre over the plinth top at which its shadow has shrunk and faded
-/// to its far share of radius and strength. A drone higher still keeps the far shadow.
+/// out. A drone higher still casts none: a shadow that far up sits off its machine and reads as
+/// a stain on the floor.
 pub const SHADOW_RISE: f32 = 6.0 * BODY_RADIUS;
 const SHADOW_FAR_RADIUS: f32 = 0.55;
-const SHADOW_FAR_STRENGTH: f32 = 0.4;
+const SHADOW_FAR_STRENGTH: f32 = 0.0;
 /// The glow under the body: a soft level disc in the agent's hue, this far below the centre and
 /// this wide, which the renderer draws. The body hides its middle, so it shows round the belly.
 pub const GLOW_DROP: f32 = 0.8 * BODY_RADIUS;
@@ -706,6 +707,56 @@ mod tests {
     }
 
     #[test]
+    fn the_waiting_ring_never_crosses_the_lens_at_any_gaze_or_tilt() {
+        let edge = (RING_DEG + 1.0).to_radians().cos();
+        let lens: Vec<V> = [agent_body(), agent_accent()]
+            .iter()
+            .flat_map(|model| model.meshes[0].positions.clone())
+            .filter(|&p| {
+                let length = dot3(p, p).sqrt();
+                length < 1.05 * BODY_RADIUS && dot3(p, LOOK) >= edge * length
+            })
+            .collect();
+        assert!(lens.len() > 50, "the lens is sampled: {}", lens.len());
+        // The ring's vertices, and the middle of each edge between neighbours on one circle.
+        let corners = crate::marks::waiting_ring().meshes[0].positions.clone();
+        let half = corners.len() / 2;
+        let ring: Vec<V> = (0..corners.len())
+            .flat_map(|i| {
+                let circle = i / half * half;
+                let next = corners[circle + (i + 1) % half];
+                [corners[i], scale3(add3(corners[i], next), 0.5)]
+            })
+            .collect();
+        let near = 0.08 * BODY_RADIUS;
+        for heading_deg in (0..360).step_by(15) {
+            let (sin, cos) = (heading_deg as f32).to_radians().sin_cos();
+            let turned: Vec<V> = lens
+                .iter()
+                .map(|p| [p[0] * cos - p[1] * sin, p[0] * sin + p[1] * cos, p[2]])
+                .collect();
+            for elevation_deg in [5.0_f32, 10.0, 15.0, 30.0, 45.0, 60.0, 89.0] {
+                let (se, ce) = elevation_deg.to_radians().sin_cos();
+                // Toward the camera, and the screen's right and up, for a camera on +x.
+                let toward = [ce, 0.0, se];
+                let up = [-se, 0.0, ce];
+                let screen = |p: V| [p[1], dot3(p, up)];
+                for &p in turned.iter().filter(|&&p| dot3(p, toward) > 0.0) {
+                    let at = screen(p);
+                    for &q in &ring {
+                        let on = screen(q);
+                        let apart = (on[0] - at[0]).hypot(on[1] - at[1]);
+                        assert!(
+                            apart >= near || dot3(q, toward) < dot3(p, toward),
+                            "the ring crosses the lens at heading {heading_deg} and tilt \
+                             {elevation_deg}: ring {q:?}, lens {p:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn the_lens_looks_down_by_its_tilt_from_the_nose() {
         let tilt = EYE_TILT_DEG.to_radians();
         assert!((dot3(LOOK, LOOK) - 1.0).abs() < 1e-5 && (dot3(LIFT, LIFT) - 1.0).abs() < 1e-5);
@@ -740,7 +791,7 @@ mod tests {
         }
         let (radius, strength) = shadow_at(SHADOW_RISE);
         assert!((radius - SHADOW_FAR_RADIUS * SHADOW_RADIUS).abs() < 1e-4);
-        assert!((strength - SHADOW_FAR_STRENGTH).abs() < 1e-6);
+        assert_eq!(strength, 0.0, "a drone this high casts no shadow");
         assert_eq!(
             shadow_at(10.0 * SHADOW_RISE),
             shadow_at(SHADOW_RISE),

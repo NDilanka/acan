@@ -2,8 +2,9 @@
 // its receipt count moves, and keeps the summary only once the wasm side has checked the view's
 // counts. It also keeps the play the view admits, which the receipt plate shows. While a view
 // shows the deterministic order, the director's answer may still arrive, so the page asks again
-// for a few minutes. This module has no imports and touches no DOM, so Node can test it. The
-// caller passes `onChange` to repaint.
+// for a few minutes. This module imports only the route helper and touches no DOM, so Node can
+// test it. The caller passes `onChange` to repaint.
+import { apiPath, target } from "./projects.js";
 
 // Orders whose plant view is being fetched. A sync skips them, so a slow fetch is not repeated.
 const inFlight = new Set();
@@ -33,7 +34,7 @@ async function fetchPlantView(state, fetchText, order, recorded, onChange, timer
   // When the window opened by the first deterministic view for this count, if one has opened.
   const opened = prior?.recorded === recorded ? prior.since : undefined;
   try {
-    const text = await fetchText(`/api/orders/${order}/plant-view`);
+    const text = await fetchText(apiPath(target(), `/api/orders/${order}/plant-view`));
     const summary = JSON.parse(state.app.plant_view_summary(text));
     const { play, playError, items } = playOf(state.app, text);
     const since = play?.mode === "deterministic" ? (opened ?? timers.now()) : null;

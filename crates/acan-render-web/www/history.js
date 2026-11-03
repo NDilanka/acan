@@ -6,6 +6,7 @@
 import { historyBlock } from "./guard.js";
 import { flyTo, goKeys } from "./lanes.js";
 import { isRailOpen, openRailTab } from "./rail.js";
+import { apiPath, target } from "./projects.js";
 
 // The ribbon shows this many orders at rest, newest first. Alt shows every one.
 export const REST_ORDERS = 5;
@@ -270,7 +271,7 @@ export function installHistory(kit) {
     ui.note = "";
     paint(true);
     try {
-      const res = await fetch("/api/commands", {
+      const res = await fetch(apiPath(target(), "/api/commands"), {
         method: "POST",
         headers: { Authorization: `Bearer ${kit.state.token}`, "Content-Type": "application/json" },
         body: JSON.stringify(cancelCommand(row.id)),

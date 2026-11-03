@@ -558,19 +558,25 @@ let plotLeadOf = new Map();
 // a dot once every one is confirmed. Its line and Alt detail open on hover.
 const PLOT_MARK_PX = 10;
 const AMBER = "#d9a441";
+// The draft ring is a deeper amber, wider and a little larger than the dot, so it holds at 3:1 or
+// better against the pale amber a draft plot tints its machine.
+export const DRAFT_RING_PX = 12;
+export const DRAFT_RING_WIDTH_PX = 3;
+export const DRAFT_AMBER = "#a86f12";
 
 function plotMark(el, draft) {
   const mark = document.createElement("span");
+  const size = draft ? DRAFT_RING_PX : PLOT_MARK_PX;
   mark.className = "mark";
   mark.title = draft ? "draft scope" : "confirmed scope";
   Object.assign(mark.style, {
     display: "none",
-    width: `${PLOT_MARK_PX}px`,
-    height: `${PLOT_MARK_PX}px`,
+    width: `${size}px`,
+    height: `${size}px`,
     borderRadius: "50%",
     boxSizing: "border-box",
     background: draft ? "var(--page)" : AMBER,
-    border: draft ? `2px solid ${AMBER}` : "none",
+    border: draft ? `${DRAFT_RING_WIDTH_PX}px solid ${DRAFT_AMBER}` : "none",
     boxShadow: "0 0 0 1.5px var(--page)",
   });
   el.prepend(mark);

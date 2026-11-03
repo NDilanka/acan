@@ -68,6 +68,40 @@ pub struct Layout {
     pub bounds: [f32; 4],
 }
 
+impl Layout {
+    /// The same layout moved by `by` on the plan: every footprint, belt point and the bounds. A
+    /// project on a canvas of several is laid out from the origin, then moved to its place, so its
+    /// scene, framing and marks are all in world coordinates.
+    pub fn translated(&self, by: [f32; 2]) -> Layout {
+        let [dx, dy] = by;
+        Layout {
+            machines: self
+                .machines
+                .iter()
+                .map(|placed| Placed {
+                    x: placed.x + dx,
+                    y: placed.y + dy,
+                    kind: placed.kind,
+                })
+                .collect(),
+            belts: self
+                .belts
+                .iter()
+                .map(|belt| Belt {
+                    path: belt.path.iter().map(|&[x, y]| [x + dx, y + dy]).collect(),
+                    ..belt.clone()
+                })
+                .collect(),
+            bounds: [
+                self.bounds[0] + dx,
+                self.bounds[1] + dy,
+                self.bounds[2] + dx,
+                self.bounds[3] + dy,
+            ],
+        }
+    }
+}
+
 pub fn layout(kinds: &[Kind], edges: &[Edge]) -> Layout {
     let machines = kinds.len();
     let accepted = acyclic_edges(machines, edges);

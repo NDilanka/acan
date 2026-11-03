@@ -15,7 +15,9 @@
 //! any provider is asked. Live and offline calls are metered in one ledger, so the usage panel
 //! shows which calls were offline.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use acan_llm::{
@@ -48,6 +50,21 @@ pub struct Models {
     keys_file: Option<KeyFile>,
     /// Whether a routing file decides the providers.
     routing: bool,
+    /// The change count of `keys_file`, shared with every client in this process that reads that
+    /// file. A change bumps it, and each client reads the file again before its next use.
+    key_changes: Arc<AtomicU64>,
+    /// The change count this client last read the keys file at.
+    synced: AtomicU64,
+}
+
+/// One change count per keys file, so the clients of one file (one per project) see each other's
+/// saves and removals.
+static KEY_CHANGES: Mutex<BTreeMap<PathBuf, Arc<AtomicU64>>> = Mutex::new(BTreeMap::new());
+
+/// The change count shared by every client of the keys file at `path`.
+fn change_count_of(path: &Path) -> Arc<AtomicU64> {
+    let mut counts = KEY_CHANGES.lock().unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(counts.entry(path.to_path_buf()).or_default())
 }
 
 /// The live client, when every role has a provider, and the status the setup page shows.
@@ -180,6 +197,11 @@ impl Models {
 
     fn build(keys_file: Option<KeyFile>, routing: bool) -> Self {
         let ledger = UsageLedger::default();
+        let key_changes = keys_file
+            .as_ref()
+            .map(|file| change_count_of(file.path()))
+            .unwrap_or_default();
+        let synced = AtomicU64::new(key_changes.load(Ordering::Acquire));
         Self {
             offline: Offline::with_ledger(ledger.clone()),
             ledger,
@@ -190,16 +212,36 @@ impl Models {
             changes: Mutex::new(()),
             keys_file,
             routing,
+            key_changes,
+            synced,
         }
     }
 
     /// The state in use now. The lock is released before this returns, so no call holds it across
     /// an await.
     fn current(&self) -> Arc<State> {
+        self.catch_up();
         self.state
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Reads the keys file again when another client of it (another project) changed it since this
+    /// client last read it. A failed read keeps the state in use until the next change.
+    fn catch_up(&self) {
+        let Some(file) = &self.keys_file else {
+            return;
+        };
+        if self.key_changes.load(Ordering::Acquire) == self.synced.load(Ordering::Acquire) {
+            return;
+        }
+        if let Err(err) = self.sync_from(file) {
+            tracing::warn!(
+                error = %err,
+                "the saved model keys could not be read; keeping the state in use"
+            );
+        }
     }
 
     fn replace(&self, state: State) {
@@ -215,12 +257,22 @@ impl Models {
         Ok(())
     }
 
-    /// Rebuilds the state from the keys file after a change was written to it.
+    /// Rebuilds the state from the keys file. The change count is read first, so a change written
+    /// while the file is read is seen again on the next use.
     fn sync_from(&self, file: &KeyFile) -> Result<(), SetupError> {
         let _changes = self.changes.lock().unwrap_or_else(PoisonError::into_inner);
+        let generation = self.key_changes.load(Ordering::Acquire);
+        self.synced.store(generation, Ordering::Release);
         let saved = file.load().map_err(SetupError::Write)?;
         self.install(&saved)?;
         Ok(())
+    }
+
+    /// Records a change this client wrote to the keys file, so every other client of the file reads
+    /// it again, then rebuilds this client's state from the file.
+    fn changed(&self, file: &KeyFile) -> Result<(), SetupError> {
+        self.key_changes.fetch_add(1, Ordering::AcqRel);
+        self.sync_from(file)
     }
 
     /// The keys file a change may be written to. A routing file decides everything, so none is.
@@ -382,7 +434,7 @@ impl ModelClient for Models {
         let config = catalog()?;
         let outcome = save_checked(file, &config, provider, key).await?;
         if matches!(outcome, KeyOutcome::Stored { .. }) {
-            self.sync_from(file)?;
+            self.changed(file)?;
         }
         Ok(outcome)
     }
@@ -402,7 +454,7 @@ impl ModelClient for Models {
             return Err(SetupError::FromEnvironment);
         }
         let removed = file.remove_key(provider)?;
-        self.sync_from(file)?;
+        self.changed(file)?;
         Ok(removed)
     }
 
@@ -424,7 +476,7 @@ impl ModelClient for Models {
             }
         }
         file.set_role(role, provider)?;
-        self.sync_from(file)
+        self.changed(file)
     }
 }
 
@@ -582,6 +634,73 @@ provider = "meta"
             .expect("baseten is listed");
         assert!(!baseten.saved);
         assert!(!status.roles[1].picked, "the pick went with the key");
+    }
+
+    #[test]
+    fn a_pick_and_a_removal_reach_every_other_client_of_the_keys_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = keys_file(&dir);
+        file.set_key("meta", SAVED).expect("saves");
+        file.set_key("baseten", "baseten-saved-key-0123456789")
+            .expect("saves");
+        let first = models_with(&dir, &file);
+        let second = models_with(&dir, &file);
+
+        first
+            .set_role(Role::Worker, Some("baseten"))
+            .expect("picks");
+        assert_eq!(
+            second.key_status().roles[1].provider.as_deref(),
+            Some("baseten"),
+            "the other client uses the pick"
+        );
+
+        assert!(first.remove_key("baseten").expect("removes"));
+        let status = second.key_status();
+        assert!(!status.roles[1].picked, "the other client drops the pick");
+        let baseten = status
+            .providers
+            .iter()
+            .find(|provider| provider.name == "baseten")
+            .expect("baseten is listed");
+        assert!(!baseten.saved, "the other client sees the removal");
+    }
+
+    #[test]
+    fn a_key_removed_for_one_project_leaves_a_routing_project_as_it_was() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let routing = dir.path().join("llm.toml");
+        std::fs::write(
+            &routing,
+            r#"
+[[providers]]
+name = "meta"
+base_url = "http://127.0.0.1:9/v1"
+api_key_env = "ACAN_TEST_UNSET_META_KEY"
+default_model = "muse-spark-1.3"
+
+[routing.foreman]
+provider = "meta"
+
+[routing.worker]
+provider = "meta"
+
+[routing.fast]
+provider = "meta"
+"#,
+        )
+        .expect("writes the routing file");
+        let file = keys_file(&dir);
+        file.set_key("meta", SAVED).expect("saves");
+        let routed = Models::open(&routing, Some(file.clone())).expect("the models open");
+        let keyed = models_with(&dir, &file);
+
+        assert!(keyed.remove_key("meta").expect("removes"));
+
+        let status = routed.key_status();
+        assert_eq!(status.source, Some(KeySource::RoutingFile));
+        assert_eq!(status.roles[1].provider.as_deref(), Some("meta"));
+        assert!(!keyed.key_status().configured);
     }
 
     #[tokio::test]

@@ -25,6 +25,7 @@ import {
   $,
   TOKEN_KEY,
   canvas,
+  freeBand,
   freeze,
   gate,
   labelsEl,
@@ -61,7 +62,12 @@ import { installHistory } from "./history.js";
 import { installScrub } from "./scrub.js";
 import { installFirstRun, paintFirstRun } from "./firstrun-panel.js";
 import { onWorkers, refreshWorkers, workersAnswer } from "./workers.js";
+import { nextFrame } from "./frames.js";
 import { closeViewer, installVision, placeVisionPins, syncVision, viewerOpen, viewerTakesEscape } from "./vision-pins.js";
+import { installMulti, nameOf } from "./multi.js";
+import { placePlates } from "./nameplates.js";
+import { placeParked } from "./parked.js";
+import { canvasState } from "./projects.js";
 
 const ZOOM_KEY = 1.25;
 
@@ -107,7 +113,12 @@ const kit = {
   onKey: (hook) => keyHooks.push(hook),
 };
 
+// The wait before the next frame while only the idle bob runs, see `nextFrame`.
+let calmTimer = null;
+
 export function requestRender() {
+  clearTimeout(calmTimer);
+  calmTimer = null;
   if (state.scheduled || state.app === null) return;
   state.scheduled = true;
   requestAnimationFrame(drawFrame);
@@ -129,10 +140,15 @@ function drawFrame(now = performance.now()) {
     paintRide();
     placeLabels();
     placeVisionPins();
-    if (turning) {
+    placePlates();
+    placeParked();
+    const next = nextFrame({ moving: turning, hidden: document.hidden, gapMs: state.app.frame_gap_ms() });
+    if (next === "stop") {
+      state.lastFrame = null;
+    } else if (next === "now") {
       requestRender();
     } else {
-      state.lastFrame = null;
+      calmTimer = setTimeout(requestRender, next);
     }
   } catch (err) {
     console.error(err);
@@ -467,7 +483,7 @@ function adoptToken() {
 }
 
 async function createApp() {
-  const plan = backendPlan(params.get("backend"), Boolean(navigator.gpu));
+  const plan = backendPlan(params.get("backend"));
   const made = await createOnFirst(plan, canvas, {
     create: (target, backend) => App.create(target, backend),
     freshCanvas: (old) => {
@@ -513,7 +529,7 @@ async function loadPlant() {
       setLink("failed");
     }
   }
-  repoEl.textContent = state.app.repo_name();
+  repoEl.textContent = canvasState.multi ? nameOf(canvasState.active) : state.app.repo_name();
 }
 
 function followReducedMotion() {
@@ -557,11 +573,16 @@ async function boot() {
   installInbox(kit);
   installHistory(kit);
   installScrub(kit);
+  installMulti(kit);
   window.addEventListener("resize", sizeCanvas);
   state.app.set_still(freeze);
   // Reduced motion turns the hover bob off, and the page follows the setting as it changes.
   followReducedMotion();
   reducedMotion.addEventListener("change", followReducedMotion);
+  // A hidden tab draws nothing, so the loop starts again when it shows.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) requestRender();
+  });
   await loadPlant();
   bindPlate();
   await installVision();
@@ -581,9 +602,11 @@ async function boot() {
   }
   // `?focus=agent-a&zoom=8` closes up on one agent's drone, at 8 times the fit zoom. The zoom is
   // the scale at the drone, so 8 draws it about 375 px tall. It applies once the log places the
-  // drone, so the page can ask before the log arrives.
+  // drone, so the page can ask before the log arrives. The view slides left when a drone would sit
+  // under the right rail's panels.
   if (params.has("focus")) {
-    state.app.focus_agent(params.get("focus"), Number(params.get("zoom") || 8));
+    const band = freeBand();
+    state.app.focus_agent(params.get("focus"), Number(params.get("zoom") || 8), new Float32Array([band.left, band.right]));
   }
   requestRender();
   if (params.get("bench") === "1") {

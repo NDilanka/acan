@@ -171,6 +171,29 @@ pub enum OrderPhase {
     Cancelled,
 }
 
+/// What the human is asked to act on, counted for the project list. Built by
+/// [`World::needs_you`](crate::World::needs_you). The counts are kept apart, so one order can
+/// appear under more than one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct NeedsYou {
+    /// Orders in phase `Asking`: a question waits for an answer.
+    pub asking: usize,
+    /// Orders in phase `Clashing`: a declaration clash waits for settlement.
+    pub clashing: usize,
+    /// Scope-first contests still open.
+    pub contests: usize,
+    /// Scope-first orders whose scope has open choices.
+    pub open_choices: usize,
+}
+
+impl NeedsYou {
+    /// The four counts summed.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.asking + self.clashing + self.contests + self.open_choices
+    }
+}
+
 /// One unit of work the foreman split from an order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskSpec {

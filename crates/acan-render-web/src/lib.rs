@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod bends;
+pub mod canvas;
 pub mod feed;
 pub mod kind;
 pub mod labels;
@@ -16,6 +17,7 @@ pub mod plan;
 pub mod plant;
 pub mod plant_view;
 pub mod pov;
+pub mod project;
 pub mod scenario;
 pub mod scene;
 pub mod seal;
