@@ -151,7 +151,12 @@
   #setup-open { font: 11px var(--mono); padding: 2px 8px; background: var(--ink); color: #ffffff; border: 1px solid var(--ink);
     border-radius: 4px; cursor: pointer; }
   #setup-banner[hidden] { display: none; }
-  #hint { top: 12px; left: 50%; transform: translateX(-50%); color: #57575a; white-space: nowrap; }
+  /* The key bar ends left of the rail (300 px wide, 12 px from the window, 12 px gap), so it never
+     runs under it. A narrow window drops the optional keys first; "/ command" always shows. */
+  #hint { top: 12px; right: 324px; display: flex; gap: 12px; color: var(--muted); white-space: nowrap; font-size: 12px; }
+  #hint > span { display: inline-flex; gap: 4px; align-items: center; }
+  @media (max-width: 1180px) { #hint .opt { display: none; } }
+  @media (max-width: 760px) { #hint > span:not(:last-child) { display: none; } }
   kbd { font: 11px ui-monospace, Consolas, monospace; color: var(--ink); background: var(--face);
     border: 1px solid #e5e5e2; border-radius: 4px; padding: 0 4px; }
   #card { box-sizing: border-box; font: 12px/1.4 var(--sans); transition: opacity 0.4s ease; }
@@ -516,7 +521,7 @@
   <p id="setup-blocked" class="muted" hidden></p>
 </dialog>
 <div class="island" id="order" hidden><span id="order-line" class="muted"></span></div>
-<div class="island" id="hint"><kbd>Alt</kbd> words&nbsp;&nbsp;<kbd>Q</kbd><kbd>E</kbd> turn&nbsp;&nbsp;<kbd>0</kbd> fit&nbsp;&nbsp;<kbd>5</kbd> ortho&nbsp;&nbsp;<kbd>C</kbd> card&nbsp;&nbsp;<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> settle&nbsp;&nbsp;<kbd>A</kbd> answer&nbsp;&nbsp;<kbd>O</kbd> order here&nbsp;&nbsp;<kbd>/</kbd> command</div>
+<div class="island" id="hint"><span class="opt"><kbd>Alt</kbd> words</span><span class="opt"><kbd>0</kbd> fit</span><span><kbd>C</kbd> card</span><span><kbd>A</kbd> answer</span><span><kbd>O</kbd> order</span><span><kbd>/</kbd> command</span></div>
 <div id="watch">
   <aside id="firstrun" class="island" hidden aria-label="first run checklist"></aside>
   <aside id="card" class="island" hidden></aside>

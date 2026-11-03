@@ -37,7 +37,7 @@ const POV_SQUARE_PX = 40;
 
 const POV_ARM_PX = 8;
 
-const RIDE_HINT = "<kbd>Esc</kbd> leave&nbsp;&nbsp;<kbd>Tab</kbd> next&nbsp;&nbsp;<kbd>Shift</kbd><kbd>Tab</kbd> back&nbsp;&nbsp;<kbd>Alt</kbd> words&nbsp;&nbsp;wheel closer";
+const RIDE_HINT = "<span class=\"opt\"><kbd>Alt</kbd> words</span><span class=\"opt\"><kbd>Shift</kbd><kbd>Tab</kbd> back</span><span><kbd>Tab</kbd> next</span><span><kbd>Esc</kbd> leave</span>";
 
 // The ride as the wasm side has it now: the chip's words, the reticle on the beam's target, and
 // the frame, vignette and chip shown or hidden as the ride starts or ends.
