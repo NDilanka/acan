@@ -10,7 +10,9 @@ import {
   BUDGET_FIELDS,
   SECTIONS,
   THEME_IDS,
+  appliedFor,
   appliedNote,
+  changedPaths,
   clearNote,
   conflictNote,
   hasTokens,
@@ -418,6 +420,40 @@ test("a change that needs a restart says so, and live or client changes say noth
   assert.equal(appliedNote({}), "");
 });
 
+test("changedPaths lists one dotted path per field a body changes, and never a value", () => {
+  assert.deepEqual(changedPaths({ budgets: { call_limits: { worker: 5, statemap: 30 } } }), [
+    "budgets.call_limits.worker",
+    "budgets.call_limits.statemap",
+  ]);
+  assert.deepEqual(changedPaths({ projects: { add: ["repos/x/"], workers: { acan: 3 } } }), [
+    "projects.add",
+    "projects.workers.acan",
+  ]);
+  assert.deepEqual(changedPaths({ models: { keys: { baseten: { key: "placeholder" } } } }), [
+    "models.keys.baseten.key",
+  ]);
+  assert.deepEqual(changedPaths({}), []);
+});
+
+test("appliedFor reads the map by exact path first, then the longest prefix", () => {
+  const applied = { "projects.workers": "restart", "projects.workers.acan": "live", budgets: "stored" };
+  assert.equal(appliedFor(applied, "projects.workers.acan"), "live");
+  assert.equal(appliedFor(applied, "projects.workers.foo"), "restart");
+  assert.equal(appliedFor(applied, "budgets.call_limits.statemap"), "stored");
+  assert.equal(appliedFor(applied, "look.theme"), undefined);
+  assert.equal(appliedFor(undefined, "budgets"), undefined);
+});
+
+test("the note follows only the fields this save changed, in either answer shape", () => {
+  const applied = { "budgets.call_limits.statemap": "stored", "projects.workers": "restart", "look.theme": "client" };
+  assert.equal(appliedNote(applied, ["budgets.call_limits.statemap"]), "Saved.");
+  assert.equal(appliedNote(applied, ["look.theme"]), "");
+  assert.equal(appliedNote(applied, ["projects.workers.acan"]), "Saved; takes effect after restart.");
+  // The older answer keyed whole sections; the same lookup reads it.
+  assert.equal(appliedNote({ budgets: "stored" }, ["budgets.call_limits.worker"]), "Saved.");
+  assert.equal(appliedNote({ projects: "restart", look: "client" }, ["look.theme"]), "");
+});
+
 test("the update view reads up to date when latest is the current version", () => {
   assert.deepEqual(updateView({ current: "0.1.0-pre.1", latest: "0.1.0-pre.1" }), {
     state: "current",
@@ -457,7 +493,7 @@ test("a valid budget write is saved, reported live, and read back", async () => 
     budgets: { call_limits: { worker: 500 } },
   });
   assert.equal(put.status, 200);
-  assert.deepEqual(put.body.applied, { budgets: "stored" });
+  assert.deepEqual(put.body.applied, { "budgets.call_limits.worker": "stored" });
   assert.deepEqual(put.body.keys, {});
   assert.equal(put.body.settings.budgets.call_limits.worker, 500);
   assert.equal(put.body.settings.budgets.call_limits.foreman, 200);
@@ -517,7 +553,7 @@ test("look and notification writes are client changes, and they persist", async 
     look: { theme: "dark" },
     notifications: { sound: true },
   });
-  assert.deepEqual(put.body.applied, { look: "client", notifications: "client" });
+  assert.deepEqual(put.body.applied, { "look.theme": "client", "notifications.sound": "client" });
   const read = (await api.request("GET", "/api/settings")).body;
   assert.equal(read.look.theme, "dark");
   assert.equal(read.notifications.sound, true);
@@ -531,7 +567,7 @@ test("a key is stored without being returned, and the answer says it was stored"
   });
   assert.equal(put.status, 200);
   assert.deepEqual(put.body.keys, { baseten: "stored" });
-  assert.deepEqual(put.body.applied, { models: "live" });
+  assert.deepEqual(put.body.applied, { "models.keys.baseten.key": "live" });
   assert.deepEqual(
     put.body.settings.models.keys.find((key) => key.provider === "baseten"),
     { provider: "baseten", set: true, source: "saved" },
@@ -607,7 +643,7 @@ test("a harness role is stored, and an unknown harness is a 422", async () => {
     harness: { roles: { worker: "claude_code" } },
   });
   assert.equal(put.status, 200);
-  assert.deepEqual(put.body.applied, { harness: "stored" });
+  assert.deepEqual(put.body.applied, { "harness.roles.worker": "stored" });
   assert.equal(put.body.settings.harness.roles.worker, "claude_code");
   assert.equal(put.body.settings.harness.roles.foreman, "builtin");
   const bad = await api.request("PUT", "/api/settings", { harness: { roles: { worker: "vim" } } });
@@ -619,7 +655,7 @@ test("projects are added and removed, and the answer says they apply on restart"
     projects: { add: ["repos/new-thing/"], remove: ["acan-web"] },
   });
   assert.equal(put.status, 200);
-  assert.deepEqual(put.body.applied, { projects: "restart" });
+  assert.deepEqual(put.body.applied, { "projects.add": "restart", "projects.remove": "restart" });
   assert.deepEqual(put.body.settings.projects.map((project) => project.id), ["acan", "new-thing"]);
 });
 
@@ -817,7 +853,7 @@ test("a statemap call limit is saved as a budget and reported stored", async () 
     budgets: { call_limits: { statemap: 40 } },
   });
   assert.equal(put.status, 200);
-  assert.deepEqual(put.body.applied, { budgets: "stored" });
+  assert.deepEqual(put.body.applied, { "budgets.call_limits.statemap": "stored" });
   assert.equal(getAt(put.body.settings.budgets, "call_limits.statemap"), 40);
 });
 
@@ -825,7 +861,7 @@ test("a project's statemap flag is saved on or off, and applies live", async () 
   const api = createMockApi(fixture);
   const on = await api.request("PUT", "/api/settings", { projects: { statemap_llm: { acan: true } } });
   assert.equal(on.status, 200);
-  assert.deepEqual(on.body.applied, { projects: "live" });
+  assert.deepEqual(on.body.applied, { "projects.statemap_llm": "live" });
   assert.equal(on.body.settings.projects.find((project) => project.id === "acan").statemap_llm, true);
   assert.equal(on.body.settings.projects.find((project) => project.id === "acan-web").statemap_llm, false);
 });
@@ -866,7 +902,7 @@ test("a worker count moves by one from 0 to 8, and stops at either end", () => {
 test("a worker count is saved per project, and applies at restart", async () => {
   const put = await createMockApi(fixture).request("PUT", "/api/settings", { projects: { workers: { acan: 4 } } });
   assert.equal(put.status, 200);
-  assert.deepEqual(put.body.applied, { projects: "restart" });
+  assert.deepEqual(put.body.applied, { "projects.workers": "restart" });
   assert.equal(put.body.settings.projects.find((project) => project.id === "acan").workers, 4);
   assert.equal(put.body.settings.projects.find((project) => project.id === "acan-web").workers, 1);
 });

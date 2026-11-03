@@ -1,7 +1,7 @@
 // A stand-in for the settings API, for the fixture mode and the Node tests. It keeps its own copy
 // of the settings and checks each write the way the server does. The copy is replaced only when a
 // write passes, so a 422 changes nothing.
-import { BUDGET_FIELDS, THEME_IDS, getAt, parseField } from "./settings-model.js";
+import { BUDGET_FIELDS, THEME_IDS, changedPaths, getAt, parseField } from "./settings-model.js";
 
 const LABEL_DENSITIES = ["sparse", "normal", "dense"];
 // How each section takes effect: live, client, restart, or stored (saved, no server path reads it yet).
@@ -205,14 +205,15 @@ export function createMockApi(initial) {
     }
     state = next;
 
+    // One entry per changed field, keyed by its dotted path. A project's flag applies live; a worker
+    // count, or a project added or removed, applies at restart.
     const applied = {};
-    for (const section of Object.keys(APPLY)) {
-      if (body[section] !== undefined) applied[section] = APPLY[section];
-    }
-    // A project's flag applies live; a project added, removed or resized applies at restart.
-    if (body.projects !== undefined) {
-      const restarts = body.projects.add || body.projects.remove || body.projects.workers;
-      applied.projects = restarts ? "restart" : "live";
+    for (const path of changedPaths(body)) {
+      const [section, field] = path.split(".");
+      if (section === "projects") {
+        const restarts = ["add", "remove", "workers"].includes(field);
+        applied[`projects.${field}`] = restarts ? "restart" : "live";
+      } else if (section in APPLY) applied[path] = APPLY[section];
     }
     return { status: 200, body: { settings: view(next), applied, keys } };
   }
