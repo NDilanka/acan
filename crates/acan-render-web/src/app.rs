@@ -91,6 +91,9 @@ pub struct App {
     view_json: String,
     view_version: u32,
     dirty: bool,
+    /// The page's clock for the marks: the time now on a live page, and when the reader last saw
+    /// it. A still page keeps no time, so nothing on it reads stale.
+    clock: marks::Clock,
 }
 
 /// An ease from one azimuth to another, in degrees. `to` is not wrapped, so repeated turns add up.
@@ -193,6 +196,7 @@ impl App {
             fit_after_leave: false,
             bob_enabled: true,
             bob_ms: 0.0,
+            clock: marks::Clock::default(),
             view_json: String::new(),
             view_version: 0,
             dirty: false,
@@ -353,8 +357,32 @@ impl App {
     /// lands at once, a leaving bot is gone, no flag fades, and a landed dot keeps its word.
     pub fn set_still(&mut self, still: bool) {
         self.still = still;
+        if still {
+            self.clock = marks::Clock::default();
+        }
         self.motion = self.new_motion();
         self.dirty = true;
+    }
+
+    /// Tells the marks the time now, in epoch milliseconds, so a quiet agent's drone can read
+    /// stale. Zero or less clears the clock, as a page that stops being live does. A still page
+    /// ignores it.
+    pub fn set_now(&mut self, ms: f64) {
+        let now = (ms > 0.0 && !self.still).then(|| ms as u64);
+        if now != self.clock.now {
+            self.clock.now = now;
+            self.dirty = true;
+        }
+    }
+
+    /// Tells the marks when the reader last saw the page, in epoch milliseconds, once they come
+    /// back after a while. Zero or less clears it. A still page ignores it.
+    pub fn set_seen(&mut self, ms: f64) {
+        let seen = (ms > 0.0 && !self.still).then(|| ms as u64);
+        if seen != self.clock.seen {
+            self.clock.seen = seen;
+            self.dirty = true;
+        }
     }
 
     /// Whether a flag listing changed while time passed, such as a landed dot going quiet or a
@@ -1150,7 +1178,7 @@ impl App {
         };
         let view = mirror.view(plan);
         self.slots.assign(&view);
-        let marks = Marks::build(&view, plan, &loaded.stands, &self.slots);
+        let marks = Marks::build_at(&view, plan, &loaded.stands, &self.slots, self.clock);
         self.view_json = serde_json::to_string(&view).map_err(js_err)?;
         self.view_version += 1;
         self.motion.sync(&marks);

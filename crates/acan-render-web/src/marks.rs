@@ -20,7 +20,7 @@ use acan_render::theme::{
 use acan_render::{Beam, Instance};
 use serde::Serialize;
 
-use crate::mirror::{CheckView, ClashView, View};
+use crate::mirror::{AgentView, CheckView, ClashView, View};
 use crate::plan::Plan;
 use crate::slices::{ScopeTint, Slice, slice_layout};
 use crate::tour::Spot;
@@ -115,6 +115,8 @@ const BOB_PX: f32 = 1.0;
 const BOB_PERIOD_MS: f32 = 2_400.0;
 /// Milliseconds a pin takes to rise in, or to sink out.
 pub const PIN_MS: f32 = 250.0;
+/// Milliseconds an agent that holds a task may be quiet before its drone reads stale.
+pub const STALE_MS: u64 = 2 * 60 * 1_000;
 /// The dot of a declaration whose task has no agent.
 const UNCLAIMED: &str = "#7a7a72";
 
@@ -384,6 +386,23 @@ pub struct Card {
     pub resolved: Option<String>,
 }
 
+/// The page's clock, as the marks read it. Both times are in log milliseconds. A frozen or
+/// replayed page gives no `now`, so nothing there reads stale.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Clock {
+    /// The time now, on a live page.
+    pub now: Option<u64>,
+    /// When the reader last saw the page, once they come back to it after a while.
+    pub seen: Option<u64>,
+}
+
+impl Clock {
+    /// How long `agent` has been quiet, or `None` with no clock or when it was never heard.
+    fn quiet(self, agent: &AgentView) -> Option<u64> {
+        Some(self.now?.saturating_sub(agent.heard_at?))
+    }
+}
+
 /// What the marks need from a plan machine's model: the height of its top, and the free spots on
 /// its plinth top, in world XY, front first.
 #[derive(Debug, Clone, PartialEq)]
@@ -410,12 +429,26 @@ pub struct Marks {
 }
 
 impl Marks {
-    /// Places the marks for `view` on `plan`. `stands` gives each plan machine's model, in plan
-    /// order. `slots` gives each agent its hue, so it must already cover the view's agents.
+    /// Places the marks for `view` on `plan`, with no clock. `stands` gives each plan machine's
+    /// model, in plan order. `slots` gives each agent its hue, so it must already cover the
+    /// view's agents.
     #[must_use]
     pub fn build(view: &View, plan: &Plan, stands: &[Stand], slots: &AgentSlots) -> Self {
+        Self::build_at(view, plan, stands, slots, Clock::default())
+    }
+
+    /// Places the marks for `view` on `plan` at the time `clock` gives, so a quiet agent's
+    /// drone can read stale.
+    #[must_use]
+    pub fn build_at(
+        view: &View,
+        plan: &Plan,
+        stands: &[Stand],
+        slots: &AgentSlots,
+        clock: Clock,
+    ) -> Self {
         let waiting = waiting_agents(view);
-        let (bodies, pins) = place(view, plan, stands, slots, &waiting);
+        let (bodies, pins) = place(view, plan, stands, slots, &waiting, clock);
         let abnormal = (0..plan.machines.len())
             .map(|i| view.machines.get(i).is_some_and(|machine| machine.abnormal))
             .collect();
@@ -1644,6 +1677,7 @@ fn place(
     stands: &[Stand],
     slots: &AgentSlots,
     waiting: &BTreeSet<String>,
+    clock: Clock,
 ) -> (Vec<Body>, Vec<Pin>) {
     let homes: Vec<Option<usize>> = view
         .agents
@@ -1677,7 +1711,7 @@ fn place(
             hover_height(top)
         };
         let id = agent.id.to_string();
-        let state = DroneState::of(agent.activity, waiting.contains(&id), false);
+        let state = DroneState::of(agent.activity, waiting.contains(&id), stale(agent, clock));
         let z = seat_height(z, state);
         let check = agent
             .task
@@ -1695,6 +1729,12 @@ fn place(
         });
     }
     (bodies, pins(view, plan, stands))
+}
+
+/// Whether an agent's drone reads stale: it holds a task and has been quiet for [`STALE_MS`].
+fn stale(agent: &AgentView, clock: Clock) -> bool {
+    let holds = agent.task.is_some() && agent.activity != "readback";
+    holds && clock.quiet(agent).is_some_and(|quiet| quiet >= STALE_MS)
 }
 
 /// The height a drone's centre takes over its seat: a stale drone sags below it.
@@ -2653,6 +2693,52 @@ mod tests {
             state: DroneState::of(activity, false, false),
             check: None,
         }
+    }
+
+    #[test]
+    fn a_quiet_agent_holding_a_task_reads_stale_only_on_a_live_clock() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let mut view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        view.clashes.clear();
+        for machine in &mut view.machines {
+            machine.abnormal = false;
+        }
+        let heard = view.agents[0].heard_at.expect("the agent was heard");
+        let slots = slots_for(&view);
+        let stands = stands(&plan);
+        let at = |now: Option<u64>| {
+            let clock = Clock { now, seen: None };
+            Marks::build_at(&view, &plan, &stands, &slots, clock).bodies[0].state
+        };
+        assert_eq!(
+            at(None),
+            DroneState::Working,
+            "no clock, as frozen or replayed"
+        );
+        assert_eq!(at(Some(heard + STALE_MS - 1)), DroneState::Working);
+        assert_eq!(at(Some(heard + STALE_MS)), DroneState::Stale);
+        let stale = Marks::build_at(
+            &view,
+            &plan,
+            &stands,
+            &slots,
+            Clock {
+                now: Some(heard + STALE_MS),
+                seen: None,
+            },
+        );
+        let fresh = Marks::build(&view, &plan, &stands, &slots);
+        assert_eq!(
+            stale.bodies[0].at[2],
+            fresh.bodies[0].at[2] - STALE_DROP,
+            "a stale drone sags"
+        );
+        assert_eq!(
+            stale.footprint_tint(stale.bodies[0].machine),
+            0,
+            "and its machine stays grey"
+        );
     }
 
     #[test]

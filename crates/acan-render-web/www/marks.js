@@ -5,8 +5,10 @@ import { openCard, openQuestionCard, paintCard, placeQuestion, syncQuestions } f
 import { placeCompose, syncCompose } from "./compose.js";
 import { machineQuad } from "./order.js";
 import { canvas, flagsEl, labelsEl, leadersEl, state } from "./state.js";
+import { requestRender } from "./main.js";
 import { boxAt, clearOf, inView, placeOverlays, unnamedSpots } from "./place.js";
 import { questionOfFlag } from "./question.js";
+import { isLive } from "./stream.js";
 
 const ID_PREFIX = { order: "o", clash: "c", question: "q", task: "t" };
 
@@ -189,9 +191,27 @@ export function label(kind, id) {
   return `${ID_PREFIX[kind]}-${id}`;
 }
 
+// How often the wasm side hears the time, so a quiet agent's drone goes stale and an away stamp
+// counts up. A frozen, replayed or rewound page gives it no time, so a recorded run never reads
+// stale.
+const CLOCK_MS = 30_000;
+
+let clockTimer = null;
+
+function startClock() {
+  if (clockTimer !== null || state.app === null) return;
+  const tick = () => {
+    state.app.set_now(isLive() ? Date.now() : 0);
+    requestRender();
+  };
+  tick();
+  clockTimer = setInterval(tick, CLOCK_MS);
+}
+
 // The marks come from the wasm side: each agent with its activity, the active order, each open
 // clash and each question. They are rebuilt when the view changes, and placed every frame.
 export function paintMarks() {
+  startClock();
   state.markState = JSON.parse(state.app.marks_json());
   flagsEl.replaceChildren();
   state.flagEls = state.markState.flags.map((flag) => {
