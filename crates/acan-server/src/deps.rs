@@ -619,7 +619,8 @@ fn is_package_name(name: &str) -> bool {
     scope.is_none_or(segment) && segment(bare)
 }
 
-/// Checks one lockfile node's `resolved` source and its `version`. `name` is the node's key.
+/// Checks one lockfile node's `resolved` source, its `version` and its legacy `from`. `name` is the
+/// node's key.
 fn check_entry(name: &str, entry: &Map<String, Value>) -> Result<(), String> {
     if let Some(resolved) = entry.get("resolved").and_then(Value::as_str) {
         if entry.get("link") == Some(&Value::Bool(true)) {
@@ -638,7 +639,26 @@ fn check_entry(name: &str, entry: &Map<String, Value>) -> Result<(), String> {
     {
         return Err(format!("{name} names a source where a version belongs"));
     }
+    // A version 1 lockfile records the spec each dependency was asked for. A URL there names a
+    // source, and the install may not fetch from it.
+    if let Some(from) = entry.get("from")
+        && !from.as_str().is_some_and(admitted_from)
+    {
+        return Err(format!(
+            "{name} names a source in its from field, which the install may not fetch"
+        ));
+    }
     Ok(())
+}
+
+/// Whether a version 1 lockfile's `from` is a spec the install may fetch, alone or after a package
+/// name. A URL, a git spec or a path names another source.
+fn admitted_from(from: &str) -> bool {
+    admitted_spec(from)
+        || match split_selector(from) {
+            (name, Some(spec)) => is_package_name(name) && admitted_spec(spec),
+            (_, None) => false,
+        }
 }
 
 /// Whether a link's target is a relative path that stays inside the tree.
@@ -1267,6 +1287,40 @@ mod tests {
             }
         }"#;
         assert_eq!(refusal(lock), None);
+    }
+
+    #[test]
+    fn a_legacy_from_field_that_names_another_source_is_refused_and_no_url_is_named() {
+        for from in [
+            "git+https://10.0.0.5/x/y.git",
+            "https://10.0.0.5/pkg.tgz",
+            "left-pad@https://evil.example.test/left-pad.tgz",
+            "git+https://user:secret@github.com/x/y.git",
+            "x/y",
+        ] {
+            let lock = format!(
+                r#"{{"lockfileVersion": 1, "dependencies": {{"left-pad": {{"version": "1.3.0", "from": "{from}"}}}}}}"#
+            );
+            let text = refusal(&lock).expect("the from field is refused");
+            assert!(text.contains("left-pad"), "{text}");
+            assert!(!text.contains(from), "the from field is not echoed: {text}");
+            assert!(!text.contains("secret"), "no credential is echoed: {text}");
+        }
+    }
+
+    #[test]
+    fn a_legacy_from_field_with_a_registry_spec_is_admitted() {
+        for from in [
+            "left-pad@^1.3.0",
+            "@scope/left-pad@1.3.0",
+            "^1.3.0",
+            "latest",
+        ] {
+            let lock = format!(
+                r#"{{"lockfileVersion": 1, "dependencies": {{"left-pad": {{"version": "1.3.0", "from": "{from}", "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}}}}}}"#
+            );
+            assert_eq!(refusal(&lock), None, "{from} is admitted");
+        }
     }
 
     #[test]
