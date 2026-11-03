@@ -833,12 +833,19 @@ fn redact_bearer(text: &str) -> String {
 }
 
 /// Redacts Markdown line by line. A line that names a sensitive key loses everything after its
-/// first `:` or `=`, because the rest of such a line is a value.
+/// first `:` or `=`, because the rest of such a line is a value. Each line keeps its own ending,
+/// so CRLF stays CRLF and a last line without one stays without one.
 fn redact_markdown(text: &str, secrets: &[String]) -> String {
     let mut out = String::with_capacity(text.len());
-    for line in text.lines() {
+    for segment in text.split_inclusive('\n') {
+        let (line, ending) = match segment.strip_suffix("\r\n") {
+            Some(line) => (line, "\r\n"),
+            None => segment
+                .strip_suffix('\n')
+                .map_or((segment, ""), |line| (line, "\n")),
+        };
         out.push_str(&redact_line(line, secrets));
-        out.push('\n');
+        out.push_str(ending);
     }
     out
 }
@@ -1260,6 +1267,17 @@ mod tests {
             !redacted.contains("abc123"),
             "second key's value: {redacted}"
         );
+    }
+
+    #[test]
+    fn markdown_keeps_its_line_endings() {
+        let text = "| path | /api |\r\npassword: hunter2\r\n| status | 200 |";
+        assert_eq!(
+            redact_markdown(text, &[]),
+            "| path | /api |\r\npassword:<redacted>\r\n| status | 200 |",
+            "CRLF stays CRLF, and a last line without one gets none"
+        );
+        assert_eq!(redact_markdown("a\nb\n", &[]), "a\nb\n", "LF stays LF");
     }
 
     #[test]
