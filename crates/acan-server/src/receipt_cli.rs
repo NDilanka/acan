@@ -1122,10 +1122,15 @@ fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '/')
 }
 
-/// Whether a character can be part of a bearer token: the RFC 6750 `b64token` set. A quote, a
-/// bracket or a comma after a token is not part of it, so it is kept.
-fn is_token_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~' | '+' | '/' | '=')
+/// Whether a character ends a bearer token. Whitespace ends it, and so does a quote, a bracket or
+/// a comma that frames the token in text or code. Any other character belongs to the token, so a
+/// token with an unusual character is redacted whole rather than cut at that character.
+fn ends_bearer_token(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>'
+        )
 }
 
 /// Replaces the token after every `Bearer ` in `text`, matched without regard to case.
@@ -1138,7 +1143,7 @@ fn redact_bearer(text: &str) -> String {
         let start = cursor + found + PREFIX.len();
         out.push_str(&text[cursor..start]);
         let end = text[start..]
-            .find(|c: char| !is_token_char(c))
+            .find(ends_bearer_token)
             .map_or(text.len(), |offset| start + offset);
         if end > start {
             out.push_str(REDACTED);
@@ -2027,6 +2032,15 @@ mod tests {
         assert_eq!(
             redact_bearer(text),
             "header: \"Bearer <redacted>\", next: 'Bearer <redacted>'`ok`"
+        );
+    }
+
+    #[test]
+    fn a_bearer_token_with_an_unusual_character_is_redacted_whole() {
+        assert_eq!(
+            redact_bearer("auth Bearer abc!def$ghi:jkl tail"),
+            "auth Bearer <redacted> tail",
+            "the rest of a token is not left in view after an unusual character"
         );
     }
 
