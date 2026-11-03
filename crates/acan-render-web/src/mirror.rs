@@ -2156,6 +2156,7 @@ mod tests {
                 "confirmation",
                 "live_leases",
                 "stopped",
+                "open_contests",
             ])
         );
         assert_eq!(

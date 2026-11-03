@@ -41,6 +41,8 @@ pub struct LaneView {
     /// Whether the repair budget ran out. A stopped lane takes no claim or build, and no seal or
     /// newer revision lifts the stop.
     pub stopped: bool,
+    /// How many contests of the order wait for the human.
+    pub open_contests: u32,
 }
 
 /// One may-change item.
@@ -142,6 +144,7 @@ fn lane_view(world: &World, lane: &ScopeLane) -> LaneView {
         confirmation: lane.confirmation.clone(),
         live_leases: live_leases(world, lane.order),
         stopped: lane.stopped,
+        open_contests: u32::try_from(lane.open_contests().count()).unwrap_or(u32::MAX),
     }
 }
 
