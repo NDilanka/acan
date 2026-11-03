@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::kind;
 use crate::model::{Belt, FileId, ImportTarget, Machine, MachineId, Plant, SourceFile};
 
 /// A repo with at most this many source files splits its large directories into modules.
@@ -25,7 +26,12 @@ pub struct Grouping {
 impl Plant {
     /// Recomputes machines, belts, and each state machine's module from the files under `grouping`.
     pub fn regroup(&mut self, grouping: &Grouping) {
-        let (machines, belts) = build(&self.files, grouping);
+        let (mut machines, belts) = build(&self.files, grouping);
+        for machine in &mut machines {
+            if let Some(&kind) = self.kind_overrides.get(&machine.name) {
+                kind::set_by_user(machine, kind);
+            }
+        }
         self.machines = machines;
         self.belts = belts;
         assign_modules(self);
@@ -78,12 +84,19 @@ fn build(files: &[SourceFile], grouping: &Grouping) -> (Vec<Machine>, Vec<Belt>)
         for file in &members {
             *lang_mix.entry(file.lang).or_insert(0) += 1;
         }
+        let dir = common_directory(members.iter().map(|file| file.path.as_str()));
+        let paths: Vec<&str> = members.iter().map(|file| file.path.as_str()).collect();
+        let decision = kind::decide(&name, &dir, &paths);
         machines.push(Machine {
             id,
             name,
-            dir: common_directory(members.iter().map(|file| file.path.as_str())),
+            dir,
             files: members.iter().map(|file| file.id).collect(),
             lang_mix,
+            kind: decision.kind,
+            kind_guessed: decision.guessed,
+            kind_reason: decision.reason,
+            kind_set_by_user: false,
         });
     }
 

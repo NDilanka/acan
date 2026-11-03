@@ -4,6 +4,7 @@
 mod extract;
 mod group;
 mod hash;
+mod kind;
 mod lang;
 mod model;
 mod resolve;
@@ -15,8 +16,10 @@ use std::path::{Path, PathBuf};
 
 use hash::Digest;
 
+pub use acan_iso::Kind;
 pub use group::Grouping;
 pub use hash::ContentHash;
+pub use kind::{OVERRIDES_PATH, kind_named, write_kind_overrides};
 pub use lang::Lang;
 pub use model::{
     Belt, Confidence, FileId, ImportRef, ImportTarget, LineRange, Machine, MachineId, Plant,
@@ -36,6 +39,18 @@ pub enum ScanError {
         path: PathBuf,
         #[source]
         source: std::io::Error,
+    },
+    #[error("failed to write {}: {source}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{} is not a valid kinds file: {source}", path.display())]
+    Overrides {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
     },
     #[error("failed to load the {lang:?} grammar: {source}")]
     Language {
@@ -99,6 +114,7 @@ pub fn scan(root: impl AsRef<Path>) -> Result<Plant, ScanError> {
         files,
         state_machines,
         state_candidates,
+        kind_overrides: kind::read_overrides(root)?,
     };
     // Regrouping also sets each state machine's module.
     plant.regroup(&Grouping::default());

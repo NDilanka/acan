@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::PathBuf;
 
+use acan_iso::Kind;
 use serde::{Deserialize, Serialize};
 
 use crate::hash::ContentHash;
@@ -30,6 +31,10 @@ pub struct Plant {
     /// does not report them as machines; the optional statemap refinement may. Not serialized.
     #[serde(skip)]
     pub state_candidates: Vec<StateCandidate>,
+    /// Kinds the user set in `.acan/kinds.json`, by machine name. [`Plant::regroup`] applies them
+    /// again, so they survive a regroup. Left out of the JSON when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub kind_overrides: BTreeMap<String, Kind>,
 }
 
 /// A state machine the scanner found: a status-like type with its states and the transitions between them.
@@ -131,6 +136,19 @@ pub struct Machine {
     pub dir: String,
     pub files: Vec<FileId>,
     pub lang_mix: BTreeMap<Lang, u32>,
+    /// The drawing the renderer uses for this machine. See [`crate::kind`].
+    #[serde(default)]
+    pub kind: Kind,
+    /// True when a keyword or the language share guessed `kind`. The renderer breaks the plinth groove for these.
+    /// Left out of the JSON when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub kind_guessed: bool,
+    /// The rule that picked `kind`, in words for the tooltip, such as `name word "auth"`.
+    #[serde(default)]
+    pub kind_reason: String,
+    /// True when the user set `kind` in `.acan/kinds.json`. Left out of the JSON when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub kind_set_by_user: bool,
 }
 
 /// Import edges from one machine to another, aggregated from file-level imports.

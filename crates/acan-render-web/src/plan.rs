@@ -137,6 +137,9 @@ mod tests {
             name: name.to_owned(),
             files: paths.len(),
             kind: Kind::Assembler,
+            guessed: false,
+            reason: String::new(),
+            set_by_user: false,
             paths: paths.iter().map(|path| (*path).to_owned()).collect(),
         }
     }

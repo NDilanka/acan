@@ -1,11 +1,11 @@
-//! Maps a scanned machine to the model kind that draws it, and gives each kind its plan footprint.
-//! Pure Rust, so the rules are unit tested on the host and the same table serves live, fixture
-//! and stress plants.
+//! Maps a machine's kind to the model that draws it, and gives each kind its plan footprint.
+//! The scan decides each machine's kind (see acan-scan's `kind` module); the plant JSON carries it.
+//! Pure Rust, so the table is unit tested on the host and serves live, fixture and stress plants.
 
 pub use acan_iso::Kind;
 
 /// Every kind, in the order their models are built. A kind's index here is its model's index.
-pub const ALL: [Kind; 7] = [
+pub const ALL: [Kind; 17] = [
     Kind::Intake,
     Kind::Gate,
     Kind::Assembler,
@@ -13,6 +13,16 @@ pub const ALL: [Kind; 7] = [
     Kind::Splitter,
     Kind::Valve,
     Kind::Crate,
+    Kind::Switchboard,
+    Kind::Kiosk,
+    Kind::Mould,
+    Kind::Conveyor,
+    Kind::Horn,
+    Kind::Switchbox,
+    Kind::Gantry,
+    Kind::Console,
+    Kind::Antenna,
+    Kind::Toolrack,
 ];
 
 /// The index of `kind` in [`ALL`].
@@ -34,107 +44,22 @@ impl PlanFootprint for Kind {
     }
 }
 
-/// Name keywords for each kind, checked in this order. The first kind with a keyword in the
-/// machine name wins; the directory is checked only when the name matches nothing.
-/// `ratelimit` is listed for readability even though `limit` already matches it.
-const RULES: [(Kind, &[&str]); 5] = [
-    (Kind::Intake, &["server", "main", "index"]),
-    (Kind::Gate, &["auth", "session", "login"]),
-    (Kind::Tank, &["store", "db", "repo"]),
-    (Kind::Splitter, &["middleware", "proxy", "gateway"]),
-    (Kind::Valve, &["ratelimit", "limit"]),
-];
-
-/// The kind of a machine, from its name, its directory and the paths of its files.
-///
-/// A machine with no files, or whose files are all tests, is a crate. Otherwise a keyword in
-/// the name or the directory picks the kind, and anything left is an assembler.
-pub fn classify(name: &str, dir: &str, file_paths: &[&str]) -> Kind {
-    if file_paths.is_empty() || file_paths.iter().all(|path| is_test(path)) {
-        return Kind::Crate;
-    }
-    let name = name.to_ascii_lowercase();
-    let dir = dir.to_ascii_lowercase();
-    for words in [&name, &dir] {
-        for (kind, keywords) in RULES {
-            if keywords.iter().any(|word| words.contains(word)) {
-                return kind;
-            }
-        }
-    }
-    Kind::Assembler
-}
-
-fn is_test(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    let in_test_dir = lower
-        .split(['/', '\\'])
-        .any(|part| matches!(part, "test" | "tests" | "__tests__" | "spec"));
-    let test_file =
-        lower.contains(".test.") || lower.contains(".spec.") || lower.contains("_test.");
-    in_test_dir || test_file
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn keywords_pick_their_kind() {
-        let src = ["src/x.ts"];
-        assert_eq!(classify("server", "src", &src), Kind::Intake);
-        assert_eq!(classify("main", "src", &src), Kind::Intake);
-        assert_eq!(classify("index", "src", &src), Kind::Intake);
-        assert_eq!(classify("auth", "src", &src), Kind::Gate);
-        assert_eq!(classify("session", "src", &src), Kind::Gate);
-        assert_eq!(classify("login", "src", &src), Kind::Gate);
-        assert_eq!(classify("store", "src", &src), Kind::Tank);
-        assert_eq!(classify("db", "src", &src), Kind::Tank);
-        assert_eq!(classify("repo", "src", &src), Kind::Tank);
-        assert_eq!(classify("middleware", "src", &src), Kind::Splitter);
-        assert_eq!(classify("proxy", "src", &src), Kind::Splitter);
-        assert_eq!(classify("gateway", "src", &src), Kind::Splitter);
-        assert_eq!(classify("ratelimit", "src", &src), Kind::Valve);
-        assert_eq!(classify("limit", "src", &src), Kind::Valve);
-    }
-
-    #[test]
-    fn other_code_is_an_assembler() {
-        let src = ["src/errors.ts"];
-        assert_eq!(classify("errors", "src", &src), Kind::Assembler);
-        assert_eq!(classify("src", "src", &["src/auth.ts"]), Kind::Assembler);
-    }
-
-    #[test]
-    fn the_name_decides_before_the_directory() {
-        assert_eq!(classify("errors", "auth", &["auth/x.ts"]), Kind::Gate);
-        assert_eq!(classify("errors", "store", &["store/x.ts"]), Kind::Tank);
-    }
-
-    #[test]
-    fn test_only_and_unrecognized_machines_are_crates() {
-        assert_eq!(
-            classify("test", "test", &["test/a.ts", "test/b.ts"]),
-            Kind::Crate
-        );
-        assert_eq!(classify("auth", "src", &["src/auth.test.ts"]), Kind::Crate);
-        assert_eq!(classify("store", "src", &[]), Kind::Crate);
-    }
-
-    #[test]
-    fn a_mixed_machine_is_not_test_only() {
-        assert_eq!(
-            classify("auth", "src", &["src/auth.ts", "src/auth.test.ts"]),
-            Kind::Gate
-        );
-    }
-
-    #[test]
     fn footprints_match_the_brief() {
         assert_eq!(Kind::Assembler.footprint(), (96.0, 86.0));
         assert_eq!(Kind::Crate.footprint(), (40.0, 40.0));
-        for (i, kind) in ALL.into_iter().enumerate() {
-            assert_eq!(index(kind), i);
+    }
+
+    #[test]
+    fn all_lists_every_kind_once_and_indexes_it() {
+        for kind in Kind::ALL {
+            assert_eq!(ALL.iter().filter(|&&k| k == kind).count(), 1, "{kind:?}");
+            assert_eq!(ALL[index(kind)], kind);
         }
+        assert_eq!(ALL.len(), Kind::ALL.len());
     }
 }
