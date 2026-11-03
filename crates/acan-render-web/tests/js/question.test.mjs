@@ -11,6 +11,7 @@ import {
   answeredLine,
   freshQuestions,
   openQuestion,
+  questionCardText,
   questionOfFlag,
   questionTitle,
 } from "../../www/question.js";
@@ -46,6 +47,12 @@ test("only questions the page has not shown are fresh, and the seen set is not c
   assert.deepEqual(freshQuestions(VIEW, seen), [2]);
   assert.deepEqual([...seen], [1]);
   assert.deepEqual(freshQuestions({ questions: [] }, seen), []);
+});
+
+test("a_long_question_card_shows_at_most_one_hundred_words", () => {
+  const text = Array.from({ length: 150 }, (_, i) => `w${i}`).join(" ");
+  assert.equal(questionCardText({ ...Q1, text }), `${text.split(" ").slice(0, 100).join(" ")}…`);
+  assert.equal(questionCardText(Q1), Q1.text, "a short question is shown whole");
 });
 
 test("an answer to an answered question is a WrongState, said in one plain sentence", () => {

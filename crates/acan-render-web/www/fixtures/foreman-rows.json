@@ -1,0 +1,8 @@
+[
+  { "role": "scope", "model": "muse-spark-1.3", "calls": 1, "input": 1420, "output": 386, "detail": "scope draft for o-1 rev 1" },
+  { "role": "split", "model": "muse-spark-1.3", "calls": 1, "input": 960, "output": 214, "detail": "split o-1 into 3 tasks" },
+  { "role": "explain", "model": "muse-spark-1.3", "calls": 2, "input": 780, "output": 402, "detail": null },
+  { "role": "director", "model": "muse-spark-1.3", "calls": 1, "input": 512, "output": 96, "detail": "tour for receipt 1a2b3c4d: admitted" },
+  { "role": "director", "model": "muse-spark-1.3", "calls": 1, "input": 530, "output": 88, "detail": "tour for receipt 9f8e7d6c: refused: out_of_scope" },
+  { "role": "future_step", "model": "muse-spark-1.3", "calls": 1, "input": 240, "output": 52, "detail": null }
+]

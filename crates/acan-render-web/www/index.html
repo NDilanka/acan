@@ -287,6 +287,7 @@
   #usage .legend, #usage .note { font: 11px/1.4 var(--sans); color: var(--muted); margin: 4px 0 0; max-width: 340px; white-space: normal; }
   #usage tr.standin td { color: var(--muted); font-style: italic; }
   #usage td.earlier { color: var(--muted); }
+  #usage td .detail { display: block; color: var(--muted); max-width: 22em; white-space: normal; }
   table { border-collapse: collapse; font: 12px/1.4 var(--mono); }
   th, td { text-align: left; padding: 1px 16px 1px 0; white-space: nowrap; }
   th { color: var(--muted); font-weight: 500; }
@@ -637,7 +638,7 @@
 <div class="island" id="usage" hidden>
   <button type="button" id="meta-badge" aria-expanded="false" aria-controls="usage-meta"></button>
   <section id="usage-meta">
-    <h3 title="provider = config name: meta = Meta Model API, baseten = Baseten-hosted Muse Spark Open, fireworks = Fireworks-hosted Muse Spark Open">Meta attribution · since server start</h3>
+    <h3 title="provider = config name: meta = Meta Model API, baseten = Baseten-hosted Muse Spark Open, fireworks = Fireworks-hosted Muse Spark Open">Foreman · since server start</h3>
     <table>
       <thead>
         <tr><th>role</th><th>provider</th><th>model</th><th class="num">calls</th><th class="num">in</th><th class="num">out</th></tr>
@@ -648,7 +649,7 @@
     <p class="note" id="meta-note"></p>
   </section>
   <section id="usage-history" hidden>
-    <h3>Meta attribution · this log</h3>
+    <h3>Foreman · this log</h3>
     <table>
       <thead>
         <tr><th>step</th><th>model</th><th class="num">calls</th><th class="num">in</th><th class="num">out</th></tr>

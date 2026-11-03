@@ -5,6 +5,10 @@
 // no DOM, so Node can test it. `installInbox` binds it to the page.
 import { flyTo, goKeys } from "./lanes.js";
 import { countsByProject, entityKey } from "./projects.js";
+import { firstWords } from "./words.js";
+
+// words.js owns firstWords; it stays exported here for the callers that import it from the inbox.
+export { firstWords };
 
 export const NOTIFY_KEY = "acan.notify";
 
@@ -30,12 +34,6 @@ export function visionDoubts(events) {
     }
   }
   return doubts;
-}
-
-// The first `count` words of a text, with "…" when it has more. Whitespace is trimmed.
-export function firstWords(text, count = 6) {
-  const words = String(text ?? "").trim().split(/\s+/).filter((word) => word !== "");
-  return words.length <= count ? words.join(" ") : `${words.slice(0, count).join(" ")}…`;
 }
 
 // A question row's line: its id and the question's first words, or the id alone.
