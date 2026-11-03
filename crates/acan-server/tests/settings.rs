@@ -257,7 +257,10 @@ async fn a_budget_change_applies_and_the_next_read_shows_it() {
     let response = put(&running, Some(OWNER_TOKEN), &change).await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = json(response).await;
-    assert_eq!(body["applied"], json!({"budgets": "stored"}));
+    assert_eq!(
+        body["applied"],
+        json!({"budgets.repair_rounds": "stored", "budgets.call_limits.worker": "stored"})
+    );
     assert_eq!(body["keys"], json!({}));
     assert_eq!(body["settings"]["budgets"]["repair_rounds"], 3);
 
@@ -361,7 +364,12 @@ async fn the_look_and_the_notifications_are_stored_for_the_page_to_apply() {
     let body = json(response).await;
     assert_eq!(
         body["applied"],
-        json!({"look": "client", "notifications": "client"})
+        json!({
+            "look.theme": "client",
+            "look.label_density": "client",
+            "look.top_down_default": "client",
+            "notifications.sound": "client",
+        })
     );
 
     let doc = owner_doc(&running).await;
@@ -398,7 +406,10 @@ async fn the_custom_adapter_needs_a_command_and_a_command_is_stored() {
     }});
     let stored = put(&running, Some(OWNER_TOKEN), &with_command).await;
     assert_eq!(stored.status(), StatusCode::OK);
-    assert_eq!(json(stored).await["applied"], json!({"harness": "stored"}));
+    assert_eq!(
+        json(stored).await["applied"],
+        json!({"harness.roles.foreman": "stored", "harness.custom_command": "stored"})
+    );
     let doc = owner_doc(&running).await;
     assert_eq!(doc["harness"]["roles"]["foreman"], "custom");
     assert_eq!(
@@ -436,9 +447,10 @@ async fn project_changes_are_recorded_for_the_next_start() {
     let workers = json!({"projects": {"workers": {&id: 2}}});
     let response = put(&running, Some(OWNER_TOKEN), &workers).await;
     assert_eq!(response.status(), StatusCode::OK);
+    let worker_path = format!("projects.workers.{id}");
     assert_eq!(
         json(response).await["applied"],
-        json!({"projects": "restart"})
+        json!({ worker_path: "restart" })
     );
     assert_eq!(owner_doc(&running).await["projects"][0]["workers"], 2);
 
@@ -497,7 +509,7 @@ async fn a_saved_key_is_cleared_and_reported_and_never_returned() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = json(response).await;
     assert_eq!(body["keys"], json!({"fireworks": "cleared"}));
-    assert_eq!(body["applied"], json!({"models": "live"}));
+    assert_eq!(body["applied"], json!({"models.keys.fireworks": "live"}));
     assert!(
         !body.to_string().contains(SAVED_KEY),
         "the response carries no key"
@@ -521,7 +533,10 @@ async fn a_role_pick_is_refused_without_a_key_and_applied_with_one() {
     let running = boot(repo.path(), models(repo.path(), &[("baseten", SAVED_KEY)])).await;
     let response = put(&running, Some(OWNER_TOKEN), &pick).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(json(response).await["applied"], json!({"models": "live"}));
+    assert_eq!(
+        json(response).await["applied"],
+        json!({"models.roles.fast": "live"})
+    );
     let doc = owner_doc(&running).await;
     let fast = doc["models"]["roles"]
         .as_array()
@@ -693,12 +708,15 @@ async fn statemap_is_a_role_in_the_models_the_harness_and_the_call_limits() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         json(response).await["applied"],
-        json!({"budgets": "stored"})
+        json!({"budgets.call_limits.statemap": "live"})
     );
+    let read = owner_doc(&running).await;
+    assert_eq!(read["budgets"]["call_limits"]["statemap"], 40);
     assert_eq!(
-        owner_doc(&running).await["budgets"]["call_limits"]["statemap"],
-        40
+        read["applied"]["budgets.call_limits.statemap"], "live",
+        "the read says how the statemap limit applies"
     );
+    assert_eq!(read["applied"]["budgets.repair_rounds"], "stored");
 
     let harness = json!({"harness": {"roles": {"statemap": "codex"}}});
     assert_eq!(
@@ -727,10 +745,14 @@ async fn the_statemap_llm_flag_is_set_per_project_and_applies_at_once() {
         "the flag is off by default"
     );
 
+    let flag_path = format!("projects.statemap_llm.{id}");
     let on = json!({"projects": {"statemap_llm": {&id: true}}});
     let response = put(&running, Some(OWNER_TOKEN), &on).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(json(response).await["applied"], json!({"projects": "live"}));
+    assert_eq!(
+        json(response).await["applied"],
+        json!({ flag_path.clone(): "live" })
+    );
     assert_eq!(
         owner_doc(&running).await["projects"][0]["statemap_llm"],
         true
@@ -761,10 +783,11 @@ async fn the_statemap_llm_flag_is_set_per_project_and_applies_at_once() {
 
     let with_restart = json!({"projects": {"statemap_llm": {&id: true}, "workers": {&id: 1}}});
     let response = put(&running, Some(OWNER_TOKEN), &with_restart).await;
+    let worker_path = format!("projects.workers.{id}");
     assert_eq!(
         json(response).await["applied"],
-        json!({"projects": "restart"}),
-        "a change that also sets workers waits for a restart"
+        json!({ flag_path: "live", worker_path: "restart" }),
+        "the worker count waits for a restart, and the flag is read on each use"
     );
 
     running.stop().await.expect("the server stops");
@@ -1090,6 +1113,25 @@ async fn post_text(
     request.send().await.expect("the request is sent")
 }
 
+/// Records one run by posting an order to the temp repository's machine. A new world's log holds
+/// only its start, which is not a run, so an export of the recorded run needs this first.
+async fn record_a_run(running: &Running) {
+    let order = json!({
+        "cmd": "post_order",
+        "machine": "model",
+        "sentence": SPLIT_SENTENCE,
+        "witnesses": []
+    });
+    let response = post_text(
+        running,
+        "/api/commands",
+        Some(OWNER_TOKEN),
+        &order.to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "the run is recorded");
+}
+
 /// The id of the default project, as `GET /api/projects` lists it.
 async fn default_project(running: &Running) -> String {
     let list = json(get_path(running, "/api/projects", Some(OWNER_TOKEN)).await).await;
@@ -1236,6 +1278,7 @@ async fn the_data_routes_refuse_a_member_an_agent_and_an_unknown_token() {
 async fn the_owner_exports_the_receipts_and_the_recorded_run_as_one_archive() {
     let repo = temp_repo();
     let running = boot(repo.path(), models(repo.path(), &[])).await;
+    record_a_run(&running).await;
     let project = default_project(&running).await;
 
     let response = get_path(
@@ -1358,6 +1401,43 @@ async fn an_export_with_no_recorded_run_is_a_conflict_and_receipts_still_answer(
 }
 
 #[tokio::test]
+async fn a_fresh_repository_has_no_recorded_run_so_its_replay_is_a_conflict() {
+    let repo = temp_repo();
+    let running = boot(repo.path(), models(repo.path(), &[])).await;
+    // A new world's log holds only its opening event: the file exists, but no run is recorded.
+    assert!(repo.path().join(".acan").join("world.db").is_file());
+
+    for what in ["all", "replay"] {
+        let response = get_path(
+            &running,
+            &format!("/api/settings/data/export?what={what}"),
+            Some(OWNER_TOKEN),
+        )
+        .await;
+        let status = response.status();
+        let body = response.bytes().await.expect("the body");
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "{what}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    let response = get_path(
+        &running,
+        "/api/settings/data/export?what=receipts",
+        Some(OWNER_TOKEN),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let entries = zip_entries(&response.bytes().await.expect("the archive"));
+    assert_eq!(names_of(&entries), ["manifest.json"]);
+
+    running.stop().await.expect("the server stops");
+}
+
+#[tokio::test]
 async fn an_export_names_one_of_three_kinds_and_refuses_any_other() {
     let repo = temp_repo();
     let running = boot(repo.path(), models(repo.path(), &[])).await;
@@ -1408,6 +1488,7 @@ async fn no_export_holds_the_text_of_a_dotenv_value_or_of_a_token() {
     let running = start(config(repo.path()), served, ledger)
         .await
         .expect("the server starts");
+    record_a_run(&running).await;
 
     let response = get_path(
         &running,

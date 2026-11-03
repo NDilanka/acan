@@ -83,14 +83,6 @@ pub(crate) struct ProjectsPatch {
     statemap_llm: Option<BTreeMap<String, bool>>,
 }
 
-impl ProjectsPatch {
-    /// Whether the change needs a restart: adds, removals and worker counts take effect at the
-    /// next start. A change that names only `statemap_llm` takes effect at once.
-    pub(crate) fn needs_restart(&self) -> bool {
-        self.add.is_some() || self.remove.is_some() || self.workers.is_some()
-    }
-}
-
 /// The budgets part of a change. Numbers are read as wide integers, so an out-of-range number is
 /// refused as a field, not as a malformed body.
 #[derive(Deserialize)]
@@ -682,11 +674,6 @@ mod tests {
         let on = accepted(json!({"projects": {"statemap_llm": {"acan-wip": true}}}));
         assert_eq!(on.next.projects.statemap_llm.get("acan-wip"), Some(&true));
         assert_eq!(on.sections, vec![Section::Projects]);
-        let flag = patch(json!({"projects": {"statemap_llm": {"acan-wip": true}}}));
-        assert!(
-            !flag.projects.as_ref().expect("the section").needs_restart(),
-            "a flag alone needs no restart"
-        );
         assert!(names(
             &refused(json!({"projects": {"statemap_llm": {"no-such-project": true}}})),
             "projects.statemap_llm.no-such-project"
