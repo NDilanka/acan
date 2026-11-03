@@ -645,6 +645,11 @@ fn api_message(err: ApiError) -> String {
         ApiError::NotFound(what) => format!("no such {what}"),
         ApiError::BadRequest(what) => format!("bad request: {what}"),
         ApiError::Conflict(why) => format!("conflict: {why}"),
+        ApiError::Invalid(fields) => fields
+            .iter()
+            .map(|field| format!("{}: {}", field.path, field.why))
+            .collect::<Vec<_>>()
+            .join("; "),
         ApiError::Rejected(rejection) => rejection.to_string(),
         ApiError::Refused(err) => serde_json::to_string(&err)
             .unwrap_or_else(|_| "the refusal did not serialize".to_owned()),

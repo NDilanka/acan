@@ -13,6 +13,9 @@
 //! 4001. The socket closes for every project, and the client reconnects with its cursors. Other
 //! projects' streams are not affected until then.
 //!
+//! A token that is revoked, such as by an owner's rotation, closes the socket with 4001 and the
+//! reason `token revoked`. The client must then authenticate again with the new token.
+//!
 //! Ids repeat across projects, so a client that merges events keys them by project and id.
 
 use std::collections::BTreeMap;
@@ -30,14 +33,14 @@ use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use crate::auth::Principal;
+use crate::auth::{Principal, subscribe_revocations};
 use crate::host::Host;
 use crate::http::bearer;
 use crate::redact;
 use crate::registry::{Entry, Registry};
 use crate::stream::{
-    AuthFrame, CLOSE_INTERNAL, CLOSE_RESUME, CLOSE_SHUTDOWN, CLOSE_UNAUTHORIZED, Offer, Resume,
-    close, next_text, shutting_down,
+    AuthFrame, CLOSE_INTERNAL, CLOSE_RESUME, CLOSE_REVOKED, CLOSE_SHUTDOWN, CLOSE_UNAUTHORIZED,
+    Offer, REVOKED_REASON, Resume, close, next_text, shutting_down,
 };
 use crate::touches::TransitionTouch;
 
@@ -91,7 +94,12 @@ pub(crate) async fn upgrade<C: ModelClient + 'static>(
     ws: WebSocketUpgrade,
 ) -> Response {
     let header_token = bearer(&headers).map(str::to_owned);
-    ws.on_upgrade(move |socket| async move { track(&projects, socket, header_token) })
+    // Subscribed before the token is checked, so a revocation that lands after the check still
+    // reaches this connection.
+    let revocations = subscribe_revocations();
+    ws.on_upgrade(move |socket| async move {
+        track(&projects, socket, header_token, revocations);
+    })
 }
 
 /// Registers the stream so shutdown can wait for it to close, then runs it.
@@ -99,8 +107,9 @@ fn track<C: ModelClient + 'static>(
     projects: &Arc<Registry<C>>,
     socket: WebSocket,
     header_token: Option<String>,
+    revocations: broadcast::Receiver<String>,
 ) {
-    let pump = pump(Arc::clone(projects), socket, header_token);
+    let pump = pump(Arc::clone(projects), socket, header_token, revocations);
     let mut streams = projects.streams().lock().expect("stream set lock poisoned");
     // Reap closed streams so a long-running server does not keep one entry per connection.
     while streams.try_join_next().is_some() {}
@@ -111,6 +120,7 @@ async fn pump<C: ModelClient + 'static>(
     projects: Arc<Registry<C>>,
     mut socket: WebSocket,
     header_token: Option<String>,
+    mut revocations: broadcast::Receiver<String>,
 ) {
     let mut shutdown = projects.shutdown_signal();
     let token = match header_token {
@@ -133,6 +143,8 @@ async fn pump<C: ModelClient + 'static>(
         }
     };
 
+    // Cleared when the revocation channel closes, so the loop stops polling it.
+    let mut watching = true;
     let mut members = members_of(projects.entries(), &token);
     if members.is_empty() {
         close(&mut socket, CLOSE_UNAUTHORIZED, "unauthorized".to_owned()).await;
@@ -256,6 +268,24 @@ async fn pump<C: ModelClient + 'static>(
                 }
                 None => return,
             },
+            revoked = revocations.recv(), if watching => match revoked {
+                Ok(revoked) if revoked == token => {
+                    close(&mut socket, CLOSE_REVOKED, REVOKED_REASON.to_owned()).await;
+                    return;
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => {
+                    // Revocations were skipped, so the token is checked in each project directly.
+                    let still_held = members
+                        .iter()
+                        .any(|member| member.host.tokens().principal(&token).is_some());
+                    if !still_held {
+                        close(&mut socket, CLOSE_REVOKED, REVOKED_REASON.to_owned()).await;
+                        return;
+                    }
+                }
+                Err(RecvError::Closed) => watching = false,
+            },
         }
     }
 }
@@ -266,7 +296,7 @@ fn members_of<C: ModelClient>(entries: &[Entry<C>], token: &str) -> Vec<Member<C
     entries
         .iter()
         .filter_map(|entry| {
-            let principal = entry.host.tokens().principal(token)?.clone();
+            let principal = entry.host.tokens().principal(token)?;
             Some(Member {
                 id: entry.id.clone(),
                 host: entry.host.clone(),

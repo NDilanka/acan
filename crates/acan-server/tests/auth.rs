@@ -15,7 +15,7 @@ fn owner_token_is_minted_once_and_then_reloaded() {
     let token = minted.expect("the first start mints an owner token");
     assert_eq!(
         tokens.principal(token.as_str()),
-        Some(&Principal::Member(owner())),
+        Some(Principal::Member(owner())),
         "the minted token acts as the owner"
     );
     assert_eq!(
@@ -29,7 +29,7 @@ fn owner_token_is_minted_once_and_then_reloaded() {
     assert!(minted_again.is_none(), "a later start mints nothing");
     assert_eq!(
         reloaded.principal(token.as_str()),
-        Some(&Principal::Member(owner())),
+        Some(Principal::Member(owner())),
         "the same token still works after a restart"
     );
 }

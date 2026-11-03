@@ -54,6 +54,7 @@ mod registry;
 pub mod release;
 pub mod replay;
 mod ruling;
+mod settings;
 mod setup;
 mod store;
 mod stream;
@@ -73,7 +74,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use acan_core::{Command, HumanCmd, MemberId, Origin, Seq, SystemCmd, WorldId, WorldRef};
-use acan_llm::{ModelClient, UsageLedger};
+use acan_llm::{KeyFile, ModelClient, UsageLedger};
 use anyhow::{Context, bail, ensure};
 use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, watch};
@@ -96,6 +97,7 @@ pub use workers::{State as WorkerState, Status as WorkerStatus, WorkersView};
 use crate::projects::{ProjectSet, ProjectSpec};
 use crate::public::PublicRoot;
 use crate::registry::{Entry, Registry};
+use crate::settings::Settings;
 use crate::writer::Writer;
 
 const STATE_DIR: &str = ".acan";
@@ -351,18 +353,35 @@ pub async fn start_with_workers<C: ModelClient + 'static>(
 /// `config.projects.projects`. Each project runs `config.local_workers` worker loops.
 ///
 /// Every project opens before anything binds, so a project that fails to open leaves nothing
-/// running. The witness pool is one pool for all projects.
+/// running. The witness pool is one pool for all projects. The settings are kept as in
+/// [`start_projects_with_settings`] with no file given.
+///
+/// # Errors
+///
+/// Returns the errors of [`start_projects_with_settings`].
+pub async fn start_projects<C: ModelClient + 'static>(
+    config: ServeConfig,
+    clients: Vec<(C, UsageLedger)>,
+) -> anyhow::Result<Running> {
+    start_projects_with_settings(config, clients, None).await
+}
+
+/// As [`start_projects`], and keeps the settings in `settings_file`. `None` keeps them in
+/// `settings.json` in the default project's state directory. A missing settings file reads as the
+/// defaults. A file that does not parse stops the start, so the server never replaces it with the
+/// defaults.
 ///
 /// # Errors
 ///
 /// Returns an error when the bind address is non-loopback without `team`, the projects do not
 /// validate, a project's state directory, tokens or database cannot be opened, a stored log does
 /// not replay, a scan fails, the web directory is not a dedicated public directory for every
-/// repository, an agent token cannot be written, a local worker cannot be registered, or the
-/// address cannot be bound.
-pub async fn start_projects<C: ModelClient + 'static>(
+/// repository, the settings file cannot be read or does not parse, an agent token cannot be
+/// written, a local worker cannot be registered, or the address cannot be bound.
+pub async fn start_projects_with_settings<C: ModelClient + 'static>(
     config: ServeConfig,
     clients: Vec<(C, UsageLedger)>,
+    settings_file: Option<PathBuf>,
 ) -> anyhow::Result<Running> {
     if !config.addr.ip().is_loopback() && !config.team {
         bail!(
@@ -398,6 +417,9 @@ pub async fn start_projects<C: ModelClient + 'static>(
     for state in &states {
         prepare_state_dir(state)?;
     }
+    // The validated projects are never empty, so the first one's state directory exists.
+    let settings_file = settings_file.unwrap_or_else(|| states[0].join(settings::FILE));
+    let stored = settings::load(&settings_file)?;
     let mut visions = Vec::with_capacity(specs.len());
     for spec in &specs {
         visions.push(
@@ -557,12 +579,18 @@ pub async fn start_projects<C: ModelClient + 'static>(
     #[cfg(test)]
     let ruling_hold = entries[0].host.ruling_hold().clone();
     let streams = Arc::new(Mutex::new(JoinSet::new()));
-    let registry = Registry::new(
+    let registry = Arc::new(Registry::new(
         config.projects.default.clone(),
         entries,
         Arc::clone(&streams),
-    );
-    let app = http::router(Arc::new(registry), web);
+    ));
+    let shared_settings = Arc::new(Settings::new(
+        settings_file,
+        stored,
+        Arc::clone(&registry),
+        founder,
+    ));
+    let app = http::router(registry, web, shared_settings);
     let mut shutdown_seen = shutdown.subscribe();
     let server = tokio::spawn(async move {
         axum::serve(listener, app)
@@ -583,6 +611,13 @@ pub async fn start_projects<C: ModelClient + 'static>(
         #[cfg(test)]
         ruling_hold,
     })
+}
+
+/// The settings file beside `keys`: `settings.json` in the folder the keys file is in. A user's
+/// settings sit with that user's model keys, so every project the user runs shares them.
+#[must_use]
+pub fn settings_file_beside(keys: &KeyFile) -> PathBuf {
+    keys.path().with_file_name(settings::FILE)
 }
 
 /// A project whose world is open and scanned, waiting for its host. Nothing is bound yet.
