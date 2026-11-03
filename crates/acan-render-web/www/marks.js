@@ -6,7 +6,9 @@ import { placeCompose, syncCompose } from "./compose.js";
 import { machineQuad } from "./order.js";
 import { canvas, flagsEl, labelsEl, leadersEl, state } from "./state.js";
 import { requestRender } from "./main.js";
-import { boxAt, clearOf, inView, placeOverlays, unnamedSpots } from "./place.js";
+import {
+  GHOST_HOLD_MS, LAST_SEEN_KEY, boxAt, clearOf, inView, placeOverlays, seenOnReturn, unnamedSpots,
+} from "./place.js";
 import { questionOfFlag } from "./question.js";
 import { isLive } from "./stream.js";
 
@@ -208,12 +210,115 @@ function startClock() {
   clockTimer = setInterval(tick, CLOCK_MS);
 }
 
+function readSeen() {
+  try {
+    return localStorage.getItem(LAST_SEEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+// Only a live page keeps the time, so a frozen or replayed visit does not move it.
+function noteSeen() {
+  if (!isLive()) return;
+  try {
+    localStorage.setItem(LAST_SEEN_KEY, String(Date.now()));
+  } catch {
+    // Storage is off, so the page shows no ghosts.
+  }
+}
+
+let ghostTimer = null;
+
+// The reader is back, on load or when the tab shows again. After a long enough absence the
+// machines where work landed meanwhile show ghosts, which go after GHOST_HOLD_MS if nothing
+// clears them first. The time is kept again at once, so a reload does not bring them back.
+function comeBack() {
+  const now = Date.now();
+  const seen = seenOnReturn(readSeen(), now, isLive());
+  noteSeen();
+  if (seen === 0) return;
+  state.app.set_now(now);
+  state.app.set_seen(seen, now);
+  clearTimeout(ghostTimer);
+  ghostTimer = setTimeout(() => {
+    if (state.app.clear_ghosts()) requestRender();
+  }, GHOST_HOLD_MS);
+  requestRender();
+}
+
+let seenWatched = false;
+
+function watchSeen() {
+  if (seenWatched || state.app === null) return;
+  seenWatched = true;
+  comeBack();
+  window.addEventListener("pagehide", noteSeen);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") noteSeen();
+    else comeBack();
+  });
+}
+
+// The canvas the ghost listeners are on. The page swaps in a fresh canvas when a backend fails,
+// so they move to the new one.
+let ghostCanvas = null;
+
+// A pointer passing over a ghost, or a click on it, clears it. A drag does not.
+function watchGhosts() {
+  if (ghostCanvas === canvas) return;
+  ghostCanvas = canvas;
+  const clear = (event) => {
+    if (state.app === null || event.currentTarget !== canvas) return;
+    if (event.type === "pointermove" && event.buttons !== 0) return;
+    const rect = canvas.getBoundingClientRect();
+    if (state.app.clear_ghost_at(event.clientX - rect.left, event.clientY - rect.top)) requestRender();
+  };
+  canvas.addEventListener("pointermove", clear);
+  canvas.addEventListener("pointerup", clear);
+}
+
+// The ghosts' Alt chips, made on first use. paintMarks empties the flags, and these with them.
+let ghostEls = [];
+
+// With Alt down, each ghost says how many tasks landed on its machine, above the corner of its
+// outline nearest the viewer.
+function placeGhostFlags(placedBoxes) {
+  const triples = state.altDown ? state.app.ghost_layout() : [];
+  const shown = triples.length / 3;
+  for (let i = 0; i < shown; i += 1) {
+    let el = ghostEls[i];
+    if (el === undefined) {
+      el = document.createElement("div");
+      el.className = "flag ghost";
+      el.setAttribute("aria-hidden", "true");
+      flagsEl.append(el);
+      ghostEls[i] = el;
+    }
+    const words = `${triples[3 * i + 2]} landed`;
+    if (el.textContent !== words) {
+      el.textContent = words;
+      el.size = undefined;
+    }
+    el.hidden = false;
+    if (el.size === undefined) el.size = [el.offsetWidth, el.offsetHeight];
+    const [w, h] = el.size;
+    const left = triples[3 * i] - w / 2;
+    const top = clearOf(left, triples[3 * i + 1] - LABEL_OFFSET_PX - h, w, h, placedBoxes, LABEL_PAD_PX);
+    placeFlag(el, left, top, placedBoxes);
+  }
+  for (let i = shown; i < ghostEls.length; i += 1) ghostEls[i].hidden = true;
+}
+
 // The marks come from the wasm side: each agent with its activity, the active order, each open
 // clash and each question. They are rebuilt when the view changes, and placed every frame.
 export function paintMarks() {
   startClock();
+  watchSeen();
+  watchGhosts();
   state.markState = JSON.parse(state.app.marks_json());
   flagsEl.replaceChildren();
+  ghostEls = [];
   state.flagEls = state.markState.flags.map((flag) => {
     const el = flagElement(flag);
     flagsEl.append(el);
@@ -369,6 +474,7 @@ function placeFlags(placedBoxes) {
       bottom = top - FLAG_ROW_GAP_PX;
     }
   }
+  placeGhostFlags(placedBoxes);
   return { plots, leaders };
 }
 

@@ -15,7 +15,8 @@ use acan_iso::{
     BEACON_RADIUS, BODY_RADIUS, BOT_HEIGHT, EYE_DISTANCE, PIN_HEIGHT, PLINTH_TOP, STALK_HEIGHT,
 };
 use acan_render::theme::{
-    AGENT_SLOTS, TINT_BODY0, TINT_CLASH, TINT_DIM0, TINT_SCOPE0, TINT_SHELL0, TINT_STALE,
+    AGENT_SLOTS, TINT_BODY0, TINT_CLASH, TINT_DIM0, TINT_GHOST, TINT_SCOPE0, TINT_SHELL0,
+    TINT_STALE,
 };
 use acan_render::{Beam, Instance};
 use serde::Serialize;
@@ -117,6 +118,15 @@ const BOB_PERIOD_MS: f32 = 2_400.0;
 pub const PIN_MS: f32 = 250.0;
 /// Milliseconds an agent that holds a task may be quiet before its drone reads stale.
 pub const STALE_MS: u64 = 2 * 60 * 1_000;
+/// The most ghosts the plant shows at once. The latest landings keep theirs.
+pub const GHOST_MAX: usize = 12;
+/// How far a ghost's outline stands out from its machine's footprint, in plan units.
+const GHOST_OFFSET: f32 = 3.0;
+/// A ghost's opacity, and its width in CSS px.
+const GHOST_ALPHA: f32 = 0.5;
+const GHOST_PX: f32 = 1.0;
+/// Milliseconds a ghost takes to fade out once it clears.
+pub const GHOST_FADE_MS: f32 = 400.0;
 /// The dot of a declaration whose task has no agent.
 const UNCLAIMED: &str = "#7a7a72";
 
@@ -386,14 +396,22 @@ pub struct Card {
     pub resolved: Option<String>,
 }
 
-/// The page's clock, as the marks read it. Both times are in log milliseconds. A frozen or
-/// replayed page gives no `now`, so nothing there reads stale.
+/// The page's clock, as the marks read it. Every time is in log milliseconds. A frozen or
+/// replayed page gives no `now`, so nothing there reads stale or has a ghost.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Clock {
     /// The time now, on a live page.
     pub now: Option<u64>,
-    /// When the reader last saw the page, once they come back to it after a while.
-    pub seen: Option<u64>,
+    /// The reader's last time away, once they come back to the page after a while.
+    pub away: Option<Away>,
+}
+
+/// A time the reader was away from the page: when they last saw it, and when they came back.
+/// Only what landed between the two has a ghost, so work that lands while they watch has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Away {
+    pub seen: u64,
+    pub back: u64,
 }
 
 impl Clock {
@@ -426,6 +444,36 @@ pub struct Marks {
     pub scope_tints: Vec<Option<ScopeTint>>,
     /// Scope machine names the plan does not have, so the page can say they are not drawn.
     pub unplaced: Vec<String>,
+    /// The machines where work landed while the reader was away, latest first.
+    pub ghosts: Vec<Ghost>,
+}
+
+/// A machine where work landed while the reader was away, drawn as a grey outline round its
+/// footprint on the ground until the reader looks at it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ghost {
+    /// The plan machine.
+    pub machine: usize,
+    /// How many of its tasks landed since the reader last saw the page.
+    pub count: usize,
+    /// When the latest of them landed, in log milliseconds.
+    pub at: u64,
+    /// The outline, as `[x, y, w, h]` in world units on the ground.
+    pub rect: [f32; 4],
+}
+
+impl Ghost {
+    /// The outline's corners on the ground, in turn round the rectangle.
+    #[must_use]
+    pub fn corners(&self) -> [[f32; 3]; 4] {
+        let [x, y, w, h] = self.rect;
+        [
+            [x, y, 0.0],
+            [x + w, y, 0.0],
+            [x + w, y + h, 0.0],
+            [x, y + h, 0.0],
+        ]
+    }
 }
 
 impl Marks {
@@ -467,6 +515,7 @@ impl Marks {
             abnormal,
             scope_tints: scope.tints,
             unplaced: scope.unplaced,
+            ghosts: ghosts(view, plan, clock),
         }
     }
 
@@ -991,6 +1040,18 @@ pub struct Motion {
     trails: Vec<Trail>,
     /// Whether the next sync lands every drone at once, as after a replay seek.
     cut: bool,
+    /// The ghosts shown, by plan machine.
+    ghosts: BTreeMap<usize, Haunt>,
+    /// The ghosts the reader cleared, by plan machine, with the landing each showed. A cleared
+    /// ghost stays gone until a newer task lands there.
+    cleared: BTreeMap<usize, u64>,
+}
+
+/// A ghost on show: the landing it shows, and how far its fade out has run once it clears.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Haunt {
+    at: u64,
+    fade: Option<f32>,
 }
 
 impl Motion {
@@ -1122,6 +1183,57 @@ impl Motion {
 
         self.sync_landed(marks);
         self.sync_order(marks);
+        self.sync_ghosts(marks);
+    }
+
+    /// Shows each ghost the marks give that the reader has not cleared. A ghost whose landing
+    /// changes shows again.
+    fn sync_ghosts(&mut self, marks: &Marks) {
+        let shown: BTreeMap<usize, u64> = marks
+            .ghosts
+            .iter()
+            .map(|ghost| (ghost.machine, ghost.at))
+            .collect();
+        self.cleared
+            .retain(|machine, at| shown.get(machine) == Some(at));
+        self.ghosts
+            .retain(|machine, haunt| shown.get(machine) == Some(&haunt.at));
+        for (&machine, &at) in &shown {
+            if !self.cleared.contains_key(&machine) {
+                self.ghosts
+                    .entry(machine)
+                    .or_insert(Haunt { at, fade: None });
+            }
+        }
+    }
+
+    /// Starts the fade out of the ghost on plan machine `machine`. Returns whether one was there
+    /// and had not begun to fade.
+    pub fn clear_ghost(&mut self, machine: usize) -> bool {
+        let Some(haunt) = self.ghosts.get_mut(&machine) else {
+            return false;
+        };
+        if haunt.fade.is_some() {
+            return false;
+        }
+        haunt.fade = Some(0.0);
+        true
+    }
+
+    /// Starts the fade out of every ghost. Returns whether any began to fade.
+    pub fn clear_ghosts(&mut self) -> bool {
+        let machines: Vec<usize> = self.ghosts.keys().copied().collect();
+        machines
+            .into_iter()
+            .fold(false, |any, machine| self.clear_ghost(machine) | any)
+    }
+
+    /// The opacity of the ghost on plan machine `machine` now, or `None` when it shows none.
+    #[must_use]
+    pub fn ghost_alpha(&self, machine: usize) -> Option<f32> {
+        let haunt = self.ghosts.get(&machine)?;
+        let left = haunt.fade.map_or(1.0, |fade| 1.0 - fade / GHOST_FADE_MS);
+        (left > 0.0).then_some(GHOST_ALPHA * left)
     }
 
     /// Points a drone at its machine. A drone turns when the spot it faces changes, and a still
@@ -1240,7 +1352,35 @@ impl Motion {
             .any(|landing| landing.elapsed < LANDED_HOLD_MS);
         let fading = !self.fades.is_empty();
         let trailing = !self.trails.is_empty();
-        bodies || turning || pins || leaving || holding || fading || trailing || self.pulsing
+        let ghosting = self.advance_ghosts(dt);
+        bodies
+            || turning
+            || pins
+            || leaving
+            || holding
+            || fading
+            || trailing
+            || ghosting
+            || self.pulsing
+    }
+
+    /// Moves each ghost's fade on, and drops the ghosts that have faded. Returns whether any is
+    /// still fading.
+    fn advance_ghosts(&mut self, dt: f32) -> bool {
+        let mut gone = Vec::new();
+        for (&machine, haunt) in &mut self.ghosts {
+            if let Some(fade) = haunt.fade.as_mut() {
+                *fade += dt;
+                if *fade >= GHOST_FADE_MS {
+                    gone.push((machine, haunt.at));
+                }
+            }
+        }
+        for (machine, at) in gone {
+            self.ghosts.remove(&machine);
+            self.cleared.insert(machine, at);
+        }
+        self.ghosts.values().any(|haunt| haunt.fade.is_some())
     }
 
     /// How far a working agent's beacon has swollen now, from 0 at rest to 1 at the top of a pulse.
@@ -1551,6 +1691,29 @@ pub fn trail_beams(motion: &Motion, dpr: f32, riding: Option<&str>) -> Vec<Beam>
         .collect()
 }
 
+/// The ghosts now, each a grey loop of four strokes round its machine's footprint on the ground.
+#[must_use]
+pub fn ghost_beams(motion: &Motion, marks: &Marks, dpr: f32) -> Vec<Beam> {
+    let tint = u8::try_from(TINT_GHOST).expect("tint slots fit in a byte");
+    marks
+        .ghosts
+        .iter()
+        .filter_map(|ghost| Some((ghost.corners(), motion.ghost_alpha(ghost.machine)?)))
+        .flat_map(|(corners, alpha)| {
+            (0..4).map(move |i| Beam {
+                from: corners[i],
+                to: corners[(i + 1) % 4],
+                origin: [0.0; 3],
+                grow: [0.0; 2],
+                turn: 0.0,
+                tint,
+                alpha,
+                width_px: GHOST_PX * dpr,
+            })
+        })
+        .collect()
+}
+
 /// Where a flag anchors on screen, in CSS px, given its point `at` in world units and how the
 /// camera projects a world point to the screen. A drone's flag anchors above its crown, and the
 /// page stacks the flags of one machine above it with a leader. A clash flag anchors to the right
@@ -1729,6 +1892,56 @@ fn place(
         });
     }
     (bodies, pins(view, plan, stands))
+}
+
+/// The machines where a task landed while the reader was away, latest first and at most
+/// [`GHOST_MAX`]. Only a live page that knows when it was last seen has any.
+fn ghosts(view: &View, plan: &Plan, clock: Clock) -> Vec<Ghost> {
+    let (Some(_), Some(away)) = (clock.now, clock.away) else {
+        return Vec::new();
+    };
+    let while_away = |at: &&u64| **at > away.seen && **at <= away.back;
+    let mut ghosts: Vec<Ghost> = plan
+        .machines
+        .iter()
+        .zip(&view.machines)
+        .enumerate()
+        .filter_map(|(machine, (plan_machine, seen_machine))| {
+            let count = seen_machine.landings.iter().filter(while_away).count();
+            let at = *seen_machine.landings.iter().rfind(while_away)?;
+            let [x, y] = plan_machine.min;
+            let [w, h] = plan_machine.size;
+            (count > 0).then_some(Ghost {
+                machine,
+                count,
+                at,
+                rect: [
+                    x - GHOST_OFFSET,
+                    y - GHOST_OFFSET,
+                    w + 2.0 * GHOST_OFFSET,
+                    h + 2.0 * GHOST_OFFSET,
+                ],
+            })
+        })
+        .collect();
+    ghosts.sort_by(|a, b| b.at.cmp(&a.at).then(a.machine.cmp(&b.machine)));
+    ghosts.truncate(GHOST_MAX);
+    ghosts
+}
+
+/// Whether the screen point `p` lies inside the polygon `quad`, by the even-odd rule.
+#[must_use]
+pub fn inside_quad(quad: &[[f32; 2]], p: [f32; 2]) -> bool {
+    let mut inside = false;
+    let mut j = quad.len().wrapping_sub(1);
+    for (i, &[xi, yi]) in quad.iter().enumerate() {
+        let [xj, yj] = quad[j];
+        if (yi > p[1]) != (yj > p[1]) && p[0] < (xj - xi) * (p[1] - yi) / (yj - yi) + xi {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
 }
 
 /// Whether an agent's drone reads stale: it holds a task and has been quiet for [`STALE_MS`].
@@ -2708,7 +2921,7 @@ mod tests {
         let slots = slots_for(&view);
         let stands = stands(&plan);
         let at = |now: Option<u64>| {
-            let clock = Clock { now, seen: None };
+            let clock = Clock { now, away: None };
             Marks::build_at(&view, &plan, &stands, &slots, clock).bodies[0].state
         };
         assert_eq!(
@@ -2725,7 +2938,7 @@ mod tests {
             &slots,
             Clock {
                 now: Some(heard + STALE_MS),
-                seen: None,
+                away: None,
             },
         );
         let fresh = Marks::build(&view, &plan, &stands, &slots);
@@ -3228,5 +3441,167 @@ mod tests {
         let ridden = beams(&motion, &marks, 1.0, Some("a"));
         assert_eq!(ridden.len(), 1, "the riding drone has no beam");
         assert_eq!(ridden[0].origin, [9.0, 3.0, 40.0]);
+    }
+
+    /// The scripted view with tasks landed on src/api at `api` and on src/ui at `ui`.
+    fn landed_view(plan: &Plan, api: &[u64], ui: &[u64]) -> View {
+        let (_origin, log, _index) = scripted();
+        let mut view = Mirror::from_log(log).expect("the log replays").view(plan);
+        view.machines[machine(plan, "src/api")].landings = api.to_vec();
+        view.machines[machine(plan, "src/ui")].landings = ui.to_vec();
+        view
+    }
+
+    fn ghosts_at(view: &View, plan: &Plan, now: Option<u64>, seen: Option<u64>) -> Vec<Ghost> {
+        let slots = slots_for(view);
+        let away = seen.map(|seen| Away { seen, back: 20_000 });
+        Marks::build_at(view, plan, &stands(plan), &slots, Clock { now, away }).ghosts
+    }
+
+    #[test]
+    fn a_machine_where_work_landed_while_the_reader_was_away_has_a_ghost() {
+        let plan = plan();
+        let view = landed_view(&plan, &[5_000, 9_000, 12_000], &[7_000]);
+        let ghosts = ghosts_at(&view, &plan, Some(30_000), Some(8_000));
+        assert_eq!(ghosts.len(), 1, "only src/api landed after last seen");
+        let ghost = ghosts[0];
+        assert_eq!(ghost.machine, machine(&plan, "src/api"));
+        assert_eq!(ghost.count, 2, "two of its tasks landed since");
+        assert_eq!(ghost.at, 12_000);
+        let footprint = &plan.machines[ghost.machine];
+        assert_eq!(
+            ghost.rect,
+            [
+                footprint.min[0] - GHOST_OFFSET,
+                footprint.min[1] - GHOST_OFFSET,
+                footprint.size[0] + 2.0 * GHOST_OFFSET,
+                footprint.size[1] + 2.0 * GHOST_OFFSET,
+            ],
+            "the outline stands out from the footprint"
+        );
+        assert!(ghost.corners().iter().all(|corner| corner[2] == 0.0));
+        let later = landed_view(&plan, &[5_000, 9_000, 12_000], &[7_000, 25_000]);
+        let ghosts = ghosts_at(&later, &plan, Some(30_000), Some(8_000));
+        assert_eq!(
+            ghosts.len(),
+            1,
+            "work that lands after the reader is back has no ghost"
+        );
+        let both = ghosts_at(&view, &plan, Some(20_000), Some(6_000));
+        assert_eq!(
+            both.iter().map(|ghost| ghost.at).collect::<Vec<_>>(),
+            [12_000, 7_000],
+            "latest first"
+        );
+    }
+
+    #[test]
+    fn a_frozen_or_replayed_page_or_one_never_left_has_no_ghosts() {
+        let plan = plan();
+        let view = landed_view(&plan, &[9_000], &[9_000]);
+        assert!(
+            ghosts_at(&view, &plan, None, Some(1_000)).is_empty(),
+            "no clock"
+        );
+        assert!(
+            ghosts_at(&view, &plan, Some(20_000), None).is_empty(),
+            "never away"
+        );
+        assert!(
+            ghosts_at(&view, &plan, Some(20_000), Some(9_000)).is_empty(),
+            "seen since"
+        );
+    }
+
+    #[test]
+    fn ghosts_keep_the_latest_dozen() {
+        let small = plan();
+        let template = landed_view(&small, &[], &[]).machines[0].clone();
+        let mut plan = Plan::default();
+        let mut view = landed_view(&small, &[], &[]);
+        view.machines.clear();
+        for i in 0..20_u64 {
+            let name = format!("m{i}");
+            plan.machines.push(crate::plan::PlanMachine {
+                name: name.clone(),
+                min: [i as f32 * 100.0, 0.0],
+                size: [80.0, 80.0],
+            });
+            view.machines.push(crate::mirror::MachineView {
+                name,
+                landings: vec![2_000 + i],
+                ..template.clone()
+            });
+        }
+        let clock = Clock {
+            now: Some(20_000),
+            away: Some(Away {
+                seen: 1_000,
+                back: 20_000,
+            }),
+        };
+        let ghosts = ghosts(&view, &plan, clock);
+        assert_eq!(ghosts.len(), GHOST_MAX);
+        assert_eq!(ghosts[0].machine, 19, "the latest landing first");
+        assert_eq!(ghosts[GHOST_MAX - 1].machine, 20 - GHOST_MAX);
+    }
+
+    #[test]
+    fn a_ghost_is_a_grey_loop_that_fades_once_cleared_and_stays_gone() {
+        let plan = plan();
+        let view = landed_view(&plan, &[9_000], &[]);
+        let clock = Clock {
+            now: Some(20_000),
+            away: Some(Away {
+                seen: 1_000,
+                back: 20_000,
+            }),
+        };
+        let marks = Marks::build_at(&view, &plan, &stands(&plan), &slots_for(&view), clock);
+        let api = machine(&plan, "src/api");
+        let mut motion = Motion::new(false);
+        motion.sync(&marks);
+        let loop_ = ghost_beams(&motion, &marks, 2.0);
+        assert_eq!(loop_.len(), 4, "one stroke loop");
+        assert!(loop_.iter().all(|beam| {
+            u32::from(beam.tint) == TINT_GHOST
+                && beam.alpha == GHOST_ALPHA
+                && beam.width_px == 2.0
+                && beam.from[2] == 0.0
+        }));
+        for (i, beam) in loop_.iter().enumerate() {
+            assert_eq!(beam.to, loop_[(i + 1) % 4].from, "the sides close");
+        }
+        assert!(!motion.advance(1_000.0), "a ghost at rest needs no frames");
+        assert!(motion.clear_ghost(api));
+        assert!(!motion.clear_ghost(api), "it is already fading");
+        assert!(motion.advance(GHOST_FADE_MS / 2.0), "the fade runs");
+        let half = motion.ghost_alpha(api).expect("still fading");
+        assert!((half - GHOST_ALPHA / 2.0).abs() < 1e-4);
+        assert!(!motion.advance(GHOST_FADE_MS));
+        assert_eq!(motion.ghost_alpha(api), None);
+        assert!(ghost_beams(&motion, &marks, 2.0).is_empty());
+        motion.sync(&marks);
+        assert_eq!(motion.ghost_alpha(api), None, "a cleared ghost stays gone");
+        let newer = landed_view(&plan, &[9_000, 15_000], &[]);
+        let marks = Marks::build_at(&newer, &plan, &stands(&plan), &slots_for(&newer), clock);
+        motion.sync(&marks);
+        assert_eq!(
+            motion.ghost_alpha(api),
+            Some(GHOST_ALPHA),
+            "a newer landing brings it back"
+        );
+        assert!(motion.clear_ghosts());
+        assert!(!motion.advance(GHOST_FADE_MS));
+        assert_eq!(motion.ghost_alpha(api), None);
+    }
+
+    #[test]
+    fn a_point_is_inside_a_quad_by_the_even_odd_rule() {
+        let quad = [[0.0, 0.0], [10.0, 2.0], [12.0, 12.0], [-2.0, 10.0]];
+        assert!(inside_quad(&quad, [5.0, 5.0]));
+        assert!(!inside_quad(&quad, [11.0, 1.0]));
+        assert!(!inside_quad(&quad, [-5.0, 5.0]));
+        assert!(!inside_quad(&[], [0.0, 0.0]));
     }
 }

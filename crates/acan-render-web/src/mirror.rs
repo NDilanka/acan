@@ -228,7 +228,7 @@ impl Mirror {
             .filter(|clash| unsettled(clash))
             .flat_map(|clash| plan.machines_at(clash.key.at()))
             .collect();
-        let mut landed_at: BTreeMap<usize, u64> = BTreeMap::new();
+        let mut landings: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
         for (task, &at) in &self.landed_at {
             let Some(machine) = world
                 .task(*task)
@@ -236,8 +236,10 @@ impl Mirror {
             else {
                 continue;
             };
-            let latest = landed_at.entry(machine).or_insert(at);
-            *latest = (*latest).max(at);
+            landings.entry(machine).or_default().push(at);
+        }
+        for times in landings.values_mut() {
+            times.sort_unstable();
         }
         let machines = plan
             .machines
@@ -248,7 +250,8 @@ impl Mirror {
                 min: m.min,
                 size: m.size,
                 abnormal: abnormal.contains(&i),
-                landed_at: landed_at.get(&i).copied(),
+                landed_at: landings.get(&i).and_then(|times| times.last().copied()),
+                landings: landings.remove(&i).unwrap_or_default(),
             })
             .collect();
 
@@ -498,6 +501,8 @@ pub struct MachineView {
     pub abnormal: bool,
     /// When the last of its tasks landed, in log milliseconds.
     pub landed_at: Option<u64>,
+    /// When each of its tasks landed, in log milliseconds, oldest first.
+    pub landings: Vec<u64>,
 }
 
 /// An order pinned on a machine.
@@ -1405,11 +1410,15 @@ mod tests {
         let view = Mirror::from_log(log).expect("the log replays").view(&plan);
         let api = machine_index(&view, "src/api");
         assert_eq!(view.machines[api].landed_at, landed.iter().max().copied());
+        let mut oldest_first = landed.clone();
+        oldest_first.sort_unstable();
+        assert_eq!(view.machines[api].landings, oldest_first);
         let ui = machine_index(&view, "src/ui");
         assert_eq!(
             view.machines[ui].landed_at, None,
             "nothing landed on src/ui"
         );
+        assert!(view.machines[ui].landings.is_empty());
     }
 
     #[test]

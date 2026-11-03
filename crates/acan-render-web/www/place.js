@@ -113,3 +113,22 @@ export function placeOverlays({ placed, labels, plots, width, height, pad }) {
   }
   return { labelShown, plotTops, plotLeaders };
 }
+
+// The key under which the page keeps when the reader last saw it live.
+export const LAST_SEEN_KEY = "acan.lastSeen";
+
+// How long the reader must be away before the page shows, as ghosts, what landed meanwhile.
+export const AWAY_MS = 5 * 60_000;
+
+// How long the ghosts stay after the reader comes back, if nothing clears them first.
+export const GHOST_HOLD_MS = 90_000;
+
+// When the reader last saw the page, for a return at `now` with `stored` as the page kept it, or
+// 0 when there is nothing to show: the page is not live, nothing usable was kept, or the reader
+// was away less than AWAY_MS.
+export function seenOnReturn(stored, now, live) {
+  if (!live || stored === null || stored === undefined) return 0;
+  const seen = Number(stored);
+  if (!Number.isFinite(seen) || seen <= 0 || seen > now) return 0;
+  return now - seen >= AWAY_MS ? seen : 0;
+}

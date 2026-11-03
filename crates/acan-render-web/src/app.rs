@@ -368,19 +368,23 @@ impl App {
     /// stale. Zero or less clears the clock, as a page that stops being live does. A still page
     /// ignores it.
     pub fn set_now(&mut self, ms: f64) {
-        let now = (ms > 0.0 && !self.still).then(|| ms as u64);
+        let now = (ms > 0.0 && !self.still).then_some(ms as u64);
         if now != self.clock.now {
             self.clock.now = now;
             self.dirty = true;
         }
     }
 
-    /// Tells the marks when the reader last saw the page, in epoch milliseconds, once they come
-    /// back after a while. Zero or less clears it. A still page ignores it.
-    pub fn set_seen(&mut self, ms: f64) {
-        let seen = (ms > 0.0 && !self.still).then(|| ms as u64);
-        if seen != self.clock.seen {
-            self.clock.seen = seen;
+    /// Tells the marks when the reader last saw the page and when they came back to it, in epoch
+    /// milliseconds, once they were away a while. What landed between the two shows as ghosts.
+    /// A time of zero or less clears it. A still page ignores it.
+    pub fn set_seen(&mut self, seen_ms: f64, back_ms: f64) {
+        let away = (seen_ms > 0.0 && back_ms >= seen_ms && !self.still).then_some(marks::Away {
+            seen: seen_ms as u64,
+            back: back_ms as u64,
+        });
+        if away != self.clock.away {
+            self.clock.away = away;
             self.dirty = true;
         }
     }
@@ -1006,6 +1010,50 @@ impl App {
             .collect()
     }
 
+    /// Each ghost on show, as flat `[css x, css y, landed count]` triples, at the corner of its
+    /// outline lowest on screen. Alt labels each with how many tasks landed there.
+    pub fn ghost_layout(&self) -> Vec<f32> {
+        self.marks
+            .ghosts
+            .iter()
+            .filter(|ghost| self.motion.ghost_alpha(ghost.machine).is_some())
+            .flat_map(|ghost| {
+                let [x, y] = ghost
+                    .corners()
+                    .map(|corner| self.screen(corner))
+                    .into_iter()
+                    .fold([0.0, f32::NEG_INFINITY], |low, p| {
+                        if p[1] > low[1] { p } else { low }
+                    });
+                [x, y, ghost.count as f32]
+            })
+            .collect()
+    }
+
+    /// Clears the ghost whose outline holds the CSS point `(x, y)`, as the reader's pointer
+    /// passing over it or a click on it does. Returns whether one began to fade.
+    pub fn clear_ghost_at(&mut self, x: f32, y: f32) -> bool {
+        let shown = self
+            .marks
+            .ghosts
+            .iter()
+            .filter(|ghost| self.motion.ghost_alpha(ghost.machine).is_some());
+        let hit = shown.into_iter().find(|ghost| {
+            let quad = ghost.corners().map(|corner| self.screen(corner));
+            marks::inside_quad(&quad, [x, y])
+        });
+        let Some(machine) = hit.map(|ghost| ghost.machine) else {
+            return false;
+        };
+        self.motion.clear_ghost(machine)
+    }
+
+    /// Clears every ghost, as the page does a while after the reader comes back. Returns whether
+    /// any began to fade.
+    pub fn clear_ghosts(&mut self) -> bool {
+        self.motion.clear_ghosts()
+    }
+
     /// Each drone's disc on screen, as flat `[css x, css y, css radius]` triples, in the order the
     /// marks list the drones. The page keeps flags and names clear of them.
     pub fn drone_layout(&self) -> Vec<f32> {
@@ -1207,6 +1255,9 @@ impl App {
         scene
             .beams
             .extend(marks::trail_beams(&self.motion, self.dpr, riding));
+        scene
+            .beams
+            .extend(marks::ghost_beams(&self.motion, &self.marks, self.dpr));
         scene.instances.extend(marks::mark_instances(
             &self.motion,
             &self.marks,
