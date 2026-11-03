@@ -7,7 +7,8 @@ import { machineQuad } from "./order.js";
 import { canvas, flagsEl, labelsEl, leadersEl, state } from "./state.js";
 import { requestRender } from "./main.js";
 import {
-  GHOST_HOLD_MS, LAST_SEEN_KEY, boxAt, clearOf, inView, placeOverlays, seenOnReturn, unnamedSpots,
+  BADGE_PX, GHOST_HOLD_MS, LAST_SEEN_KEY, badgeBoxes, boxAt, clearOf, inView, placeOverlays, seenOnReturn,
+  unnamedSpots,
 } from "./place.js";
 import { questionOfFlag } from "./question.js";
 import { isLive } from "./stream.js";
@@ -281,6 +282,51 @@ function watchGhosts() {
 // The ghosts' Alt chips, made on first use. paintMarks empties the flags, and these with them.
 let ghostEls = [];
 
+// Each clash's two badge elements, by clash index, as paintMarks last made them.
+let badgeEls = new Map();
+
+function badgeElement(badge, clash) {
+  const el = document.createElement("div");
+  el.className = "badge";
+  el.textContent = badge.text;
+  el.title = "open the clash card";
+  Object.assign(el.style, {
+    position: "absolute",
+    left: "0",
+    top: "0",
+    width: `${BADGE_PX}px`,
+    height: `${BADGE_PX}px`,
+    borderRadius: "50%",
+    background: badge.hue,
+    color: "#ffffff",
+    font: `700 10px/${BADGE_PX}px var(--sans)`,
+    textAlign: "center",
+    letterSpacing: "-0.02em",
+    pointerEvents: "auto",
+    cursor: "pointer",
+  });
+  el.addEventListener("click", () => openCard(clash));
+  return el;
+}
+
+// The badges sit either side of their diamonds. They are placed before the flags, so no flag or
+// name lands on one.
+function placeBadges(placedBoxes) {
+  const quads = state.app.badge_layout();
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  for (let k = 0; k < quads.length; k += 4) {
+    const pair = badgeEls.get(quads[k]);
+    if (pair === undefined) continue;
+    badgeBoxes(quads[k + 1], quads[k + 2], quads[k + 3]).forEach((box, i) => {
+      const inside = inView(box, width, height);
+      pair[i].style.visibility = inside ? "visible" : "hidden";
+      pair[i].style.transform = `translate(${box.left}px, ${box.top}px)`;
+      if (inside) placedBoxes.push(box);
+    });
+  }
+}
+
 // With Alt down, each ghost says how many tasks landed on its machine, above the corner of its
 // outline nearest the viewer.
 function placeGhostFlags(placedBoxes) {
@@ -319,6 +365,12 @@ export function paintMarks() {
   state.markState = JSON.parse(state.app.marks_json());
   flagsEl.replaceChildren();
   ghostEls = [];
+  badgeEls = new Map();
+  for (const badges of state.markState.badges) {
+    const pair = [badgeElement(badges.a, badges.clash), badgeElement(badges.b, badges.clash)];
+    flagsEl.append(...pair);
+    badgeEls.set(badges.clash, pair);
+  }
   state.flagEls = state.markState.flags.map((flag) => {
     const el = flagElement(flag);
     flagsEl.append(el);
@@ -427,6 +479,7 @@ function placeFlags(placedBoxes) {
     const [x, y, r] = [discs[k], discs[k + 1], discs[k + 2]];
     placedBoxes.push({ left: x - r, right: x + r, top: y - r, bottom: y + r });
   }
+  placeBadges(placedBoxes);
   const quads = state.app.flag_layout();
   const columns = new Map();
   for (let k = 0; k < quads.length; k += 4) {

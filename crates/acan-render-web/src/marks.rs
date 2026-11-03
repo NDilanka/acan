@@ -56,7 +56,7 @@ const ORDER_LIFT: f32 = 4.0;
 /// either one that would be shorter. The drone's body is sized to be about 40 px at fit zoom, so this
 /// floor only applies when the view is zoomed out past fit.
 pub const BOT_MIN_PX: f32 = 24.0;
-pub const PIN_MIN_PX: f32 = 18.0;
+pub const PIN_MIN_PX: f32 = 22.0;
 /// The shortest a beacon is drawn on screen, in CSS px, when it is at rest. Only a working
 /// agent's drone has a beacon.
 const BEACON_PX: f32 = 7.0;
@@ -85,6 +85,11 @@ pub const LEAVE_MS: f32 = 400.0;
 const LANDED_INSET: f32 = 2.0;
 /// The diamond's half width as a share of its height. It sets where a clash label starts.
 const DIAMOND_HALF_WIDTH: f32 = 0.42;
+/// A clash badge's diameter, and its gap from the diamond's side, in CSS px.
+pub const BADGE_PX: f32 = 16.0;
+const BADGE_GAP_PX: f32 = 3.0;
+/// The most characters a badge's initials take.
+const INITIALS_MAX: usize = 3;
 /// Gap between a bot's crown or a diamond and its flag, in CSS px.
 const FLAG_GAP_PX: f32 = 8.0;
 /// How far above its place a body starts its drop in, how far a leaving body rises, and how far
@@ -301,6 +306,107 @@ pub struct Pin {
     /// Where the stalk stands, in world units: the machine's centre on its top. The diamond sits
     /// on the stalk's top, [`STALK_HEIGHT`] above this point.
     pub at: [f32; 3],
+}
+
+/// The round badge on one side of a clash diamond: the initials of the agent that holds one of
+/// the two tasks, on its hue, or a grey `?` for a task no agent holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Badge {
+    pub text: String,
+    pub hue: String,
+}
+
+/// A clash's two badges: task `a`'s on the diamond's left, task `b`'s on its right.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Badges {
+    /// The index of the clash in the view, so a click opens its card.
+    pub clash: usize,
+    pub a: Badge,
+    pub b: Badge,
+}
+
+/// An agent's initials: the first letter of its id in upper case, then its trailing digits, at
+/// most [`INITIALS_MAX`] characters. `w2` gives `W2`, and `agent-a` gives `A`.
+#[must_use]
+pub fn initials(id: &str) -> String {
+    initials_with(id, 0)
+}
+
+/// The initials of the two agents on one clash. When they would read the same, each takes the
+/// next letter of its id too, so `agent` and `anna` give `AG` and `AN`.
+#[must_use]
+pub fn pair_initials(a: &str, b: &str) -> (String, String) {
+    let (first, second) = (initials(a), initials(b));
+    if first == second {
+        (initials_with(a, 1), initials_with(b, 1))
+    } else {
+        (first, second)
+    }
+}
+
+/// The first letter of `id`, then `more` of the letters after it, then its trailing digits, in
+/// upper case and cut to [`INITIALS_MAX`] characters.
+fn initials_with(id: &str, more: usize) -> String {
+    let digits: String = {
+        let tail: Vec<char> = id.chars().rev().take_while(char::is_ascii_digit).collect();
+        tail.into_iter().rev().collect()
+    };
+    let letters = id
+        .chars()
+        .filter(|c| c.is_alphabetic())
+        .take(1 + more)
+        .flat_map(char::to_uppercase);
+    let mut out: String = letters.chain(digits.chars()).take(INITIALS_MAX).collect();
+    if out.is_empty() {
+        out.push('?');
+    }
+    out
+}
+
+/// The badges of each pin's clash, in pin order.
+#[must_use]
+pub fn clash_badges(view: &View, pins: &[Pin], slots: &AgentSlots) -> Vec<Badges> {
+    let holder = |task: TaskId| {
+        view.tasks
+            .iter()
+            .find(|candidate| candidate.id == task)
+            .and_then(|candidate| candidate.agent.as_ref())
+            .map(ToString::to_string)
+    };
+    pins.iter()
+        .filter_map(|pin| {
+            let clash = view.clashes.get(pin.clash)?;
+            let (a, b) = (holder(clash.a), holder(clash.b));
+            let (a_text, b_text) = match (&a, &b) {
+                (Some(a), Some(b)) => pair_initials(a, b),
+                _ => (
+                    a.as_deref().map_or_else(|| "?".to_owned(), initials),
+                    b.as_deref().map_or_else(|| "?".to_owned(), initials),
+                ),
+            };
+            let badge = |agent: &Option<String>, text: String| Badge {
+                text,
+                hue: agent
+                    .as_deref()
+                    .map_or_else(|| UNCLAIMED.to_owned(), |id| hue_css(slots.slot(id))),
+            };
+            Some(Badges {
+                clash: pin.clash,
+                a: badge(&a, a_text),
+                b: badge(&b, b_text),
+            })
+        })
+        .collect()
+}
+
+/// The centres of a diamond's two badges on screen, in CSS px, left then right, given the
+/// diamond's foot in world units.
+#[must_use]
+pub fn badge_centres(foot: [f32; 3], project: impl Fn([f32; 3]) -> [f32; 2]) -> [[f32; 2]; 2] {
+    let (base, height) = visual_extent(foot, PIN_HEIGHT, PIN_MIN_PX, &project);
+    let y = base[1] - height * 0.5;
+    let reach = height * DIAMOND_HALF_WIDTH + BADGE_GAP_PX + BADGE_PX * 0.5;
+    [[base[0] - reach, y], [base[0] + reach, y]]
 }
 
 /// What a flag's anchor follows while the marks move.
@@ -1727,11 +1833,8 @@ pub fn flag_anchor(flag: &Flag, at: [f32; 3], project: impl Fn([f32; 3]) -> [f32
             [centre[0], centre[1] - height * 0.5 - FLAG_GAP_PX]
         }
         FlagKind::Clash => {
-            let (foot, height) = visual_extent(at, PIN_HEIGHT, PIN_MIN_PX, &project);
-            [
-                foot[0] + height * DIAMOND_HALF_WIDTH + FLAG_GAP_PX,
-                foot[1] - height * 0.5,
-            ]
+            let [_, right] = badge_centres(at, &project);
+            [right[0] + BADGE_PX * 0.5 + FLAG_GAP_PX, right[1]]
         }
         FlagKind::Landed => {
             let [x, y] = project(at);
@@ -2834,9 +2937,92 @@ mod tests {
 
         let clash = flag(FlagKind::Clash);
         let label = flag_anchor(&clash, centre, project);
+        let [left, right] = badge_centres(centre, project);
+        assert!(left[0] < centre[0] && right[0] > centre[0]);
+        assert_eq!(left[1], right[1], "the badges sit level");
+        let half = PIN_MIN_PX * DIAMOND_HALF_WIDTH;
         assert!(
-            label[0] > centre[0],
-            "the label starts right of the diamond"
+            right[0] - BADGE_PX * 0.5 > centre[0] + half,
+            "the badge is clear of the diamond"
+        );
+        assert_eq!(
+            label,
+            [right[0] + BADGE_PX * 0.5 + FLAG_GAP_PX, right[1]],
+            "the label starts right of the right badge"
+        );
+    }
+
+    #[test]
+    fn initials_are_the_first_letter_and_the_trailing_digits() {
+        assert_eq!(initials("w2"), "W2");
+        assert_eq!(initials("agent-a"), "A");
+        assert_eq!(initials("worker-12"), "W12");
+        assert_eq!(initials("worker-1234"), "W12", "at most three characters");
+        assert_eq!(initials("42"), "42");
+        assert_eq!(initials(""), "?");
+        assert_eq!(
+            pair_initials("agent", "anna"),
+            ("AG".to_owned(), "AN".to_owned())
+        );
+        assert_eq!(
+            pair_initials("w2", "w3"),
+            ("W2".to_owned(), "W3".to_owned())
+        );
+        assert_eq!(
+            pair_initials("agent-a", "agent-b"),
+            ("AG".to_owned(), "AG".to_owned()),
+            "the next letter is all a pair gets"
+        );
+    }
+
+    #[test]
+    fn a_clash_has_a_badge_in_each_agents_hue_and_a_grey_query_for_no_agent() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let mut view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let slots = slots_for(&view);
+        let marks = Marks::build(&view, &plan, &stands(&plan), &slots);
+        assert!(!marks.pins.is_empty(), "the script has a clash");
+        let badges = clash_badges(&view, &marks.pins, &slots);
+        assert_eq!(badges.len(), marks.pins.len());
+        let clash = &view.clashes[badges[0].clash];
+        let holder = |task: TaskId| {
+            view.tasks
+                .iter()
+                .find(|candidate| candidate.id == task)
+                .and_then(|candidate| candidate.agent.as_ref())
+                .map(ToString::to_string)
+                .expect("the script claims both tasks")
+        };
+        let (a, b) = (holder(clash.a), holder(clash.b));
+        let (a_text, b_text) = pair_initials(&a, &b);
+        assert_eq!(
+            badges[0].a,
+            Badge {
+                text: a_text,
+                hue: hue_css(slots.slot(&a))
+            }
+        );
+        assert_eq!(
+            badges[0].b,
+            Badge {
+                text: b_text,
+                hue: hue_css(slots.slot(&b))
+            }
+        );
+        let task_b = clash.b;
+        for task in &mut view.tasks {
+            if task.id == task_b {
+                task.agent = None;
+            }
+        }
+        let badges = clash_badges(&view, &marks.pins, &slots);
+        assert_eq!(
+            badges[0].b,
+            Badge {
+                text: "?".to_owned(),
+                hue: UNCLAIMED.to_owned()
+            }
         );
     }
 

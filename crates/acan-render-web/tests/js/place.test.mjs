@@ -3,7 +3,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { boxAt, clearOf, overlaps, placeOverlays, unnamedSpots } from "../../www/place.js";
+import {
+  BADGE_PX, badgeBoxes, boxAt, clearOf, overlaps, placeOverlays, unnamedSpots,
+} from "../../www/place.js";
 
 const PAD = 4;
 const VIEW = { width: 800, height: 600 };
@@ -228,4 +230,27 @@ test("a machine the wasm side left unnamed gets a spot under its front corner", 
   ];
   const spots = unnamedSpots(machines, new Set([1]), VIEW.width, VIEW.height, 18);
   assert.deepEqual(spots, [{ index: 0, x: 130, y: 160 }], "named, too small and off screen get none");
+});
+
+test("a clash's badges are round boxes either side of its diamond, level with its centre", () => {
+  const [left, right] = badgeBoxes(100, 140, 50);
+  assert.deepEqual(left, { left: 100 - BADGE_PX / 2, right: 100 + BADGE_PX / 2, top: 42, bottom: 58 });
+  assert.deepEqual(right, { left: 132, right: 148, top: 42, bottom: 58 });
+  assert.equal(overlaps(left, right), false);
+});
+
+test("a clash label that starts right of its right badge keeps its place beside the badges", () => {
+  const badges = badgeBoxes(100, 140, 50);
+  // The wasm side anchors the label a flag gap (8 px) right of the right badge's edge, and
+  // marks.js centres it on the anchor's y.
+  const x = 140 + BADGE_PX / 2 + 8;
+  const [w, h] = [90, 18];
+  const top = clearOf(x, 50 - h / 2, w, h, badges, PAD);
+  assert.equal(top, 50 - h / 2, "the badges do not push the label");
+});
+
+test("a flag placed after the badges moves clear of them", () => {
+  const badges = badgeBoxes(100, 140, 50);
+  const top = clearOf(110, 45, 40, 14, badges, PAD);
+  assert.ok(badges.every((box) => !overlaps(boxAt(110, top, 40, 14, PAD), box)));
 });

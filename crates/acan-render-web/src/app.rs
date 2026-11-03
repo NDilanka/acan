@@ -955,17 +955,21 @@ impl App {
             .collect()
     }
 
-    /// The flags, the open clash card and the scope machine names the plant lacks, as JSON:
-    /// `{"flags": [...], "card": {...} | null, "unplaced": [...]}`. The
-    /// page reads it when the view changes or a card opens. Flag `i` anchors where `flag_layout`
-    /// puts index `i`.
+    /// The flags, the open clash card, the scope machine names the plant lacks and each clash's
+    /// badges, as JSON: `{"flags": [...], "card": {...} | null, "unplaced": [...], "badges":
+    /// [...]}`. The page reads it when the view changes or a card opens. Flag `i` anchors where
+    /// `flag_layout` puts index `i`, and a clash's badges where `badge_layout` puts its clash.
     pub fn marks_json(&self) -> String {
         #[derive(serde::Serialize)]
         struct Out<'a> {
             flags: Vec<marks::Flag>,
             card: Option<marks::Card>,
             unplaced: &'a [String],
+            badges: Vec<marks::Badges>,
         }
+        let badges = self.view.as_ref().map_or_else(Vec::new, |view| {
+            marks::clash_badges(view, &self.marks.pins, &self.slots)
+        });
         let card = self.card_clash.and_then(|index| {
             let view = self.view.as_ref()?;
             let mirror = self.mirror.as_ref()?;
@@ -975,6 +979,7 @@ impl App {
             flags: self.all_flags(),
             card,
             unplaced: &self.marks.unplaced,
+            badges,
         })
         .expect("marks serialize as JSON")
     }
@@ -1006,6 +1011,20 @@ impl App {
                 let foot = self.motion.pin_at(&pin.id).unwrap_or(pin.at);
                 let [x, y] = marks::diamond_centre(foot, |p| self.screen(p));
                 [pin.clash as f32, x, y]
+            })
+            .collect()
+    }
+
+    /// Each clash's badge centres on screen, as flat `[clash index, left css x, right css x, css
+    /// y]` quads, following the diamonds as they rise and sink.
+    pub fn badge_layout(&self) -> Vec<f32> {
+        self.marks
+            .pins
+            .iter()
+            .flat_map(|pin| {
+                let foot = self.motion.pin_at(&pin.id).unwrap_or(pin.at);
+                let [left, right] = marks::badge_centres(foot, |p| self.screen(p));
+                [pin.clash as f32, left[0], right[0], left[1]]
             })
             .collect()
     }

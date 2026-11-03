@@ -114,6 +114,15 @@ export function placeOverlays({ placed, labels, plots, width, height, pad }) {
   return { labelShown, plotTops, plotLeaders };
 }
 
+// A clash badge's diameter in CSS px, as the wasm side sizes it (`marks::BADGE_PX`).
+export const BADGE_PX = 16;
+
+// The boxes of a clash's two badges, centred at (leftX, y) and (rightX, y).
+export function badgeBoxes(leftX, rightX, y, size = BADGE_PX) {
+  const half = size / 2;
+  return [leftX, rightX].map((x) => ({ left: x - half, right: x + half, top: y - half, bottom: y + half }));
+}
+
 // The key under which the page keeps when the reader last saw it live.
 export const LAST_SEEN_KEY = "acan.lastSeen";
 
