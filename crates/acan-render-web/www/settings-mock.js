@@ -4,15 +4,45 @@
 import { BUDGET_FIELDS, THEME_IDS, changedPaths, getAt, parseField } from "./settings-model.js";
 
 const LABEL_DENSITIES = ["sparse", "normal", "dense"];
-// How each section takes effect: live, client, restart, or stored (saved, no server path reads it yet).
-const APPLY = {
-  models: "live",
-  harness: "stored",
-  budgets: "stored",
-  look: "client",
-  notifications: "client",
-  projects: "restart",
-};
+// How a path's change takes effect, named as the server's `applied` names it: live, client, restart,
+// or stored (saved, no server path reads it yet). Models and the statemap budget are live; projects
+// restart, except the statemap flag, which is live.
+function labelFor(path) {
+  const [section, group, field] = path.split(".");
+  if (section === "models") return "live";
+  if (section === "harness") return "stored";
+  if (section === "projects") return group === "statemap_llm" ? "live" : "restart";
+  if (section === "budgets") return group === "call_limits" && field === "statemap" ? "live" : "stored";
+  if (section === "look" || section === "notifications") return "client";
+  return "stored";
+}
+
+// The server keys a provider's key by its name, so a change to one of its fields is that key.
+function appliedKey(path) {
+  return path.startsWith("models.keys.") ? path.split(".").slice(0, 3).join(".") : path;
+}
+
+// Every path the GET names, with its label. Names and labels only, never values.
+function appliedLabels(settings) {
+  const out = {};
+  const add = (path) => {
+    out[path] = labelFor(path);
+  };
+  for (const section of ["budgets", "look", "notifications"]) {
+    for (const path of changedPaths(settings[section], section)) add(path);
+  }
+  for (const role of Object.keys(settings.harness?.roles ?? {})) add(`harness.roles.${role}`);
+  add("harness.custom_command");
+  for (const row of settings.models?.roles ?? []) add(`models.roles.${row.role}`);
+  for (const row of settings.models?.keys ?? []) add(`models.keys.${row.provider}`);
+  add("projects.add");
+  add("projects.remove");
+  for (const project of settings.projects ?? []) {
+    add(`projects.workers.${project.id}`);
+    add(`projects.statemap_llm.${project.id}`);
+  }
+  return out;
+}
 const EXPORTS = ["receipts", "replay", "all"];
 const RECHECK = "Install it, then Recheck.";
 const CODEX_LOGIN = "Run `codex login`, then Recheck.";
@@ -175,6 +205,7 @@ export function createMockApi(initial) {
   // A member sees no tokens, and every setting reads as read only.
   function view(settings) {
     const copy = clone(settings);
+    copy.applied = appliedLabels(settings);
     if (member) {
       delete copy.tokens;
       copy.editable = false;
@@ -205,15 +236,11 @@ export function createMockApi(initial) {
     }
     state = next;
 
-    // One entry per changed field, keyed by its dotted path. A project's flag applies live; a worker
-    // count, or a project added or removed, applies at restart.
+    // Only the paths this request set, keyed as the server keys them, each with its label.
     const applied = {};
     for (const path of changedPaths(body)) {
-      const [section, field] = path.split(".");
-      if (section === "projects") {
-        const restarts = ["add", "remove", "workers"].includes(field);
-        applied[`projects.${field}`] = restarts ? "restart" : "live";
-      } else if (section in APPLY) applied[path] = APPLY[section];
+      const key = appliedKey(path);
+      applied[key] = labelFor(key);
     }
     return { status: 200, body: { settings: view(next), applied, keys } };
   }

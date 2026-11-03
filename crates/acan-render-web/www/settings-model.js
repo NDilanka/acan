@@ -220,7 +220,7 @@ export function changedPaths(body, base = "") {
 // wins, then the longest prefix (projects.workers covers projects.workers.acan). The older answer
 // keyed whole sections, which the same lookup reads as prefixes. Unknown gives undefined.
 export function appliedFor(applied, path) {
-  if (!applied || typeof applied !== "object") return undefined;
+  if (!applied || typeof applied !== "object" || typeof path !== "string") return undefined;
   if (typeof applied[path] === "string") return applied[path];
   for (let at = path.lastIndexOf("."); at > 0; at = path.lastIndexOf(".", at - 1)) {
     const prefix = path.slice(0, at);
@@ -236,6 +236,18 @@ export function appliedNote(applied, paths = Object.keys(applied ?? {})) {
   if (values.includes("restart")) return "Saved; takes effect after restart.";
   if (values.includes("stored")) return "Saved.";
   return "";
+}
+
+// The label a field shows under it for how its change takes effect, as the server's `applied` names
+// each path. An unknown label gets no text.
+const EFFECT_TEXT = {
+  live: "Live",
+  client: "Live in this browser",
+  restart: "After restart",
+  stored: "Saved; not used yet",
+};
+export function effectText(label) {
+  return EFFECT_TEXT[label] ?? "";
 }
 
 // The line under the statemap toggle: the most a scan can spend, from the statemap call limit. No
@@ -283,11 +295,12 @@ const REFUSED = {
   403: "Only the owner can do this. Nothing changed.",
 };
 
-// A data export's answer. A 409 with no recorded run is not a failure: receipts still export.
+// A data export's answer. A 409 with no recorded run is not a failure, but it refuses replays and All,
+// so the note points to Receipts, which still export.
 export function exportNote(status, body) {
   if (status === 200) return { bad: false, text: "Export downloaded." };
   if (status === 409 && body?.what === "no_recorded_run") {
-    return { bad: false, text: "No recorded run yet. Receipts still export." };
+    return { bad: false, text: "No recorded run yet. Choose Receipts to export." };
   }
   if (status === 404) return { bad: false, text: "Not on this server yet." };
   return { bad: true, text: REFUSED[status] ?? "Not exported. Nothing changed." };

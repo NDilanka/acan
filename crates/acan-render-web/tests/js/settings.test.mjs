@@ -15,6 +15,7 @@ import {
   changedPaths,
   clearNote,
   conflictNote,
+  effectText,
   hasTokens,
   exportNote,
   fieldErrors,
@@ -568,7 +569,7 @@ test("a key is stored without being returned, and the answer says it was stored"
   });
   assert.equal(put.status, 200);
   assert.deepEqual(put.body.keys, { baseten: "stored" });
-  assert.deepEqual(put.body.applied, { "models.keys.baseten.key": "live" });
+  assert.deepEqual(put.body.applied, { "models.keys.baseten": "live" });
   assert.deepEqual(
     put.body.settings.models.keys.find((key) => key.provider === "baseten"),
     { provider: "baseten", set: true, source: "saved" },
@@ -776,8 +777,34 @@ test("an export that downloads says so, and a 409 with no run gives the reason",
   assert.deepEqual(exportNote(200, null), { bad: false, text: "Export downloaded." });
   assert.deepEqual(exportNote(409, { error: "conflict", what: "no_recorded_run" }), {
     bad: false,
-    text: "No recorded run yet. Receipts still export.",
+    text: "No recorded run yet. Choose Receipts to export.",
   });
+});
+
+test("the effect label reads each server label, and a live or unknown one gets its own words", () => {
+  assert.equal(effectText("live"), "Live");
+  assert.equal(effectText("client"), "Live in this browser");
+  assert.equal(effectText("restart"), "After restart");
+  assert.equal(effectText("stored"), "Saved; not used yet");
+  assert.equal(effectText("mystery"), "");
+  assert.equal(effectText(undefined), "");
+});
+
+test("the fixture's applied map names every path the drawer can change, with its label", async () => {
+  const { body } = await createMockApi(fixture).request("GET", "/api/settings");
+  assert.equal(body.applied["budgets.call_limits.statemap"], "live");
+  assert.equal(body.applied["budgets.call_limits.worker"], "stored");
+  assert.equal(body.applied["look.theme"], "client");
+  assert.equal(body.applied["harness.roles.worker"], "stored");
+  assert.equal(body.applied["models.keys.baseten"], "live");
+  assert.equal(body.applied["projects.add"], "restart");
+  assert.equal(body.applied["projects.workers.acan"], "restart");
+  assert.equal(body.applied["projects.statemap_llm.acan"], "live");
+});
+
+test("an applied path with no label from the server is not shown", () => {
+  assert.equal(appliedFor({ "projects.workers.acan": "restart" }, "projects.workers.foo"), undefined);
+  assert.equal(effectText(appliedFor({ "projects.workers.acan": "restart" }, "projects.workers.foo")), "");
 });
 
 test("an export refused for an owner or a network reason says nothing was changed", () => {
@@ -849,12 +876,12 @@ test("the fixture has the statemap role, the statemap call limit and the project
   assert.ok(fixture.projects.every((project) => project.statemap_llm === false));
 });
 
-test("a statemap call limit is saved as a budget and reported stored", async () => {
+test("a statemap call limit is saved as a budget and reported live", async () => {
   const put = await createMockApi(fixture).request("PUT", "/api/settings", {
     budgets: { call_limits: { statemap: 40 } },
   });
   assert.equal(put.status, 200);
-  assert.deepEqual(put.body.applied, { "budgets.call_limits.statemap": "stored" });
+  assert.deepEqual(put.body.applied, { "budgets.call_limits.statemap": "live" });
   assert.equal(getAt(put.body.settings.budgets, "call_limits.statemap"), 40);
 });
 
@@ -876,7 +903,7 @@ test("a project's statemap flag is saved on or off, and applies live", async () 
   const api = createMockApi(fixture);
   const on = await api.request("PUT", "/api/settings", { projects: { statemap_llm: { acan: true } } });
   assert.equal(on.status, 200);
-  assert.deepEqual(on.body.applied, { "projects.statemap_llm": "live" });
+  assert.deepEqual(on.body.applied, { "projects.statemap_llm.acan": "live" });
   assert.equal(on.body.settings.projects.find((project) => project.id === "acan").statemap_llm, true);
   assert.equal(on.body.settings.projects.find((project) => project.id === "acan-web").statemap_llm, false);
 });
@@ -917,7 +944,7 @@ test("a worker count moves by one from 0 to 8, and stops at either end", () => {
 test("a worker count is saved per project, and applies at restart", async () => {
   const put = await createMockApi(fixture).request("PUT", "/api/settings", { projects: { workers: { acan: 4 } } });
   assert.equal(put.status, 200);
-  assert.deepEqual(put.body.applied, { "projects.workers": "restart" });
+  assert.deepEqual(put.body.applied, { "projects.workers.acan": "restart" });
   assert.equal(put.body.settings.projects.find((project) => project.id === "acan").workers, 4);
   assert.equal(put.body.settings.projects.find((project) => project.id === "acan-web").workers, 1);
 });

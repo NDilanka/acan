@@ -17,8 +17,10 @@ import {
   tokenFromRotate,
   testText,
   keyNotes,
+  appliedFor,
   appliedNote,
   changedPaths,
+  effectText,
   updateView,
   exportNote,
   clearNote,
@@ -147,9 +149,13 @@ function chip(kind, text) {
   return el("span", { class: `chip ${kind}` }, el("i", { "aria-hidden": "true" }), text ? el("span", { text }) : null);
 }
 
-function fieldNote(path) {
+// A field's line under it: a validation message in red, or else how its change takes effect. The
+// server keys effects by its own path, which is `effectPath` when it differs from the form path.
+function fieldNote(path, effectPath = path) {
   const why = invalid.get(path);
-  return why ? el("p", { class: "fieldnote", text: why }) : null;
+  if (why) return el("p", { class: "fieldnote", text: why });
+  const label = effectText(appliedFor(settings?.applied, effectPath));
+  return label ? el("p", { class: "effect", text: label }) : null;
 }
 
 // Hint text, with the parts between backticks set as code.
@@ -643,7 +649,12 @@ function seg(options, current, onPick, ctl) {
 }
 
 // A switch with its label on the left. `before` sits between the label and the switch.
-function toggleRow(label, checked, onToggle, { disabled = false, path = null, before = null, after = null } = {}) {
+function toggleRow(
+  label,
+  checked,
+  onToggle,
+  { disabled = false, path = null, effectPath = path, before = null, after = null } = {},
+) {
   const node = el("button", {
     type: "button",
     role: "switch",
@@ -662,7 +673,7 @@ function toggleRow(label, checked, onToggle, { disabled = false, path = null, be
     el("span", { class: "label", text: label }),
     before,
     node,
-    path ? fieldNote(path) : null,
+    path ? fieldNote(path, effectPath) : null,
     after,
   );
 }
@@ -699,7 +710,7 @@ function keyRowNodes(row) {
     ),
   ];
   if (note?.text) nodes.push(el("p", { class: `fill note${note.bad ? " bad" : ""}`, text: note.text }));
-  if (invalid.has(path)) nodes.push(fieldNote(path));
+  nodes.push(fieldNote(path));
   const out = [el("div", { class: "row", "data-path": path }, nodes)];
   if (editingKey === row.provider && !ro()) out.push(keyEditor(row.provider, path));
   return out;
@@ -819,7 +830,7 @@ function roleRowNode(role, keys) {
       ),
     );
   }
-  if (invalid.has(path)) nodes.push(fieldNote(path));
+  nodes.push(fieldNote(path));
   return el("div", { class: "row roles", "data-path": path }, nodes);
 }
 
@@ -1004,7 +1015,7 @@ function projectRow(project) {
     "Refine state charts with an LLM (experimental, uses tokens)",
     project.statemap_llm === true,
     (value) => setStatemapLlm(project.id, value),
-    { path: `projects.${project.id}.statemap_llm` },
+    { path: `projects.${project.id}.statemap_llm`, effectPath: `projects.statemap_llm.${project.id}` },
   );
   const hint = statemapHint(settings.budgets);
   return el(
@@ -1042,7 +1053,7 @@ function workersRow(project) {
       el("span", { class: "count", "aria-live": "polite", text: String(n) }),
       step(1, `More workers for ${project.id}`),
     ),
-    fieldNote(path),
+    fieldNote(path, `projects.workers.${project.id}`),
   );
 }
 
@@ -1139,7 +1150,7 @@ function numberRow(field) {
     { class: "row wide", "data-path": path },
     el("span", { class: "label", text: field.label }),
     el("span", { class: "num" }, input, field.unit ? el("span", { class: "unit", text: field.unit }) : null),
-    why ? fieldNote(path) : null,
+    fieldNote(path),
   );
 }
 
