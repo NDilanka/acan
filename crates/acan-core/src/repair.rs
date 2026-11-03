@@ -4,6 +4,8 @@
 //! ReceiptReady(run): the run is gating and prepared; the receipt's counts match its items, and
 //!   it names the confirmed scope, the prepared context and every ruling at the current head
 //!     --> ReceiptRecorded, GateClosed, LeaseEnded Delivered | LeaseRenewed
+//!     --> ReceiptRecorded, GateClosed, LeaseEnded BudgetSpent per claimed task, when the
+//!         repair budget runs out (the lane stops)
 //! failing item obligation_failed | out_of_scope | violates_ruling --> episode open, bounced
 //!   by the next round, at most max_episodes open episodes per round; the rest stay open for a
 //!   later round. When the order has no rounds left, the open episodes are stopped and the lane
@@ -41,8 +43,8 @@ use crate::event::{Event, Rejection};
 use crate::gate::{self, GateVerdict};
 use crate::ids::{AgentId, GateRunId, MemberId, TaskId};
 use crate::lane::{self, ScopeLane};
-use crate::lease::{self, Fence};
-use crate::order::TaskState;
+use crate::lease::{self, Fence, LeaseEnd};
+use crate::order::{self, TaskState};
 use crate::ruling::Ledger;
 use crate::world::{Ctx, World};
 
@@ -331,22 +333,39 @@ pub(crate) fn decide_receipt(
         scores,
         ctx,
     )?;
-    let verdict = if record.verdict == LaneVerdict::Passed {
-        GateVerdict::Passed
-    } else {
-        GateVerdict::Failed {
-            failing: Vec::new(),
-        }
-    };
     let fence = Fence {
         task: gate_run.task,
         generation: gate_run.generation,
+    };
+    // The closing events follow the verdict. A pass delivers the lease, and a block fails the run
+    // and renews the lease so the worker can react. A stop fails the run and renews nothing: it
+    // ends every lease in the lane, so no claimed task keeps a lease on a stopped lane.
+    let closing = match &record.verdict {
+        LaneVerdict::Passed => Vec::from(gate::close(ctx, fence, run, GateVerdict::Passed)),
+        LaneVerdict::Blocked { .. } => Vec::from(gate::close(
+            ctx,
+            fence,
+            run,
+            GateVerdict::Failed {
+                failing: Vec::new(),
+            },
+        )),
+        LaneVerdict::Stopped { .. } => {
+            let mut events = vec![Event::GateClosed {
+                run,
+                verdict: GateVerdict::Failed {
+                    failing: Vec::new(),
+                },
+            }];
+            events.extend(order::end_leases(world, lane.order, LeaseEnd::BudgetSpent));
+            events
+        }
     };
     let mut events = vec![Event::ReceiptRecorded {
         run,
         record: Box::new(record),
     }];
-    events.extend(gate::close(ctx, fence, run, verdict));
+    events.extend(closing);
     Ok(events)
 }
 
