@@ -56,6 +56,7 @@ pub mod replay;
 mod ruling;
 mod settings;
 mod setup;
+mod statemap;
 mod store;
 mod stream;
 mod stream_all;
@@ -456,9 +457,12 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
             Origin::replay(log)?
         };
         let repo = spec.repo.clone();
-        let scan = tokio::task::spawn_blocking(move || scan(&repo))
+        let mut scan = tokio::task::spawn_blocking(move || scan(&repo))
             .await
             .context("the scan task did not finish")??;
+        // Off until the settings file says otherwise: no model call, no cache write.
+        let statemap = statemap::RefineSettings::OFF;
+        statemap::refine(&client, &mut scan.plant, statemap).await;
         openings.push(Opening {
             spec,
             store,
@@ -468,6 +472,7 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
             vision,
             client,
             ledger,
+            statemap,
             worker_tokens,
         });
     }
@@ -494,10 +499,11 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
             vision,
             client,
             ledger,
+            statemap,
             worker_tokens,
         } = opening;
         let git = open_git(&spec).await;
-        let host = Host::new_with_slots(
+        let host = Host::new_with_statemap(
             HostParts {
                 origin,
                 store,
@@ -514,6 +520,7 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
                 vision,
             },
             Arc::clone(&slots),
+            statemap,
         );
         entries.push(Entry {
             id: spec.id,
@@ -630,6 +637,8 @@ struct Opening<C> {
     vision: Option<Vision>,
     client: C,
     ledger: UsageLedger,
+    /// The statemap refinement the project's scans run with.
+    statemap: statemap::RefineSettings,
     /// The tokens of this project's local workers, in worker order.
     worker_tokens: Vec<String>,
 }

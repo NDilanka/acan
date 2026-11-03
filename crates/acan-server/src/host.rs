@@ -89,6 +89,7 @@ struct Inner<C> {
     wake: Arc<Notify>,
     ledger: UsageLedger,
     client: C,
+    statemap: crate::statemap::RefineSettings,
     repo: PathBuf,
     shutdown: watch::Receiver<bool>,
     streams: Arc<Mutex<JoinSet<()>>>,
@@ -138,6 +139,20 @@ impl<C: ModelClient> Host<C> {
     /// Panics when called outside a Tokio runtime, or when `probe_concurrency` is zero.
     #[must_use]
     pub fn new_with_slots(parts: HostParts<C>, slots: Arc<Semaphore>) -> Self {
+        Self::new_with_statemap(parts, slots, crate::statemap::RefineSettings::OFF)
+    }
+
+    /// [`new_with_slots`](Self::new_with_slots), with the statemap refinement each rescan runs with.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a Tokio runtime, or when `probe_concurrency` is zero.
+    #[must_use]
+    pub(crate) fn new_with_statemap(
+        parts: HostParts<C>,
+        slots: Arc<Semaphore>,
+        statemap: crate::statemap::RefineSettings,
+    ) -> Self {
         assert!(
             parts.probe_concurrency > 0,
             "probe_concurrency must allow at least one probe, got {}",
@@ -174,6 +189,7 @@ impl<C: ModelClient> Host<C> {
                 wake,
                 ledger: parts.ledger,
                 client: parts.client,
+                statemap,
                 repo: parts.repo,
                 shutdown: parts.shutdown,
                 streams: Arc::new(Mutex::new(JoinSet::new())),
@@ -401,9 +417,10 @@ impl<C: ModelClient> Host<C> {
     /// Returns an error when the scan fails, or when the `IndexUpdated` event cannot be stored.
     pub async fn rescan(&self) -> Result<Vec<Stamped>, SubmitError> {
         let repo = self.inner.repo.clone();
-        let scan = tokio::task::spawn_blocking(move || crate::index::scan(&repo))
+        let mut scan = tokio::task::spawn_blocking(move || crate::index::scan(&repo))
             .await
             .context("the scan task did not finish")??;
+        crate::statemap::refine(&self.inner.client, &mut scan.plant, self.inner.statemap).await;
         self.inner.writer.rescan(scan).await
     }
 
