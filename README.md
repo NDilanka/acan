@@ -78,6 +78,10 @@ In the Super-agent design, a single writer keeps the sequence, a foreman splits 
 
 The tour director orders a receipt's tour over the plant view. It routes no work, so it is not the Router.
 
+## Model checks
+
+The `tla/` folder holds two TLA+ models of the lane rules that the scheduler enforces, and TLC checks them. The properties, constants, results and open items are in `tla/README.md`.
+
 ## Run steps
 
 ### Prerequisites
