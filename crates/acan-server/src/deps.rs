@@ -2147,21 +2147,21 @@ mod tests {
 
     #[test]
     fn a_platform_without_owner_checks_trusts_only_a_cache_under_the_profile() {
-        let profile = "C:/Users/Me";
-        let cache = "C:/Users/Me/AppData/Local/acan/deps";
+        let profile = "C:/srv/me";
+        let cache = "C:/srv/me/AppData/Local/acan/deps";
         assert!(
             platform_trusts(true, "/anywhere/deps", None),
             "unix checks owners and modes"
         );
         assert!(platform_trusts(false, cache, Some(profile)));
         assert!(
-            platform_trusts(false, "c:/users/ME/deps", Some(profile)),
+            platform_trusts(false, "c:/SRV/ME/deps", Some(profile)),
             "case does not matter on Windows"
         );
         assert!(!platform_trusts(false, "D:/cache", Some(profile)));
         assert!(!platform_trusts(false, cache, None), "no profile, no trust");
         assert!(
-            !platform_trusts(false, "C:/Users/Me/../Other/deps", Some(profile)),
+            !platform_trusts(false, "C:/srv/me/../Other/deps", Some(profile)),
             "a .. can leave the profile"
         );
         assert!(
@@ -2176,7 +2176,7 @@ mod tests {
         assert!(under("/srv/me", "/srv/me"));
         assert!(under("/SRV/Me/cache", "/srv/me"));
         assert!(
-            under(r"C:\Users\Me\cache", "c:/users/me"),
+            under(r"C:\srv\me\cache", "c:/SRV/me"),
             "both separators, and any case"
         );
         assert!(
@@ -2189,19 +2189,19 @@ mod tests {
 
     #[test]
     fn a_verbatim_prefix_is_removed_before_the_comparison() {
-        assert_eq!(strip_verbatim(r"\\?\C:\Users\Me"), r"C:\Users\Me");
+        assert_eq!(strip_verbatim(r"\\?\C:\srv\me"), r"C:\srv\me");
         assert_eq!(
             strip_verbatim(r"\\?\UNC\server\share\me"),
             r"\\server\share\me"
         );
-        assert_eq!(strip_verbatim(r"C:\Users\Me"), r"C:\Users\Me");
+        assert_eq!(strip_verbatim(r"C:\srv\me"), r"C:\srv\me");
         assert!(
-            !under(r"\\?\C:\Users\Me\deps", r"C:\Users\Me"),
+            !under(r"\\?\C:\srv\me\deps", r"C:\srv\me"),
             "the prefix is a component that the profile does not have"
         );
         assert!(under(
-            &strip_verbatim(r"\\?\C:\Users\Me\deps"),
-            &strip_verbatim(r"\\?\C:\Users\Me")
+            &strip_verbatim(r"\\?\C:\srv\me\deps"),
+            &strip_verbatim(r"\\?\C:\srv\me")
         ));
     }
 
