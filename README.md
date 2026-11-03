@@ -64,6 +64,20 @@ Acan is a Rust workspace. Each crate under `crates/` has one job.
 
 The demo app that the live take runs against is a separate public repository: https://github.com/NDilanka/acan-demo.
 
+## Acan and the Super-agent design
+
+In the Super-agent design, a single writer keeps the sequence, a foreman splits the work, workers each build one task, and a person decides. Acan maps onto its parts as follows.
+
+| Super-agent part | In Acan | Status |
+| --- | --- | --- |
+| Router | The single writer (`crates/acan-server/src/writer.rs`) owns the origin. The foreman's splits and scope drafts turn orders into tasks. | On main |
+| Workers | Each `acan-worker` takes one task over MCP, builds it and reports. Muse Spark Open runs them. | On main |
+| Threads | An order's work shows as trails: each drone leaves a trail of its recent moves on the plant map. | On main |
+| Watchdog | A drone that holds a task and goes quiet turns stale after 2 minutes and away after 10. Drift marks (stuck, or a candidate out of scope) are planned. | Liveness on main, drift planned |
+| Needs you (short channel) | The inbox lists each open question, clash, seal and residue that waits on you. The 100-word card cap is planned. | Inbox on main, cap planned |
+
+The tour director orders a receipt's tour over the plant view. It routes no work, so it is not the Router.
+
 ## Run steps
 
 ### Prerequisites
