@@ -55,11 +55,12 @@ The demo app that the live take runs against is a separate public repository: ht
 
 ### Prerequisites
 
-- For the live take: Windows 10 or 11 with PowerShell 7, Git, Bun 1.4 or newer, and the Rust toolchain in `rust-toolchain.toml`.
+- For the live take on Windows: Windows 10 or 11 with PowerShell 7, Git, Bun 1.4 or newer, and the Rust toolchain in `rust-toolchain.toml`.
+- For the live take on Linux: a POSIX shell with Git, `jq`, `curl`, `nohup`, `ps`, `pgrep`, Bun 1.4 or newer, and the same Rust toolchain. See `demo/README.md`.
 - For the UI bundle: the `wasm32-unknown-unknown` target and the `wasm-bindgen` CLI.
 - For `cargo test --workspace`: Docker, and a clone of the demo repo with `ACAN_DEMO_DIR` set to its path. The witness tests read that checkout.
 - For a live take: provider keys (see step 2 below).
-- For the replay: PowerShell 7 on Windows or Linux. No keys are needed. macOS is not tested.
+- For the replay: PowerShell 7 on Windows or Linux, or a POSIX shell with `sha256sum` or `shasum`. No keys are needed. macOS is not tested.
 
 ### Replay without keys
 
@@ -69,13 +70,15 @@ pwsh demo/replay.ps1
 
 This checks each receipt in `receipts/` against `receipts/SHA256SUMS`, then prints it. It reads no keys and makes no network calls. It has run on Windows and on Linux (PowerShell 7.4 in a container). macOS has not been tested.
 
+`sh demo/replay.sh` does the same check with a POSIX shell and prints the same lines. `sh demo/replay.sh -v` checks the checksums only.
+
 ### Live take (needs your keys)
 
 1. Clone the repo: `git clone https://github.com/NDilanka/acan.git`, then `cd acan`.
 2. Copy `crates/acan-llm/.env.example` to `crates/acan-llm/.env` and fill in `META_API_KEY`, `BASETEN_API_KEY` and `FIREWORKS_API_KEY`. Copy `crates/acan-llm/llm.example.toml` to `crates/acan-llm/llm.toml`. Both copies are git-ignored.
 3. Build the UI bundle once: `crates/acan-render-web/build.ps1`.
-4. Start the take: `pwsh demo/run.ps1 -Watch -Settle 3`.
-5. Stop it: `pwsh demo/stop.ps1`.
+4. Start the take: `pwsh demo/run.ps1 -Watch -Settle 3`. On Linux, `sh demo/run.sh -w -S 3`.
+5. Stop it: `pwsh demo/stop.ps1`. On Linux, `sh demo/stop.sh`.
 
 The UI and API use port 7311, and the demo app uses port 7312. Both are set with parameters, and the environment variables `ACAN_RUN_ROOT` and `ACAN_DEMO_REPO` change the run folder and the demo repo. The full list is in `demo/README.md`.
 
@@ -85,9 +88,9 @@ Pending. This runs after the two-order take lands. No numbers are published befo
 
 ## Honest limits
 
-- The live take runs on Windows only. Its scripts use PowerShell 7 with Windows APIs.
+- The live take runs on Windows with PowerShell 7, and on Linux with the POSIX scripts in `demo/`. The POSIX path has run a take without provider keys. A live take on the POSIX path has not run yet. The take scripts under `demo/intent` are Windows-only.
 - Live takes need your own provider keys. `llm.toml` and `.env` are git-ignored and are not in the repository.
-- The take passes each worker a per-take local acan agent token on the command line. These tokens are created by the take for its own server. They are not provider keys.
+- The take and the worker slots pass each worker its per-take local acan agent token in the `ACAN_AGENT_TOKEN` variable, not on the command line, so the process list does not show it. The control identity's token goes the same way. These tokens are created by the take for its own server. They are not provider keys.
 - The probe driver runs in the same container as the candidate code. The container has a read-only root and all Linux capabilities dropped.
 - `model_cost_micros` is stored in each order's repair budget, but no check reads it. The model cost cap is not enforced.
 - There is no hosted replay yet. The recorded receipts replay the provider calls, not the full UI.
