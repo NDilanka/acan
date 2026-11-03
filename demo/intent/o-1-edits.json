@@ -2,7 +2,7 @@
   "schema": "acan-demo-intent-edits/2",
   "order": "o-1",
   "decided_by": "coordinator, delegated by the owner",
-  "note": "Written for the o-1 draft in replay run x01-r6-20261102-181008 (o-1/scope-draft.json, rev 1, base f919621), under the same decisions as o-1-edits-d02m7.json (coordinator, delegated by the owner). Only the draft ids and question wording differ; every answer is unchanged. The drafted window items (boundary inclusive) are removed; the kept window items state boundary exclusive, as decided before. Nothing here is a verdict: the edits state the order rules and the gate checks them.",
+  "note": "Written for the o-1 draft in replay run x01-r7-20261103-104241 (o-1/scope-draft.json, rev 1, base f919621), under the same decisions as o-1-edits-d02m7.json (coordinator, delegated by the owner). Only the draft ids and question wording differ; every answer is unchanged. The drafted window items (boundary inclusive) are removed; the kept window items state boundary exclusive, as decided before. Nothing here is a verdict: the edits state the order rules and the gate checks them.",
   "choice_rules": [
     {
       "id": "cr-bucket-scope",
@@ -35,6 +35,14 @@
       "when_no_option_matches": "fail",
       "decided_by": "coordinator, delegated by the owner",
       "reason": "The window items in this file state boundary exclusive with the recovers obligation: the first request at or after 60 s starts a new window and is allowed. So a request at the boundary is in the new window and allowed. The x01-r6 m-broad-scope draft asks it as window-boundary with the option \"In new window and allowed\"."
+    },
+    {
+      "id": "cr-redirect-api-only",
+      "question_match": "(?i)(redirect|dashboard)",
+      "option_label_match": "(?i)^Only /api/links",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The order limits the link API only. The public redirect GET /:code stays outside the limit (keep-redirect on s3). This run asks it as q-redirect-included with the option \"Only /api/links routes count\"."
     }
   ],
   "scope_edits": [
@@ -52,9 +60,15 @@
     },
     {
       "op": "remove_may",
-      "id": "limit-delete-links",
+      "id": "limit-delete-link",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "No probe sends more than ten DELETE requests, so this item cannot be judged; a DELETE status change stays out of scope and is reported. Coordinator decision 4: DELETE /api/links/:code is accepted as is and is named in the window items' text. (drafted id in this run is limit-delete-links)"
+      "reason": "No probe sends more than ten DELETE requests, so this item cannot be judged; a DELETE status change stays out of scope and is reported. Coordinator decision 4: DELETE /api/links/:code is accepted as is and is named in the window items' text. (drafted id in this run is limit-delete-link)"
+    },
+    {
+      "op": "remove_may",
+      "id": "limit-redirect-conditional",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The order limits the link API only; the public redirect GET /:code is not limited, as answered in q-redirect-included. keep-redirect anchors it on s3. (drafted id in this run is limit-redirect-conditional)"
     },
     {
       "op": "replace_must_keep",
@@ -100,9 +114,9 @@
       }
     },
     {
-      "op": "replace_must_keep",
+      "op": "add_must_keep",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "Standing rule 2: the drafted keep-redirect names a step that is not a corpus step. Re-anchored on probe step s3 (GET /:code), equals_base on status.",
+      "reason": "This run's draft has no GET /:code must-keep, so the earlier rule is added (anchored on probe step s3, anonymous, equals_base on status).",
       "rule": {
         "id": "keep-redirect",
         "selector": {
@@ -141,9 +155,9 @@
       }
     },
     {
-      "op": "add_must_keep",
+      "op": "replace_must_keep",
       "decided_by": "coordinator, delegated by the owner",
-      "reason": "This run's draft has no POST /api/login must-keep, so the earlier rule is added (anchored on probe step s11, equals_base on status).",
+      "reason": "Standing rule 2: the drafted keep-login names no corpus step. Re-anchored on probe step s11 (POST /api/login), equals_base on status.",
       "rule": {
         "id": "keep-login",
         "selector": {
@@ -1845,8 +1859,8 @@
     }
   ],
   "draft_mapping": {
-    "run": "D:\\dev\\acan-demo-runs\\intent\\x01-r6-20261102-181008",
-    "draft_file": "D:\\dev\\acan-demo-runs\\intent\\x01-r6-20261102-181008\\o-1\\scope-draft.json",
+    "run": "D:\\dev\\acan-demo-runs\\intent\\x01-r7-20261103-104241",
+    "draft_file": "D:\\dev\\acan-demo-runs\\intent\\x01-r7-20261103-104241\\o-1\\scope-draft.json",
     "draft_rev": 1,
     "decided_by": "coordinator, delegated by the owner",
     "items": [
@@ -1863,10 +1877,16 @@
         "decision": "POST /api/links"
       },
       {
-        "draft_id": "limit-delete-links",
+        "draft_id": "limit-delete-link",
         "kind": "may",
         "action": "remove_may",
         "decision": "DELETE /api/links/:code"
+      },
+      {
+        "draft_id": "limit-redirect-conditional",
+        "kind": "may",
+        "action": "remove_may",
+        "decision": "GET /:code not limited"
       },
       {
         "draft_id": "keep-health",
@@ -1875,16 +1895,16 @@
         "decision": "re-anchored on s1"
       },
       {
-        "draft_id": "keep-redirect",
+        "draft_id": "keep-login",
         "kind": "must_keep",
         "action": "replace_must_keep",
-        "decision": "re-anchored on s3"
+        "decision": "re-anchored on s11"
       },
       {
         "draft_id": "(none)",
         "kind": "must_keep",
         "action": "add_must_keep",
-        "decision": "keep-login on s11"
+        "decision": "keep-redirect on s3"
       },
       {
         "draft_id": "(none)",
@@ -1896,13 +1916,13 @@
         "draft_id": "q-quota-scope",
         "kind": "open",
         "action": "choice rule",
-        "decision": "see choice_rules"
+        "decision": "cr-bucket-scope"
       },
       {
-        "draft_id": "q-anon-scope",
+        "draft_id": "q-redirect-included",
         "kind": "open",
         "action": "choice rule",
-        "decision": "see choice_rules"
+        "decision": "cr-redirect-api-only"
       }
     ]
   },
