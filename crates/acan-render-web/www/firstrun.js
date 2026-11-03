@@ -61,11 +61,22 @@ export function workersState(answer) {
   return { kind: list.every((worker) => worker?.state === "no_key") ? "no_key" : "none", running: 0 };
 }
 
+// A Windows browser, by its client hints, platform or user agent, in that order.
+export function isWindows(nav = globalThis.navigator) {
+  const platform = nav?.userAgentData?.platform ?? nav?.platform ?? "";
+  if (platform) return /^win/i.test(platform);
+  return /\bWindows\b/.test(nav?.userAgent ?? "");
+}
+
 // The command that starts one outside worker against this origin. Only a server without
-// GET /api/workers shows it. The token goes in ACAN_AGENT_TOKEN, not a flag, so it stays out of
-// the process list.
-export function workerCommand(origin) {
-  return `ACAN_AGENT_TOKEN=<agent token from .acan/tokens.json> acan-worker --server ${origin} --repo <path to your repo>`;
+// GET /api/workers shows it. The token goes in the environment, not a flag, so it stays out of
+// the process list. Windows gets the PowerShell form, every other platform the POSIX one.
+export function workerCommand(origin, windows = isWindows()) {
+  const token = "<agent token from .acan/tokens.json>";
+  const flags = `--server ${origin} --repo <path to your repo>`;
+  return windows
+    ? `$env:ACAN_AGENT_TOKEN="${token}"; acan-worker ${flags}`
+    : `ACAN_AGENT_TOKEN=${token} acan-worker ${flags}`;
 }
 
 // The workers in one summary, read by the worker step here and by the lanes strip's status and

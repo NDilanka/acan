@@ -15,6 +15,7 @@ import {
   allDone,
   contractOf,
   contractState,
+  isWindows,
   progressShort,
   progressText,
   setupState,
@@ -153,6 +154,40 @@ test("a server without GET /api/workers falls back to the view's agents and the 
   const connected = byId(steps({ token: true, view: view({ agents: 2 }) })).worker;
   assert.equal(connected.state, DONE);
   assert.equal(connected.detail, "2 workers connected.");
+});
+
+test("the worker command passes the token in the environment, in the one form its platform's shell reads", () => {
+  const token = "<agent token from .acan/tokens.json>";
+  const flags = `--server ${ORIGIN} --repo <path to your repo>`;
+  assert.equal(workerCommand(ORIGIN, false), `ACAN_AGENT_TOKEN=${token} acan-worker ${flags}`);
+  assert.equal(workerCommand(ORIGIN, true), `$env:ACAN_AGENT_TOKEN="${token}"; acan-worker ${flags}`);
+  for (const windows of [false, true]) {
+    const command = workerCommand(ORIGIN, windows);
+    assert.equal(command.split("acan-worker").length, 2, "one command, not two");
+    assert.doesNotMatch(command, /--token\b/);
+  }
+});
+
+test("a Windows browser is told by its client hints, its platform or its user agent", () => {
+  assert.equal(isWindows({ userAgentData: { platform: "Windows" } }), true);
+  assert.equal(isWindows({ platform: "Win32" }), true);
+  assert.equal(isWindows({ userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }), true);
+  assert.equal(isWindows({ userAgentData: { platform: "macOS" }, platform: "MacIntel" }), false);
+  assert.equal(isWindows({ userAgent: "Mozilla/5.0 (X11; Linux x86_64)" }), false);
+  assert.equal(isWindows({ platform: "Linux x86_64", userAgent: "Mozilla/5.0 (Windows NT 10.0)" }), false, "the platform wins over the user agent");
+  assert.equal(isWindows(null), false);
+});
+
+test("the checklist's worker step shows the PowerShell form in a Windows browser", () => {
+  const { navigator } = globalThis;
+  Object.defineProperty(globalThis, "navigator", { value: { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }, configurable: true });
+  try {
+    const worker = byId(steps({ token: true, setup: KEYED, contract: CONTRACT, workers: { status: 404, body: null }, view: view(), origin: ORIGIN })).worker;
+    assert.equal(worker.command, workerCommand(ORIGIN, true));
+    assert.match(worker.command, /^\$env:ACAN_AGENT_TOKEN=/);
+  } finally {
+    Object.defineProperty(globalThis, "navigator", { value: navigator, configurable: true });
+  }
 });
 
 test("the order and seal steps follow the view's orders and lanes", () => {
