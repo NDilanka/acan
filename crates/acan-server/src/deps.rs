@@ -395,7 +395,8 @@ fn check_lock(lock: &[u8]) -> Result<(), String> {
 fn check_node(name: &str, node: &Map<String, Value>) -> Result<(), String> {
     check_entry(name, node)?;
     for (key, child) in node {
-        if is_spec_map(key, true) {
+        // A version 2 or 3 lockfile root has `requires: true`, a flag and not a map.
+        if is_spec_map(key, true) && !child.is_boolean() {
             check_lock_specs(name, key, child)?;
         }
     }
@@ -1399,6 +1400,19 @@ mod tests {
     }
 
     #[test]
+    fn a_version_3_lockfile_root_with_a_requires_flag_is_admitted() {
+        let lock = r#"{
+            "name": "app",
+            "lockfileVersion": 3,
+            "requires": true,
+            "packages": {
+                "": { "name": "app", "version": "1.0.0" }
+            }
+        }"#;
+        assert_eq!(refusal(lock), None);
+    }
+
+    #[test]
     fn a_lockfile_with_a_registry_spec_in_its_maps_is_admitted() {
         let lock = r#"{
             "lockfileVersion": 3,
@@ -1805,6 +1819,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     const PACKAGE: &str =
         r#"{"name": "app", "version": "1.0.0", "dependencies": {"left-pad": "1.3.0"}}"#;
     const LOCK: &str = r#"{
@@ -1873,6 +1888,7 @@ mod tests {
     }
 
     /// The cache key of the node fixture's install, as `install` computes it.
+    #[cfg(unix)]
     fn fixture_key(app: &AppContract) -> String {
         let image = ContainerPolicy::node_install()
             .image
