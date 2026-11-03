@@ -160,7 +160,11 @@ async fn view<C: ModelClient + 'static>(entry: &Entry<C>, default_id: &str) -> P
         id: entry.id.clone(),
         name: entry.name.clone(),
         default: entry.id == default_id,
-        status: "ready",
+        status: if entry.host.writer_stopped() {
+            "degraded"
+        } else {
+            "ready"
+        },
         protected_branch: entry
             .host
             .workspace()
@@ -204,4 +208,145 @@ async fn head_commit<C: ModelClient + 'static>(entry: &Entry<C>, seq: u64) -> Op
     };
     *cached = Some((seq, commit.clone()));
     commit
+}
+
+#[cfg(test)]
+mod tests {
+    //! A project whose writer stops reports `degraded` and refuses requests with 503, and the
+    //! other projects keep serving. The writer is stopped here, in the crate, because an
+    //! integration test cannot stop one project's writer.
+
+    use std::fs;
+    use std::net::SocketAddr;
+    use std::path::{Path, PathBuf};
+
+    use acan_llm::{Stub, UsageLedger};
+    use reqwest::StatusCode;
+    use serde_json::{Value, json};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+    use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+
+    use crate::projects::ProjectSet;
+    use crate::{DEFAULT_WITNESS_CONCURRENCY, Running, ServeConfig, start_projects};
+
+    fn repo(root: &Path, name: &str) -> PathBuf {
+        let dir = root.join(name);
+        fs::create_dir_all(dir.join("model")).expect("the machine folder");
+        fs::write(
+            dir.join("model/store.ts"),
+            "export function load() {\n  return 1;\n}\n",
+        )
+        .expect("a source file");
+        dir
+    }
+
+    async fn start(repos: &[PathBuf]) -> Running {
+        let config = ServeConfig {
+            projects: ProjectSet::from_repos(repos),
+            addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            team: false,
+            web: None,
+            witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
+            vision: None,
+            local_workers: 0,
+        };
+        let clients = repos
+            .iter()
+            .map(|_| (Stub::default(), UsageLedger::default()))
+            .collect();
+        start_projects(config, clients)
+            .await
+            .expect("the server starts")
+    }
+
+    async fn get(running: &Running, path: &str, token: &str) -> (StatusCode, Value) {
+        let response = reqwest::Client::new()
+            .get(format!("http://{}{path}", running.local_addr))
+            .bearer_auth(token)
+            .send()
+            .await
+            .expect("the request is sent");
+        let status = response.status();
+        (status, response.json().await.unwrap_or(Value::Null))
+    }
+
+    fn status_of<'a>(list: &'a Value, id: &str) -> &'a str {
+        let project = list
+            .as_array()
+            .expect("a list of projects")
+            .iter()
+            .find(|project| project["id"] == json!(id))
+            .expect("the project is listed");
+        project["status"].as_str().expect("a status")
+    }
+
+    #[tokio::test]
+    async fn a_project_whose_writer_stops_is_degraded_and_the_others_keep_serving() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let running = start(&[repo(root.path(), "alpha"), repo(root.path(), "beta")]).await;
+        let token = running
+            .owner_token
+            .as_ref()
+            .expect("the first start mints the human token")
+            .as_str()
+            .to_owned();
+
+        running
+            .writer_of("beta")
+            .shutdown()
+            .await
+            .expect("beta's writer stops");
+
+        let (status, body) = get(&running, "/api/p/beta/plant", &token).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], json!("project_unavailable"));
+        let (status, _) = get(&running, "/api/p/beta/events", &token).await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "every route of the stopped project refuses"
+        );
+
+        let (status, list) = get(&running, "/api/projects", &token).await;
+        assert_eq!(status, StatusCode::OK, "the list still answers");
+        assert_eq!(status_of(&list, "beta"), "degraded");
+        assert_eq!(status_of(&list, "alpha"), "ready");
+
+        let (status, _) = get(&running, "/api/plant", &token).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the default project, alpha, still answers"
+        );
+
+        let posted = reqwest::Client::new()
+            .post(format!(
+                "http://{}/api/p/alpha/commands",
+                running.local_addr
+            ))
+            .bearer_auth(&token)
+            .json(&json!({
+                "cmd": "post_order",
+                "machine": "model",
+                "sentence": "alpha work",
+                "witnesses": []
+            }))
+            .send()
+            .await
+            .expect("the command is sent");
+        assert_eq!(posted.status(), StatusCode::OK, "alpha takes commands");
+
+        let mut request = format!("ws://{}/api/p/alpha/stream", running.local_addr)
+            .into_client_request()
+            .expect("the stream URL");
+        let value = HeaderValue::from_str(&format!("Bearer {token}")).expect("a header value");
+        request.headers_mut().insert(AUTHORIZATION, value);
+        let (socket, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("alpha's stream opens");
+        drop(socket);
+
+        running.stop().await.expect("the server stops");
+    }
 }

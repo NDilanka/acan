@@ -245,6 +245,17 @@ impl Running {
         &self.runtimes[0].writer
     }
 
+    /// The writer of the project `id`, which a test stops to make that project degraded.
+    #[cfg(test)]
+    pub(crate) fn writer_of(&self, id: &str) -> &Writer {
+        &self
+            .runtimes
+            .iter()
+            .find(|runtime| runtime.id == id)
+            .expect("the project runs")
+            .writer
+    }
+
     /// Stops the server and returns when no write can still happen: the listener stops taking
     /// connections, in-flight handlers finish against the writers, streams close, the job loops
     /// are aborted and joined, and each writer drains its queue and stops.

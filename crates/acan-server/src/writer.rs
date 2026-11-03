@@ -102,6 +102,12 @@ impl Writer {
         }
     }
 
+    /// Whether the writer task has stopped. A stopped writer takes no command, so its project
+    /// cannot change until the server restarts.
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.tx.is_closed()
+    }
+
     pub(crate) async fn submit(&self, command: Command) -> Result<Vec<Stamped>, SubmitError> {
         self.submit_with(command, None).await
     }

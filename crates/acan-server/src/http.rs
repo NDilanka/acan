@@ -21,9 +21,10 @@ use acan_intent::{
 use acan_llm::{ModelClient, Role, RoleStatus, UsageTotals};
 use acan_scan::Plant;
 use axum::body::Bytes;
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
@@ -129,7 +130,24 @@ fn project_routes<C: ModelClient + 'static>(
             get(get_vision_baseline::<C>),
         )
         .layer(Extension(board))
+        .layer(middleware::from_fn_with_state(
+            host.clone(),
+            refuse_when_stopped::<C>,
+        ))
         .with_state(host)
+}
+
+/// Refuses a request to a project whose writer has stopped, before any route runs. The other
+/// projects are not affected: each one has its own writer.
+async fn refuse_when_stopped<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if host.writer_stopped() {
+        return ApiError::ProjectUnavailable.into_response();
+    }
+    next.run(request).await
 }
 
 /// Builds the router for every project. Each project answers under `/api/p/{id}`, and the default
@@ -198,6 +216,8 @@ pub enum ApiError {
     Rejected(Rejection),
     /// The scope-first lane refused the call with a closed code. The body is the [`McpError`].
     Refused(McpError),
+    /// The project's writer has stopped, so the project cannot take a request.
+    ProjectUnavailable,
     /// Something on the server failed. The detail goes to the log, not the response.
     Internal(anyhow::Error),
 }
@@ -232,6 +252,11 @@ impl IntoResponse for ApiError {
                 .into_response(),
             Self::Rejected(rejection) => (StatusCode::CONFLICT, Json(rejection)).into_response(),
             Self::Refused(err) => (refusal_status(&err.error), Json(err)).into_response(),
+            Self::ProjectUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "project_unavailable", "what": "project" })),
+            )
+                .into_response(),
             Self::Internal(err) => {
                 tracing::error!(error = ?err, "request failed");
                 (

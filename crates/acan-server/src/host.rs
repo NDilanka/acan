@@ -434,6 +434,11 @@ impl<C: ModelClient> Host<C> {
     pub(crate) fn writer(&self) -> Writer {
         self.inner.writer.clone()
     }
+
+    /// Whether this project's writer has stopped, so the project refuses requests.
+    pub(crate) fn writer_stopped(&self) -> bool {
+        self.inner.writer.is_stopped()
+    }
 }
 
 /// Whether `command` can change what a queued scope-first land checks: the scope and its
