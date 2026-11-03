@@ -278,16 +278,16 @@ mod tests {
         // The log may hold the path as it was typed, and the plant the canonical path, which
         // Windows writes with the verbatim prefix.
         let spellings = repo_spellings(
-            Path::new(r"D:\dev\takes\take-1"),
-            Path::new(r"\\?\D:\dev\takes\take-1"),
+            Path::new(r"C:\work\takes\take-1"),
+            Path::new(r"\\?\C:\work\takes\take-1"),
         );
         let mut value = json!({
             "log": [
-                r"D:\dev\takes\take-1\model\store.ts",
-                r"\\?\D:\dev\takes\take-1\model\store.ts",
-                "D:/dev/takes/take-1/model/store.ts",
+                r"C:\work\takes\take-1\model\store.ts",
+                r"\\?\C:\work\takes\take-1\model\store.ts",
+                "C:/work/takes/take-1/model/store.ts",
             ],
-            "plant": { "root": r"\\?\D:\dev\takes\take-1" },
+            "plant": { "root": r"\\?\C:\work\takes\take-1" },
         });
         name_the_repo(&mut value, &spellings, "take-1");
         assert_eq!(

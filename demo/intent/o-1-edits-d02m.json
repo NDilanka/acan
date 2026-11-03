@@ -2,7 +2,7 @@
   "schema": "acan-demo-intent-edits/2",
   "order": "o-1",
   "decided_by": "coordinator, delegated by the owner",
-  "note": "Written for the draft in run D:\\dev\\acan-takes\\d02m-fresh4-20261101-052932 (scope-draft-o-1.json, rev 1), under the D02N ruling (coordinator, delegated by the owner). Derived from o-1-edits-d02t.json (the d02t-fresh3 draft). The d02m-fresh4 draft differs in ids and wording: remove_may limit-delete-link (was limit-delete-links); must-keep health-keep (was keep-health); signup-keep replaces keep-login (that draft has no login must-keep, so keep-login is added per D9); open ids quota-scope and window-type with new wording, answered by the same choice rules. Each edit names the draft item it acts on by id; draft_mapping maps each drafted id to the decision it follows. Nothing here is a verdict: the edits state the order rules and the gate checks them.",
+  "note": "Written for the draft in run C:\\work\\acan-takes\\d02m-fresh4-20261101-052932 (scope-draft-o-1.json, rev 1), under the D02N ruling (coordinator, delegated by the owner). Derived from o-1-edits-d02t.json (the d02t-fresh3 draft). The d02m-fresh4 draft differs in ids and wording: remove_may limit-delete-link (was limit-delete-links); must-keep health-keep (was keep-health); signup-keep replaces keep-login (that draft has no login must-keep, so keep-login is added per D9); open ids quota-scope and window-type with new wording, answered by the same choice rules. Each edit names the draft item it acts on by id; draft_mapping maps each drafted id to the decision it follows. Nothing here is a verdict: the edits state the order rules and the gate checks them.",
   "choice_rules": [
     {
       "id": "cr-bucket-scope",
@@ -1829,8 +1829,8 @@
     }
   ],
   "draft_mapping": {
-    "run": "D:\\dev\\acan-takes\\d02m-fresh4-20261101-052932",
-    "draft_file": "D:\\dev\\acan-takes\\d02m-fresh4-20261101-052932\\scope-draft-o-1.json",
+    "run": "C:\\work\\acan-takes\\d02m-fresh4-20261101-052932",
+    "draft_file": "C:\\work\\acan-takes\\d02m-fresh4-20261101-052932\\scope-draft-o-1.json",
     "draft_rev": 1,
     "decided_by": "coordinator, delegated by the owner",
     "items": [

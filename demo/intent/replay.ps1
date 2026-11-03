@@ -32,14 +32,14 @@ param(
             $true
         })]
     [int]$Port = 7413,
-    [string]$RunsRoot = 'D:\dev\acan-demo-runs\intent',
-    [string]$DemoRepo = 'D:\dev\acan-demo',
+    [string]$RunsRoot = 'C:\work\acan-demo-runs\intent',
+    [string]$DemoRepo = 'C:\work\acan-demo',
     [string]$Pin = 'f91962156841332d5753d869554839f7c4cdea79',
     [string]$AcanRepo = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
     [string]$AcanExe = 'C:\cargo-targets\acan-x01\debug\acan.exe',
     [string]$WorkerExe = 'C:\cargo-targets\acan-x01\debug\acan-worker.exe',
-    [string]$LlmSource = 'D:\dev\acan\crates\acan-llm\llm.toml',
-    [string]$EnvSource = 'D:\dev\acan\crates\acan-llm\.env',
+    [string]$LlmSource = 'C:\work\acan\crates\acan-llm\llm.toml',
+    [string]$EnvSource = 'C:\work\acan\crates\acan-llm\.env',
     [string]$TakeScript = (Join-Path $PSScriptRoot 'take.ps1'),
     [int]$MaxEpisodes = 40,
     [int]$HealthWaitSec = 90,

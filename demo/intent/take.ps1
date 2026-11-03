@@ -38,8 +38,8 @@ param(
     [ValidateSet('o-1', 'o-8')]
     [string]$Order = 'o-1',
     [int]$Port = 7411,
-    [string]$RunsRoot = 'D:\dev\acan-takes',
-    [string]$DemoRepo = 'D:\dev\acan-demo',
+    [string]$RunsRoot = 'C:\work\acan-takes',
+    [string]$DemoRepo = 'C:\work\acan-demo',
     [string]$Pin = 'f91962156841332d5753d869554839f7c4cdea79',
     # The Acan checkout the take runs from. Empty means the repository that holds this script.
     [string]$AcanRepo = '',

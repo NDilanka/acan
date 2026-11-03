@@ -2,7 +2,7 @@
   "schema": "acan-demo-intent-edits/2",
   "order": "o-1",
   "decided_by": "coordinator, delegated by the owner",
-  "note": "Written for the draft in run D:\\dev\\acan-takes\\d02m-fresh5-20261101-071347 (scope-draft-o-1.json, rev 1), under the D02N ruling and the D02N 07:17 answers (coordinator, delegated by the owner). Derived from o-1-edits-d02m.json (the d02m-fresh4 draft, which had health-keep, signup-keep and no keep-redirect). The d02m-fresh5 draft differs in ids and wording: limit-delete-links (was limit-delete-link); keep-health and keep-signup (were health-keep and signup-keep); keep-redirect is already in the draft, so its earlier re-add is a replace; q-bucket wording changed; q-anon is new and answered auth-only; window-type is not asked, and the fixed window is already in every window item's policy (anchor first_match, boundary exclusive). Each edit names the draft item it acts on by id; draft_mapping maps each drafted id to the decision it follows. Nothing here is a verdict: the edits state the order rules and the gate checks them.",
+  "note": "Written for the draft in run C:\\work\\acan-takes\\d02m-fresh5-20261101-071347 (scope-draft-o-1.json, rev 1), under the D02N ruling and the D02N 07:17 answers (coordinator, delegated by the owner). Derived from o-1-edits-d02m.json (the d02m-fresh4 draft, which had health-keep, signup-keep and no keep-redirect). The d02m-fresh5 draft differs in ids and wording: limit-delete-links (was limit-delete-link); keep-health and keep-signup (were health-keep and signup-keep); keep-redirect is already in the draft, so its earlier re-add is a replace; q-bucket wording changed; q-anon is new and answered auth-only; window-type is not asked, and the fixed window is already in every window item's policy (anchor first_match, boundary exclusive). Each edit names the draft item it acts on by id; draft_mapping maps each drafted id to the decision it follows. Nothing here is a verdict: the edits state the order rules and the gate checks them.",
   "choice_rules": [
     {
       "id": "cr-bucket-scope",
@@ -1837,8 +1837,8 @@
     }
   ],
   "draft_mapping": {
-    "run": "D:\\dev\\acan-takes\\d02m-fresh5-20261101-071347",
-    "draft_file": "D:\\dev\\acan-takes\\d02m-fresh5-20261101-071347\\scope-draft-o-1.json",
+    "run": "C:\\work\\acan-takes\\d02m-fresh5-20261101-071347",
+    "draft_file": "C:\\work\\acan-takes\\d02m-fresh5-20261101-071347\\scope-draft-o-1.json",
     "draft_rev": 1,
     "decided_by": "coordinator, delegated by the owner",
     "items": [
