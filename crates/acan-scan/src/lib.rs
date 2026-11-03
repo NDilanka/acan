@@ -1,5 +1,5 @@
 //! Scans a source repository with tree-sitter into a plant: machines, the belts between them,
-//! and per-file symbols and imports for clash detection.
+//! per-file symbols and imports for clash detection, and the state machines found in the code.
 
 mod extract;
 mod group;
@@ -7,6 +7,7 @@ mod hash;
 mod lang;
 mod model;
 mod resolve;
+mod states;
 mod walk;
 
 use std::path::{Path, PathBuf};
@@ -17,8 +18,8 @@ pub use group::Grouping;
 pub use hash::ContentHash;
 pub use lang::Lang;
 pub use model::{
-    Belt, FileId, ImportRef, ImportTarget, LineRange, Machine, MachineId, Plant, SourceFile,
-    Symbol, SymbolKind,
+    Belt, Confidence, FileId, ImportRef, ImportTarget, LineRange, Machine, MachineId, Plant,
+    SourceFile, State, StateMachine, Symbol, SymbolKind, Transition,
 };
 
 /// Why a scan failed.
@@ -63,6 +64,7 @@ pub fn scan(root: impl AsRef<Path>) -> Result<Plant, ScanError> {
     let mut extractor = extract::Extractor::new()?;
 
     let mut files = Vec::with_capacity(sources.len());
+    let mut file_states = Vec::with_capacity(sources.len());
     for (position, source) in sources.iter().enumerate() {
         let text = std::fs::read_to_string(&source.abs).map_err(|error| ScanError::Read {
             path: source.abs.clone(),
@@ -82,6 +84,7 @@ pub fn scan(root: impl AsRef<Path>) -> Result<Plant, ScanError> {
             symbols: extracted.symbols,
             imports,
         });
+        file_states.push(extracted.states);
     }
 
     let revision = revision_of(&files);
@@ -91,7 +94,9 @@ pub fn scan(root: impl AsRef<Path>) -> Result<Plant, ScanError> {
         machines: Vec::new(),
         belts: Vec::new(),
         files,
+        state_machines: states::resolve(file_states),
     };
+    // Regrouping also sets each state machine's module.
     plant.regroup(&Grouping::default());
     Ok(plant)
 }

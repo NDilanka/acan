@@ -23,11 +23,35 @@ pub struct Grouping {
 }
 
 impl Plant {
-    /// Recomputes machines and belts from the files under `grouping`.
+    /// Recomputes machines, belts, and each state machine's module from the files under `grouping`.
     pub fn regroup(&mut self, grouping: &Grouping) {
         let (machines, belts) = build(&self.files, grouping);
         self.machines = machines;
         self.belts = belts;
+        assign_modules(self);
+    }
+}
+
+/// Sets each state machine's module to the name of the plant machine whose files include its file.
+fn assign_modules(plant: &mut Plant) {
+    let mut owner: BTreeMap<&str, &str> = BTreeMap::new();
+    for machine in &plant.machines {
+        for id in &machine.files {
+            let path = plant.files[id.0 as usize].path.as_str();
+            owner.insert(path, machine.name.as_str());
+        }
+    }
+    let modules: Vec<String> = plant
+        .state_machines
+        .iter()
+        .map(|machine| {
+            owner
+                .get(machine.file.as_str())
+                .map_or_else(String::new, |name| (*name).to_string())
+        })
+        .collect();
+    for (machine, module) in plant.state_machines.iter_mut().zip(modules) {
+        machine.module = module;
     }
 }
 
