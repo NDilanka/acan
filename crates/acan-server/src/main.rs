@@ -238,11 +238,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         load_dotenv(&project.repo)?;
     }
     // The bug report removes what every project holds: its secrets and its repository's paths.
-    let mut redaction = Redaction::EMPTY;
-    for project in &projects.projects {
-        redaction.merge(Redaction::for_repo(&project.repo));
-    }
-    release::configure(redaction);
+    release::configure(projects.redaction());
     tracing::info!(
         version = release::version(),
         commit = release::commit(),

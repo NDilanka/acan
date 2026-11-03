@@ -13,6 +13,7 @@ use anyhow::{Context as _, bail, ensure};
 use serde::Deserialize;
 
 use crate::STATE_DIR;
+use crate::release::Redaction;
 
 /// The longest id a projects file may give. Long enough for any folder name a slug is made from,
 /// with room for a `-2` suffix.
@@ -127,6 +128,18 @@ impl ProjectSet {
             .or_else(|| projects.first().map(|project| project.id.clone()))
             .unwrap_or_default();
         Ok(Self { default, projects })
+    }
+
+    /// What a bug report removes for these projects: every repository's secrets and paths, merged
+    /// so that one project's redaction never replaces another's. Call it after each project's
+    /// `.env` file is loaded, so the keys it sets are included.
+    #[must_use]
+    pub fn redaction(&self) -> Redaction {
+        let mut redaction = Redaction::EMPTY;
+        for project in &self.projects {
+            redaction.merge(Redaction::for_repo(&project.repo));
+        }
+        redaction
     }
 
     /// Checks the set before anything opens. Ids must be valid and unique, and the default must

@@ -40,21 +40,30 @@ fn tokens_text(repo: &Path) -> String {
     fs::read_to_string(repo.join(".acan").join("tokens.json")).expect("the tokens file")
 }
 
-async fn boot(repos: &[PathBuf]) -> Running {
-    let config = ServeConfig {
+/// The config of a server over `repos`, listening on `addr`.
+fn config(repos: &[PathBuf], addr: SocketAddr) -> ServeConfig {
+    ServeConfig {
         projects: ProjectSet::from_repos(repos),
-        addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        addr,
         team: false,
         web: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
         vision: None,
         local_workers: 0,
-    };
+    }
+}
+
+/// Starts a server over `repos` on `addr`. The error is what the server refused.
+async fn try_boot(repos: &[PathBuf], addr: SocketAddr) -> anyhow::Result<Running> {
     let clients = repos
         .iter()
         .map(|_| (Stub::default(), UsageLedger::default()))
         .collect();
-    start_projects(config, clients)
+    start_projects(config(repos, addr), clients).await
+}
+
+async fn boot(repos: &[PathBuf]) -> Running {
+    try_boot(repos, SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .expect("the server starts")
 }
@@ -206,4 +215,49 @@ async fn the_human_token_survives_a_restart() {
     let (status, _) = get(&second, "/api/p/beta/plant", &owner).await;
     assert_eq!(status, StatusCode::OK, "the same token still opens beta");
     second.stop().await.expect("the second server stops");
+}
+
+#[tokio::test]
+async fn startup_refuses_overlap_before_anything_binds() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let alpha = repo(root.path(), "alpha");
+    // A repository inside another project's state directory.
+    let nested = repo(&alpha.join(".acan"), "nested");
+    let overlapping = [
+        (
+            "the same repository twice",
+            vec![alpha.clone(), alpha.clone()],
+        ),
+        ("a repository inside another's state", vec![alpha, nested]),
+    ];
+    for (case, repos) in overlapping {
+        // Ask for a free port, then release it. A refused start must leave it free.
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+        let addr = probe.local_addr().expect("the port");
+        drop(probe);
+
+        let refused = try_boot(&repos, addr).await;
+        assert!(refused.is_err(), "{case}: the server refuses to start");
+        std::net::TcpListener::bind(addr)
+            .unwrap_or_else(|err| panic!("{case}: the refused start left {addr} bound: {err}"));
+    }
+}
+
+#[test]
+fn the_bug_report_removes_every_projects_repository() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let alpha = repo(root.path(), "alpha");
+    let beta = repo(root.path(), "beta");
+    let redaction = ProjectSet::from_repos(&[alpha.clone(), beta.clone()]).redaction();
+
+    let text = format!(
+        "reading {}/model/store.ts and {}/model/store.ts",
+        alpha.display(),
+        beta.display()
+    );
+    assert_eq!(
+        redaction.scrub(&text),
+        "reading <repo>/model/store.ts and <repo>/model/store.ts",
+        "the second project's paths are removed as well as the first's"
+    );
 }
