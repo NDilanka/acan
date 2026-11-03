@@ -62,9 +62,35 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: NDilanka/acan-demo
+          # The commit the e2e tests pin the protected branch to. The checkout is depth 1, so it
+          # must be this commit, not whatever the demo's default branch points at later.
+          ref: f91962156841332d5753d869554839f7c4cdea79
           path: acan-demo
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Pull the pinned Docker images
+        # The gate runs its containers with `--pull never`, and a hosted runner starts with an
+        # empty image store. Without these images every gate run is refused, and each Docker test
+        # waits out its whole budget. Pull by digest and tag the names the preflight inspects.
+        # The digests must match the pinned ones in crates/acan-intent/src/container.rs.
+        env:
+          BUN_IMAGE: oven/bun:1.4.4
+          BUN_DIGEST: sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d
+          NODE_IMAGE: node:24.22.2-bookworm-slim
+          NODE_DIGEST: sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c
+        run: |
+          set -euo pipefail
+          for value in "$BUN_IMAGE" "$BUN_DIGEST" "$NODE_IMAGE" "$NODE_DIGEST"; do
+            if ! grep -qF "$value" crates/acan-intent/src/container.rs; then
+              echo "::error::$value is not pinned in crates/acan-intent/src/container.rs"
+              exit 1
+            fi
+          done
+          docker pull "$BUN_IMAGE@$BUN_DIGEST"
+          docker tag "$BUN_IMAGE@$BUN_DIGEST" "$BUN_IMAGE"
+          docker pull "$NODE_IMAGE@$NODE_DIGEST"
+          docker tag "$NODE_IMAGE@$NODE_DIGEST" "$NODE_IMAGE"
+          docker image inspect "$BUN_IMAGE" "$NODE_IMAGE" > /dev/null
       - run: cargo test --workspace --locked
         env:
           ACAN_DEMO_DIR: ${{ github.workspace }}/acan-demo
