@@ -1,6 +1,7 @@
 // The agent lanes strip: one row per registered agent, with its task, machine, last activity
-// and check. A row whose agent holds a task but has sent nothing for STALE_MS is flagged stale.
-// The row logic has no DOM, so Node can test it. `installLanes` binds the strip to the page.
+// and check. A row whose agent holds a task but has gone quiet reads stale, then away, by the same
+// rule and the same clock as the map's drones (see `quietState`). The row logic has no DOM, so
+// Node can test it. `installLanes` binds the strip to the page.
 //
 // Hover hook for the map: each row is `<li data-lane="<index>" data-agent="<agent id>">`, stable
 // across repaints. `highlightLane(agentId)` marks that agent's row (class `hl`, and
@@ -13,8 +14,11 @@
 import { workerCommand, workerSummary } from "./firstrun.js";
 
 // A worker renews its lease every 20 seconds, so two minutes with no event from an agent that
-// holds a task means it has stopped talking to the origin.
+// holds a task means it has stopped talking to the origin. From AWAY_MS the map takes its drone
+// down and shows an away dot. Both mirror STALE_MS and AWAY_MS in the drone code (marks.rs), which
+// the map ring reads; change them together.
 export const STALE_MS = 2 * 60 * 1000;
+export const AWAY_MS = 10 * 60 * 1000;
 
 // How often the "2m ago" words are refreshed while nothing else changes.
 export const TICK_MS = 15 * 1000;
@@ -103,15 +107,48 @@ function byName(a, b) {
   return a.id > b.id ? 1 : 0;
 }
 
-// One row per agent, sorted by name as Tab rides them. `now` is the clock the rows are read
-// against, in unix milliseconds. Only an agent that holds a task can be stale: an idle agent has
-// nothing to report.
-export function laneRows(view, activity, now, staleMs = STALE_MS) {
+// How long an away agent has been quiet, as the map's away dot says it: whole minutes, then whole
+// hours from an hour on, such as "12m" or "2h".
+export function awayStamp(quietMs) {
+  const minutes = Math.floor(quietMs / 60_000);
+  return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h`;
+}
+
+// The agents that wait on the user: their task is in an open or proposed clash, or their order
+// asks a question. The map gives their drones a waiting ring, never stale or away.
+export function waitingAgents(view) {
+  const clashed = new Set((view.clashes ?? []).filter((c) => c.state === "open" || c.state === "proposed").flatMap((c) => [c.a, c.b]));
+  const asked = new Set((view.questions ?? []).map((q) => q.order));
   const tasks = new Map(view.tasks.map((task) => [task.id, task]));
+  return new Set(view.agents.filter((agent) => agent.task !== null && agent.task !== undefined
+    && (clashed.has(agent.task) || asked.has(tasks.get(agent.task)?.order))).map((agent) => agent.id));
+}
+
+// "stale", "away" or null for one agent, by the map's rule: only an agent that holds a task (not
+// on read-back) and does not wait on the user goes quiet; stale from STALE_MS to AWAY_MS, away
+// from AWAY_MS. `quietMs` is null on a page with no live clock (frozen, replayed or rewound),
+// which the map is given no time on either, so nothing there is stale or away.
+export function quietState({ holds, waiting, quietMs }) {
+  if (!holds || waiting || quietMs === null) return null;
+  if (quietMs >= AWAY_MS) return "away";
+  return quietMs >= STALE_MS ? "stale" : null;
+}
+
+// One row per agent, sorted by name as Tab rides them. `now` is the clock the "ago" words are
+// read against, in unix milliseconds. `live` says the page has the live clock, Date.now(), the
+// one the map's drones read; without it no row is stale or away.
+export function laneRows(view, activity, now, { live = true } = {}) {
+  const tasks = new Map(view.tasks.map((task) => [task.id, task]));
+  const waiting = waitingAgents(view);
   return [...view.agents].sort(byName).map((agent, index) => {
     const task = agent.task === null || agent.task === undefined ? null : tasks.get(agent.task) ?? null;
     const seen = activity.get(agent.id) ?? null;
     const quiet = seen === null ? null : Math.max(0, now - seen.at);
+    const state = quietState({
+      holds: task !== null && agent.activity !== "readback",
+      waiting: waiting.has(agent.id),
+      quietMs: live ? quiet : null,
+    });
     return {
       agent: agent.id,
       key: index < 9 ? index + 1 : null,
@@ -120,7 +157,10 @@ export function laneRows(view, activity, now, staleMs = STALE_MS) {
       machine: agent.machine ?? task?.machine ?? null,
       activity: agent.activity.replaceAll("_", " "),
       ago: quiet === null ? "not heard from" : agoWords(quiet),
-      stale: task !== null && quiet !== null && quiet >= staleMs,
+      quiet: state,
+      stale: state === "stale",
+      away: state === "away",
+      stamp: state === "away" ? awayStamp(quiet) : null,
       check: task?.check ?? null,
       rideable: Array.isArray(agent.body),
     };
@@ -201,7 +241,7 @@ function element(tag, className, text) {
 
 // The words a row shows, joined, so a change can be seen and marked.
 function signature(row) {
-  return [row.task, row.activity, row.machine, row.stale, row.check?.state].join("|");
+  return [row.task, row.activity, row.machine, row.quiet, row.check?.state].join("|");
 }
 
 function rowButton(row) {
@@ -210,7 +250,8 @@ function rowButton(row) {
   const key = element("kbd", "key", row.key === null ? "" : String(row.key));
   if (row.key === null) key.hidden = true;
   const name = element("span", "name", row.agent);
-  const when = element("span", row.stale ? "when stale" : "when", row.stale ? `stale · ${row.ago}` : row.ago);
+  const words = row.away ? `away · ${row.stamp}` : row.stale ? `stale · ${row.ago}` : row.ago;
+  const when = element("span", row.quiet ? `when ${row.quiet}` : "when", words);
   const doing = element("span", "doing", [row.task, row.activity, row.machine].filter((part) => part).join(" · "));
   const check = element("span", `chip ${row.check?.state ?? ""}`);
   if (row.check !== null) {
@@ -220,7 +261,7 @@ function rowButton(row) {
   if (row.title) button.title = row.title;
   const where = row.rideable ? "Ride" : row.machine ? "Go to the machine of" : "No drone for";
   const parts = [`${where} ${row.agent}`, row.task && `on ${row.task} ${row.activity}`, row.machine && `at ${row.machine}`,
-    `last heard ${row.ago}`, row.stale && "stale", checkWords(row.check)];
+    `last heard ${row.ago}`, row.quiet, checkWords(row.check)];
   button.setAttribute("aria-label", parts.filter((part) => part).join(", "));
   return button;
 }
@@ -276,7 +317,7 @@ export function installLanes(kit) {
     if (last.version === kit.state.renderedVersion && last.feed === kit.feed.version && last.tick === tick && last.answer === answer) return;
     last = { version: kit.state.renderedVersion, feed: kit.feed.version, tick, answer };
     panel.hidden = false;
-    const rows = laneRows(view, lastActivity(kit.feed.events), now);
+    const rows = laneRows(view, lastActivity(kit.feed.events), now, { live: kit.isLive() });
     kit.lanes = rows;
     empty.hidden = rows.length > 0;
     list.hidden = rows.length === 0;

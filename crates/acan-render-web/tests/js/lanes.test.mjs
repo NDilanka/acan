@@ -2,10 +2,12 @@
 // empty state and the G chord. Run with:
 //   node --test crates/acan-render-web/tests/js/lanes.test.mjs
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
   GO_MS,
+  AWAY_MS,
   STALE_MS,
   agoWords,
   checkWords,
@@ -13,8 +15,11 @@ import {
   goStep,
   highlightLane,
   listenForDroneHover,
+  awayStamp,
   laneRows,
   lastActivity,
+  quietState,
+  waitingAgents,
   workerLines,
 } from "../../www/lanes.js";
 import { steps, workerCommand } from "../../www/firstrun.js";
@@ -231,4 +236,48 @@ test("a drone-hover event marks that agent's lane, and a null agent clears it", 
   map.dispatchEvent(new CustomEvent("acan:drone-hover", { detail: { agent: null } }));
   assert.deepEqual(strip.rows.map((row) => row.classList.contains("hl")), [false, false]);
   assert.equal(strip.rows[0].dataset.highlighted, undefined);
+});
+
+test("stale and away use the map ring's numbers: stale from 2 to 10 minutes, away from 10", () => {
+  // The same values as STALE_MS and AWAY_MS in the drone code (marks.rs).
+  assert.equal(STALE_MS, 2 * 60 * 1000);
+  assert.equal(AWAY_MS, 10 * 60 * 1000);
+  const at = (quietMs) => quietState({ holds: true, waiting: false, quietMs });
+  assert.equal(at(STALE_MS - 1), null);
+  assert.equal(at(STALE_MS), "stale");
+  assert.equal(at(AWAY_MS - 1), "stale");
+  assert.equal(at(AWAY_MS), "away");
+  assert.equal(quietState({ holds: false, waiting: false, quietMs: AWAY_MS }), null, "an idle agent is never quiet");
+  assert.equal(quietState({ holds: true, waiting: true, quietMs: AWAY_MS }), null, "a waiting agent keeps its ring");
+  assert.equal(quietState({ holds: true, waiting: false, quietMs: null }), null, "no live clock, nothing quiet");
+});
+
+test("an agent quiet 12 minutes reads away · 12m, not stale; a replayed page reads neither", () => {
+  const now = T0 + 30_000 + 12 * 60_000;
+  const rows = laneRows(view(), lastActivity(log()), now);
+  const a = rows.find((row) => row.agent === "agent-a");
+  assert.equal(a.quiet, "away");
+  assert.equal(a.away, true);
+  assert.equal(a.stale, false);
+  assert.equal(a.stamp, "12m");
+  const replayed = laneRows(view(), lastActivity(log()), now, { live: false });
+  assert.equal(replayed.some((row) => row.quiet !== null), false);
+  assert.equal(awayStamp(59 * 60_000), "59m");
+  assert.equal(awayStamp(125 * 60_000), "2h");
+});
+
+test("an agent whose task is in an open clash, or whose order asks, waits and is never quiet", () => {
+  const v = { ...view(), clashes: [{ id: 0, a: 1, b: 2, state: "open" }], questions: [] };
+  assert.deepEqual([...waitingAgents(v)].sort(), ["agent-a", "agent-b"]);
+  const asked = { ...view(), clashes: [], questions: [{ id: 0, order: 1 }] };
+  assert.deepEqual([...waitingAgents(asked)].sort(), ["agent-a", "agent-b"]);
+  const rows = laneRows(v, lastActivity(log()), T0 + 30_000 + AWAY_MS);
+  assert.equal(rows.some((row) => row.quiet !== null), false);
+});
+
+test("stale is muted and away is ink in the strip; neither is red", () => {
+  const css = readFileSync(new URL("../../www/index.html", import.meta.url), "utf8");
+  assert.match(css, /#lanes \.when\.stale \{ color: var\(--muted\); \}/);
+  assert.match(css, /#lanes \.when\.away \{ color: var\(--ink\); \}/);
+  assert.doesNotMatch(css, /#lanes \.when\.\w+ \{ color: var\(--red\)/);
 });
