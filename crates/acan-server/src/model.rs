@@ -46,6 +46,47 @@ pub const PROBE_PROMPT: &str = "You propose input only probe steps for one order
 /// and stopped at an 8000 cap mid-reply (finish_reason `length`), so drafts get 16000.
 pub const DRAFT_MAX_TOKENS: u32 = 16_000;
 
+/// Word caps on the text a person reads. A reply over its cap is refused, so the job fails and
+/// takes its usual retry. Each cap is at least the length its prompt asks for: an explanation is
+/// one or two sentences, and an obligation is one line.
+pub(crate) mod caps {
+    /// The most words an explanation's consequence holds.
+    pub const CONSEQUENCE_WORDS: usize = 60;
+    /// The most words a question holds.
+    pub const QUESTION_WORDS: usize = 30;
+    /// The most words an option holds.
+    pub const OPTION_WORDS: usize = 8;
+    /// The most words an acceptance or must-keep obligation's line holds.
+    pub const OBLIGATION_WORDS: usize = 30;
+    /// The most words a card or a usage detail holds.
+    pub const CARD_WORDS: usize = 100;
+
+    /// The number of words in `text`. Text splits on whitespace, except that a run inside a
+    /// backtick span is one word, so `a b c` counts once. A backtick with no partner is ordinary
+    /// text. Backticks pair up in order, so the last one of an odd count has none.
+    pub(crate) fn words(text: &str) -> usize {
+        let ticks = text.matches('`').count();
+        let mut seen = 0_usize;
+        let mut in_span = false;
+        let mut in_word = false;
+        let mut count = 0_usize;
+        for ch in text.chars() {
+            if ch == '`' {
+                seen += 1;
+                // An odd backtick with a partner opens a span, and an even one closes it.
+                in_span = seen % 2 == 1 && seen < ticks;
+            }
+            if ch.is_whitespace() && !in_span {
+                in_word = false;
+            } else if !in_word {
+                in_word = true;
+                count += 1;
+            }
+        }
+        count
+    }
+}
+
 /// Which job a model request was built for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ask {
@@ -83,6 +124,16 @@ pub enum ReplyError {
     /// A split reply has no tasks, so the order would have nothing to do.
     #[error("split reply has no tasks")]
     NoTasks,
+    /// A reply's text holds more words than its cap allows.
+    #[error("{field} has {words} words, more than the {cap} allowed; shorten it")]
+    TooLong {
+        /// The field that is over its cap.
+        field: &'static str,
+        /// The words the field holds.
+        words: usize,
+        /// The most words the field may hold.
+        cap: usize,
+    },
 }
 
 /// What a draft must fit. The machines are the plant's, the routes and fixtures come from the
@@ -164,6 +215,17 @@ pub enum DraftError {
     /// A template holds a placeholder that is not a valid capture name.
     #[error("template {0:?} has a malformed placeholder")]
     MalformedTemplate(String),
+    /// A question, option label or obligation line holds more words than its cap allows. The
+    /// retry carries this text as the previous error, so the model shortens the field it names.
+    #[error("{field} has {words} words, more than the {cap} allowed; shorten it")]
+    TooLong {
+        /// The field that is over its cap.
+        field: &'static str,
+        /// The words the field holds.
+        words: usize,
+        /// The most words the field may hold.
+        cap: usize,
+    },
     /// The reply does not decode as the proposal type. Unknown fields are refused here, so a
     /// draft cannot set a count, mask, class or expected value.
     #[error("reply does not decode as a proposal: {0}")]
@@ -400,8 +462,17 @@ pub enum SettlementReply {
 ///
 /// # Errors
 ///
-/// Returns [`ReplyError`] when a named id is invalid.
+/// Returns [`ReplyError::TooLong`] when the consequence is over [`caps::CONSEQUENCE_WORDS`], and
+/// [`ReplyError`] when a named id is invalid.
 pub fn explanation(reply: ExplainReply) -> Result<Explanation, ReplyError> {
+    let words = caps::words(&reply.consequence);
+    if words > caps::CONSEQUENCE_WORDS {
+        return Err(ReplyError::TooLong {
+            field: "consequence",
+            words,
+            cap: caps::CONSEQUENCE_WORDS,
+        });
+    }
     let breaks = reply
         .breaks
         .as_deref()
@@ -557,9 +628,9 @@ pub fn probe_from_reply(
 ///
 /// # Errors
 ///
-/// Returns [`DraftError`] when the draft has no may-change items, names a machine or route that
-/// the plant or the route table does not have, or names a step id or side effect that the probe
-/// corpus does not define.
+/// Returns [`DraftError`] when the draft has no may-change items, holds a question, option label
+/// or obligation line over its word cap, names a machine or route that the plant or the route
+/// table does not have, or names a step id or side effect that the probe corpus does not define.
 pub fn scope_draft(
     body: ScopeBody,
     model: ModelRef,
@@ -585,10 +656,45 @@ pub fn probe_draft(
     Ok(ModelProposal::new(probe, model))
 }
 
+/// Refuses a scope whose person-facing text is over its cap: the obligation lines of the may-change
+/// items and the must-keep rules, each open question, and each option label. It runs before any
+/// reference is checked, so the retry is told the length first.
+fn check_text(body: &ScopeBody) -> Result<(), DraftError> {
+    let obligations = body
+        .may
+        .iter()
+        .flat_map(|item| item.acceptance.as_slice())
+        .chain(
+            body.must_keep
+                .iter()
+                .flat_map(|rule| rule.obligations.as_slice()),
+        );
+    for obligation in obligations {
+        check_words("obligation text", &obligation.text, caps::OBLIGATION_WORDS)?;
+    }
+    for choice in &body.open {
+        check_words("open question", &choice.question, caps::QUESTION_WORDS)?;
+        for option in choice.options.as_slice() {
+            check_words("option label", &option.label, caps::OPTION_WORDS)?;
+        }
+    }
+    Ok(())
+}
+
+/// Refuses `text` when it holds more than `cap` words, naming `field`.
+fn check_words(field: &'static str, text: &str, cap: usize) -> Result<(), DraftError> {
+    let words = caps::words(text);
+    if words > cap {
+        return Err(DraftError::TooLong { field, words, cap });
+    }
+    Ok(())
+}
+
 fn check_scope(body: &ScopeBody, bounds: &DraftBounds<'_>) -> Result<(), DraftError> {
     if body.may.is_empty() {
         return Err(DraftError::EmptyScope);
     }
+    check_text(body)?;
     let corpus = CorpusSteps::of(bounds);
     for item in &body.may {
         check_route(&item.selector.route_template, bounds.routes)?;
@@ -1253,5 +1359,82 @@ mod tests {
             reply.suggested,
             Some(SettlementReply::Narrow { task }) if task == "t-2"
         ));
+    }
+
+    #[test]
+    fn words_counts_a_backtick_span_as_one_word() {
+        assert_eq!(caps::words("`a b c`"), 1, "a span is one word");
+        assert_eq!(
+            caps::words("a `b c` d"),
+            3,
+            "a span inside text is one word"
+        );
+        assert_eq!(
+            caps::words("use `a b"),
+            3,
+            "an unmatched backtick is ordinary text"
+        );
+        assert_eq!(
+            caps::words("`a b` c `d e"),
+            4,
+            "a span, then an unmatched backtick"
+        );
+        assert_eq!(
+            caps::words("one two\tthree\nfour"),
+            4,
+            "any whitespace splits"
+        );
+        assert_eq!(caps::words("   "), 0, "blank text has no words");
+    }
+
+    #[test]
+    fn an_explanation_over_the_consequence_cap_is_refused() {
+        let reply = ExplainReply {
+            consequence: vec!["word"; caps::CONSEQUENCE_WORDS + 1].join(" "),
+            breaks: None,
+            suggested: None,
+        };
+
+        let err = explanation(reply).expect_err("61 words is over the 60-word cap");
+
+        assert!(
+            matches!(
+                err,
+                ReplyError::TooLong {
+                    field: "consequence",
+                    words: 61,
+                    cap: 60,
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_too_long_draft_names_its_field_and_its_cap() {
+        let err = DraftError::TooLong {
+            field: "open question",
+            words: 40,
+            cap: 30,
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "open question has 40 words, more than the 30 allowed; shorten it"
+        );
+    }
+
+    #[test]
+    fn a_too_long_reply_names_its_field_and_its_cap() {
+        let err = ReplyError::TooLong {
+            field: "consequence",
+            words: 61,
+            cap: 60,
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "consequence has 61 words, more than the 60 allowed; shorten it"
+        );
     }
 }

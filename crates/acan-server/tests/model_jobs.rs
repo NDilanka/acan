@@ -13,11 +13,13 @@ use std::path::Path;
 use std::process::Command as Process;
 use std::str::FromStr;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use acan_core::{
-    CallFailure, Command, Event, HumanCmd, Judgement, MachineKey, MemberId, OrderId, OrderRev,
-    Origin, ReadbackId, ReadbackVerdict, Seq, Step, SystemCmd, TaskId, TaskSpec, Timestamp,
+    AgentCmd, AgentId, CallFailure, ClashId, CodeIndex, Command, Ctx, DeclarationInput, Event,
+    HumanCmd, Judgement, Locus, MachineKey, MemberId, OrderId, OrderRev, Origin, ReadbackId,
+    ReadbackVerdict, Seq, Stamped, Step, SystemCmd, TaskId, TaskSpec, TaskState, Timestamp,
     WitnessId, WorldId, WorldRef,
 };
 use acan_git::Repo;
@@ -678,6 +680,60 @@ fn an_empty_scope_is_refused_and_never_stands_for_a_reply() {
     let err = check_scope_json(scope, &plant).expect_err("a scope with no may items is empty");
 
     assert_eq!(err, DraftError::EmptyScope);
+}
+
+#[test]
+fn a_scope_obligation_over_thirty_words_is_refused() {
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["may"][0]["acceptance"][0]["text"] = json!(vec!["word"; 31].join(" "));
+
+    let err = check_scope_json(scope, &plant).expect_err("31 words is over the 30-word cap");
+
+    assert!(
+        matches!(
+            &err,
+            DraftError::TooLong {
+                field: "obligation text",
+                words: 31,
+                cap: 30,
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_scope_option_over_eight_words_is_refused() {
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["open"][0]["options"][0]["label"] = json!(["word"; 9].join(" "));
+
+    let err = check_scope_json(scope, &plant).expect_err("9 words is over the 8-word cap");
+
+    assert!(
+        matches!(
+            &err,
+            DraftError::TooLong {
+                field: "option label",
+                words: 9,
+                cap: 8,
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_scope_at_each_word_cap_is_accepted() {
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["may"][0]["acceptance"][0]["text"] = json!(vec!["word"; 30].join(" "));
+    scope["open"][0]["question"] = json!(vec!["word"; 30].join(" "));
+    scope["open"][0]["options"][0]["label"] = json!(["word"; 8].join(" "));
+
+    check_scope_json(scope, &plant)
+        .expect("a 30-word obligation, a 30-word question and an 8-word option fit their caps");
 }
 
 #[test]
@@ -1660,4 +1716,354 @@ async fn a_scope_draft_refused_before_its_request_records_no_usage() {
         ledger.is_empty(),
         "no request reached the provider: {ledger:?}"
     );
+}
+
+/// The clock the explain setup and its host share.
+fn clock() -> Timestamp {
+    Timestamp::from_millis(1_800_000_000_000)
+}
+
+/// Runs one setup command through `origin` against the demo's code index, and stores what the
+/// origin accepted. The host starts from this log, so its events and its origin agree.
+async fn settle(
+    origin: &mut Origin,
+    store: &EventStore,
+    index: &CodeIndex,
+    cmd: Command,
+) -> Vec<Stamped> {
+    let ctx = Ctx {
+        now: clock(),
+        index,
+    };
+    let events = origin
+        .execute(&ctx, cmd)
+        .unwrap_or_else(|rejection| panic!("the origin refused a setup command: {rejection}"));
+    store.append(&events).await.expect("the setup events store");
+    events
+}
+
+/// A host whose log holds one clash: two tasks of one order, each read back, each claimed, and
+/// both declaring the same symbol. The foreman is `client`. Returns the host and the clash.
+async fn clashed_host(root: &Path, client: Stub) -> (Host<Stub>, ClashId) {
+    let state = root.join(".acan");
+    fs::create_dir_all(&state).expect("the state directory");
+    let store = EventStore::open(&state.join("world.db"))
+        .await
+        .expect("the event store opens");
+    let index = support::code_index();
+    let (mut origin, opened) = Origin::open(
+        WorldRef {
+            id: WorldId::from_str("clash-explain").expect("a world id"),
+            repo: root.display().to_string(),
+        },
+        owner(),
+        clock(),
+    );
+    store
+        .append(&[opened])
+        .await
+        .expect("the open event stores");
+
+    let posted = settle(
+        &mut origin,
+        &store,
+        &index,
+        Command::Human {
+            member: owner(),
+            cmd: HumanCmd::PostOrder {
+                machine: support::machine(support::UI),
+                sentence: ORDER_SENTENCE.to_owned(),
+                witnesses: Vec::new(),
+            },
+        },
+    )
+    .await;
+    let order = posted
+        .iter()
+        .find_map(|stamped| match &stamped.event {
+            Event::OrderPosted { order, .. } => Some(*order),
+            _ => None,
+        })
+        .expect("posting an order emits OrderPosted");
+
+    let rev = origin.world().order(order).expect("the order exists").rev;
+    let spec = |title: &str| TaskSpec {
+        title: title.to_owned(),
+        brief: format!("{title}, then run the greet tests"),
+        scope: vec![support::machine(support::UI)],
+    };
+    settle(
+        &mut origin,
+        &store,
+        &index,
+        Command::System(SystemCmd::SplitReady {
+            order,
+            rev,
+            tasks: vec![spec("Read the greeting"), spec("Add the setting")],
+        }),
+    )
+    .await;
+    let tasks: [TaskId; 2] = origin
+        .world()
+        .tasks_of(order)
+        .map(|task| task.id)
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("the split makes two tasks");
+
+    let agents = [
+        AgentId::from_str("agent-a").expect("a valid agent id"),
+        AgentId::from_str("agent-b").expect("a valid agent id"),
+    ];
+    let mut readbacks = BTreeSet::new();
+    for (agent, task) in agents.iter().zip(tasks) {
+        settle(
+            &mut origin,
+            &store,
+            &index,
+            Command::Human {
+                member: owner(),
+                cmd: HumanCmd::RegisterAgent {
+                    agent: agent.clone(),
+                },
+            },
+        )
+        .await;
+        let posted = settle(
+            &mut origin,
+            &store,
+            &index,
+            Command::Agent {
+                agent: agent.clone(),
+                cmd: AgentCmd::PostReadback {
+                    task,
+                    summary: "Read the greeting from the settings file.".to_owned(),
+                    touches: vec![Locus::Machine {
+                        machine: support::machine(support::UI),
+                    }],
+                },
+            },
+        )
+        .await;
+        readbacks.insert(
+            posted
+                .iter()
+                .find_map(|stamped| match &stamped.event {
+                    Event::ReadbackPosted { readback } => Some(readback.id),
+                    _ => None,
+                })
+                .expect("posting a readback emits ReadbackPosted"),
+        );
+    }
+    let rev = origin.world().order(order).expect("the order exists").rev;
+    let verdicts = readbacks
+        .iter()
+        .map(|readback| {
+            (
+                *readback,
+                ReadbackVerdict {
+                    rev,
+                    per_witness: BTreeMap::new(),
+                },
+            )
+        })
+        .collect();
+    settle(
+        &mut origin,
+        &store,
+        &index,
+        Command::System(SystemCmd::ReadbacksReviewed {
+            order,
+            rev,
+            verdicts,
+            question: None,
+        }),
+    )
+    .await;
+
+    for (agent, task) in agents.iter().zip(tasks) {
+        settle(
+            &mut origin,
+            &store,
+            &index,
+            Command::Agent {
+                agent: agent.clone(),
+                cmd: AgentCmd::Claim { task },
+            },
+        )
+        .await;
+        let fence = match &origin.world().task(task).expect("the task exists").state {
+            TaskState::Claimed { claim, .. } => claim.fence(task),
+            other => panic!("the claim left {task} as {other:?}"),
+        };
+        settle(
+            &mut origin,
+            &store,
+            &index,
+            Command::Agent {
+                agent: agent.clone(),
+                cmd: AgentCmd::Declare {
+                    fence,
+                    footprint: DeclarationInput {
+                        symbols: vec![support::greet_symbol()],
+                        ..DeclarationInput::default()
+                    },
+                },
+            },
+        )
+        .await;
+    }
+    let clash = origin
+        .world()
+        .clashes()
+        .next()
+        .map(|clash| clash.id)
+        .expect("two declarations of one symbol raise a clash");
+
+    let (tokens, _) = Tokens::load_or_create(&state, &owner()).expect("the tokens load");
+    let (_shutdown, shutdown) = tokio::sync::watch::channel(false);
+    let host = Host::new(HostParts {
+        origin,
+        store,
+        tokens,
+        scan: scan(root).expect("the scan succeeds"),
+        ledger: UsageLedger::default(),
+        client,
+        repo: root.to_path_buf(),
+        shutdown,
+        git: None,
+        witness_http_base_url: None,
+        witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
+        probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
+        vision: None,
+    });
+    (host, clash)
+}
+
+/// A foreman reply to an explain call, whose consequence is `consequence`.
+fn explain_reply(consequence: &str) -> Reply {
+    Reply::text(
+        json!({ "consequence": consequence, "breaks": null, "suggested": null }).to_string(),
+    )
+}
+
+/// How many explain calls the log records, each a `ModelUsed` under the explain step.
+fn explain_entries(events: &[Event]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::ModelUsed {
+                    step: Step::Explain,
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// An explanation over the consequence cap is refused, so the explain job fails and takes its
+/// retry. The job makes five attempts, the limit of its retries, and each attempt records its
+/// usage before the reply is read. No clash explanation reaches the log.
+#[tokio::test]
+async fn an_explanation_over_sixty_words_fails_the_job_and_is_retried() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let too_long = vec!["word"; 61].join(" ");
+    let client = Stub::default().when(Role::Fast, |_| true, explain_reply(&too_long));
+    let (host, _clash) = clashed_host(dir.path(), client).await;
+    let jobs = spawn_jobs(host.clone());
+    host.wake_jobs();
+
+    let events = logged_until(&host, |events| explain_entries(events) == 5).await;
+    stop(&host, jobs).await;
+
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, Event::ClashExplained { .. })),
+        "a refused explanation is never recorded: {events:?}"
+    );
+}
+
+/// An explanation at the consequence cap is recorded as the clash's explanation.
+#[tokio::test]
+async fn an_explanation_at_sixty_words_is_recorded() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let at_cap = vec!["word"; 60].join(" ");
+    let client = Stub::default().when(Role::Fast, |_| true, explain_reply(&at_cap));
+    let (host, clash) = clashed_host(dir.path(), client).await;
+    let jobs = spawn_jobs(host.clone());
+    host.wake_jobs();
+
+    let events = logged_until(&host, |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, Event::ClashExplained { .. }))
+    })
+    .await;
+    stop(&host, jobs).await;
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::ClashExplained { clash: recorded, explanation }
+                if *recorded == clash && explanation.consequence == at_cap
+        )),
+        "the explanation at the cap is recorded: {events:?}"
+    );
+}
+
+/// A scope draft whose open question is forty words is refused. Each retry carries the refusal as
+/// its previous error, which names the field and its cap, so the model is told what to shorten.
+#[tokio::test]
+async fn a_scope_draft_with_a_forty_word_question_fails_with_the_cap_in_previous_error() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mut scope = fixture_scope();
+    scope["open"][0]["question"] = json!(vec!["word"; 40].join(" "));
+    let drafts: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let seen = Arc::clone(&drafts);
+    let client = Stub::default().when(
+        Role::Foreman,
+        move |request| {
+            let context = user_json(request);
+            // Only a scope draft carries previous_error, so a split call is not counted here.
+            let is_draft = context.get("previous_error").is_some();
+            if is_draft {
+                seen.lock()
+                    .expect("the draft log is not poisoned")
+                    .push(context);
+            }
+            is_draft
+        },
+        Reply::text(scope.to_string()),
+    );
+    let host = scope_host(dir.path(), client).await;
+    post_order(&host).await;
+    let jobs = spawn_jobs(host.clone());
+    host.wake_jobs();
+
+    logged_until(&host, |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, Event::ScopeDraftFailed { .. }))
+    })
+    .await;
+    stop(&host, jobs).await;
+
+    let drafts = drafts.lock().expect("the draft log is not poisoned");
+    assert_eq!(drafts.len(), 5, "each of the five attempts sends the draft");
+    assert!(
+        drafts[0]["previous_error"].is_null(),
+        "a first attempt carries no error"
+    );
+    for retry in &drafts[1..] {
+        let previous = retry["previous_error"]
+            .as_str()
+            .expect("a retry carries the last error");
+        assert!(
+            previous.contains("open question has 40 words, more than the 30 allowed"),
+            "the retry names the field and the cap: {previous}"
+        );
+    }
 }

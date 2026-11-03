@@ -26,6 +26,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::host::Host;
 use crate::jobs::{failure_of, failure_word};
+use crate::model::caps;
 
 /// The most output one director reply may use. Muse Spark spends hidden reasoning tokens from this
 /// cap. A reply under the old 2000 cap stopped before its tour was written (receipt VIS02 director),
@@ -628,14 +629,10 @@ fn log_unusable_reply(view: &PlantView, err: &TourError) {
     );
 }
 
-/// The most words a usage detail holds. The detail is short, so a row of the usage panel stays
-/// readable.
-const DETAIL_WORDS: usize = 100;
-
 /// The outcome of one director call, as its usage detail names it for the view that started the
 /// call: the proposal is admitted for that view, refused by the code of the rule it breaks, or the
 /// reply is not a tour. The detail is built from fixed codes, so it never carries the model's text.
-/// Code builds it, and it is cut to [`DETAIL_WORDS`] words.
+/// Code builds it, and it is cut to [`caps::CARD_WORDS`] words.
 fn outcome_detail(view: &PlantView, answer: &DirectorAnswer) -> String {
     let receipt = short_receipt(&view.receipt_hash);
     let outcome = match answer {
@@ -647,7 +644,7 @@ fn outcome_detail(view: &PlantView, answer: &DirectorAnswer) -> String {
     };
     cut_words(
         &format!("tour for receipt {receipt}: {outcome}"),
-        DETAIL_WORDS,
+        caps::CARD_WORDS,
     )
 }
 
@@ -740,7 +737,7 @@ fn usage_of<C: ModelClient>(
                     input_tokens: None,
                     output_tokens: None,
                     failure: Some(*failure),
-                    detail: Some(cut_words(&text, DETAIL_WORDS)),
+                    detail: Some(cut_words(&text, caps::CARD_WORDS)),
                 })
             }
             None => {
@@ -1238,11 +1235,14 @@ mod tests {
     fn a_usage_detail_is_cut_to_one_hundred_words() {
         let long = vec!["word"; 150].join(" ");
 
-        let cut = cut_words(&long, DETAIL_WORDS);
+        let cut = cut_words(&long, caps::CARD_WORDS);
 
-        assert_eq!(cut.split_whitespace().count(), DETAIL_WORDS);
+        assert_eq!(cut.split_whitespace().count(), caps::CARD_WORDS);
         assert!(cut.ends_with("word..."), "{cut}");
-        assert_eq!(cut_words("a short detail", DETAIL_WORDS), "a short detail");
+        assert_eq!(
+            cut_words("a short detail", caps::CARD_WORDS),
+            "a short detail"
+        );
     }
 
     /// A director routed to Muse Spark whose calls fail with the error `error` builds from the
