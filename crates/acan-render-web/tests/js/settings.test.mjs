@@ -27,6 +27,7 @@ import {
   patchFor,
   providerLabel,
   roleRows,
+  sectionEffect,
   sectionsFor,
   setAt,
   statemapHint,
@@ -788,6 +789,22 @@ test("the effect label reads each server label, and a live or unknown one gets i
   assert.equal(effectText("stored"), "Saved; not used yet");
   assert.equal(effectText("mystery"), "");
   assert.equal(effectText(undefined), "");
+});
+
+test("a section's shared label is the one most of its paths carry, and a tie goes to the first listed", () => {
+  assert.equal(sectionEffect({ "budgets.a": "stored", "budgets.b": "stored", "budgets.c": "live" }, "budgets"), "stored");
+  assert.equal(sectionEffect({ "projects.add": "restart", "projects.statemap_llm.a": "live" }, "projects"), "restart");
+  assert.equal(sectionEffect({ "look.theme": "client" }, "budgets"), undefined);
+  assert.equal(sectionEffect(undefined, "budgets"), undefined);
+});
+
+test("the fixture's applied map gives each section its shared label", async () => {
+  const { body } = await createMockApi(fixture).request("GET", "/api/settings");
+  assert.equal(sectionEffect(body.applied, "budgets"), "stored");
+  assert.equal(sectionEffect(body.applied, "projects"), "restart");
+  assert.equal(sectionEffect(body.applied, "models"), "live");
+  assert.equal(sectionEffect(body.applied, "harness"), "stored");
+  assert.equal(sectionEffect(body.applied, "look"), "client");
 });
 
 test("the fixture's applied map names every path the drawer can change, with its label", async () => {

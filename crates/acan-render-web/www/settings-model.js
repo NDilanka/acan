@@ -250,6 +250,25 @@ export function effectText(label) {
   return EFFECT_TEXT[label] ?? "";
 }
 
+// The label most of a section's paths share, so the section can show it once. A tie goes to the
+// label the server lists first. Undefined when the section has no labelled paths.
+export function sectionEffect(applied, section) {
+  const counts = new Map();
+  for (const [path, label] of Object.entries(applied ?? {})) {
+    if (path.split(".")[0] !== section || !effectText(label)) continue;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  let best;
+  let most = 0;
+  for (const [label, count] of counts) {
+    if (count > most) {
+      best = label;
+      most = count;
+    }
+  }
+  return best;
+}
+
 // The line under the statemap toggle: the most a scan can spend, from the statemap call limit. No
 // limit means no figure, so no line.
 export function statemapHint(budgets) {

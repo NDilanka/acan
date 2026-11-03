@@ -21,6 +21,7 @@ import {
   appliedNote,
   changedPaths,
   effectText,
+  sectionEffect,
   updateView,
   exportNote,
   clearNote,
@@ -150,12 +151,21 @@ function chip(kind, text) {
 }
 
 // A field's line under it: a validation message in red, or else how its change takes effect. The
-// server keys effects by its own path, which is `effectPath` when it differs from the form path.
+// server keys effects by its own path, which is `effectPath` when it differs from the form path. A
+// label its section already shows at the top is not repeated under the field.
 function fieldNote(path, effectPath = path) {
   const why = invalid.get(path);
   if (why) return el("p", { class: "fieldnote", text: why });
-  const label = effectText(appliedFor(settings?.applied, effectPath));
-  return label ? el("p", { class: "effect", text: label }) : null;
+  const label = appliedFor(settings?.applied, effectPath);
+  if (!label || label === sectionEffect(settings?.applied, effectPath.split(".")[0])) return null;
+  const text = effectText(label);
+  return text ? el("p", { class: "effect", text }) : null;
+}
+
+// The label most of a section's fields share, shown once at the top of the section.
+function sectionEffectNode(id) {
+  const text = effectText(sectionEffect(settings?.applied, id));
+  return text ? el("p", { class: "sec-effect", text }) : null;
 }
 
 // Hint text, with the parts between backticks set as code.
@@ -593,7 +603,9 @@ function sectionNode(section) {
   );
   head.addEventListener("click", () => toggleSection(section.id));
   const parts = [el("h3", {}, head)];
-  if (isShown) parts.push(el("div", { class: "sec-body", id: `sec-${section.id}` }, bodyFor(section.id)));
+  if (isShown) {
+    parts.push(el("div", { class: "sec-body", id: `sec-${section.id}` }, sectionEffectNode(section.id), bodyFor(section.id)));
+  }
   return el("section", { class: "sec", "data-section": section.id }, parts);
 }
 
