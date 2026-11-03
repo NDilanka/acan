@@ -20,20 +20,25 @@ import {
   strikeScope,
   strikeWords,
 } from "./seal.js";
-import { freeze, slipEl, state } from "./state.js";
+import { DRAFT_RETRY_MS, adoptCommand, draftSummary, wantsDraft } from "./draft.js";
+import { freeze, replay, slipEl, state } from "./state.js";
 import { historyBlock } from "./guard.js";
 import { forgetToken, get, hold } from "./stream.js";
 
+// A failed draft is retried by the server's job loop, so the slip asks again, but seldom.
+const FAILED_RETRY_MS = 30000;
+
 export function paintSlip() {
   const lane = slipLane();
-  state.hasSlip = lane !== null;
-  slipEl.hidden = !state.hasSlip || state.ridden !== "";
-  if (lane === null) {
-    slipEl.replaceChildren();
-    return;
-  }
   const focused = document.activeElement;
   const focusKey = slipEl.contains(focused) ? focused.dataset.focusKey : undefined;
+  if (lane === null) {
+    paintDraft();
+    if (focusKey !== undefined) slipEl.querySelector(`[data-focus-key="${focusKey}"]`)?.focus();
+    return;
+  }
+  state.hasSlip = true;
+  slipEl.hidden = state.ridden !== "";
   const picks = picksFor(state, lane);
   slipEl.replaceChildren(
     head(lane),
@@ -43,7 +48,6 @@ export function paintSlip() {
     choicesBlock(lane, picks),
     broadBlock(lane, picks),
     ...(state.slipNote ? [el("p", "note", state.slipNote)] : []),
-    el("p", "foot", "A plot names behavior the order may change, on the machines it lists. It is not an authorization boundary or a fence around the code."),
   );
   if (focusKey !== undefined) {
     slipEl.querySelector(`[data-focus-key="${focusKey}"]`)?.focus();
@@ -55,6 +59,89 @@ function slipLane() {
   const order = shownOrder(state.view);
   if (order === undefined) return null;
   return state.view.lanes.find((lane) => lane.order === order.id) ?? null;
+}
+
+// An order with no lane yet shows its scope draft, once the route has one, with the one control
+// that adopts it. Adopting sends ReviseScope, which opens the lane; the slip then offers the Seal.
+function paintDraft() {
+  const order = shownOrder(state.view);
+  const wanted = state.token && !replay && wantsDraft(order, state.view.lanes);
+  const entry = wanted ? draftEntry(order) : null;
+  state.hasSlip = entry !== null && entry.answer !== null;
+  slipEl.hidden = !state.hasSlip || state.ridden !== "";
+  if (!state.hasSlip) {
+    slipEl.replaceChildren();
+    return;
+  }
+  slipEl.replaceChildren(draftHead(order), ...draftBlock(order, entry.answer), ...(state.slipNote ? [el("p", "note", state.slipNote)] : []));
+}
+
+function draftEntry(order) {
+  let entry = state.drafts.get(order.id);
+  if (entry === undefined) {
+    entry = { answer: null, inFlight: false, retryAt: 0 };
+    state.drafts.set(order.id, entry);
+  }
+  if (!entry.inFlight && entry.retryAt <= Date.now() && entry.answer?.state !== "drafted") fetchDraft(order.id, entry);
+  return entry;
+}
+
+async function fetchDraft(id, entry) {
+  entry.inFlight = true;
+  let wait = DRAFT_RETRY_MS;
+  try {
+    entry.answer = JSON.parse(await get(`/api/orders/o-${id}/scope-draft`));
+    if (entry.answer.state === "failed") wait = FAILED_RETRY_MS;
+  } catch {
+    // A 404 says the foreman has not drafted yet; the slip asks again shortly.
+  } finally {
+    entry.inFlight = false;
+    entry.retryAt = Date.now() + wait;
+    if (entry.answer?.state !== "drafted") setTimeout(paintSlip, wait);
+    paintSlip();
+  }
+}
+
+function draftHead(order) {
+  const box = el("div", "head");
+  box.append(el("h2", null, "Scope draft"));
+  box.append(el("p", "sub", `o-${order.id} · ${order.machine} · ${order.sentence}`));
+  return box;
+}
+
+function draftBlock(order, answer) {
+  const summary = draftSummary(answer);
+  if (summary.kind === "failed") return [el("p", "warn", `The draft failed: ${summary.reason}`)];
+  const counts = el("p", "counts");
+  counts.append(el("b", null, String(summary.may)), " may change · ", el("b", null, String(summary.keep)), " must keep · ",
+    el("b", null, String(summary.open)), " open");
+  const by = el("p", "sub", summary.model ? `Proposed by ${summary.model}. Not in force until you adopt and seal it.` : "Not in force until you adopt and seal it.");
+  const adoptButton = el("button", "primary", state.slipPending ? "sending…" : "Adopt draft");
+  adoptButton.type = "button";
+  adoptButton.dataset.focusKey = "adopt";
+  const blocked = historyBlock("adopt", hold.on);
+  adoptButton.disabled = state.slipPending || blocked !== null;
+  if (blocked !== null) adoptButton.title = blocked;
+  adoptButton.addEventListener("click", () => adopt(order, answer));
+  return [counts, by, adoptButton, ...(blocked !== null ? [el("p", "reason", blocked)] : [])];
+}
+
+// Sends the ReviseScope that adopts the draft. The lane opens once the view carries it.
+async function adopt(order, answer) {
+  if (!state.token || state.slipPending || historyBlock("adopt", hold.on) !== null) return;
+  state.slipPending = true;
+  state.slipNote = "";
+  paintSlip();
+  try {
+    await post(adoptCommand(order.id, answer));
+  } catch (err) {
+    state.slipNote = err instanceof TypeError
+      ? "The server did not answer, so the draft may not be adopted. Try again."
+      : `Not sent: ${err.message}.`;
+  } finally {
+    state.slipPending = false;
+    paintSlip();
+  }
 }
 
 function head(lane) {

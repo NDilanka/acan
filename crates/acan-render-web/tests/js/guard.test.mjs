@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 import { HISTORY_REASONS, historyBlock } from "../../www/guard.js";
 
-const COMMANDS = ["send", "answer", "settle", "seal", "strike", "cancel"];
+const COMMANDS = ["send", "answer", "settle", "adopt", "seal", "strike", "cancel"];
 
 test("a live map blocks nothing", () => {
   for (const command of COMMANDS) assert.equal(historyBlock(command, false), null);
@@ -29,7 +29,7 @@ test("a command with no rule is a programming error, not a silent pass", () => {
 // Each control that changes the origin's state asks the guard both where it paints (the control is
 // off and says why) and where it sends (a stale click or key sends nothing).
 test("each state-changing control asks the guard where it paints and where it sends", () => {
-  const uses = { "compose.js": ["send"], "cards.js": ["settle", "answer"], "slip.js": ["seal", "strike"], "history.js": ["cancel"] };
+  const uses = { "compose.js": ["send"], "cards.js": ["settle", "answer"], "slip.js": ["adopt", "seal", "strike"], "history.js": ["cancel"] };
   for (const [file, commands] of Object.entries(uses)) {
     const source = readFileSync(new URL(`../../www/${file}`, import.meta.url), "utf8");
     for (const command of commands) {

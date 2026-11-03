@@ -137,6 +137,9 @@ export const state = {
   // Whether a Seal or a Strike is being sent, and the note the last one left.
   slipPending: false,
   slipNote: "",
+  // The scope-draft answer of each order with no lane yet, as `slip.js` fetches it: `{ answer,
+  // inFlight, retryAt }`, with `answer` null until the route has a draft or a failure to show.
+  drafts: new Map(),
   labelGeneration: 0,
   labels: new Map(),
   // The plant view summary of each order that has receipts, as the wasm side checked it, with the

@@ -284,6 +284,10 @@
   #slip button:disabled { color: var(--muted); cursor: default; border-color: var(--rule); }
   #slip button[aria-pressed="true"] { background: var(--ink); color: #ffffff; border-color: var(--ink); }
   #slip button.danger { color: var(--red); border-color: var(--red); }
+  #slip button.primary { background: var(--ink); color: #ffffff; border-color: var(--ink); padding: 4px 12px; }
+  #slip button.primary:disabled { opacity: 0.6; color: #ffffff; }
+  #slip .counts { margin: 8px 0 2px; font: 12px/1.4 var(--mono); color: var(--muted); }
+  #slip .counts b { color: var(--ink); font-weight: 600; }
   #slip .warn { border-left: 2px solid var(--red); padding: 4px 0 4px 8px; margin-top: 6px; }
   #slip .mismatch, #slip .note { font-family: var(--mono); font-size: 11px; color: var(--red); }
   #slip .foot { color: var(--muted); font-size: 11px; border-top: 1px solid var(--rule); margin-top: 10px; padding-top: 6px; }
