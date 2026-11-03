@@ -143,6 +143,8 @@ export function quietState({ holds, waiting, quietMs }) {
 export function laneRows(view, activity, now, { live = true } = {}) {
   const tasks = new Map(view.tasks.map((task) => [task.id, task]));
   const waiting = waitingAgents(view);
+  // The sentence of each held order's lane, by order. A row whose task is on that order carries it.
+  const holds = new Map((view.lanes ?? []).map((lane) => [lane.order, lane.hold]));
   return [...view.agents].sort(byName).map((agent, index) => {
     const task = agent.task === null || agent.task === undefined ? null : tasks.get(agent.task) ?? null;
     const seen = activity.get(agent.id) ?? null;
@@ -152,6 +154,7 @@ export function laneRows(view, activity, now, { live = true } = {}) {
       waiting: waiting.has(agent.id),
       quietMs: live ? quiet : null,
     });
+    const hold = task === null ? null : holds.get(task.order);
     return {
       agent: agent.id,
       key: index < 9 ? index + 1 : null,
@@ -166,6 +169,7 @@ export function laneRows(view, activity, now, { live = true } = {}) {
       stamp: state === "away" ? awayStamp(quiet) : null,
       check: task?.check ?? null,
       rideable: Array.isArray(agent.body),
+      hold: typeof hold === "string" && hold !== "" ? hold : null,
     };
   });
 }
@@ -341,6 +345,8 @@ export function installLanes(kit) {
       button.dataset.agent = row.agent;
       button.addEventListener("click", () => visit(kit, row));
       li.append(button);
+      // Why the row's order is held, and what frees it, under the row.
+      if (row.hold) li.append(element("p", "hold muted", row.hold));
       // A row whose task, activity, machine or check moved glows once, so a change is seen.
       if (before !== undefined && before !== signature(row)) li.classList.add("moved");
       return li;

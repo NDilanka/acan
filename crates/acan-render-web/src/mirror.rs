@@ -2157,6 +2157,11 @@ mod tests {
                 "live_leases",
                 "stopped",
                 "open_contests",
+                "episodes_opened",
+                "max_episodes",
+                "rounds_used",
+                "repair_rounds",
+                "hold",
             ])
         );
         assert_eq!(

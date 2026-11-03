@@ -3864,6 +3864,11 @@ mod tests {
             live_leases: 0,
             stopped,
             open_contests,
+            episodes_opened: 0,
+            max_episodes: None,
+            rounds_used: 0,
+            repair_rounds: None,
+            hold: None,
         }];
         view
     }

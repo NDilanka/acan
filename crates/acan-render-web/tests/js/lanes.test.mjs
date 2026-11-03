@@ -284,6 +284,19 @@ test("a_stopped_or_contested_order_holds_its_agents", () => {
   assert.deepEqual([...waitingAgents(live)], []);
 });
 
+test("a_held_order_row_carries_its_sentence", () => {
+  const sentence = "Budget spent: 10 findings against a cap of 4, 0 of 2 repair rounds used. Cancel the order to free it.";
+  const held = { ...view(), lanes: [{ order: 1, stopped: true, open_contests: 0, hold: sentence }] };
+  const heldRows = Object.fromEntries(laneRows(held, lastActivity(log()), T0 + 60_000).map((row) => [row.agent, row.hold]));
+  assert.equal(heldRows["agent-a"], sentence);
+  assert.equal(heldRows["agent-b"], sentence, "every row on the held order carries it");
+  assert.equal(heldRows["agent-c"], null, "an idle agent is on no order");
+  const empty = { ...view(), lanes: [{ order: 1, stopped: false, open_contests: 0, hold: "" }] };
+  assert.deepEqual(laneRows(empty, lastActivity(log()), T0 + 60_000).map((row) => row.hold), [null, null, null]);
+  const live = { ...view(), lanes: [{ order: 1, stopped: false, open_contests: 0, hold: null }] };
+  assert.deepEqual(laneRows(live, lastActivity(log()), T0 + 60_000).map((row) => row.hold), [null, null, null]);
+});
+
 test("stale is muted and away is ink in the strip; neither is red", () => {
   const css = readFileSync(new URL("../../www/index.html", import.meta.url), "utf8");
   assert.match(css, /#lanes \.when\.stale \{ color: var\(--muted\); \}/);
