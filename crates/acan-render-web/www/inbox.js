@@ -31,6 +31,18 @@ export function visionDoubts(events) {
   return doubts;
 }
 
+// The first `count` words of a text, with "…" when it has more. Whitespace is trimmed.
+export function firstWords(text, count = 6) {
+  const words = String(text ?? "").trim().split(/\s+/).filter((word) => word !== "");
+  return words.length <= count ? words.join(" ") : `${words.slice(0, count).join(" ")}…`;
+}
+
+// A question row's line: its id and the question's first words, or the id alone.
+export function questionLine(id, text) {
+  const start = firstWords(text);
+  return start === "" ? `q-${id}` : `q-${id} · ${start}`;
+}
+
 function plural(count, word) {
   return `${count} ${word}${count === 1 ? "" : "s"}`;
 }
@@ -62,7 +74,8 @@ export function inboxItems(view, plantViews = new Map(), doubts = new Map()) {
   }
   for (const question of view.questions) {
     add({ key: `question:${question.id}`, kind: "question", id: question.id,
-      ...words(`q-${question.id} asks`, question.text), machine: machineOf(question.order) });
+      line: questionLine(question.id, question.text), detail: question.text,
+      text: `q-${question.id} asks: ${question.text}`, machine: machineOf(question.order) });
   }
   for (const lane of view.lanes) {
     if (!live(lane.order)) continue;

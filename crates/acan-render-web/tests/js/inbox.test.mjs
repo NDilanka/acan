@@ -8,8 +8,10 @@ import { test } from "node:test";
 
 import {
   announcement,
+  firstWords,
   freshItems,
   inboxItems,
+  questionLine,
   shouldNotify,
   titleWith,
   visionDoubts,
@@ -145,13 +147,15 @@ test("a notification goes out only while hidden, opted in, allowed and live", ()
 test("each needs-you row is one short line, its detail on hover", () => {
   const byKey = Object.fromEntries(inboxItems(view()).map((item) => [item.key, item]));
   assert.deepEqual([byKey["clash:2"].line, byKey["clash:2"].detail], ["c-2 · breaks w-3", "tasks overlap, choose a settle"]);
-  assert.deepEqual([byKey["question:7"].line, byKey["question:7"].detail], ["q-7 asks", "keep the old header?"]);
+  assert.deepEqual([byKey["question:7"].line, byKey["question:7"].detail], ["q-7 · keep the old header?", "keep the old header?"]);
+  assert.equal(byKey["question:7"].text, "q-7 asks: keep the old header?", "the spoken text is unchanged");
   assert.deepEqual([byKey["stopped:3"].line, byKey["stopped:3"].detail], ["o-3 stopped", "repair budget spent"]);
   assert.deepEqual([byKey["seal:2:3"].line, byKey["seal:2:3"].detail], ["o-2 rev 3", "waits for your seal"]);
   assert.equal(byKey["seal:2:3"].text, "o-2 rev 3 waits for your seal", "the spoken text is the whole sentence");
   for (const item of Object.values(byKey)) {
     assert.ok(!item.line.includes(":"), `${item.key} shows no reason on its line`);
-    assert.ok(item.text.startsWith(item.line) && item.text.endsWith(item.detail), item.key);
+    if (item.kind !== "question") assert.ok(item.text.startsWith(item.line), item.key);
+    assert.ok(item.text.endsWith(item.detail), item.key);
   }
 });
 
@@ -164,4 +168,24 @@ test("a needs-you row paints its line, holds its detail as the title, and still 
   assert.match(js, /goKeys\.set\("i", /);
   const html = readFileSync(new URL("../../www/index.html", import.meta.url), "utf8");
   assert.match(html, /#inbox \.item \.text \{[^}]*white-space: nowrap;/);
+});
+
+test("a question row names its id and the first six words, the whole question on hover", () => {
+  const long = "  Count failed logins per client address or per account?  ";
+  assert.equal(firstWords(long), "Count failed logins per client address…");
+  assert.equal(questionLine(7, long), "q-7 · Count failed logins per client address…");
+  assert.equal(questionLine(7, "keep the old header?"), "q-7 · keep the old header?", "six words or fewer: whole, no ellipsis");
+  assert.equal(questionLine(7, "one two three four five six"), "q-7 · one two three four five six");
+  assert.equal(questionLine(7, ""), "q-7");
+  assert.equal(questionLine(7, "   "), "q-7");
+  const v = view();
+  v.questions[0].text = long.trim();
+  const item = inboxItems(v).find((entry) => entry.key === "question:7");
+  assert.equal(item.line, "q-7 · Count failed logins per client address…");
+  assert.equal(item.detail, long.trim(), "the title holds the full question");
+  assert.equal(item.text, `q-7 asks: ${long.trim()}`, "the aria label keeps the full text");
+  assert.equal(item.machine, "src/api", "the click still flies to the order's machine");
+  const js = readFileSync(new URL("../../www/inbox.js", import.meta.url), "utf8");
+  assert.match(js, /button\.addEventListener\("click", \(\) => flyTo\(kit, item\.machine\)\);/);
+  assert.match(js, /button\.title = item\.detail;/);
 });
