@@ -417,6 +417,7 @@ impl App {
             let own = &mut self.parked[index].marks;
             own.motion = motion;
             own.dirty = true;
+            self.parked[index].view_json = None;
         }
     }
 
@@ -1504,7 +1505,7 @@ impl App {
         else {
             return Ok(());
         };
-        let view = mirror.view(plan);
+        let view = mirror.view_still(plan, self.still);
         self.slots.assign(&view);
         let marks = Marks::build_at(&view, plan, &loaded.stands, &self.slots, self.clock);
         self.view_json = serde_json::to_string(&view).map_err(js_err)?;
@@ -1725,13 +1726,16 @@ impl App {
         let [vw, vh] = camera.viewport();
         let viewport = [vw / dpr, vh / dpr];
         let clock = self.clock;
+        let still = self.still;
         let mut changed = false;
         for parked in &mut self.parked {
             if parked.marks.dirty {
                 match &parked.mirror {
                     Some(mirror) => {
                         let stands = &parked.loaded.stands;
-                        parked.marks.rebuild(mirror, &parked.plan, stands, clock);
+                        parked
+                            .marks
+                            .rebuild(mirror, &parked.plan, stands, clock, still);
                         parked.view_json = None;
                         changed = true;
                     }
@@ -1978,12 +1982,12 @@ impl App {
         let Some(index) = self.parked_index(id) else {
             return String::new();
         };
+        let still = self.still;
         let parked = &mut self.parked[index];
         if parked.view_json.is_none() {
-            parked.view_json = parked
-                .mirror
-                .as_ref()
-                .and_then(|mirror| serde_json::to_string(&mirror.view(&parked.plan)).ok());
+            parked.view_json = parked.mirror.as_ref().and_then(|mirror| {
+                serde_json::to_string(&mirror.view_still(&parked.plan, still)).ok()
+            });
         }
         parked.view_json.clone().unwrap_or_default()
     }

@@ -137,8 +137,8 @@ export function placeOverlays({ placed, labels, plots, width, height, pad }) {
 export const FLAGS_PER_COLUMN = 2;
 
 // How a column ranks its agents' flags, nearest the drones first: one that waits on the user,
-// then a stale one, then a working one, then an idle one.
-const FLAG_RANK = { waiting: 0, stale: 1, working: 2, idle: 3 };
+// then a stale one, then a drifting one, then a working one, then an idle one.
+const FLAG_RANK = { waiting: 0, stale: 1, drift: 2, working: 3, idle: 4 };
 
 // Whether an agent's flag shows: always for a working, waiting or stale drone, and for an idle one
 // only while it is hovered or Alt is down.

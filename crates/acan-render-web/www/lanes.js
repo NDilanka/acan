@@ -167,6 +167,8 @@ export function laneRows(view, activity, now, { live = true } = {}) {
       stale: state === "stale",
       away: state === "away",
       stamp: state === "away" ? awayStamp(quiet) : null,
+      // The drift the view derives in Rust (`Drift`): a stuck or beyond-scope agent says so.
+      drift: agent.drift?.kind === "stuck" || agent.drift?.kind === "beyond_scope" ? "drift" : null,
       check: task?.check ?? null,
       rideable: Array.isArray(agent.body),
       hold: typeof hold === "string" && hold !== "" ? hold : null,
@@ -248,7 +250,7 @@ function element(tag, className, text) {
 
 // The words a row shows, joined, so a change can be seen and marked.
 function signature(row) {
-  return [row.task, row.activity, row.machine, row.quiet, row.check?.state].join("|");
+  return [row.task, row.activity, row.machine, row.quiet, row.drift, row.check?.state].join("|");
 }
 
 function rowButton(row) {
@@ -259,6 +261,7 @@ function rowButton(row) {
   const name = element("span", "name", row.agent);
   const words = row.away ? `away · ${row.stamp}` : row.stale ? `stale · ${row.ago}` : row.ago;
   const when = element("span", row.quiet ? `when ${row.quiet}` : "when", words);
+  if (row.drift) when.append(` · ${row.drift}`);
   const doing = element("span", "doing", [row.task, row.activity, row.machine].filter((part) => part).join(" · "));
   const check = element("span", `chip ${row.check?.state ?? ""}`);
   if (row.check !== null) {
@@ -268,7 +271,7 @@ function rowButton(row) {
   if (row.title) button.title = row.title;
   const where = row.rideable ? "Ride" : row.machine ? "Go to the machine of" : "No drone for";
   const parts = [`${where} ${row.agent}`, row.task && `on ${row.task} ${row.activity}`, row.machine && `at ${row.machine}`,
-    `last heard ${row.ago}`, row.quiet, checkWords(row.check)];
+    `last heard ${row.ago}`, row.quiet, row.drift, checkWords(row.check)];
   button.setAttribute("aria-label", parts.filter((part) => part).join(", "));
   return button;
 }

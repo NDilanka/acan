@@ -22,7 +22,7 @@ use acan_render::theme::{
 use acan_render::{Beam, Instance};
 use serde::Serialize;
 
-use crate::mirror::{AgentView, CheckView, ClashView, View};
+use crate::mirror::{AgentView, CheckView, ClashView, Drift, View};
 use crate::plan::Plan;
 use crate::slices::{ScopeTint, Slice, slice_layout};
 use crate::tour::Spot;
@@ -133,6 +133,12 @@ pub const STALE_MS: u64 = 2 * 60 * 1_000;
 /// Milliseconds an agent that holds a task may be quiet before its drone goes and an away dot
 /// takes its place.
 pub const AWAY_MS: u64 = 10 * 60 * 1_000;
+/// Milliseconds a claimed task may go without a declaration, with its agent still heard, before
+/// its drone drifts.
+pub const STUCK_DECLARE_MS: u64 = 5 * 60 * 1_000;
+/// Milliseconds a declared and cleared task may go without a build report, with its agent still
+/// heard, before its drone drifts.
+pub const STUCK_BUILD_MS: u64 = 15 * 60 * 1_000;
 /// The most ghosts the plant shows at once. The latest landings keep theirs.
 pub const GHOST_MAX: usize = 12;
 /// How far a ghost's outline stands out from its machine's footprint, in plan units.
@@ -201,7 +207,7 @@ pub fn body_tint(slot: usize) -> u8 {
 #[must_use]
 pub fn eye_tint(state: DroneState, slot: usize) -> u8 {
     let tint = match state {
-        DroneState::Working => u32::from(body_tint(slot)),
+        DroneState::Working | DroneState::Drifting => u32::from(body_tint(slot)),
         DroneState::Idle | DroneState::Waiting => u32::from(body_tint(slot)) + TINT_DIM0,
         DroneState::Stale => TINT_STALE,
     };
@@ -226,17 +232,17 @@ pub struct Body {
     /// its top, lifted by the beacon's radius so the beacon stands on the top.
     pub target: [f32; 3],
     pub activity: &'static str,
-    /// What the drone shows: working, idle, waiting on the user, or stale.
+    /// What the drone shows: working, idle, waiting on the user, stale, or drifting.
     pub state: DroneState,
     /// The check the agent's task answers to, as the chip beside its flag shows it.
     pub check: Option<CheckView>,
 }
 
 impl Body {
-    /// Whether the agent is working on its task now, so its beacon pulses.
+    /// Whether the agent is working on its task now, drifting or not, so its beacon pulses.
     #[must_use]
     pub fn working(&self) -> bool {
-        self.state == DroneState::Working
+        matches!(self.state, DroneState::Working | DroneState::Drifting)
     }
 
     /// Whether the agent waits on the user: its task is in an open clash, or its order asks a
@@ -248,7 +254,7 @@ impl Body {
 }
 
 /// What a drone shows of its agent. One state shows at a time, by precedence: waiting, then
-/// stale, then working, then idle.
+/// stale, then drifting, then working, then idle.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DroneState {
@@ -263,17 +269,23 @@ pub enum DroneState {
     Waiting,
     /// It holds a task but has been quiet for a while: still and lower, its eye grey, no glow.
     Stale,
+    /// It holds a task it has drifted from: it looks as it does while it works, and its flag
+    /// carries a grey chevron.
+    Drifting,
 }
 
 impl DroneState {
     /// The state of an agent whose activity is `activity`. `waiting` is whether it waits on the
-    /// user, and `stale` whether it holds a task and has gone quiet.
+    /// user, `stale` whether it holds a task and has gone quiet, and `drifting` whether its task
+    /// has drifted from its plan.
     #[must_use]
-    pub fn of(activity: &str, waiting: bool, stale: bool) -> Self {
+    pub fn of(activity: &str, waiting: bool, stale: bool, drifting: bool) -> Self {
         if waiting {
             Self::Waiting
         } else if stale {
             Self::Stale
+        } else if drifting {
+            Self::Drifting
         } else if WORKING.contains(&activity) {
             Self::Working
         } else {
@@ -281,23 +293,23 @@ impl DroneState {
         }
     }
 
-    /// The tether's opacity: strong while the agent works or waits, faint while it idles, and
-    /// fainter still once it has gone stale.
+    /// The tether's opacity: strong while the agent works, waits or drifts, faint while it idles,
+    /// and fainter still once it has gone stale.
     #[must_use]
     pub fn tether_alpha(self) -> f32 {
         match self {
-            Self::Working | Self::Waiting => 0.9,
+            Self::Working | Self::Waiting | Self::Drifting => 0.9,
             Self::Idle => 0.3,
             Self::Stale => 0.2,
         }
     }
 
-    /// The opacity of the glow under the drone: strong while the agent works, faint while it idles
-    /// or waits, and none once it has gone stale.
+    /// The opacity of the glow under the drone: strong while the agent works or drifts, faint while
+    /// it idles or waits, and none once it has gone stale.
     #[must_use]
     pub fn glow_alpha(self) -> f32 {
         match self {
-            Self::Working => 0.5,
+            Self::Working | Self::Drifting => 0.5,
             Self::Idle | Self::Waiting => 0.18,
             Self::Stale => 0.0,
         }
@@ -308,7 +320,7 @@ impl DroneState {
     #[must_use]
     pub fn bob(self) -> Option<(f32, f32)> {
         match self {
-            Self::Working => Some((BOB_PX, BOB_PERIOD_MS)),
+            Self::Working | Self::Drifting => Some((BOB_PX, BOB_PERIOD_MS)),
             Self::Idle => Some((IDLE_BOB_PX, IDLE_BOB_PERIOD_MS)),
             Self::Waiting | Self::Stale => None,
         }
@@ -322,6 +334,7 @@ impl DroneState {
             Self::Idle => "idle",
             Self::Waiting => "waiting",
             Self::Stale => "stale",
+            Self::Drifting => "drift",
         }
     }
 }
@@ -509,7 +522,8 @@ pub struct DroneFlag {
     pub agent: String,
     /// The drone's state, as [`DroneState::word`] gives it.
     pub state: &'static str,
-    /// How long a stale agent has been quiet, such as `3m`.
+    /// How long a stale agent has been quiet, such as `3m`. A drifting agent's words, such as
+    /// `drift · quiet 6m` or `drift · beyond scope`.
     pub quiet: Option<String>,
 }
 
@@ -1616,7 +1630,7 @@ impl Motion {
         if self.still || self.reduced {
             return 0.0;
         }
-        let ms = if state == DroneState::Working {
+        let ms = if matches!(state, DroneState::Working | DroneState::Drifting) {
             self.bob_ms
         } else {
             self.idle_ms
@@ -2194,7 +2208,12 @@ fn place(
             hover_height(top)
         };
         let id = agent.id.to_string();
-        let state = DroneState::of(agent.activity, waiting.contains(&id), stale(agent, clock));
+        let state = DroneState::of(
+            agent.activity,
+            waiting.contains(&id),
+            stale(agent, clock),
+            agent.drift != Drift::None,
+        );
         let z = seat_height(z, state);
         let check = agent
             .task
@@ -2531,9 +2550,14 @@ fn agent_flag(view: &View, body: &Body, clock: Clock) -> Flag {
         .and_then(|agent| agent.task)
         .and_then(|task| view.tasks.iter().find(|candidate| candidate.id == task))
         .map(|task| task.title.clone());
-    let quiet = (body.state == DroneState::Stale)
-        .then(|| agent.and_then(|agent| clock.quiet(agent)).map(away_stamp))
-        .flatten();
+    let quiet = match (body.state, agent.map(|agent| agent.drift)) {
+        (DroneState::Stale, _) => agent.and_then(|agent| clock.quiet(agent)).map(away_stamp),
+        (DroneState::Drifting, Some(Drift::Stuck { quiet_ms })) => {
+            Some(format!("drift · quiet {}", away_stamp(quiet_ms)))
+        }
+        (DroneState::Drifting, _) => Some("drift · beyond scope".to_owned()),
+        _ => None,
+    };
     Flag {
         kind: FlagKind::Agent,
         text: body.agent.chars().take(FLAG_ID_CHARS).collect(),
@@ -3756,7 +3780,7 @@ mod tests {
             at,
             target,
             activity,
-            state: DroneState::of(activity, false, false),
+            state: DroneState::of(activity, false, false, false),
             check: None,
         }
     }
@@ -3810,20 +3834,39 @@ mod tests {
     #[test]
     fn a_claimed_stage_works_and_every_other_activity_is_idle() {
         for activity in ["claimed", "declared", "building", "gating"] {
-            assert_eq!(DroneState::of(activity, false, false), DroneState::Working);
+            assert_eq!(
+                DroneState::of(activity, false, false, false),
+                DroneState::Working
+            );
         }
         for activity in ["open", "readback", "queued", "landed", "idle"] {
-            assert_eq!(DroneState::of(activity, false, false), DroneState::Idle);
+            assert_eq!(
+                DroneState::of(activity, false, false, false),
+                DroneState::Idle
+            );
         }
     }
 
     #[test]
-    fn waiting_outranks_stale_which_outranks_working() {
-        assert_eq!(DroneState::of("building", true, true), DroneState::Waiting);
-        assert_eq!(DroneState::of("building", false, true), DroneState::Stale);
-        assert_eq!(DroneState::of("open", false, true), DroneState::Stale);
+    fn waiting_outranks_stale_which_outranks_drifting_which_outranks_working() {
         assert_eq!(
-            DroneState::of("building", false, false),
+            DroneState::of("building", true, true, true),
+            DroneState::Waiting
+        );
+        assert_eq!(
+            DroneState::of("building", false, true, true),
+            DroneState::Stale
+        );
+        assert_eq!(
+            DroneState::of("open", false, true, false),
+            DroneState::Stale
+        );
+        assert_eq!(
+            DroneState::of("building", false, false, true),
+            DroneState::Drifting
+        );
+        assert_eq!(
+            DroneState::of("building", false, false, false),
             DroneState::Working
         );
     }

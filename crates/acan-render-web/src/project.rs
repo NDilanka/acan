@@ -33,10 +33,17 @@ impl ProjectMarks {
     }
 
     /// Folds the log into the view and places its marks, as the app does for the project on
-    /// screen.
-    pub fn rebuild(&mut self, mirror: &Mirror, plan: &Plan, stands: &[Stand], clock: Clock) {
+    /// screen. A `still` page shows no drift.
+    pub fn rebuild(
+        &mut self,
+        mirror: &Mirror,
+        plan: &Plan,
+        stands: &[Stand],
+        clock: Clock,
+        still: bool,
+    ) {
         self.dirty = false;
-        let view = mirror.view(plan);
+        let view = mirror.view_still(plan, still);
         self.slots.assign(&view);
         let marks = Marks::build_at(&view, plan, stands, &self.slots, clock);
         self.motion.sync(&marks);
@@ -280,7 +287,7 @@ mod tests {
         let plan = plan_at(dx);
         let mirror = Mirror::from_log(log(land)).expect("the log replays");
         let mut project = ProjectMarks::new(Motion::new(true));
-        project.rebuild(&mirror, &plan, &stands(&plan), Clock::default());
+        project.rebuild(&mirror, &plan, &stands(&plan), Clock::default(), false);
         (project, plan)
     }
 
@@ -327,7 +334,7 @@ mod tests {
         let a_before = a.marks.clone();
         let landed = Mirror::from_log(log(true)).expect("the log replays");
         a.dirty = true;
-        a.rebuild(&landed, &plan_a, &stands(&plan_a), Clock::default());
+        a.rebuild(&landed, &plan_a, &stands(&plan_a), Clock::default(), false);
         assert_ne!(a.marks, a_before, "the fold changed a's marks");
         assert_eq!(b.marks, before, "b's marks did not move");
         assert_eq!(b.motion.flags_now(&b.marks.flags), flags_before);
