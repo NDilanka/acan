@@ -91,6 +91,7 @@ jobs:
           docker pull "$NODE_IMAGE@$NODE_DIGEST"
           docker tag "$NODE_IMAGE@$NODE_DIGEST" "$NODE_IMAGE"
           docker image inspect "$BUN_IMAGE" "$NODE_IMAGE" > /dev/null
-      - run: cargo test --workspace --locked
+      # --no-fail-fast runs every test binary, so one failure does not hide the others.
+      - run: cargo test --workspace --locked --no-fail-fast
         env:
           ACAN_DEMO_DIR: ${{ github.workspace }}/acan-demo
