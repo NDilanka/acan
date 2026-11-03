@@ -78,6 +78,12 @@
   .island { position: fixed; background: var(--face); border: 1px solid var(--rule); border-radius: var(--radius);
     box-shadow: var(--shadow); padding: 6px 12px; }
   #shell { top: 12px; left: 12px; display: flex; gap: 10px; align-items: baseline; }
+  /* At rest the shell is the brand and two keys; the repo and a healthy link show with the key bar. */
+  #shell .repo:not(:empty), #shell #link { display: none; }
+  #shell.open .repo:not(:empty), #shell.open #link, #shell #link:not(.quiet) { display: inline; }
+  #shell button.key { align-self: center; min-width: 20px; height: 20px; padding: 0 5px; font: 11px/18px var(--mono); color: var(--ink);
+    background: var(--card); border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+  #shell button.key:hover, #shell button.key[aria-expanded="true"] { border-color: var(--ink); }
   .brand { font-weight: 600; letter-spacing: 0.02em; }
   .repo, .muted { color: var(--muted); }
   #link { font: 11px var(--mono); }
@@ -155,6 +161,7 @@
   #setup-banner[hidden] { display: none; }
   /* The key bar ends left of the rail (300 px wide, 12 px from the window, 12 px gap), so it never
      runs under it. A narrow window drops the optional keys first; "/ command" always shows. */
+  #hint[hidden] { display: none; }
   #hint { top: 12px; right: 324px; display: flex; gap: 12px; color: var(--muted); white-space: nowrap; font-size: 12px; }
   #hint > span { display: inline-flex; gap: 4px; align-items: center; }
   @media (max-width: 1180px) { #hint .opt { display: none; } }
@@ -483,7 +490,7 @@
 <div id="pov-frame" hidden></div>
 <svg id="pov-reticle" hidden aria-hidden="true"><path id="pov-bracket" d=""></path></svg>
 <div class="island" id="pov-chip" hidden><span class="dot" id="pov-dot"></span><span class="inside">inside</span><b id="pov-agent"></b><span class="line" id="pov-line"></span><kbd>Esc</kbd><span class="alt" id="pov-alt" hidden></span></div>
-<div class="island" id="shell"><span class="brand">Acan</span><span class="repo" id="repo"></span><span id="link" class="muted">starting</span><span id="stale" class="stale" hidden></span><span id="version" class="version" hidden></span></div>
+<div class="island" id="shell"><span class="brand">Acan</span><span class="repo" id="repo"></span><span id="link" class="muted quiet">starting</span><span id="stale" class="stale" hidden></span><span id="version" class="version" hidden></span><button type="button" id="command-open" class="key" aria-label="Command bar" title="Command bar (/)">/</button><button type="button" id="help-toggle" class="key" aria-expanded="false" aria-controls="hint" aria-label="Keys" title="Keys (?)">?</button></div>
 <div class="island" id="alpha" hidden><span id="setup-banner" hidden><span id="setup-banner-text"></span><button id="setup-open" type="button">Set a key</button></span><span id="update" class="update" hidden><span id="update-text"></span> <a id="update-link" target="_blank" rel="noopener">open release</a></span><span class="alpha-actions"><button id="setup-manage" type="button" hidden>Model setup</button><button id="report-bug" type="button">Report a bug</button></span><span id="bug-note" class="muted" hidden></span></div>
 <dialog id="bug-dialog" aria-labelledby="bug-heading">
   <h2 id="bug-heading">Bug report</h2>
@@ -527,7 +534,7 @@
   </form>
   <p id="setup-blocked" class="muted" hidden></p>
 </dialog>
-<div class="island" id="hint"><span class="opt"><kbd>Alt</kbd> words</span><span class="opt"><kbd>0</kbd> fit</span><span><kbd>C</kbd> card</span><span><kbd>A</kbd> answer</span><span><kbd>O</kbd> order</span><span><kbd>/</kbd> command</span></div>
+<div class="island" id="hint" hidden><span class="opt"><kbd>Alt</kbd> words</span><span class="opt"><kbd>0</kbd> fit</span><span><kbd>C</kbd> card</span><span><kbd>A</kbd> answer</span><span><kbd>O</kbd> order</span><span><kbd>/</kbd> command</span></div>
 <div id="watch">
   <aside id="firstrun" class="island" hidden aria-label="first run checklist"></aside>
   <aside id="card" class="island" hidden></aside>

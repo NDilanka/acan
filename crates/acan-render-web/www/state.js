@@ -83,6 +83,10 @@ export const hintEl = $("hint");
 
 export const hintRest = hintEl.innerHTML;
 
+export const shellEl = $("shell");
+
+export const helpToggle = $("help-toggle");
+
 export const povEls = ["pov-vignette", "pov-frame", "pov-reticle", "pov-chip"].map((id) => $(id));
 
 export const povChip = $("pov-chip");

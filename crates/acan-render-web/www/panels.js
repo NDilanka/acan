@@ -1,7 +1,9 @@
 // The HTML panels: the point-of-view chip and reticle, the usage table, and the note that an
 // older page passes events over.
+import { requestRender } from "./main.js";
 import { shownOrderOf } from "./order.js";
 import {
+  helpToggle,
   hintEl,
   hintRest,
   historyBody,
@@ -17,6 +19,7 @@ import {
   povDot,
   povEls,
   povLine,
+  shellEl,
   slipEl,
   stale,
   state,
@@ -37,6 +40,18 @@ const POV_SQUARE_PX = 40;
 const POV_ARM_PX = 8;
 
 const RIDE_HINT = "<span class=\"opt\"><kbd>Alt</kbd> words</span><span class=\"opt\"><kbd>Shift</kbd><kbd>Tab</kbd> back</span><span><kbd>Tab</kbd> next</span><span><kbd>Esc</kbd> leave</span>";
+
+// The key bar sits behind the shell's "?" button and the "?" key. Opened, the shell shows the
+// repo and the link words too.
+export function toggleHelp(open = hintEl.hidden) {
+  hintEl.hidden = !open;
+  helpToggle.setAttribute("aria-expanded", String(open));
+  shellEl.classList.toggle("open", open);
+  // The names under the bar move aside on the next frame.
+  requestRender();
+}
+
+helpToggle.addEventListener("click", () => toggleHelp());
 
 // The ride as the wasm side has it now: the chip's words, the reticle on the beam's target, and
 // the frame, vignette and chip shown or hidden as the ride starts or ends.

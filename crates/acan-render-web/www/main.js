@@ -18,7 +18,7 @@ import { closeCommand, commandOpen, openCommand } from "./commandbar.js";
 import { clickMachine, closeCompose, composeOpen, orderHere } from "./compose.js";
 import { keyAction } from "./keys.js";
 import { paintMarks, pinAt, placeLabels } from "./marks.js";
-import { paintRide, paintStale, paintUsage } from "./panels.js";
+import { paintRide, paintStale, paintUsage, toggleHelp } from "./panels.js";
 import { syncSeals } from "./seal.js";
 import { paintSlip } from "./slip.js";
 import {
@@ -326,6 +326,9 @@ function runKey(action, event) {
       break;
     case "open-command":
       openCommand();
+      break;
+    case "toggle-help":
+      toggleHelp();
       break;
     case "toggle-question":
       toggleQuestionCard();
