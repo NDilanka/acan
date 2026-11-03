@@ -469,7 +469,7 @@ async fn project_changes_are_recorded_for_the_next_start() {
 
     let folder = tempfile::tempdir().expect("temp dir");
     let folder_path = folder.path().display().to_string();
-    let add = json!({"projects": {"add": [&folder_path], "remove": ["gone-project"]}});
+    let add = json!({"projects": {"add": [&folder_path]}});
     let response = put(&running, Some(OWNER_TOKEN), &add).await;
     assert_eq!(response.status(), StatusCode::OK);
     let saved: Value = serde_json::from_str(
@@ -477,7 +477,12 @@ async fn project_changes_are_recorded_for_the_next_start() {
     )
     .expect("the file is JSON");
     assert_eq!(saved["projects"]["add"], json!([folder_path]));
-    assert_eq!(saved["projects"]["remove"], json!(["gone-project"]));
+    assert_eq!(saved["projects"]["remove"], json!([]));
+
+    let unknown = json!({"projects": {"remove": ["gone-project"]}});
+    let refused = put(&running, Some(OWNER_TOKEN), &unknown).await;
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(invalid_paths(refused).await, ["projects.remove"]);
 
     running.stop().await.expect("the server stops");
 }

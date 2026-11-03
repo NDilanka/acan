@@ -6,7 +6,7 @@
 //! a key cannot come back in an error.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use acan_intent::RepairRounds;
 use acan_llm::{MUSE_SPARK_PROVIDER, Role, is_provider};
@@ -16,7 +16,7 @@ use super::{
     Adapter, Budgets, Harness, LabelDensity, Look, Notifications, Projects, Section, Stored, Theme,
 };
 use crate::http::FieldError;
-use crate::projects::valid_id;
+use crate::projects::{same_folder, valid_id};
 
 /// The longest key a change may set, in bytes. acan-llm refuses a longer key when it saves one.
 const MAX_KEY_BYTES: usize = 512;
@@ -180,9 +180,10 @@ pub(crate) enum KeyChange {
     Clear,
 }
 
-/// Checks `patch` against the settings `current`. `projects` lists the ids of the projects the
-/// server runs, which a change may name. A change that fails returns every failure. A change that
-/// passes returns the settings after it.
+/// Checks `patch` against the settings `current`. `running` lists the projects the server runs,
+/// each with its id and repository, which a change may name. `default` is the id of the default
+/// project. A change that fails returns every failure. A change that passes returns the settings
+/// after it.
 ///
 /// # Errors
 ///
@@ -190,7 +191,8 @@ pub(crate) enum KeyChange {
 pub(crate) fn check(
     patch: &Patch,
     current: &Stored,
-    projects_running: &[&str],
+    running: &[(&str, PathBuf)],
+    default: &str,
 ) -> Result<Changes, Vec<FieldError>> {
     let mut errors = Vec::new();
     let mut next = current.clone();
@@ -207,7 +209,7 @@ pub(crate) fn check(
     }
     if let Some(section) = &patch.projects {
         sections.push(Section::Projects);
-        projects(section, &mut next.projects, projects_running, &mut errors);
+        projects(section, &mut next.projects, running, default, &mut errors);
     }
     if let Some(section) = &patch.budgets {
         sections.push(Section::Budgets);
@@ -375,12 +377,16 @@ fn is_folder(path: &str) -> bool {
     path.is_absolute() && path.is_dir()
 }
 
-/// The projects part of a change. Adds, removes and worker counts are recorded for the next start.
-/// A statemap LLM flag names a project the server runs, and takes effect at once.
+/// The projects part of a change. Adds, removes and worker counts take effect at the next start,
+/// and are kept until a later change undoes them. Folders are kept as paths, so a removed project
+/// stays removed whatever the command line names. A statemap LLM flag names a project the server
+/// runs, and takes effect at once. The default project cannot be removed, since the unprefixed
+/// routes answer for it.
 fn projects(
     section: &ProjectsPatch,
     next: &mut Projects,
-    projects_running: &[&str],
+    running: &[(&str, PathBuf)],
+    default: &str,
     errors: &mut Vec<FieldError>,
 ) {
     if let Some(paths) = &section.add {
@@ -390,7 +396,15 @@ fn projects(
                     "projects.add",
                     "must be absolute paths to folders that exist",
                 ));
-            } else if !next.add.contains(path) {
+                continue;
+            }
+            // Adding a folder brings it back if a change removed it. A folder the server already
+            // runs needs no add, so none is kept.
+            let folder = PathBuf::from(path);
+            next.remove
+                .retain(|removed| !same_folder(Path::new(removed), &folder));
+            let served = running.iter().any(|(_, repo)| same_folder(repo, &folder));
+            if !served && !next.add.contains(path) {
                 next.add.push(path.clone());
             }
         }
@@ -399,8 +413,33 @@ fn projects(
         for id in ids {
             if !valid_id(id) {
                 errors.push(field("projects.remove", "must be project ids"));
-            } else if !next.remove.contains(id) {
-                next.remove.push(id.clone());
+                continue;
+            }
+            if id.as_str() == default {
+                errors.push(field(
+                    "projects.remove",
+                    "the default project cannot be removed",
+                ));
+                continue;
+            }
+            let Some((_, repo)) = running.iter().find(|(running_id, _)| running_id == id) else {
+                errors.push(field(
+                    "projects.remove",
+                    "must name a project the server runs",
+                ));
+                continue;
+            };
+            // Removing a folder that a change added drops the add. Otherwise the folder is kept
+            // as removed, so the command line does not bring it back.
+            let folder = std::path::absolute(repo).unwrap_or_else(|_| repo.clone());
+            next.add
+                .retain(|added| !same_folder(Path::new(added), &folder));
+            let kept = next
+                .remove
+                .iter()
+                .any(|removed| same_folder(Path::new(removed), &folder));
+            if !kept {
+                next.remove.push(folder.display().to_string());
             }
         }
     }
@@ -426,7 +465,10 @@ fn projects(
         for (id, on) in flags {
             if !valid_id(id) {
                 errors.push(field("projects.statemap_llm", "must name project ids"));
-            } else if !projects_running.contains(&id.as_str()) {
+            } else if !running
+                .iter()
+                .any(|(running_id, _)| *running_id == id.as_str())
+            {
                 let path = format!("projects.statemap_llm.{id}");
                 errors.push(field(&path, "must name a project the server runs"));
             } else {
@@ -574,23 +616,34 @@ fn notifications(section: &NotificationsPatch, next: &mut Notifications) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use serde_json::{Value, json};
 
     use super::*;
 
-    /// The projects the server runs, for the checks that name one.
-    const RUNNING: &[&str] = &["acan-wip"];
+    /// The default project of the checks: the one the server runs.
+    const DEFAULT: &str = "acan-wip";
+
+    /// The projects the server runs, each with its repository, for the checks that name one.
+    fn running() -> Vec<(&'static str, PathBuf)> {
+        vec![
+            (DEFAULT, PathBuf::from("/work/acan-wip")),
+            ("beta", PathBuf::from("/work/beta")),
+        ]
+    }
 
     fn patch(value: Value) -> Patch {
         serde_json::from_value(value).expect("the patch parses")
     }
 
     fn accepted(value: Value) -> Changes {
-        check(&patch(value), &Stored::default(), RUNNING).expect("the change is accepted")
+        check(&patch(value), &Stored::default(), &running(), DEFAULT)
+            .expect("the change is accepted")
     }
 
     fn refused(value: Value) -> Vec<FieldError> {
-        check(&patch(value), &Stored::default(), RUNNING)
+        check(&patch(value), &Stored::default(), &running(), DEFAULT)
             .err()
             .expect("the change is refused")
     }
@@ -731,14 +784,16 @@ mod tests {
             check(
                 &patch(json!({"harness": {"roles": {"fast": "builtin"}}})),
                 &stored,
-                RUNNING
+                &running(),
+                DEFAULT,
             )
             .is_ok()
         );
         let cleared = check(
             &patch(json!({"harness": {"custom_command": []}})),
             &stored,
-            RUNNING,
+            &running(),
+            DEFAULT,
         )
         .err()
         .expect("clearing the command leaves a custom role without one");
@@ -892,13 +947,76 @@ mod tests {
     }
 
     #[test]
+    fn a_removed_project_stays_removed_until_its_folder_is_added_again() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let alpha = root.path().join("alpha");
+        let beta = root.path().join("beta");
+        fs::create_dir_all(&beta).expect("the folder");
+        let beta_text = beta.display().to_string();
+        let serving = vec![(DEFAULT, alpha.clone()), ("beta", beta.clone())];
+        let removed = check(
+            &patch(json!({"projects": {"remove": ["beta"]}})),
+            &Stored::default(),
+            &serving,
+            DEFAULT,
+        )
+        .expect("the removal is accepted")
+        .next;
+        assert_eq!(removed.projects.remove, vec![beta_text.clone()]);
+
+        // Adding the folder again brings it back, and the removal is dropped.
+        let not_serving = vec![(DEFAULT, alpha.clone())];
+        let back = check(
+            &patch(json!({"projects": {"add": [beta_text.clone()]}})),
+            &removed,
+            &not_serving,
+            DEFAULT,
+        )
+        .expect("the add is accepted")
+        .next;
+        assert!(back.projects.remove.is_empty());
+        assert_eq!(back.projects.add, vec![beta_text.clone()]);
+
+        // A project a change added is removed by dropping the add, not by a removal that would
+        // bring it back.
+        let added = Stored {
+            projects: Projects {
+                add: vec![beta_text.clone()],
+                ..Projects::default()
+            },
+            ..Stored::default()
+        };
+        let gone = check(
+            &patch(json!({"projects": {"remove": ["beta"]}})),
+            &added,
+            &serving,
+            DEFAULT,
+        )
+        .expect("the removal is accepted")
+        .next;
+        assert!(gone.projects.add.is_empty());
+        assert_eq!(gone.projects.remove, vec![beta_text]);
+    }
+
+    #[test]
     fn project_ids_and_worker_counts_are_bounded() {
         assert!(names(
             &refused(json!({"projects": {"remove": ["Bad_Id"]}})),
             "projects.remove"
         ));
-        let kept = accepted(json!({"projects": {"remove": ["acan-wip"]}}));
-        assert_eq!(kept.next.projects.remove, vec!["acan-wip".to_owned()]);
+        assert!(
+            names(
+                &refused(json!({"projects": {"remove": ["acan-wip"]}})),
+                "projects.remove"
+            ),
+            "the default project cannot be removed"
+        );
+        assert!(names(
+            &refused(json!({"projects": {"remove": ["gamma"]}})),
+            "projects.remove"
+        ));
+        let other = accepted(json!({"projects": {"remove": ["beta"]}}));
+        assert_eq!(other.next.projects.remove, vec!["/work/beta".to_owned()]);
         let eight = accepted(json!({"projects": {"workers": {"acan-wip": 8}}}));
         assert_eq!(eight.next.projects.workers.get("acan-wip"), Some(&8));
         assert!(names(

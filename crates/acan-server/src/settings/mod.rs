@@ -150,17 +150,19 @@ pub(crate) struct Harness {
     pub(crate) custom_command: Vec<String>,
 }
 
-/// The projects a change records. Adds and removals take effect at the next start, and the worker
-/// counts are what each project runs with.
+/// The projects a change records. Adds and removals take effect at the next start, and stay in
+/// effect until a later change undoes them. The worker counts are what each project runs with.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct Projects {
     /// The local worker count of each project, by id. A project with no entry runs the count the
     /// server started with.
     pub(crate) workers: BTreeMap<String, u8>,
-    /// Folders to add as projects at the next start, as absolute paths.
+    /// Folders served as projects beyond the ones the command line or projects file names, as
+    /// absolute paths.
     pub(crate) add: Vec<String>,
-    /// Ids of projects to remove at the next start.
+    /// Folders of projects that are not served, as absolute paths. A folder stays here until a
+    /// change adds it again.
     pub(crate) remove: Vec<String>,
     /// Whether each project uses the LLM refinement of scanned state charts, by id. A project with
     /// no entry does not use it. This takes effect at once, since the flag is read on each use.
@@ -452,6 +454,10 @@ impl<C: ModelClient + 'static> Settings<C> {
             look: stored.look.clone(),
             notifications: stored.notifications.clone(),
             applied: self.applied_fields(),
+            project_changes: (caller == Caller::Owner).then(|| ProjectChangesView {
+                add: stored.projects.add.clone(),
+                remove: stored.projects.remove.clone(),
+            }),
             tokens: (caller == Caller::Owner).then(|| self.tokens_view()),
             about: release::version_info(),
         }
@@ -495,10 +501,7 @@ impl<C: ModelClient + 'static> Settings<C> {
             .map(|entry| ProjectView {
                 id: entry.id.clone(),
                 name: entry.name.clone(),
-                workers: stored.projects.workers.get(&entry.id).map_or_else(
-                    || entry.board.view().workers.len(),
-                    |count| usize::from(*count),
-                ),
+                workers: worker_count(stored, &entry.id, entry.board.view().workers.len()),
                 statemap_llm: stored
                     .projects
                     .statemap_llm
@@ -585,10 +588,22 @@ struct View {
     notifications: Notifications,
     /// How each setting takes effect, by its dotted path: `live`, `stored`, `restart` or `client`.
     applied: BTreeMap<String, &'static str>,
+    /// Only the owner's document has this key. The folders settings added and removed as projects,
+    /// which the next start applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_changes: Option<ProjectChangesView>,
     /// Only the owner's document has this key. Its contents are filled in by the token routes.
     #[serde(skip_serializing_if = "Option::is_none")]
     tokens: Option<TokensView>,
     about: VersionInfo,
+}
+
+/// The folders settings added and removed as projects. They are paths, so only the owner sees
+/// them.
+#[derive(Debug, Serialize)]
+struct ProjectChangesView {
+    add: Vec<String>,
+    remove: Vec<String>,
 }
 
 /// The owner's view of the tokens. Every token is masked, so no response carries a whole one.
@@ -712,13 +727,19 @@ async fn put_settings<C: ModelClient + 'static>(
     let patch = Patch::deserialize(&raw)
         .map_err(|_| ApiError::BadRequest("a JSON object of settings sections"))?;
     let _turn = state.changes.lock().await;
-    let known: Vec<&str> = state
+    let running: Vec<(&str, PathBuf)> = state
         .projects
         .entries()
         .iter()
-        .map(|entry| entry.id.as_str())
+        .map(|entry| (entry.id.as_str(), entry.host.repo().to_path_buf()))
         .collect();
-    let changes = validate::check(&patch, &state.stored(), &known).map_err(ApiError::Invalid)?;
+    let changes = validate::check(
+        &patch,
+        &state.stored(),
+        &running,
+        state.projects.default_id(),
+    )
+    .map_err(ApiError::Invalid)?;
 
     let host = state.default_host();
     let mut keys = BTreeMap::new();
@@ -1034,11 +1055,74 @@ pub(crate) fn statemap_llm_enabled(settings_path: &Path, project_id: &str) -> bo
     }
 }
 
+/// The most calls the statemap role may make, as the settings file at `settings_path` says now.
+/// The file is read on each call, like [`statemap_llm_enabled`]. A missing file, or one that
+/// cannot be read, gives the default limit.
+#[allow(
+    dead_code,
+    reason = "the statemap pass does not read this limit in this crate yet"
+)]
+pub(crate) fn statemap_call_limit(settings_path: &Path) -> u32 {
+    match file::load(settings_path) {
+        Ok(stored) => stored.budgets.call_limits.statemap,
+        Err(err) => {
+            tracing::warn!(error = %err, "the statemap call limit cannot be read; the default applies");
+            DEFAULT_CALL_LIMIT
+        }
+    }
+}
+
+/// The local worker count of project `id`: the count the settings give it, or `started` when they
+/// give none. The count is read when the server starts, so a change takes effect at the next start.
+pub(crate) fn worker_count(stored: &Stored, id: &str, started: usize) -> usize {
+    stored
+        .projects
+        .workers
+        .get(id)
+        .map_or(started, |count| usize::from(*count))
+}
+
 #[cfg(test)]
 mod tests {
     use acan_llm::ProviderStatus;
 
     use super::*;
+
+    #[test]
+    fn a_project_with_no_worker_count_runs_the_count_it_started_with() {
+        let mut stored = Stored::default();
+        assert_eq!(worker_count(&stored, "alpha", 2), 2);
+        stored.projects.workers.insert("alpha".to_owned(), 0);
+        assert_eq!(worker_count(&stored, "alpha", 2), 0, "zero runs none");
+        assert_eq!(
+            worker_count(&stored, "beta", 2),
+            2,
+            "the others keep theirs"
+        );
+    }
+
+    #[test]
+    fn the_statemap_call_limit_is_read_from_the_file_on_each_call() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(FILE);
+        assert_eq!(
+            statemap_call_limit(&path),
+            30,
+            "a missing file gives the default"
+        );
+
+        let mut stored = Stored::default();
+        stored.budgets.call_limits.statemap = 12;
+        file::save(&path, &stored).expect("the settings are saved");
+        assert_eq!(statemap_call_limit(&path), 12);
+
+        std::fs::write(&path, "{ not json").expect("the file is written");
+        assert_eq!(
+            statemap_call_limit(&path),
+            30,
+            "a file that does not parse gives the default"
+        );
+    }
 
     /// A status where each `(provider, saved, environment)` has a key, and the setup saved the keys.
     fn status(providers: &[(&str, bool, bool)]) -> KeyStatus {

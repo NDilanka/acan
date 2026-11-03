@@ -168,8 +168,9 @@ pub struct ServeConfig {
     pub witness_concurrency: usize,
     /// The advisory vision witness, shared by every project. `None` runs no vision checks.
     pub vision: Option<VisionConfig>,
-    /// How many local worker loops each project runs in this process. Zero runs none. Each
-    /// loop has its own agent, `local-1` and so on, in every project.
+    /// How many local worker loops each project runs in this process, unless the settings give
+    /// that project another count. Zero runs none. Each loop has its own agent, `local-1` and so
+    /// on, in every project.
     pub local_workers: usize,
 }
 
@@ -372,6 +373,10 @@ pub async fn start_projects<C: ModelClient + 'static>(
 /// defaults. A file that does not parse stops the start, so the server never replaces it with the
 /// defaults.
 ///
+/// Each project runs the local worker count its settings give, or `config.local_workers` when they
+/// give none. The folders settings added and removed are the caller's to apply, with
+/// [`apply_project_changes`], before it builds the clients.
+///
 /// # Errors
 ///
 /// Returns an error when the bind address is non-loopback without `team`, the projects do not
@@ -441,8 +446,9 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
         let state_dir = spec.repo.join(STATE_DIR);
         // Each project's local workers hold their own tokens, kept in that project's state
         // directory, so the same worker keeps its token across starts.
-        let mut worker_tokens = Vec::with_capacity(config.local_workers);
-        for index in 0..config.local_workers {
+        let workers = settings::worker_count(&stored, &spec.id, config.local_workers);
+        let mut worker_tokens = Vec::with_capacity(workers);
+        for index in 0..workers {
             let token = tokens.agent_token(&state_dir, &workers::agent(index)?)?;
             worker_tokens.push(token.as_str().to_owned());
         }
@@ -527,7 +533,7 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
             id: spec.id,
             name: spec.name,
             host,
-            board: workers::Board::new(config.local_workers),
+            board: workers::Board::new(worker_tokens.len()),
             head: tokio::sync::Mutex::new(None),
         });
         project_workers.push(worker_tokens);
@@ -544,8 +550,8 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
             return Err(err).context("recording the initial code index");
         }
     }
-    for entry in &entries {
-        for index in 0..config.local_workers {
+    for (entry, worker_tokens) in entries.iter().zip(&project_workers) {
+        for index in 0..worker_tokens.len() {
             let registration = Command::Human {
                 member: founder.clone(),
                 cmd: HumanCmd::RegisterAgent {
@@ -626,6 +632,52 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
 #[must_use]
 pub fn settings_file_beside(keys: &KeyFile) -> PathBuf {
     keys.path().with_file_name(settings::FILE)
+}
+
+/// The settings file a start keeps when it is given none: `settings.json` in the first project's
+/// state directory, the one the start opens first.
+#[must_use]
+pub fn default_settings_file(projects: &ProjectSet) -> PathBuf {
+    projects
+        .projects
+        .first()
+        .map_or_else(
+            || PathBuf::from(STATE_DIR),
+            |project| project.repo.join(STATE_DIR),
+        )
+        .join(settings::FILE)
+}
+
+/// Applies the project changes that `settings_file` holds to `projects`: the folders settings added
+/// and removed. Call this before the clients are built, and start with the same `projects`. The
+/// result names each added folder that cannot be served, with the reason. Such a folder is dropped
+/// from the changes, so the next start does not name it again.
+///
+/// # Errors
+///
+/// Returns an error when the settings file cannot be read, does not parse, or cannot be written,
+/// or when the set that results does not validate.
+pub fn apply_project_changes(
+    projects: &mut ProjectSet,
+    settings_file: &Path,
+) -> anyhow::Result<Vec<String>> {
+    let mut stored = settings::load(settings_file)?;
+    let add: Vec<PathBuf> = stored.projects.add.iter().map(PathBuf::from).collect();
+    let remove: Vec<PathBuf> = stored.projects.remove.iter().map(PathBuf::from).collect();
+    let skipped = projects.apply_changes(&add, &remove)?;
+    if skipped.is_empty() {
+        return Ok(Vec::new());
+    }
+    stored
+        .projects
+        .add
+        .retain(|folder| !skipped.iter().any(|(repo, _)| repo == Path::new(folder)));
+    settings::file::save(settings_file, &stored)
+        .context("dropping the folders that cannot be served from the project changes")?;
+    Ok(skipped
+        .into_iter()
+        .map(|(repo, reason)| format!("{}: {reason}", repo.display()))
+        .collect())
 }
 
 /// A project whose world is open and scanned, waiting for its host. Nothing is bound yet.
