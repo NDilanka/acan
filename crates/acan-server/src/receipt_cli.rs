@@ -1379,6 +1379,28 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_refused_run_creates_no_diagnostics_directory() {
+        let repo = clone_with(&contract_files());
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let diagnostics = dir.path().join("diagnostics");
+        let error = run_with(
+            &args(repo.path(), "main", "main"),
+            &missing_docker(),
+            Some(&diagnostics),
+        )
+        .await
+        .expect_err("a run without docker is refused");
+        assert!(
+            matches!(error, ShadowError::Docker(_)),
+            "no docker: {error}"
+        );
+        assert!(
+            !diagnostics.exists(),
+            "a refused run keeps no diagnostics directory"
+        );
+    }
+
     /// Every path under `dir` with its length, sorted, so a change to a directory shows.
     fn listing(dir: &Path) -> Vec<(PathBuf, u64)> {
         let mut found = Vec::new();
