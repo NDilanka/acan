@@ -8,7 +8,9 @@ import {
   historyBody,
   historyEl,
   metaBody,
+  metaLegend,
   metaNote,
+  metaSection,
   orderEl,
   orderLine,
   povAgent,
@@ -161,7 +163,9 @@ function paintOrderShown() {
 // role, provider and model, with the legend that says what each provider name is. Alt also shows
 // the history of this log, which the page folds from the model calls in the log. The panel is
 // hidden until there is something to show. At rest the first section shows its first few rows;
-// Alt shows every origin row and the newest history rows the view carries.
+// Alt shows every origin row, the provider legend and the newest history rows the view carries.
+// A page with no origin rows (a replay, a fixture) shows the history at rest instead of an empty
+// table, so the attribution is still on screen.
 export function paintUsage() {
   const served = state.serverUsage;
   const history = state.view === null ? [] : state.view.usage;
@@ -171,7 +175,9 @@ export function paintUsage() {
   const shown = state.altDown ? rows : rows.slice(0, USAGE_REST_ROWS);
   metaBody.replaceChildren(...shown.map(metaRow));
   metaNote.textContent = metaNoteText(served, live.length, offline.length, total);
-  historyEl.hidden = !state.altDown || history.length === 0;
+  metaSection.hidden = rows.length === 0 && !served?.error && history.length > 0;
+  metaLegend.hidden = !state.altDown || rows.length === 0;
+  historyEl.hidden = history.length === 0 || (!state.altDown && !metaSection.hidden);
   const earlier = state.view === null ? 0 : state.view.usage_earlier;
   historyBody.replaceChildren(...history.map(historyRow), ...(earlier > 0 ? [earlierRow(earlier)] : []));
 }

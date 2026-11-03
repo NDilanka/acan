@@ -71,6 +71,10 @@ export const metaBody = $("meta-body");
 
 export const metaNote = $("meta-note");
 
+export const metaSection = $("usage-meta");
+
+export const metaLegend = $("meta-legend");
+
 export const historyEl = $("usage-history");
 
 export const historyBody = $("history-body");

@@ -56,12 +56,12 @@ test("each kind of waiting thing is listed once, in the order blockers first", (
   assert.deepEqual(items.map((item) => item.key), ["clash:2", "clash:3", "question:7", "stopped:3", "seal:2:3"]);
   const byKey = Object.fromEntries(items.map((item) => [item.key, item]));
   assert.equal(byKey["clash:2"].machine, "src/api", "a clash flies to its lower task's machine");
-  assert.equal(byKey["clash:2"].text, "c-2 · breaks w-3: two tasks overlap, so choose how to settle it");
-  assert.equal(byKey["clash:3"].text, "c-3: a settle was proposed and waits for yours");
+  assert.equal(byKey["clash:2"].text, "c-2 · breaks w-3: tasks overlap, choose a settle");
+  assert.equal(byKey["clash:3"].text, "c-3: settle proposed, waits for yours");
   assert.equal(byKey["question:7"].text, "q-7 asks: keep the old header?");
   assert.equal(byKey["question:7"].machine, "src/api");
-  assert.equal(byKey["stopped:3"].text, "o-3 stopped because its repair budget ran out");
-  assert.equal(byKey["seal:2:3"].text, "o-2 scope rev 3 waits for your seal");
+  assert.equal(byKey["stopped:3"].text, "o-3 stopped: repair budget spent");
+  assert.equal(byKey["seal:2:3"].text, "o-2 rev 3 waits for your seal");
   assert.equal(byKey["seal:2:3"].machine, "src/web");
 });
 
@@ -91,7 +91,7 @@ test("residue items in a plant view wait for a ruling, one line per order", () =
   ]);
   const residue = inboxItems(view(), plantViews).filter((item) => item.kind === "residue");
   assert.deepEqual(residue.map((item) => [item.key, item.text, item.machine]), [
-    ["residue:o-1", "o-1 has 2 residue items to rule on", "src/api/retry"],
+    ["residue:o-1", "o-1: 2 residue items to rule on", "src/api/retry"],
   ]);
 });
 
@@ -101,7 +101,7 @@ test("a vision check that found something inconsistent or unclear waits; a later
   assert.deepEqual([...doubts.keys()], [1]);
   const items = inboxItems(view(), new Map(), doubts).filter((item) => item.kind === "vision");
   assert.deepEqual(items.map((item) => [item.key, item.text, item.machine]), [
-    ["vision:1:13", "t-1 vision check found 1 inconsistent, 2 unclear; it is advisory, so take a look", "src/api"],
+    ["vision:1:13", "t-1 vision: 1 inconsistent, 2 unclear (advisory)", "src/api"],
   ]);
 });
 

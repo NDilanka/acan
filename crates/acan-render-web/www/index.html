@@ -258,6 +258,7 @@
   #usage { left: 12px; bottom: 12px; color: var(--soft); }
   #usage h3 { margin: 0 0 4px; font: 600 11px/1.2 var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
   #usage section + section { margin-top: 8px; }
+  #usage section[hidden], #usage .legend[hidden] { display: none; }
   #usage .legend, #usage .note { font: 11px/1.4 var(--sans); color: var(--muted); margin: 4px 0 0; max-width: 340px; white-space: normal; }
   #usage tr.standin td { color: var(--muted); font-style: italic; }
   #usage td.earlier { color: var(--muted); }
@@ -410,8 +411,10 @@
   #inbox .kind { flex: none; width: 56px; font: 10px/1.6 var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
   #inbox .item.clash .kind, #inbox .item.stopped .kind { color: var(--red); }
   #inbox .item.vision .kind { color: var(--muted); }
-  #inbox .opt-in { margin-top: 6px; font: 11px var(--mono); padding: 2px 8px; background: var(--face); color: var(--muted);
+  #inbox h3.alone { margin-bottom: 0; }
+  #inbox .opt-in { font: 11px var(--mono); padding: 0 6px; background: var(--face); color: var(--muted);
     border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+  #inbox .opt-in[hidden] { display: none; }
   #inbox .opt-in:hover { color: var(--ink); border-color: var(--ink); }
   #lanes ol { max-height: 30vh; }
   #history ol { max-height: 26vh; }
@@ -591,19 +594,19 @@
   </form>
 </div>
 <div class="island" id="usage" hidden>
-  <section>
-    <h3>Meta attribution · since server start</h3>
+  <section id="usage-meta">
+    <h3 title="provider = config name: meta = Meta Model API, baseten = Baseten-hosted Muse Spark Open, fireworks = Fireworks-hosted Muse Spark Open">Meta attribution · since server start</h3>
     <table>
       <thead>
         <tr><th>role</th><th>provider</th><th>model</th><th class="num">calls</th><th class="num">in</th><th class="num">out</th></tr>
       </thead>
       <tbody id="meta-body"></tbody>
     </table>
-    <p class="legend">provider = config name: meta = Meta Model API, baseten = Baseten-hosted Muse Spark Open, fireworks = Fireworks-hosted Muse Spark Open</p>
+    <p class="legend" id="meta-legend" hidden>provider = config name: meta = Meta Model API, baseten = Baseten-hosted Muse Spark Open, fireworks = Fireworks-hosted Muse Spark Open</p>
     <p class="note" id="meta-note"></p>
   </section>
   <section id="usage-history" hidden>
-    <h3>history (this log)</h3>
+    <h3>Meta attribution · this log</h3>
     <table>
       <thead>
         <tr><th>step</th><th>model</th><th class="num">calls</th><th class="num">in</th><th class="num">out</th></tr>
