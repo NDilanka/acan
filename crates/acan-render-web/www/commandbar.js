@@ -22,6 +22,8 @@ let bar = null;
 
 let bound = false;
 
+$("command-open").addEventListener("click", () => openCommand());
+
 export function commandOpen() {
   return bar !== null;
 }

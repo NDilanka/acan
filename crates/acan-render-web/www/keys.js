@@ -24,6 +24,7 @@ const ARROWS = {
 // key is stopped. "/" and "o" move the focus into a text field, so the key must not be typed there.
 const SINGLE = {
   "/": { kind: "open-command", repeats: false, prevent: true },
+  "?": { kind: "toggle-help", repeats: false, prevent: true },
   a: { kind: "toggle-question", repeats: false },
   o: { kind: "order-here", repeats: false, prevent: true },
   c: { kind: "toggle-card", repeats: false },

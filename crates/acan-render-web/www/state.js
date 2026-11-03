@@ -59,10 +59,6 @@ export const link = $("link");
 
 export const stale = $("stale");
 
-export const orderEl = $("order");
-
-export const orderLine = $("order-line");
-
 export const slipEl = $("slip");
 
 export const usagePanel = $("usage");
@@ -70,6 +66,12 @@ export const usagePanel = $("usage");
 export const metaBody = $("meta-body");
 
 export const metaNote = $("meta-note");
+
+export const metaBadge = $("meta-badge");
+
+export const metaSection = $("usage-meta");
+
+export const metaLegend = $("meta-legend");
 
 export const historyEl = $("usage-history");
 
@@ -82,6 +84,10 @@ export const noticeEl = $("notice");
 export const hintEl = $("hint");
 
 export const hintRest = hintEl.innerHTML;
+
+export const shellEl = $("shell");
+
+export const helpToggle = $("help-toggle");
 
 export const povEls = ["pov-vignette", "pov-frame", "pov-reticle", "pov-chip"].map((id) => $(id));
 
@@ -120,11 +126,9 @@ export const state = {
   altDown: false,
   // The agent the page rides, or "" when it does not ride.
   ridden: "",
-  // Whether the view holds an order to show in the order island.
-  hasOrder: false,
-  // The id of the order this page posted last, or null. The island names it while it is in flight.
+  // The id of the order this page posted last, or null. The slip shows it while it is in flight.
   postedOrder: null,
-  // Whether the slip shows: the order island's order has a scope lane. See `slip.js`.
+  // Whether the slip shows: the shown order has a scope lane. See `slip.js`.
   hasSlip: false,
   // The origin's confirmation route for each order with a scope, as `seal.js` keeps it.
   sealViews: new Map(),
@@ -137,6 +141,9 @@ export const state = {
   // Whether a Seal or a Strike is being sent, and the note the last one left.
   slipPending: false,
   slipNote: "",
+  // The scope-draft answer of each order with no lane yet, as `slip.js` fetches it: `{ answer,
+  // inFlight, retryAt }`, with `answer` null until the route has a draft or a failure to show.
+  drafts: new Map(),
   labelGeneration: 0,
   labels: new Map(),
   // The plant view summary of each order that has receipts, as the wasm side checked it, with the

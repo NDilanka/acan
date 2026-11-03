@@ -7,6 +7,7 @@ export const HISTORY_REASONS = {
   send: "Go live to send.",
   answer: "Go live to answer.",
   settle: "Go live to settle.",
+  adopt: "Go live to adopt.",
   seal: "Go live to seal.",
   strike: "Go live to strike.",
   cancel: "Go live to cancel.",

@@ -1,4 +1,4 @@
-// The slip: the scope of the order the order island shows. It lists the plots, the must-keep rules
+// The slip: the scope of the shown order (see `shownOrderOf`). It lists the plots, the must-keep rules
 // and the open choices, and the Seal and the Strike that act on them. The Seal sends ConfirmScope
 // and the Strike sends ReviseScope, both to `/api/commands` as the clash card's settle does. The
 // Seal paints solid only once the view carries the origin's confirmation, never on the click.
@@ -20,20 +20,25 @@ import {
   strikeScope,
   strikeWords,
 } from "./seal.js";
-import { freeze, slipEl, state } from "./state.js";
+import { DRAFT_RETRY_MS, adoptCommand, draftSummary, wantsDraft } from "./draft.js";
+import { freeze, replay, slipEl, state } from "./state.js";
 import { historyBlock } from "./guard.js";
 import { forgetToken, get, hold } from "./stream.js";
 
+// A failed draft is retried by the server's job loop, so the slip asks again, but seldom.
+const FAILED_RETRY_MS = 30000;
+
 export function paintSlip() {
   const lane = slipLane();
-  state.hasSlip = lane !== null;
-  slipEl.hidden = !state.hasSlip || state.ridden !== "";
-  if (lane === null) {
-    slipEl.replaceChildren();
-    return;
-  }
   const focused = document.activeElement;
   const focusKey = slipEl.contains(focused) ? focused.dataset.focusKey : undefined;
+  if (lane === null) {
+    paintDraft();
+    if (focusKey !== undefined) slipEl.querySelector(`[data-focus-key="${focusKey}"]`)?.focus();
+    return;
+  }
+  state.hasSlip = true;
+  slipEl.hidden = state.ridden !== "";
   const picks = picksFor(state, lane);
   slipEl.replaceChildren(
     head(lane),
@@ -43,7 +48,6 @@ export function paintSlip() {
     choicesBlock(lane, picks),
     broadBlock(lane, picks),
     ...(state.slipNote ? [el("p", "note", state.slipNote)] : []),
-    el("p", "foot", "A plot names behavior the order may change, on the machines it lists. It is not an authorization boundary or a fence around the code."),
   );
   if (focusKey !== undefined) {
     slipEl.querySelector(`[data-focus-key="${focusKey}"]`)?.focus();
@@ -55,6 +59,89 @@ function slipLane() {
   const order = shownOrder(state.view);
   if (order === undefined) return null;
   return state.view.lanes.find((lane) => lane.order === order.id) ?? null;
+}
+
+// An order with no lane yet shows its scope draft, once the route has one, with the one control
+// that adopts it. Adopting sends ReviseScope, which opens the lane; the slip then offers the Seal.
+function paintDraft() {
+  const order = shownOrder(state.view);
+  const wanted = state.token && !replay && wantsDraft(order, state.view.lanes);
+  const entry = wanted ? draftEntry(order) : null;
+  state.hasSlip = entry !== null && entry.answer !== null;
+  slipEl.hidden = !state.hasSlip || state.ridden !== "";
+  if (!state.hasSlip) {
+    slipEl.replaceChildren();
+    return;
+  }
+  slipEl.replaceChildren(draftHead(order), ...draftBlock(order, entry.answer), ...(state.slipNote ? [el("p", "note", state.slipNote)] : []));
+}
+
+function draftEntry(order) {
+  let entry = state.drafts.get(order.id);
+  if (entry === undefined) {
+    entry = { answer: null, inFlight: false, retryAt: 0 };
+    state.drafts.set(order.id, entry);
+  }
+  if (!entry.inFlight && entry.retryAt <= Date.now() && entry.answer?.state !== "drafted") fetchDraft(order.id, entry);
+  return entry;
+}
+
+async function fetchDraft(id, entry) {
+  entry.inFlight = true;
+  let wait = DRAFT_RETRY_MS;
+  try {
+    entry.answer = JSON.parse(await get(`/api/orders/o-${id}/scope-draft`));
+    if (entry.answer.state === "failed") wait = FAILED_RETRY_MS;
+  } catch {
+    // A 404 says the foreman has not drafted yet; the slip asks again shortly.
+  } finally {
+    entry.inFlight = false;
+    entry.retryAt = Date.now() + wait;
+    if (entry.answer?.state !== "drafted") setTimeout(paintSlip, wait);
+    paintSlip();
+  }
+}
+
+function draftHead(order) {
+  const box = el("div", "head");
+  box.append(el("h2", null, "Scope draft"));
+  box.append(el("p", "sub", `o-${order.id} · ${order.machine} · ${order.sentence}`));
+  return box;
+}
+
+function draftBlock(order, answer) {
+  const summary = draftSummary(answer);
+  if (summary.kind === "failed") return [el("p", "warn", `The draft failed: ${summary.reason}`)];
+  const counts = el("p", "counts");
+  counts.append(el("b", null, String(summary.may)), " may change · ", el("b", null, String(summary.keep)), " must keep · ",
+    el("b", null, String(summary.open)), " open");
+  const by = el("p", "sub", summary.model ? `Proposed by ${summary.model}. Not in force until you adopt and seal it.` : "Not in force until you adopt and seal it.");
+  const adoptButton = el("button", "primary", state.slipPending ? "sending…" : "Adopt draft");
+  adoptButton.type = "button";
+  adoptButton.dataset.focusKey = "adopt";
+  const blocked = historyBlock("adopt", hold.on);
+  adoptButton.disabled = state.slipPending || blocked !== null;
+  if (blocked !== null) adoptButton.title = blocked;
+  adoptButton.addEventListener("click", () => adopt(order, answer));
+  return [counts, by, adoptButton, ...(blocked !== null ? [el("p", "reason", blocked)] : [])];
+}
+
+// Sends the ReviseScope that adopts the draft. The lane opens once the view carries it.
+async function adopt(order, answer) {
+  if (!state.token || state.slipPending || historyBlock("adopt", hold.on) !== null) return;
+  state.slipPending = true;
+  state.slipNote = "";
+  paintSlip();
+  try {
+    await post(adoptCommand(order.id, answer));
+  } catch (err) {
+    state.slipNote = err instanceof TypeError
+      ? "The server did not answer, so the draft may not be adopted. Try again."
+      : `Not sent: ${err.message}.`;
+  } finally {
+    state.slipPending = false;
+    paintSlip();
+  }
 }
 
 function head(lane) {
@@ -92,11 +179,24 @@ function sealBlock(lane, picks) {
   if (panel.accepted) children.push(el("p", "sub", SENT_LINE));
   else if (panel.sent) children.push(el("p", "sub", UNSENT_LINE));
   else if (panel.missing.length > 0) {
-    children.push(el("p", "sub", `Needs ${panel.missing.map((missing) => missingWords(missing, lane)).join("; ")}.`));
+    // The count reads at a glance; each open choice and broad plot below carries its own control.
+    const needs = el("p", "sub", `Needs ${missingCount(panel.missing)}`);
+    needs.title = `Needs ${panel.missing.map((missing) => missingWords(missing, lane)).join("; ")}.`;
+    children.push(needs);
   }
   children.push(send);
   if (blocked !== null) children.push(el("p", "reason", blocked));
   return children;
+}
+
+// "1 answer · 3 acks": what an unsent Seal still needs, by kind.
+function missingCount(missing) {
+  const answers = missing.filter((item) => item.kind === "choice").length;
+  const acks = missing.length - answers;
+  const parts = [];
+  if (answers > 0) parts.push(`${answers} ${answers === 1 ? "answer" : "answers"}`);
+  if (acks > 0) parts.push(`${acks} ${acks === 1 ? "ack" : "acks"}`);
+  return parts.join(" · ");
 }
 
 function withheld(seal) {
@@ -168,11 +268,9 @@ function strikeWarning(lane, item) {
   const words = strikeWords(lane, item);
   box.append(el("p", null, words.removes));
   if (words.last !== null) box.append(el("p", "mismatch", words.last));
-  box.append(el(
-    "p",
-    "sub",
-    "A lease shows that an agent's authority is valid, not that its work is safe. Leases do not expire while a run gates. A newer revision ends them.",
-  ));
+  const lease = el("p", "sub", "A lease is authority, not proof the work is safe.");
+  lease.title = "A lease shows that an agent's authority is valid, not that its work is safe. Leases do not expire while a run gates. A newer revision ends them.";
+  box.append(lease);
   const confirm = el("button", "danger", state.slipPending ? "sending…" : "Strike");
   confirm.type = "button";
   confirm.dataset.focusKey = "strike-confirm";

@@ -1,16 +1,18 @@
-// The HTML panels: the order island, the point-of-view chip and reticle, the usage table, and
-// the note that an older page passes events over.
-import { label } from "./marks.js";
+// The HTML panels: the point-of-view chip and reticle, the usage table, and the note that an
+// older page passes events over.
+import { requestRender } from "./main.js";
 import { shownOrderOf } from "./order.js";
 import {
+  helpToggle,
   hintEl,
+  metaBadge,
   hintRest,
   historyBody,
   historyEl,
   metaBody,
+  metaLegend,
   metaNote,
-  orderEl,
-  orderLine,
+  metaSection,
   povAgent,
   povAlt,
   povBracket,
@@ -18,11 +20,13 @@ import {
   povDot,
   povEls,
   povLine,
+  shellEl,
   slipEl,
   stale,
   state,
   usagePanel,
 } from "./state.js";
+import { metaBadgeText } from "./chrome.js";
 import { OFFLINE_PROVIDER, roleLabel, splitUsage } from "./usage.js";
 
 // The usage panel shows this many rows at rest. Alt shows every row.
@@ -37,7 +41,19 @@ const POV_SQUARE_PX = 40;
 
 const POV_ARM_PX = 8;
 
-const RIDE_HINT = "<kbd>Esc</kbd> leave&nbsp;&nbsp;<kbd>Tab</kbd> next&nbsp;&nbsp;<kbd>Shift</kbd><kbd>Tab</kbd> back&nbsp;&nbsp;<kbd>Alt</kbd> words&nbsp;&nbsp;wheel closer";
+const RIDE_HINT = "<span class=\"opt\"><kbd>Alt</kbd> words</span><span class=\"opt\"><kbd>Shift</kbd><kbd>Tab</kbd> back</span><span><kbd>Tab</kbd> next</span><span><kbd>Esc</kbd> leave</span>";
+
+// The key bar sits behind the shell's "?" button and the "?" key. Opened, the shell shows the
+// repo and the link words too.
+export function toggleHelp(open = hintEl.hidden) {
+  hintEl.hidden = !open;
+  helpToggle.setAttribute("aria-expanded", String(open));
+  shellEl.classList.toggle("open", open);
+  // The names under the bar move aside on the next frame.
+  requestRender();
+}
+
+helpToggle.addEventListener("click", () => toggleHelp());
 
 // The ride as the wasm side has it now: the chip's words, the reticle on the beam's target, and
 // the frame, vignette and chip shown or hidden as the ride starts or ends.
@@ -57,9 +73,6 @@ function rideToggled(riding) {
     if (riding) showPov(el);
     else hidePov(el);
   }
-  // The order island fades out with the point of view, and comes back when the ride ends.
-  if (riding && !orderEl.hidden) hidePov(orderEl);
-  if (!riding && state.hasOrder) showPov(orderEl);
   // The slip has no fade of its own, so it is hidden and shown with the ride directly.
   slipEl.hidden = riding || !state.hasSlip;
   hintEl.innerHTML = riding ? RIDE_HINT : hintRest;
@@ -136,42 +149,45 @@ export function paintStale() {
     : `this page is older than the server: ${passed} ${passed === 1 ? "event" : "events"} not shown, rebuild the UI`;
 }
 
-// The order the order island shows, and the slip shows its scope. See `shownOrderOf`.
+// The order the slip shows the scope of. See `shownOrderOf`.
 export function shownOrder(view) {
   return shownOrderOf(view, state.postedOrder);
 }
 
-export function paintOrderLine() {
-  const order = shownOrder(state.view);
-  state.hasOrder = order !== undefined;
-  orderLine.textContent = state.hasOrder
-    ? `${label("order", order.id)} · ${order.machine} · ${order.phase.replace("_", " ")} · ${order.sentence}`
-    : "";
-  paintOrderShown();
-}
+// The Meta attribution rests as one badge, "Meta · 6 calls", with the server's count since its
+// start, or the log's own count where the server has none (a replay, a fixture). A click opens
+// the panel: the origin's rows, one per role, provider and model, and Alt adds the provider
+// legend and the history of this log. With no origin rows the open panel shows the log's history
+// instead of an empty table, so the attribution is still there.
+let metaOpen = false;
 
-// A ride holds the island: it fades with the point of view, so rideToggled shows and hides it.
-function paintOrderShown() {
-  if (state.ridden !== "") return;
-  orderEl.hidden = !state.hasOrder;
-  orderEl.classList.toggle("on", state.hasOrder);
-}
+metaBadge.addEventListener("click", () => {
+  metaOpen = !metaOpen;
+  paintUsage();
+  requestRender();
+});
 
-// The usage panel has two sections. The first is the origin's count since its start, one row per
-// role, provider and model, with the legend that says what each provider name is. Alt also shows
-// the history of this log, which the page folds from the model calls in the log. The panel is
-// hidden until there is something to show. At rest the first section shows its first few rows;
-// Alt shows every origin row and the newest history rows the view carries.
 export function paintUsage() {
   const served = state.serverUsage;
   const history = state.view === null ? [] : state.view.usage;
   const { live, offline, total } = splitUsage(served?.rows ?? []);
   const rows = [...live, ...offline];
-  usagePanel.hidden = rows.length === 0 && history.length === 0 && !served?.error;
+  const logCalls = history.reduce((sum, row) => sum + row.calls, 0);
+  const badge = rows.length > 0 || served?.error || logCalls > 0
+    ? metaBadgeText({ serverCalls: rows.length > 0 ? total.calls : null, logCalls, error: served?.error ?? null })
+    : "";
+  usagePanel.hidden = badge === "";
+  if (badge === "") return;
+  metaBadge.textContent = badge;
+  metaBadge.setAttribute("aria-expanded", String(metaOpen));
+  usagePanel.classList.toggle("open", metaOpen);
+  metaSection.hidden = !metaOpen || (rows.length === 0 && !served?.error && history.length > 0);
+  historyEl.hidden = !metaOpen || history.length === 0 || (!state.altDown && !metaSection.hidden);
+  if (!metaOpen) return;
   const shown = state.altDown ? rows : rows.slice(0, USAGE_REST_ROWS);
   metaBody.replaceChildren(...shown.map(metaRow));
   metaNote.textContent = metaNoteText(served, live.length, offline.length, total);
-  historyEl.hidden = !state.altDown || history.length === 0;
+  metaLegend.hidden = !state.altDown || rows.length === 0;
   const earlier = state.view === null ? 0 : state.view.usage_earlier;
   historyBody.replaceChildren(...history.map(historyRow), ...(earlier > 0 ? [earlierRow(earlier)] : []));
 }

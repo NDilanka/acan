@@ -3,8 +3,8 @@
 // It reads GET /api/setup and GET /api/plant itself, with its own fetch, so a server without a
 // route (404) or a refused read never signs the tester out. GET /api/workers is read once for the
 // page, in workers.js, so the lanes strip says the same.
-import { $, card, gate, params, replay, slipEl, state } from "./state.js";
-import { DONE, FIRSTRUN_KEY, UNAVAILABLE, UNKNOWN, contractOf, progressText, shouldShow, steps } from "./firstrun.js";
+import { $, gate, params, replay, state } from "./state.js";
+import { DONE, FIRSTRUN_KEY, UNAVAILABLE, UNKNOWN, contractOf, progressShort, shouldShow, steps } from "./firstrun.js";
 import { loadWorkers, onWorkers, refreshWorkers, workersAnswer } from "./workers.js";
 
 const panel = $("firstrun");
@@ -14,7 +14,7 @@ let setup = null;
 let contract;
 let checking = false;
 let copied = false;
-// The tester's own open or closed choice, or null to follow the panels the checklist yields to.
+// The tester's own open or closed choice, or null while the checklist rests folded to one line.
 let collapsedByUser = null;
 
 function dismissed() {
@@ -46,9 +46,9 @@ export function installFirstRun() {
   // The token form's own handler runs first and sets the token, so the key is read after it.
   $("token-form").addEventListener("submit", () => setTimeout(loadSetup, 0));
   $("setup-dialog").addEventListener("close", loadSetup);
-  // The clash card and the slip need the room more, so the checklist folds while either shows.
+  // Signing in settles the first step, so the gate hiding repaints the list.
   const observer = new MutationObserver(paintFirstRun);
-  for (const el of [card, slipEl, gate]) observer.observe(el, { attributes: true, attributeFilter: ["hidden"] });
+  observer.observe(gate, { attributes: true, attributeFilter: ["hidden"] });
   onWorkers(paintFirstRun);
   loadSetup();
 }
@@ -89,8 +89,7 @@ function shown(el) {
 }
 
 function collapsed() {
-  if (collapsedByUser !== null) return collapsedByUser;
-  return shown(card) || shown(slipEl);
+  return collapsedByUser ?? true;
 }
 
 // Words with `code` in backticks, as text nodes and <code> elements.
@@ -135,7 +134,9 @@ export function paintFirstRun() {
   toggle.type = "button";
   toggle.dataset.focus = "toggle";
   toggle.setAttribute("aria-expanded", String(!folded));
-  toggle.append(element("b", undefined, "Get started"), element("span", "muted", progressText(list)));
+  const chevron = element("span", "chev", "›");
+  chevron.setAttribute("aria-hidden", "true");
+  toggle.append(element("b", undefined, "Setup"), element("span", "muted", progressShort(list)), chevron);
   toggle.addEventListener("click", () => {
     collapsedByUser = !folded;
     paintFirstRun();
@@ -143,6 +144,7 @@ export function paintFirstRun() {
   const hide = element("button", "fr-hide", "hide");
   hide.type = "button";
   hide.dataset.focus = "hide";
+  hide.hidden = folded;
   hide.setAttribute("aria-label", "Hide the checklist for good");
   hide.addEventListener("click", dismiss);
   head.append(toggle, hide);

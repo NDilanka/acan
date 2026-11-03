@@ -18,7 +18,7 @@ import { closeCommand, commandOpen, openCommand } from "./commandbar.js";
 import { clickMachine, closeCompose, composeOpen, orderHere } from "./compose.js";
 import { keyAction } from "./keys.js";
 import { droneHover, paintMarks, pinAt, placeLabels } from "./marks.js";
-import { paintOrderLine, paintRide, paintStale, paintUsage } from "./panels.js";
+import { paintRide, paintStale, paintUsage, toggleHelp } from "./panels.js";
 import { syncSeals } from "./seal.js";
 import { paintSlip } from "./slip.js";
 import {
@@ -55,6 +55,7 @@ import {
 } from "./stream.js";
 import { requestUsage } from "./usage.js";
 import { goKeys, installLanes } from "./lanes.js";
+import { installRailTabs } from "./rail.js";
 import { installInbox } from "./inbox.js";
 import { installHistory } from "./history.js";
 import { installScrub } from "./scrub.js";
@@ -153,7 +154,6 @@ function syncView() {
 }
 
 function paint() {
-  paintOrderLine();
   paintMarks();
   paintUsage();
   paintStale();
@@ -327,6 +327,9 @@ function runKey(action, event) {
       break;
     case "open-command":
       openCommand();
+      break;
+    case "toggle-help":
+      toggleHelp();
       break;
     case "toggle-question":
       toggleQuestionCard();
@@ -549,6 +552,7 @@ async function boot() {
   sizeCanvas();
   bindCanvas();
   bindKeys();
+  installRailTabs(kit);
   installLanes(kit);
   installInbox(kit);
   installHistory(kit);

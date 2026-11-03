@@ -55,8 +55,8 @@ export function inboxItems(view, plantViews = new Map(), doubts = new Map()) {
     if (clash.state !== "open" && clash.state !== "proposed") continue;
     const machine = tasks.get(clash.a)?.machine ?? tasks.get(clash.b)?.machine ?? null;
     const text = clash.state === "proposed"
-      ? `${clash.label}: a settle was proposed and waits for yours`
-      : `${clash.label}: two tasks overlap, so choose how to settle it`;
+      ? `${clash.label}: settle proposed, waits for yours`
+      : `${clash.label}: tasks overlap, choose a settle`;
     add({ key: `clash:${clash.id}`, kind: "clash", id: clash.id, text, machine });
   }
   for (const question of view.questions) {
@@ -67,10 +67,10 @@ export function inboxItems(view, plantViews = new Map(), doubts = new Map()) {
     if (!live(lane.order)) continue;
     if (lane.stopped) {
       add({ key: `stopped:${lane.order}`, kind: "stopped", id: lane.order,
-        text: `o-${lane.order} stopped because its repair budget ran out`, machine: machineOf(lane.order) });
+        text: `o-${lane.order} stopped: repair budget spent`, machine: machineOf(lane.order) });
     } else if (lane.state !== "confirmed") {
       add({ key: `seal:${lane.order}:${lane.rev}`, kind: "seal", id: lane.order,
-        text: `o-${lane.order} scope rev ${lane.rev} waits for your seal`, machine: machineOf(lane.order) });
+        text: `o-${lane.order} rev ${lane.rev} waits for your seal`, machine: machineOf(lane.order) });
     }
   }
   for (const [order, entry] of plantViews) {
@@ -78,7 +78,7 @@ export function inboxItems(view, plantViews = new Map(), doubts = new Map()) {
     const id = Number(String(order).replace(/^o-/, ""));
     if (residue.length === 0 || !live(id)) continue;
     add({ key: `residue:${order}`, kind: "residue", id,
-      text: `${order} has ${plural(residue.length, "residue item")} to rule on`, machine: residue[0].machine_id ?? machineOf(id) });
+      text: `${order}: ${plural(residue.length, "residue item")} to rule on`, machine: residue[0].machine_id ?? machineOf(id) });
   }
   for (const doubt of doubts.values()) {
     const task = tasks.get(doubt.task);
@@ -86,7 +86,7 @@ export function inboxItems(view, plantViews = new Map(), doubts = new Map()) {
     const found = [doubt.inconsistent && `${doubt.inconsistent} inconsistent`, doubt.unclear && `${doubt.unclear} unclear`]
       .filter((part) => part).join(", ");
     add({ key: `vision:${doubt.task}:${doubt.run}`, kind: "vision", id: doubt.task,
-      text: `t-${doubt.task} vision check found ${found}; it is advisory, so take a look`, machine: task.machine ?? null });
+      text: `t-${doubt.task} vision: ${found} (advisory)`, machine: task.machine ?? null });
   }
   return [...items.values()].sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.id - b.id);
 }
@@ -141,15 +141,18 @@ export function installInbox(kit) {
   title.append(badge);
   const keys = element("span", "keys");
   keys.innerHTML = "<kbd>G</kbd> <kbd>I</kbd>";
+  // An empty inbox is its head alone: the zero badge says it, and the map keeps the room.
+  const optIn = element("button", "opt-in", "notify");
+  optIn.type = "button";
+  optIn.title = "Notify me while this tab is hidden";
+  optIn.setAttribute("aria-label", optIn.title);
+  keys.prepend(optIn, " ");
   head.append(title, keys);
   const list = element("ol");
-  const empty = element("p", "empty", "Nothing waits on you.");
   const status = element("p", "sr-only");
   status.setAttribute("role", "status");
   status.setAttribute("aria-live", "polite");
-  const optIn = element("button", "opt-in", "Notify me while this tab is hidden");
-  optIn.type = "button";
-  panel.append(head, list, empty, optIn, status);
+  panel.append(head, list, status);
 
   const baseTitle = document.title;
   const canNotify = typeof Notification !== "undefined";
@@ -188,7 +191,7 @@ export function installInbox(kit) {
     badge.classList.toggle("some", items.length > 0);
     panel.setAttribute("aria-label", `needs you: ${items.length}`);
     document.title = titleWith(baseTitle, items.length);
-    empty.hidden = items.length > 0;
+    head.classList.toggle("alone", items.length === 0);
     list.hidden = items.length === 0;
     const focused = list.contains(document.activeElement) ? document.activeElement.dataset.key : null;
     list.replaceChildren(...items.map((item) => {

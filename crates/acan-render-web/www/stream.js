@@ -2,6 +2,7 @@
 // each event into the view as it arrives. A stream that cannot be applied reloads the log. While
 // the timeline scrubber holds the map in the past, the stream keeps every event in the hold
 // instead, and the scrubber folds them all when the map goes live again.
+import { linkQuiet } from "./chrome.js";
 import { requestRender } from "./main.js";
 import { createFeed, createHold, eventsBefore } from "./scrub.js";
 import { TOKEN_KEY, freeze, gate, link, replay, state, upto } from "./state.js";
@@ -74,13 +75,18 @@ const linkWords = { stream: "", held: null };
 
 export function setLink(text) {
   linkWords.stream = text;
-  link.textContent = linkWords.held ?? text;
+  paintLink(linkWords.held ?? text);
+}
+
+function paintLink(text) {
+  link.textContent = text;
+  link.classList.toggle("quiet", linkQuiet(text));
 }
 
 // Shows `text` in the link while the map is held, or the stream's words again for null.
 export function showHold(text) {
   linkWords.held = text;
-  link.textContent = text ?? linkWords.stream;
+  paintLink(text ?? linkWords.stream);
 }
 
 export function forgetToken() {
