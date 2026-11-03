@@ -2216,10 +2216,13 @@ mod tests {
             under(&cache_text, &comparable(profile)),
             "{cache_text} lies under the profile"
         );
-        let through_dots = profile.join("missing").join("..").join("elsewhere");
+        // A `..` that leaves the profile is refused on every platform. The case is not a `..` after
+        // a name that does not exist (`missing\..`): Windows collapses that lexically to the
+        // profile itself, where it stays under the profile, so it would not test a refusal there.
+        let leaves = profile.join("..").join("elsewhere");
         assert!(
-            !under(&comparable(&through_dots), &comparable(profile)),
-            "a .. that cannot be resolved is refused"
+            !under(&comparable(&leaves), &comparable(profile)),
+            "a .. that leaves the profile is refused"
         );
     }
 
