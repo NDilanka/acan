@@ -25,7 +25,8 @@ use crate::lane::{
 use crate::lease::{self, Claim, DECLARE_BARRIER_MS};
 use crate::member::{self, AgentPrincipal, Member, Role, SettleRight};
 use crate::order::{
-    self, Order, OrderPhase, OrderState, Question, Readback, Stage, Task, TaskState, Witness,
+    self, NeedsYou, Order, OrderPhase, OrderState, Question, Readback, Stage, Task, TaskState,
+    Witness,
 };
 use crate::repair::{self, LaneVerdict};
 use crate::ruling::{self, Append, Ledger};
@@ -359,6 +360,27 @@ impl World {
             OrderState::Split => self.split_phase(order.id),
         };
         Some(phase)
+    }
+
+    /// What the human is asked to act on: orders in phase `Asking` or `Clashing`, open contests,
+    /// and scope-first orders whose scope has open choices. See [`NeedsYou`].
+    #[must_use]
+    pub fn needs_you(&self) -> NeedsYou {
+        let mut needs = NeedsYou::default();
+        for order in self.orders() {
+            match self.phase(order.id) {
+                Some(OrderPhase::Asking { .. }) => needs.asking += 1,
+                Some(OrderPhase::Clashing) => needs.clashing += 1,
+                _ => {}
+            }
+        }
+        for lane in self.lanes() {
+            needs.contests += lane.open_contests().count();
+            if !lane.scope.body.open.is_empty() {
+                needs.open_choices += 1;
+            }
+        }
+        needs
     }
 
     fn split_phase(&self, order: OrderId) -> OrderPhase {

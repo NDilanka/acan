@@ -480,6 +480,7 @@ pub async fn start_projects<C: ModelClient + 'static>(
             name: spec.name,
             host,
             board: workers::Board::new(config.local_workers),
+            head: tokio::sync::Mutex::new(None),
         });
         project_workers.push(worker_tokens);
     }

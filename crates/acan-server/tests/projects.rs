@@ -112,6 +112,47 @@ fn owner_token(running: &Running) -> String {
         .to_owned()
 }
 
+/// Runs `git` in `dir` and returns its trimmed standard output. Commits carry their own identity,
+/// so the test never reads or writes the machine's git configuration.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=Acan Test",
+            "-c",
+            "user.email=test@acan.invalid",
+        ])
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert!(output.status.success(), "git {args:?} succeeds");
+    String::from_utf8(output.stdout)
+        .expect("git prints UTF-8")
+        .trim()
+        .to_owned()
+}
+
+/// A repository folder that is a git repository with one commit on `main`, so the server opens
+/// its git state and reports the protected head.
+fn git_repo(root: &Path, name: &str) -> PathBuf {
+    let dir = repo(root, name);
+    git(&dir, &["init", "-q", "-b", "main"]);
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "initial"]);
+    dir
+}
+
+/// The entry for `id` in a project list.
+fn project<'a>(list: &'a Value, id: &str) -> &'a Value {
+    list.as_array()
+        .expect("a list of projects")
+        .iter()
+        .find(|project| project["id"] == json!(id))
+        .unwrap_or_else(|| panic!("the list holds {id}"))
+}
+
 #[tokio::test]
 async fn one_human_token_opens_every_project_and_sits_in_each_tokens_file() {
     let root = tempfile::tempdir().expect("temp dir");
@@ -213,6 +254,57 @@ async fn an_unknown_project_is_not_found_and_a_stranger_gets_no_list() {
         StatusCode::UNAUTHORIZED,
         "a token in no project lists nothing"
     );
+    running.stop().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn the_project_list_reports_head_workers_and_needs_you_without_paths() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let alpha = git_repo(root.path(), "alpha");
+    let beta = repo(root.path(), "beta");
+    let agent = "acan_agent_alpha_0123456789abcdef";
+    grant_agent(&alpha, agent, "worker-a");
+    let head = git(&alpha, &["rev-parse", "main"]);
+    let running = boot(&[alpha, beta]).await;
+    let owner = owner_token(&running);
+
+    let (status, list) = get(&running, "/api/projects", &owner).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !list
+            .to_string()
+            .contains(root.path().to_str().expect("UTF-8 path")),
+        "the list never names a repository path"
+    );
+
+    let alpha_view = project(&list, "alpha");
+    assert_eq!(alpha_view["status"], json!("ready"));
+    assert_eq!(alpha_view["protected_branch"], json!("main"));
+    assert_eq!(
+        alpha_view["head"]["commit"],
+        json!(head),
+        "the head is the protected branch's commit"
+    );
+    assert!(alpha_view["head"]["seq"].is_u64(), "the head names a seq");
+    assert_eq!(
+        alpha_view["workers"],
+        json!({ "members": 1, "active": 0 }),
+        "alpha lists one agent and none holds a lease"
+    );
+    assert_eq!(
+        alpha_view["needs_you"],
+        json!({ "total": 0, "asking": 0, "clashing": 0, "contests": 0, "open_choices": 0 }),
+        "a fresh project has nothing for the human"
+    );
+
+    let beta_view = project(&list, "beta");
+    assert!(
+        beta_view["head"]["commit"].is_null(),
+        "a folder that is not a git repository has no head commit"
+    );
+    assert!(beta_view["protected_branch"].is_null());
+    assert_eq!(beta_view["workers"], json!({ "members": 0, "active": 0 }));
+    assert_eq!(beta_view["needs_you"]["total"], json!(0));
     running.stop().await.expect("the server stops");
 }
 

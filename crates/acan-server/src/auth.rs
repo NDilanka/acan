@@ -154,6 +154,19 @@ impl Tokens {
         self.by_token.get(token)
     }
 
+    /// How many distinct agents the tokens act for. An agent with two tokens counts once.
+    #[must_use]
+    pub fn agent_count(&self) -> usize {
+        self.by_token
+            .values()
+            .filter_map(|principal| match principal {
+                Principal::Agent(agent) => Some(agent),
+                Principal::Member(_) => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    }
+
     /// The token of agent `agent`. A token the file does not hold yet is minted and written to
     /// `<dir>/tokens.json` before it is returned, so an agent keeps its token across starts.
     ///

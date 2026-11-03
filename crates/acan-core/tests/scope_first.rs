@@ -1687,6 +1687,11 @@ fn a_contest_asks_the_human_and_never_widens_scope() {
         .expect("a contest was recorded");
     let (_, state) = fx.lane_episode(10);
     assert_eq!(state, EpisodeState::Contested);
+    assert_eq!(
+        fx.origin.world().needs_you().contests,
+        1,
+        "the open contest is counted for the human"
+    );
     // While the human is asked, no receipt can pass.
     let (run2, prepared2) = fx.prepared_run(&scope, fx.task1);
     let second = fx.passing_receipt(&scope, &prepared2);
@@ -1740,6 +1745,11 @@ fn a_contest_asks_the_human_and_never_widens_scope() {
         state,
         EpisodeState::Residue,
         "an upheld contest leaves residue"
+    );
+    assert_eq!(
+        fx.origin.world().needs_you().contests,
+        0,
+        "a decided contest is no longer counted"
     );
     // A rejected contest restores the state it interrupted.
     let (run3, prepared3) = fx.prepared_run(&scope, fx.task1);
@@ -2279,6 +2289,30 @@ fn a_failed_draft_is_recorded_and_the_job_stays_derived() {
         "a restart asks the foreman again"
     );
     fx.assert_replays();
+}
+
+#[test]
+fn a_scope_with_open_choices_is_counted_until_they_are_settled() {
+    let mut fx = Fx::new();
+    assert_eq!(fx.origin.world().needs_you().open_choices, 0);
+    let mut value = fx.scope_json(1, narrow_selector());
+    value["body"]["open"] = json!([{
+        "id": "c-retry",
+        "machine_id": "api",
+        "question": "Should a 429 be retried?",
+        "options": [
+            {"key": "never", "label": "Never retry"},
+            {"key": "once", "label": "Retry once"}
+        ]
+    }]);
+    let scope: Scope = from(value);
+    fx.revise(&scope);
+    let needs = fx.origin.world().needs_you();
+    assert_eq!(
+        needs.open_choices, 1,
+        "the scope with a question is counted"
+    );
+    assert_eq!(needs.total(), 1, "and nothing else is");
 }
 
 #[test]
