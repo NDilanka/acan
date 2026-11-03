@@ -20,7 +20,7 @@ pub use hash::ContentHash;
 pub use lang::Lang;
 pub use model::{
     Belt, Confidence, FileId, ImportRef, ImportTarget, LineRange, Machine, MachineId, Plant,
-    SourceFile, State, StateMachine, Symbol, SymbolKind, Transition,
+    Source, SourceFile, State, StateCandidate, StateMachine, Symbol, SymbolKind, Transition,
 };
 pub use touch::{Change, Touched, hunks, touched};
 
@@ -90,13 +90,15 @@ pub fn scan(root: impl AsRef<Path>) -> Result<Plant, ScanError> {
     }
 
     let revision = revision_of(&files);
+    let (state_machines, state_candidates) = states::resolve_all(file_states);
     let mut plant = Plant {
         root: root.to_path_buf(),
         revision,
         machines: Vec::new(),
         belts: Vec::new(),
         files,
-        state_machines: states::resolve(file_states),
+        state_machines,
+        state_candidates,
     };
     // Regrouping also sets each state machine's module.
     plant.regroup(&Grouping::default());
