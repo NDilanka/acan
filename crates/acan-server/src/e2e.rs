@@ -3064,7 +3064,8 @@ async fn claim(running: &Running, task: TaskId) -> Fence {
 /// lease lapses 60 seconds after its last renewal, and a chain under load can run longer.
 ///
 /// A renewal the origin rejects means the claim is over, because the task landed, was released,
-/// or was claimed again. The test's own steps check that outcome, so the rejection is ignored.
+/// was claimed again, or its lane was stopped. The test's own steps check that outcome, so the
+/// rejection is ignored.
 fn keep_lease(running: &Running, fence: Fence) {
     let writer = running.writer().clone();
     tokio::spawn(async move {
