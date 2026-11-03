@@ -164,6 +164,24 @@ export function standsBeside(kind) {
   return kind === "clash" || kind === "landed" || kind === "away";
 }
 
+// The flag kinds whose words wait for a hover: a clash's detail, an order's tag and a plot's
+// scope line. Everything else on the map keeps its words.
+export const HOVER_KINDS = new Set(["clash"]);
+
+// What a flag shows now: "open" for its words, "mark" for a plot's small mark, or "hidden".
+// `hover` is `{ clash }` while a clash diamond or its badges are under the pointer, `{ machine }`
+// while a machine or its plot mark is, else null. A clash opens only on its own diamond, an order
+// or a plot only on its machine, and Alt opens them all. Until then a plot that `lead`s its
+// machine shows its mark, so each machine has at most one, and the rest show nothing.
+export function markWords(flag, hover, alt, lead = false) {
+  if (!HOVER_KINDS.has(flag.kind) || alt) return "open";
+  const hit = flag.kind === "clash"
+    ? hover?.clash !== undefined && hover.clash === flag.clash
+    : hover?.machine !== undefined && hover.machine === flag.on;
+  if (hit) return "open";
+  return flag.kind === "plot" && lead ? "mark" : "hidden";
+}
+
 // A clash badge's diameter in CSS px, as the wasm side sizes it (`marks::BADGE_PX`).
 export const BADGE_PX = 16;
 

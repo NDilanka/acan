@@ -8,7 +8,7 @@ import { canvas, flagsEl, labelsEl, leadersEl, state } from "./state.js";
 import { requestRender } from "./main.js";
 import {
   BADGE_PX, GHOST_HOLD_MS, LAST_SEEN_KEY, agentFlagShown, badgeBoxes, boxAt, clearOf, flagSpot, foldColumn, inView,
-  placeOverlays, seenOnReturn, standsBeside, unnamedSpots,
+  markWords, placeOverlays, seenOnReturn, standsBeside, unnamedSpots,
 } from "./place.js";
 import { questionOfFlag } from "./question.js";
 import { isLive } from "./stream.js";
@@ -282,7 +282,9 @@ function watchCanvas() {
     if (state.app.clear_ghost_at(event.clientX - rect.left, event.clientY - rect.top)) requestRender();
   };
   const unhover = (event) => {
-    if (event.currentTarget === canvas) setHover(null);
+    if (event.currentTarget !== canvas) return;
+    setHover(null);
+    setMapHover(null);
   };
   canvas.addEventListener("pointermove", clear);
   canvas.addEventListener("pointerup", clear);
@@ -299,8 +301,7 @@ function setHover(agent) {
   if (agent === hovered || state.app === null) return;
   hovered = agent;
   state.app.set_hovered(agent ?? "");
-  // An inline cursor wins over the canvas's grab cursor, and clearing it gives that back.
-  canvas.style.cursor = agent === null ? "" : "pointer";
+  pointCursor();
   document.dispatchEvent(new CustomEvent("acan:drone-hover", { detail: { agent } }));
   requestRender();
 }
@@ -312,6 +313,30 @@ export function droneHover(x, y) {
   if (state.app === null) return;
   const agent = state.app.drone_at(x, y);
   setHover(agent === "" ? null : agent);
+  setMapHover(agent === "" ? markAt(x, y) : null);
+}
+
+// What else on the map the pointer is over, as `markWords` reads it: a clash diamond as
+// `{ clash }`, or null.
+function markAt(x, y) {
+  const clash = pinAt(x, y);
+  return clash === null ? null : { clash };
+}
+
+// The map mark under the pointer, besides a drone, as `markAt` gives it.
+let mapHover = null;
+
+function setMapHover(next) {
+  if (next?.clash === mapHover?.clash && next?.machine === mapHover?.machine) return;
+  mapHover = next;
+  pointCursor();
+  requestRender();
+}
+
+// A drone or a clash under the pointer takes a click, so it shows the pointer cursor. An inline
+// cursor wins over the canvas's grab cursor, and clearing it gives that back.
+function pointCursor() {
+  canvas.style.cursor = hovered !== null || mapHover?.clash !== undefined ? "pointer" : "";
 }
 
 // The paper halo round the hovered drone, 2 px wide.
@@ -440,6 +465,9 @@ function badgeElement(badge, clash) {
     cursor: "pointer",
   });
   el.addEventListener("click", () => openCard(clash));
+  // A badge takes the pointer from the canvas, so it opens its clash's detail itself.
+  el.addEventListener("pointerenter", () => setMapHover({ clash }));
+  el.addEventListener("pointerleave", () => setMapHover(null));
   return el;
 }
 
@@ -559,7 +587,8 @@ function flagElement(flag) {
     el.title = flag.scope;
     el.append(scope);
   }
-  if (state.altDown && flag.detail.length > 0 && flag.kind !== "agent") {
+  if (flag.kind === "clash") clashStyle(el);
+  if ((state.altDown || flag.kind === "clash") && flag.detail.length > 0 && flag.kind !== "agent") {
     const lines = document.createElement("span");
     lines.className = "detail";
     for (const line of flag.detail) {
@@ -586,6 +615,12 @@ function flagElement(flag) {
     });
   }
   return el;
+}
+
+// A clash's flag is its detail, shown only while its diamond is hovered: the id and the overlap,
+// then its two agents. It takes no pointer, so the pointer stays on the diamond under it.
+function clashStyle(el) {
+  Object.assign(el.style, { flexDirection: "column", alignItems: "flex-start", gap: "2px", pointerEvents: "none" });
 }
 
 // Opens or closes a pill's detail, measuring it again when that changes its size.
@@ -686,8 +721,8 @@ function checkChip(check, onPill = false) {
 // it is off the canvas. An agent's flags stack in a column above their machine's drones, at most
 // FLAGS_PER_COLUMN with the rest folded into `+N`, and a flag never sits on a drone because the
 // column starts above the crowns. A lone flag that keeps its place points at its drone; any other
-// draws a leader in its hue. An idle drone's flag shows only with Alt. A clash label starts to the right of its diamond, and the order flag sits
-// above its machine. A flag that would cover a flag or a panel placed before it moves up clear of
+// draws a leader in its hue. An idle drone's flag shows only with Alt. A clash's detail shows only
+// while its diamond is hovered, and starts to the right of it; the order flag sits above its machine. A flag that would cover a flag or a panel placed before it moves up clear of
 // it. Each flag keeps its place as the drones and diamonds move. The plot flags are the exception:
 // they are returned, not placed here, and placed after the names, so they move clear of a name.
 // Returns the plot flags and how many leader lines the flags drew.
@@ -724,6 +759,10 @@ function placeFlags(placedBoxes) {
       const isHovered = agent !== undefined && agent === hovered;
       el.style.zIndex = isHovered ? "1" : "";
       columns.get(machine).push({ el, x, y, flag, state: flag.drone?.state ?? "working", hovered: isHovered });
+      continue;
+    }
+    if (markWords(state.markState.flags[quads[k]], mapHover, state.altDown) === "hidden") {
+      el.style.visibility = "hidden";
       continue;
     }
     const [w, h] = el.size;

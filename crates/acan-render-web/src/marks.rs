@@ -501,6 +501,9 @@ pub struct Flag {
     pub scope: Option<String>,
     /// On an agent's flag, the drone it names.
     pub drone: Option<DroneFlag>,
+    /// The machine an order, clash or plot flag marks, as the plan names it. The page shows such
+    /// a flag's words only while that machine, or the flag's own mark, is hovered.
+    pub on: Option<String>,
     /// The plan index of the machine an agent's flag stacks on, so the page groups them.
     #[serde(skip)]
     pub machine: Option<usize>,
@@ -739,6 +742,7 @@ pub fn stage_flags(spots: &[Spot], plan: &Plan, stands: &[Stand]) -> Vec<Flag> {
                 machine: Some(machine),
                 at: [centre[0], centre[1], top + ORDER_LIFT],
                 drone: None,
+                on: None,
                 follow: Follow::Still,
             });
         }
@@ -2215,6 +2219,7 @@ fn away_flags(
                     PLINTH_TOP,
                 ],
                 drone: None,
+                on: None,
                 follow: Follow::Still,
             })
         })
@@ -2317,6 +2322,7 @@ fn flags(
             machine: None,
             at: [centre[0], centre[1], top + ORDER_LIFT],
             drone: None,
+            on: Some(plan.machines[machine].name.clone()),
             follow: Follow::Still,
         });
     }
@@ -2329,11 +2335,12 @@ fn flags(
             clash: Some(pin.clash),
             check: None,
             leaving: false,
-            detail: Vec::new(),
+            detail: clash_agents(view, &view.clashes[pin.clash]),
             scope: view.clashes[pin.clash].scope.clone(),
             machine: None,
             at: [pin.at[0], pin.at[1], pin.at[2] + STALK_HEIGHT],
             drone: None,
+            on: Some(plan.machines[pin.machine].name.clone()),
             follow: Follow::Pin(pin.id.clone()),
         });
     }
@@ -2354,10 +2361,28 @@ fn flags(
             machine: None,
             at: [at[0], at[1], PLINTH_TOP + ORDER_LIFT],
             drone: None,
+            on: None,
             follow: Follow::Still,
         });
     }
     out
+}
+
+/// The two agents of a clash, task `a`'s first, each as `agent-a · t-0`. A task no agent holds
+/// reads `unclaimed · t-1`.
+fn clash_agents(view: &View, clash: &ClashView) -> Vec<String> {
+    [clash.a, clash.b]
+        .into_iter()
+        .map(|task| {
+            let holder = view
+                .tasks
+                .iter()
+                .find(|candidate| candidate.id == task)
+                .and_then(|candidate| candidate.agent.as_ref())
+                .map_or_else(|| "unclaimed".to_owned(), ToString::to_string);
+            format!("{holder} · {task}")
+        })
+        .collect()
 }
 
 /// The flag of one lane's slice, above its machine. Alt lists its plots and keeps.
@@ -2379,6 +2404,7 @@ fn plot_flag(slice: &Slice, plan: &Plan, stands: &[Stand]) -> Flag {
         machine: None,
         at: [centre[0], centre[1], top + ORDER_LIFT],
         drone: None,
+        on: Some(plan.machines[slice.machine].name.clone()),
         follow: Follow::Still,
     }
 }
@@ -2416,6 +2442,7 @@ fn agent_flag(view: &View, body: &Body, clock: Clock) -> Flag {
         }),
         machine: Some(body.machine),
         at: body.at,
+        on: None,
         follow: Follow::Body(body.agent.clone()),
     }
 }
@@ -2451,6 +2478,7 @@ fn landed_flags(view: &View, plan: &Plan) -> Vec<Flag> {
                 machine: None,
                 at: [x + LANDED_INSET, y + LANDED_INSET, PLINTH_TOP],
                 drone: None,
+                on: None,
                 follow: Follow::Landed { machine, count },
             }
         })
@@ -2645,6 +2673,7 @@ mod tests {
             machine: None,
             at: [0.0; 3],
             drone: None,
+            on: None,
             follow: Follow::Still,
         }
     }
@@ -2962,6 +2991,48 @@ mod tests {
         );
         let ui = machine(&plan, "src/ui");
         assert_eq!(marks.footprint_tint(ui), 0, "a quiet machine stays grey");
+    }
+
+    #[test]
+    fn a_clash_flag_holds_its_id_overlap_and_two_agents_for_the_hover() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let marks = Marks::build(&view, &plan, &stands(&plan), &slots_for(&view));
+        let clash = &view.clashes[0];
+        let flag = marks
+            .flags
+            .iter()
+            .find(|flag| flag.kind == FlagKind::Clash)
+            .expect("the pin has a flag");
+        assert!(flag.text.starts_with(&clash.id.to_string()), "{}", flag.text);
+        assert_eq!(flag.on.as_deref(), Some("src/api"), "it marks the clashed machine");
+        let agents: Vec<String> = view.agents.iter().map(|agent| agent.id.to_string()).collect();
+        let [a, b] = flag.detail.as_slice() else {
+            panic!("the detail names two agents: {:?}", flag.detail);
+        };
+        assert!(a.ends_with(&format!(" · {}", clash.a)), "{a}");
+        assert!(b.ends_with(&format!(" · {}", clash.b)), "{b}");
+        let holder = |line: &str| line.split(" · ").next().unwrap_or_default().to_owned();
+        assert!(agents.contains(&holder(a)) && agents.contains(&holder(b)), "{agents:?}");
+        assert_ne!(holder(a), holder(b), "the two agents differ");
+    }
+
+    #[test]
+    fn an_order_flag_names_the_machine_whose_hover_shows_it() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let marks = Marks::build(&view, &plan, &stands(&plan), &slots_for(&view));
+        let order = marks
+            .flags
+            .iter()
+            .find(|flag| flag.kind == FlagKind::Order)
+            .expect("the live order has a flag");
+        assert_eq!(order.on.as_deref(), Some(view.orders[0].machine.as_str()));
+        for flag in marks.flags.iter().filter(|flag| flag.kind == FlagKind::Agent) {
+            assert_eq!(flag.on, None, "an agent's pill is not a machine's hover text");
+        }
     }
 
     #[test]
