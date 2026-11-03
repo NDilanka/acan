@@ -8,6 +8,7 @@ mod lang;
 mod model;
 mod resolve;
 mod states;
+mod touch;
 mod walk;
 
 use std::path::{Path, PathBuf};
@@ -21,6 +22,7 @@ pub use model::{
     Belt, Confidence, FileId, ImportRef, ImportTarget, LineRange, Machine, MachineId, Plant,
     SourceFile, State, StateMachine, Symbol, SymbolKind, Transition,
 };
+pub use touch::{Change, Touched, hunks, touched};
 
 /// Why a scan failed.
 #[derive(Debug, thiserror::Error)]
