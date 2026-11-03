@@ -13,6 +13,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
 use crate::api;
+use crate::canvas;
 use crate::feed;
 use crate::kind::{self, ALL, PlanFootprint};
 use crate::labels::{self, LabelSpot};
@@ -96,6 +97,24 @@ pub struct App {
     clock: marks::Clock,
     /// The agent whose drone the pointer is over, if any.
     hovered: Option<String>,
+    /// The id of the project on screen when the canvas holds several, or empty for one plant.
+    project: String,
+    /// The other projects on the canvas. Each draws as plain plant at its place, without marks:
+    /// the marks share one tint table and key agents by name, so only one project carries them.
+    parked: Vec<Parked>,
+    /// Each plant's layout from the origin, by the scan's revision.
+    layouts: HashMap<String, Layout>,
+}
+
+/// A project on the canvas that is not on screen: its plant at its place and its log folded, so
+/// the page can list what waits there and switch to it without fetching again.
+struct Parked {
+    id: String,
+    loaded: Loaded,
+    plan: Plan,
+    mirror: Option<Mirror>,
+    /// The view as JSON, until the next event changes it.
+    view_json: Option<String>,
 }
 
 /// An ease from one azimuth to another, in degrees. `to` is not wrapped, so repeated turns add up.
@@ -136,6 +155,9 @@ struct Loaded {
     /// Each machine's model box, which a ride sizes its distance from, in the layout's machine
     /// order. See `scene::machine_model_boxes`.
     machine_bounds: Vec<Aabb>,
+    /// The plant as it arrived and its layout from the origin, so a move rebuilds it in place.
+    source: Plant,
+    at_origin: Layout,
 }
 
 #[wasm_bindgen]
@@ -203,6 +225,9 @@ impl App {
             view_json: String::new(),
             view_version: 0,
             dirty: false,
+            project: String::new(),
+            parked: Vec::new(),
+            layouts: HashMap::new(),
         })
     }
 
@@ -266,18 +291,7 @@ impl App {
         let Some(to) = self.tour_pose(machine_id, zoom) else {
             return false;
         };
-        if reduced || self.still {
-            self.tour_move = None;
-            self.camera.set_pivot(to.0);
-            self.camera.set_zoom(to.1);
-        } else {
-            let from = (self.camera.pivot(), self.camera.zoom());
-            self.tour_move = Some(TourMove {
-                from,
-                to,
-                elapsed_ms: 0.0,
-            });
-        }
+        self.ease_to(to, reduced);
         true
     }
 
@@ -1214,8 +1228,38 @@ impl App {
     fn load(&mut self, plant: Plant) -> u32 {
         let (kinds, edges) = plant.layout_input();
         let laid = layout(&kinds, &edges);
+        let count = plant.machines.len() as u32;
+        self.show(plant, laid, [0.0; 2]);
+        count
+    }
+
+    /// Puts `plant` on screen with its layout from the origin moved to `offset`, and fits it.
+    fn show(&mut self, plant: Plant, at_origin: Layout, offset: [f32; 2]) {
+        let (loaded, plan) = self.build(plant, at_origin, offset);
+        self.plan = Some(plan);
+        self.view = None;
+        self.marks = Marks::default();
+        self.motion = self.new_motion();
+        self.card_clash = None;
+        self.tour_move = None;
+        self.ride = None;
+        self.fit_after_leave = false;
+        self.dirty = true;
+        self.plant = Some(loaded);
+        self.refresh_fog();
+        self.fit();
+        self.sync_scene();
+    }
+
+    /// The plant's scene, framing and plan, with its layout from the origin moved to `offset`.
+    fn build(&self, plant: Plant, at_origin: Layout, offset: [f32; 2]) -> (Loaded, Plan) {
+        let source = plant.clone();
+        let laid = if offset == [0.0; 2] {
+            at_origin.clone()
+        } else {
+            at_origin.translated(offset)
+        };
         let scene = scene::plant_scene(&laid, &self.models);
-        self.camera.set_fog_bounds(scene.bounds);
         let occluders = scene
             .instances
             .iter()
@@ -1235,7 +1279,6 @@ impl App {
             .zip(&laid.machines)
             .map(|(machine, placed)| (machine.name.as_str(), placed.footprint()))
             .collect();
-        let count = plant.machines.len() as u32;
         let plan = Plan::new(&plant, |name| {
             footprints.get(name).copied().unwrap_or([0.0; 4])
         });
@@ -1264,19 +1307,11 @@ impl App {
                 }
             })
             .collect();
-        self.plan = Some(plan);
-        self.view = None;
-        self.marks = Marks::default();
-        self.motion = self.new_motion();
-        self.card_clash = None;
-        self.tour_move = None;
-        self.ride = None;
-        self.fit_after_leave = false;
-        self.dirty = true;
+        let belts = scene::belt_lines(&laid.belts);
         let drone_reach = stand::reach(&self.models[usize::from(scene::mark_kinds().body)]);
         let framing = scene::fit_boxes(&laid, &self.models, &self.kind_spots, drone_reach);
         let machine_bounds = scene::machine_model_boxes(&laid, &self.models);
-        self.plant = Some(Loaded {
+        let loaded = Loaded {
             machine_bounds,
             repo: plant.repo,
             rest: {
@@ -1298,10 +1333,10 @@ impl App {
             base: scene,
             plan_instance,
             stands,
-        });
-        self.fit();
-        self.sync_scene();
-        count
+            source,
+            at_origin,
+        };
+        (loaded, plan)
     }
 
     /// Folds the log into the view, and places the marks it calls for on the plant.
@@ -1356,6 +1391,12 @@ impl App {
             self.dpr,
             riding,
         ));
+        for parked in &self.parked {
+            let other = &parked.loaded.base;
+            scene.ribbons.extend(other.ribbons.iter().cloned());
+            scene.instances.extend(other.instances.iter().copied());
+            scene.bounds = joined(scene.bounds, other.bounds);
+        }
         self.renderer.set_scene(&scene);
         self.renderer.set_tints(&acan_render::theme::tints());
     }
@@ -1399,6 +1440,331 @@ impl App {
     fn lod(&self) -> Lod {
         Lod::for_ratio(self.camera.zoom() / self.fit_zoom())
     }
+
+    /// Eases the camera's pivot and zoom to `to`, as a tour step does. With `reduced`, or on a
+    /// still page, the camera jumps.
+    fn ease_to(&mut self, to: tour::Pose, reduced: bool) {
+        if reduced || self.still {
+            self.tour_move = None;
+            self.camera.set_pivot(to.0);
+            self.camera.set_zoom(to.1);
+        } else {
+            let from = (self.camera.pivot(), self.camera.zoom());
+            self.tour_move = Some(TourMove {
+                from,
+                to,
+                elapsed_ms: 0.0,
+            });
+        }
+    }
+
+    /// Keeps the fog clear of every plant on the canvas, so a neighbour is not fogged out.
+    fn refresh_fog(&mut self) {
+        let Some(loaded) = &self.plant else {
+            return;
+        };
+        let bounds = self.parked.iter().fold(loaded.base.bounds, |acc, parked| {
+            joined(acc, parked.loaded.base.bounds)
+        });
+        self.camera.set_fog_bounds(bounds);
+    }
+
+    /// The pivot and zoom that fit `framing` at the default angles.
+    fn pose_of(&self, framing: &[Aabb]) -> tour::Pose {
+        let mut probe = self.camera;
+        probe.set_angles(DEFAULT_AZIMUTH, DEFAULT_ELEVATION);
+        probe.fit_boxes_room(framing, FIT_MARGIN_CSS * self.dpr, self.fit_room());
+        (probe.pivot(), probe.zoom())
+    }
+
+    /// The plant's layout from the origin, from the cache when the scan's revision was laid out
+    /// before. The key holds the machine and edge counts too, so a scan of uncommitted changes at
+    /// the same revision never takes a layout of another size.
+    fn laid_out(&mut self, plant: &Plant, revision: Option<String>) -> Layout {
+        let key =
+            revision.map(|rev| format!("{rev}/{}/{}", plant.machines.len(), plant.edges.len()));
+        if let Some(laid) = key.as_ref().and_then(|key| self.layouts.get(key)) {
+            return laid.clone();
+        }
+        let (kinds, edges) = plant.layout_input();
+        let laid = layout(&kinds, &edges);
+        if let Some(key) = key {
+            self.layouts.insert(key, laid.clone());
+        }
+        laid
+    }
+
+    fn parked_mut(&mut self, id: &str) -> Result<&mut Parked, JsError> {
+        self.parked
+            .iter_mut()
+            .find(|parked| parked.id == id)
+            .ok_or_else(|| js_err("the canvas holds no such project"))
+    }
+
+    fn parked_index(&self, id: &str) -> Option<usize> {
+        self.parked.iter().position(|parked| parked.id == id)
+    }
+}
+
+/// The canvas of several projects. A page with one plant never calls these.
+#[wasm_bindgen]
+impl App {
+    /// The bounds `[min x, min y, max x, max y]` of a plant from `GET /api/p/{id}/plant`, as its
+    /// layout places it from the origin. The page packs the plants with them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON is not the plant's shape.
+    pub fn plant_bounds(&mut self, json: &str) -> Result<Vec<f32>, JsError> {
+        let plant = from_scan_json(json).map_err(js_err)?;
+        Ok(self
+            .laid_out(&plant, canvas::revision(json))
+            .bounds
+            .to_vec())
+    }
+
+    /// Puts project `id`'s plant on the canvas with its layout's origin at `(x, y)`. The first
+    /// project goes on screen and is fitted; a later one is parked beside it. A project the canvas
+    /// holds already takes the new plant in place and keeps its log. Returns the machine count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON is not the plant's shape.
+    pub fn add_project(&mut self, id: &str, json: &str, x: f32, y: f32) -> Result<u32, JsError> {
+        let revision = canvas::revision(json);
+        let plant = from_scan_json(json).map_err(js_err)?;
+        let count = plant.machines.len() as u32;
+        let at_origin = self.laid_out(&plant, revision);
+        if self.plant.is_none() || self.project == id {
+            self.project = id.to_owned();
+            self.show(plant, at_origin, [x, y]);
+            return Ok(count);
+        }
+        let (loaded, plan) = self.build(plant, at_origin, [x, y]);
+        match self.parked_index(id) {
+            Some(index) => {
+                let parked = &mut self.parked[index];
+                parked.loaded = loaded;
+                parked.plan = plan;
+                parked.view_json = None;
+            }
+            None => self.parked.push(Parked {
+                id: id.to_owned(),
+                loaded,
+                plan,
+                mirror: None,
+                view_json: None,
+            }),
+        }
+        self.refresh_fog();
+        self.sync_scene();
+        Ok(count)
+    }
+
+    /// Moves project `id`'s plant so its layout's origin sits at `(x, y)`. The marks of the
+    /// project on screen follow on the next frame. Returns false for a project the canvas lacks.
+    pub fn move_project(&mut self, id: &str, x: f32, y: f32) -> bool {
+        if id == self.project {
+            let Some(old) = self.plant.take() else {
+                return false;
+            };
+            let (loaded, plan) = self.build(old.source, old.at_origin, [x, y]);
+            self.plant = Some(loaded);
+            self.plan = Some(plan);
+            self.dirty = true;
+        } else if let Some(index) = self.parked_index(id) {
+            let old = &self.parked[index].loaded;
+            let (loaded, plan) = self.build(old.source.clone(), old.at_origin.clone(), [x, y]);
+            let parked = &mut self.parked[index];
+            parked.loaded = loaded;
+            parked.plan = plan;
+            parked.view_json = None;
+        } else {
+            return false;
+        }
+        self.refresh_fog();
+        self.sync_scene();
+        true
+    }
+
+    /// Puts project `id` on screen: its marks, names, flags and view take over, and the project
+    /// that was on screen is parked as plain plant. The camera does not move. Returns false when
+    /// the canvas lacks the project or its log has not loaded.
+    pub fn activate(&mut self, id: &str) -> bool {
+        if id == self.project {
+            return self.plant.is_some();
+        }
+        let Some(index) = self.parked_index(id) else {
+            return false;
+        };
+        if self.parked[index].mirror.is_none() {
+            return false;
+        }
+        let next = self.parked.remove(index);
+        if let (Some(loaded), Some(plan)) = (self.plant.take(), self.plan.take()) {
+            let view_json = (self.view.is_some() && !self.dirty).then(|| self.view_json.clone());
+            self.parked.insert(
+                index,
+                Parked {
+                    id: std::mem::take(&mut self.project),
+                    loaded,
+                    plan,
+                    mirror: self.mirror.take(),
+                    view_json,
+                },
+            );
+        }
+        self.project = next.id;
+        self.plant = Some(next.loaded);
+        self.plan = Some(next.plan);
+        self.mirror = next.mirror;
+        self.view = None;
+        self.marks = Marks::default();
+        self.motion = self.new_motion();
+        self.slots = AgentSlots::default();
+        self.card_clash = None;
+        self.stage.clear();
+        self.focus = None;
+        self.ride = None;
+        self.fit_after_leave = false;
+        self.dirty = true;
+        self.sync_scene();
+        true
+    }
+
+    /// The id of the project on screen, or an empty string on a page with one plant.
+    pub fn active_project(&self) -> String {
+        self.project.clone()
+    }
+
+    /// Folds project `id`'s log, as `load_log` does for the project on screen.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a project the canvas lacks, or a log that does not parse or replay.
+    pub fn project_load_log(&mut self, id: &str, json: &str) -> Result<(), JsError> {
+        if id == self.project {
+            return self.load_log(json);
+        }
+        let entries = feed::entries(json).map_err(js_err)?;
+        let mirror = Mirror::from_entries(entries).map_err(js_err)?;
+        let parked = self.parked_mut(id)?;
+        parked.mirror = Some(mirror);
+        parked.view_json = None;
+        Ok(())
+    }
+
+    /// Applies one streamed event of project `id`, as `ingest` does for the project on screen.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a project the canvas lacks or whose log is not loaded, or an event
+    /// that does not apply.
+    pub fn project_ingest(&mut self, id: &str, json: &str) -> Result<(), JsError> {
+        if id == self.project {
+            return self.ingest(json);
+        }
+        let entry = feed::entry(json).map_err(js_err)?;
+        let parked = self.parked_mut(id)?;
+        let mirror = parked
+            .mirror
+            .as_mut()
+            .ok_or_else(|| js_err("no log is loaded"))?;
+        mirror.ingest_entry(entry).map_err(js_err)?;
+        parked.view_json = None;
+        Ok(())
+    }
+
+    /// The seq project `id`'s next event will carry, or 0 before its log loads.
+    pub fn project_next_seq(&self, id: &str) -> f64 {
+        if id == self.project {
+            return self.next_seq();
+        }
+        self.parked
+            .iter()
+            .find(|parked| parked.id == id)
+            .and_then(|parked| parked.mirror.as_ref())
+            .map_or(0.0, |mirror| mirror.next_seq().get() as f64)
+    }
+
+    /// Project `id`'s view as JSON, or an empty string before its log loads. A parked project's
+    /// view is folded when it is asked for after a change.
+    pub fn project_view_json(&mut self, id: &str) -> String {
+        if id == self.project {
+            return self.view_json.clone();
+        }
+        let Some(index) = self.parked_index(id) else {
+            return String::new();
+        };
+        let parked = &mut self.parked[index];
+        if parked.view_json.is_none() {
+            parked.view_json = parked
+                .mirror
+                .as_ref()
+                .and_then(|mirror| serde_json::to_string(&mirror.view(&parked.plan)).ok());
+        }
+        parked.view_json.clone().unwrap_or_default()
+    }
+
+    /// Eases the camera to fit project `id`'s plant at the current angles, as a tour step moves.
+    /// Returns false for a project the canvas lacks, or while riding, so the page leaves the
+    /// ride first.
+    pub fn fly_to(&mut self, id: &str, reduced: bool) -> bool {
+        if self.ride.is_some() {
+            return false;
+        }
+        let framing = if id == self.project {
+            self.plant.as_ref().map(|loaded| loaded.framing.clone())
+        } else {
+            self.parked
+                .iter()
+                .find(|parked| parked.id == id)
+                .map(|parked| parked.loaded.framing.clone())
+        };
+        let Some(framing) = framing else {
+            return false;
+        };
+        self.turn = None;
+        let to = self.pose_of(&framing);
+        self.ease_to(to, reduced);
+        true
+    }
+
+    /// The project whose plant holds the ground under the CSS point, or the nearest one. Empty
+    /// when the canvas holds no project or the point is above the horizon.
+    pub fn project_under(&self, css_x: f32, css_y: f32) -> String {
+        let Some(point) = self.camera.ground_at([css_x * self.dpr, css_y * self.dpr]) else {
+            return String::new();
+        };
+        let mut ids = Vec::new();
+        let mut boxes = Vec::new();
+        if let Some(loaded) = &self.plant {
+            ids.push(self.project.as_str());
+            boxes.push(loaded.layout.bounds);
+        }
+        for parked in &self.parked {
+            ids.push(parked.id.as_str());
+            boxes.push(parked.loaded.layout.bounds);
+        }
+        canvas::nearest(&boxes, point).map_or_else(String::new, |index| ids[index].to_owned())
+    }
+
+    /// The plan point on the ground under the CSS point, as `[x, y]`, or empty above the horizon.
+    pub fn screen_to_ground(&self, css_x: f32, css_y: f32) -> Vec<f32> {
+        self.camera
+            .ground_at([css_x * self.dpr, css_y * self.dpr])
+            .map_or_else(Vec::new, |point| point.to_vec())
+    }
+}
+
+/// The box round two boxes. An empty box adds nothing.
+fn joined(a: Aabb, b: Aabb) -> Aabb {
+    let mut out = a;
+    if b.min[0] <= b.max[0] {
+        out.include(b.min);
+        out.include(b.max);
+    }
+    out
 }
 
 fn js_err(err: impl std::fmt::Display) -> JsError {

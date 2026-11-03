@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod bends;
+pub mod canvas;
 pub mod feed;
 pub mod kind;
 pub mod labels;
