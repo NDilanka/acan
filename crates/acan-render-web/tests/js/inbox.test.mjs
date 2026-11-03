@@ -85,18 +85,38 @@ test("a new scope revision is a new thing to seal", () => {
 test("a_drifting_agent_is_one_inbox_row_after_clashes", () => {
   const drifting = {
     ...view(),
+    tasks: [...view().tasks, { id: 6, order: 5, machine: "src/ops", state: "building" }],
     agents: [
       { id: "ada", task: 1, activity: "building", machine: "src/api", drift: { kind: "stuck", quiet_ms: 360_000 } },
       { id: "bo", task: 2, activity: "gating", machine: "src/web", drift: { kind: "beyond_scope" } },
+      { id: "dee", task: 6, activity: "building", machine: "src/ops", drift: { kind: "stuck", quiet_ms: 360_000 } },
       { id: "cy", task: null, activity: "idle", machine: null, drift: { kind: "none" } },
     ],
   };
   const items = inboxItems(drifting).filter((item) => item.kind === "clash" || item.kind === "drift");
-  assert.deepEqual(items.map((item) => item.key), ["clash:2", "clash:3", "drift:ada", "drift:bo"]);
+  // ada and bo sit on the clashed tasks, so they wait and show no drift row.
+  assert.deepEqual(items.map((item) => item.key), ["clash:2", "clash:3", "drift:dee"]);
   const byKey = Object.fromEntries(items.map((item) => [item.key, item]));
-  assert.equal(byKey["drift:ada"].text, "t-1 drift: ada quiet 6m, no next step");
-  assert.equal(byKey["drift:ada"].machine, "src/api");
-  assert.equal(byKey["drift:bo"].text, "t-2 drift: bo edits beyond its scope");
+  assert.equal(byKey["drift:dee"].text, "t-6 drift: dee quiet 6m, no next step");
+  assert.equal(byKey["drift:dee"].machine, "src/ops");
+});
+
+test("an_open_contest_is_one_inbox_row, and a drone waiting on it shows no drift", () => {
+  const contested = {
+    ...view(),
+    clashes: [],
+    questions: [],
+    lanes: [{ order: 1, rev: 1, state: "confirmed", stopped: false, open_contests: 2 }],
+    tasks: [...view().tasks, { id: 6, order: 5, machine: "src/ops", state: "building" }],
+    agents: [
+      { id: "ada", task: 1, activity: "building", machine: "src/api", drift: { kind: "stuck", quiet_ms: 360_000 } },
+      { id: "dee", task: 6, activity: "building", machine: "src/ops", drift: { kind: "stuck", quiet_ms: 360_000 } },
+    ],
+  };
+  const items = inboxItems(contested).filter((item) => item.kind === "contest" || item.kind === "drift");
+  assert.deepEqual(items.map((item) => item.key), ["contest:1", "drift:dee"]);
+  assert.equal(items[0].text, "o-1 contest: 2 contests wait for your ruling");
+  assert.equal(items[0].machine, "src/api");
 });
 
 test("residue items in a plant view wait for a ruling, one line per order", () => {

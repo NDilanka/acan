@@ -307,6 +307,15 @@ test("an agent whose task is in an open clash, or whose order asks, waits and is
   assert.equal(rows.some((row) => row.quiet !== null), false);
 });
 
+test("a_waiting_agent_shows_no_drift_in_its_lane_row", () => {
+  const agents = [{ id: "ada", task: 1, activity: "building", machine: "src/api", drift: { kind: "stuck", quiet_ms: 360_000 } }];
+  const tasks = [{ id: 1, order: 1, machine: "src/api", state: "building" }];
+  const contested = { agents, tasks, clashes: [], questions: [], lanes: [{ order: 1, stopped: false, open_contests: 1 }] };
+  assert.equal(laneRows(contested, new Map(), 0)[0].drift, null, "a contest holds the agent still, so no drift");
+  const free = { ...contested, lanes: [{ order: 1, stopped: false, open_contests: 0 }] };
+  assert.equal(laneRows(free, new Map(), 0)[0].drift, "drift");
+});
+
 test("a_stopped_or_contested_order_holds_its_agents", () => {
   const stopped = { ...view(), clashes: [], questions: [], lanes: [{ order: 1, stopped: true, open_contests: 0 }] };
   assert.deepEqual([...waitingAgents(stopped)].sort(), ["agent-a", "agent-b"]);
