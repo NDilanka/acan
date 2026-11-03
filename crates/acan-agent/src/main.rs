@@ -19,6 +19,10 @@ struct Cli {
     /// The origin's base URL, such as `http://127.0.0.1:7311`.
     #[arg(long)]
     server: String,
+    /// The project the origin serves to work on, by its id, such as `acan`. Without it the
+    /// worker uses the origin's default project.
+    #[arg(long)]
+    project: Option<String>,
     /// The agent's bearer token. Without it, the `ACAN_AGENT_TOKEN` variable is used. The scripts
     /// set the variable, because a flag shows in the process list.
     #[arg(long)]
@@ -87,8 +91,9 @@ async fn run_cli() -> Result<Exit> {
         LlmConfig::load(&cli.llm).with_context(|| format!("loading {}", cli.llm.display()))?;
     let keys = ApiKeys::from_env(&config);
     let model = OpenAiCompatible::new(config, keys).context("building the model client")?;
+    let server = project_url(&cli.server, cli.project.as_deref())?;
     let worker = WorkerConfig {
-        server: cli.server,
+        server,
         token,
         repo: cli.repo,
         test_command: cli.test_command,
@@ -107,6 +112,31 @@ fn agent_token(flag: Option<String>, variable: Option<String>) -> Result<String>
     flag.filter(|token| !token.is_empty())
         .or_else(|| variable.filter(|token| !token.is_empty()))
         .context("no agent token: pass --token or set ACAN_AGENT_TOKEN")
+}
+
+/// The base URL the worker's MCP calls go to. With a project, that is the project's routes under
+/// `/api/p/<id>`. Without one, it is the origin's unprefixed routes, which serve the default
+/// project.
+fn project_url(server: &str, project: Option<&str>) -> Result<String> {
+    let base = server.trim_end_matches('/');
+    match project {
+        None => Ok(base.to_owned()),
+        Some(id) if valid_project_id(id) => Ok(format!("{base}/api/p/{id}")),
+        Some(id) => bail!(
+            "the project id {id:?} is not valid: lowercase letters, digits and dashes, with no dash at either end"
+        ),
+    }
+}
+
+/// Whether `id` may name a project. The origin applies the same rule when it names projects, so a
+/// valid id here is a valid id there.
+fn valid_project_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.starts_with('-')
+        && !id.ends_with('-')
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 /// Loads the provider keys from `path`. A missing file is normal; a file that does not parse is
@@ -141,7 +171,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Cli, agent_token, load_env};
+    use super::{Cli, agent_token, load_env, project_url};
 
     #[test]
     fn the_flag_wins_and_the_variable_fills_in() {
@@ -190,6 +220,29 @@ mod tests {
         ])
         .expect("the flags parse without --token");
         assert!(cli.token.is_none());
+    }
+
+    #[test]
+    fn the_project_flag_selects_its_routes_and_none_is_the_default() {
+        assert_eq!(
+            project_url("http://127.0.0.1:7311", Some("acan")).expect("a valid id"),
+            "http://127.0.0.1:7311/api/p/acan"
+        );
+        assert_eq!(
+            project_url("http://127.0.0.1:7311/", None).expect("no project"),
+            "http://127.0.0.1:7311",
+            "without a project the base is the origin, with its trailing slash dropped"
+        );
+    }
+
+    #[test]
+    fn a_project_id_that_the_origin_would_not_name_is_refused_before_any_call() {
+        for id in ["", "-acan", "acan-", "Acan", "a/b", "a b", "../x", "a_b"] {
+            assert!(
+                project_url("http://127.0.0.1:7311", Some(id)).is_err(),
+                "{id:?} is refused"
+            );
+        }
     }
 
     #[test]
