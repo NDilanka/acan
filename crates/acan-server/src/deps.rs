@@ -904,11 +904,17 @@ fn check_ancestors(_cache: &Path, _me: Identity) -> Result<(), DepsError> {
 /// cache reaches. Other platforms have no owner or mode to read here, so only a cache under the
 /// user's profile, which holds this user's files, is trusted.
 fn check_platform(cache: &Path) -> Result<(), DepsError> {
-    // The profile is compared as it resolves too, so a short name such as `MYNAME~1` matches.
-    let profile = std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .map(|profile| fs::canonicalize(&profile).unwrap_or(profile));
-    if platform_trusts(cfg!(unix), cache, profile.as_deref()) {
+    let profile = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    check_platform_for(cache, profile.as_deref())
+}
+
+/// [`check_platform`] with the profile given, so the rule can be tested without the environment.
+fn check_platform_for(cache: &Path, profile: Option<&Path>) -> Result<(), DepsError> {
+    // Both sides are resolved the same way. A short name such as `MYNAME~1` in either one names
+    // the same place as its long name, and a verbatim prefix does not stop a match.
+    let resolved = comparable(cache);
+    let profile = profile.map(comparable);
+    if platform_trusts(cfg!(unix), &resolved, profile.as_deref()) {
         return Ok(());
     }
     Err(tampered(
@@ -918,26 +924,65 @@ fn check_platform(cache: &Path) -> Result<(), DepsError> {
     ))
 }
 
+/// The path as a comparison sees it: resolved through the file system, so a short name becomes
+/// its long name and a link is followed. A path that does not exist yet is resolved through its
+/// nearest existing ancestor, and the names below that ancestor are kept as written. A path with
+/// a `..` that cannot be resolved is kept as written, and [`under`] refuses it.
+fn comparable(path: &Path) -> String {
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(real) = fs::canonicalize(current) {
+            let mut resolved = PathBuf::from(strip_verbatim(&real.to_string_lossy()));
+            for name in missing.iter().rev() {
+                resolved.push(name);
+            }
+            return resolved.to_string_lossy().into_owned();
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name);
+                current = parent;
+            }
+            _ => return strip_verbatim(&path.to_string_lossy()),
+        }
+    }
+}
+
+/// Removes the verbatim prefix that canonicalization adds on Windows: `\\?\C:\x` becomes `C:\x`,
+/// and `\\?\UNC\server\share` becomes `\\server\share`. Other text is returned as it is.
+fn strip_verbatim(text: &str) -> String {
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    text.strip_prefix(r"\\?\").unwrap_or(text).to_owned()
+}
+
 /// Whether a cache at `cache` may be used. `unix` says the platform has owner and mode checks.
-fn platform_trusts(unix: bool, cache: &Path, profile: Option<&Path>) -> bool {
+/// Both paths are the text [`comparable`] returns.
+fn platform_trusts(unix: bool, cache: &str, profile: Option<&str>) -> bool {
     unix || profile.is_some_and(|profile| under(cache, profile))
 }
 
-/// Whether `path` is `dir` or lies under it. Components are compared without case, as Windows
-/// compares them, and a path with a `..` is never under anything, since it may leave `dir`.
-fn under(path: &Path, dir: &Path) -> bool {
-    if path
-        .components()
-        .any(|part| matches!(part, std::path::Component::ParentDir))
+/// Whether `path` is `dir` or lies under it. Both are split at `\` or `/` and compared without
+/// case, as Windows compares them. A `..` in either, or an empty `dir`, is never under anything:
+/// a `..` may leave `dir`, and an empty `dir` would admit every path.
+fn under(path: &str, dir: &str) -> bool {
+    let (path, dir) = (components(path), components(dir));
+    if dir.is_empty() || path.len() < dir.len() || path.iter().chain(&dir).any(|part| part == "..")
     {
         return false;
     }
-    let fold =
-        |part: std::path::Component<'_>| part.as_os_str().to_string_lossy().to_ascii_lowercase();
-    let mut parts = path.components().map(fold);
-    dir.components()
-        .map(fold)
-        .all(|wanted| parts.next().as_deref() == Some(wanted.as_str()))
+    path[..dir.len()] == dir[..]
+}
+
+/// The components of a path as text: split at `\` or `/`, in lower case, without empty parts and
+/// without `.` parts, which do not change where a path points.
+fn components(text: &str) -> Vec<String> {
+    text.split(['\\', '/'])
+        .filter(|part| !part.is_empty() && *part != ".")
+        .map(str::to_ascii_lowercase)
+        .collect()
 }
 
 /// Who this process runs as. A file it creates in the system temporary directory is owned by it,
@@ -2102,39 +2147,125 @@ mod tests {
 
     #[test]
     fn a_platform_without_owner_checks_trusts_only_a_cache_under_the_profile() {
-        let profile = Path::new("C:/Users/Me");
-        let cache = Path::new("C:/Users/Me/AppData/Local/acan/deps");
+        let profile = "C:/Users/Me";
+        let cache = "C:/Users/Me/AppData/Local/acan/deps";
         assert!(
-            platform_trusts(true, Path::new("/anywhere/deps"), None),
+            platform_trusts(true, "/anywhere/deps", None),
             "unix checks owners and modes"
         );
         assert!(platform_trusts(false, cache, Some(profile)));
         assert!(
-            platform_trusts(false, Path::new("c:/users/ME/deps"), Some(profile)),
+            platform_trusts(false, "c:/users/ME/deps", Some(profile)),
             "case does not matter on Windows"
         );
-        assert!(!platform_trusts(
-            false,
-            Path::new("D:/cache"),
-            Some(profile)
-        ));
+        assert!(!platform_trusts(false, "D:/cache", Some(profile)));
         assert!(!platform_trusts(false, cache, None), "no profile, no trust");
         assert!(
-            !platform_trusts(false, Path::new("C:/Users/Me/../Other/deps"), Some(profile)),
+            !platform_trusts(false, "C:/Users/Me/../Other/deps", Some(profile)),
             "a .. can leave the profile"
+        );
+        assert!(
+            !platform_trusts(false, r"C:\anything", Some("")),
+            "an empty profile admits nothing"
         );
     }
 
     #[test]
     fn under_compares_whole_components_without_case() {
-        assert!(under(Path::new("/srv/me/cache"), Path::new("/srv/me")));
-        assert!(under(Path::new("/srv/me"), Path::new("/srv/me")));
-        assert!(under(Path::new("/SRV/Me/cache"), Path::new("/srv/me")));
+        assert!(under("/srv/me/cache", "/srv/me"));
+        assert!(under("/srv/me", "/srv/me"));
+        assert!(under("/SRV/Me/cache", "/srv/me"));
         assert!(
-            !under(Path::new("/srv/meg/cache"), Path::new("/srv/me")),
+            under(r"C:\Users\Me\cache", "c:/users/me"),
+            "both separators, and any case"
+        );
+        assert!(
+            !under("/srv/meg/cache", "/srv/me"),
             "a prefix of a name is not the name"
         );
-        assert!(!under(Path::new("/srv/me/../you"), Path::new("/srv/me")));
+        assert!(!under("/srv/me/../you", "/srv/me"));
+        assert!(!under("/srv/me", ""), "an empty directory admits nothing");
+    }
+
+    #[test]
+    fn a_verbatim_prefix_is_removed_before_the_comparison() {
+        assert_eq!(strip_verbatim(r"\\?\C:\Users\Me"), r"C:\Users\Me");
+        assert_eq!(
+            strip_verbatim(r"\\?\UNC\server\share\me"),
+            r"\\server\share\me"
+        );
+        assert_eq!(strip_verbatim(r"C:\Users\Me"), r"C:\Users\Me");
+        assert!(
+            !under(r"\\?\C:\Users\Me\deps", r"C:\Users\Me"),
+            "the prefix is a component that the profile does not have"
+        );
+        assert!(under(
+            &strip_verbatim(r"\\?\C:\Users\Me\deps"),
+            &strip_verbatim(r"\\?\C:\Users\Me")
+        ));
+    }
+
+    #[test]
+    fn a_path_that_does_not_exist_yet_is_resolved_through_its_parent() {
+        let root = tempfile::tempdir().expect("a directory");
+        let profile = root.path();
+        let cache = profile.join("acan").join("deps");
+        assert!(!cache.exists(), "the cache does not exist yet");
+        let cache_text = comparable(&cache);
+        assert!(
+            under(&cache_text, &comparable(profile)),
+            "{cache_text} lies under the profile"
+        );
+        // A `..` that leaves the profile is refused on every platform. The case is not a `..` after
+        // a name that does not exist (`missing\..`): Windows collapses that lexically to the
+        // profile itself, where it stays under the profile, so it would not test a refusal there.
+        let leaves = profile.join("..").join("elsewhere");
+        assert!(
+            !under(&comparable(&leaves), &comparable(profile)),
+            "a .. that leaves the profile is refused"
+        );
+    }
+
+    /// A short name and the long name it stands for are the same place. A textual comparison
+    /// refuses that pair, so this is checked where Windows gives short names.
+    #[cfg(windows)]
+    #[test]
+    fn a_short_name_of_the_profile_or_the_cache_names_the_same_place() {
+        let profile = tempfile::tempdir().expect("a directory");
+        let long = profile.path().to_path_buf();
+        let short = short_name(&long);
+        if short == long {
+            eprintln!("short names are off on this volume; the short-name case is not exercised");
+            return;
+        }
+        let short_cache = short.join("acan").join("deps");
+        check_platform_for(&short_cache, Some(long.as_path()))
+            .expect("a cache under the long profile, named short, is trusted");
+        let long_cache = long.join("acan").join("deps");
+        check_platform_for(&long_cache, Some(short.as_path()))
+            .expect("a cache under the short profile, named long, is trusted");
+    }
+
+    /// The 8.3 short name of `path`.
+    #[cfg(windows)]
+    fn short_name(path: &Path) -> PathBuf {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetShortPathNameW(long: *const u16, short: *mut u16, len: u32) -> u32;
+        }
+        let long: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut buffer = vec![0u16; 32_768];
+        // SAFETY: `long` is a NUL-terminated wide string that lives through the call, and
+        // `buffer` holds as many wide characters as the length passed with it.
+        let written =
+            unsafe { GetShortPathNameW(long.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) };
+        assert!(
+            written > 0 && (written as usize) < buffer.len(),
+            "{} has a short name",
+            path.display()
+        );
+        PathBuf::from(std::ffi::OsString::from_wide(&buffer[..written as usize]))
     }
 
     #[test]
