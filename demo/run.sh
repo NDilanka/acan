@@ -28,7 +28,7 @@
 #
 # Environment: ACAN_RUN_ROOT, ACAN_DEMO_REPO, ACAN_LLM_FILE (default crates/acan-llm/llm.toml),
 # ACAN_ENV_FILE (default crates/acan-llm/.env, the provider keys, copied into the run folder and never printed),
-# CARGO_TARGET_DIR (default target/).
+# CARGO_TARGET_DIR (default target/), ACAN_VISION_BROWSER (the browser the vision witness renders with, off Windows).
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=lib.sh disable=SC1091
@@ -178,6 +178,12 @@ for built in "$acan_bin" "$worker_bin"; do
 done
 www="$REPO_ROOT/crates/acan-render-web/www"
 
+# The vision witness looks for Edge or Chrome at their Windows paths. On Linux or macOS, ACAN_VISION_BROWSER names
+# the browser. The path must not contain spaces, because it is passed unquoted.
+vision_flag=
+if [ -n "${ACAN_VISION_BROWSER:-}" ]; then
+  vision_flag="--vision-browser=$ACAN_VISION_BROWSER"
+fi
 start_logged "$state" "$logs" acan-serve "$run_dir" "$acan_bin" serve \
   --repo "$run_dir" \
   --port "$port" \
@@ -185,7 +191,8 @@ start_logged "$state" "$logs" acan-serve "$run_dir" "$acan_bin" serve \
   --llm "$acan_dir/llm.toml" \
   --protected-branch main \
   --witness-http-base-url "http://127.0.0.1:$demo_port" \
-  --witness-concurrency 2
+  --witness-concurrency 2 \
+  $vision_flag
 if ! wait_http_200 "http://127.0.0.1:$port/health" 60; then
   fail_take "acan serve did not answer on port $port; see $logs/acan-serve.err.log"
 fi

@@ -587,14 +587,15 @@ bounded!(
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RepairBudget {
-    /// Batched repair rounds for the whole order. Each round bounces every open episode at once
-    /// and is answered by one candidate and one full-corpus run.
+    /// Batched repair rounds for the whole order. Each round bounces one batch of open episodes
+    /// at once and is answered by one candidate and one full-corpus run.
     pub repair_rounds: RepairRounds,
     /// Wall time cap for the whole order.
     pub wall_time_ms: u64,
     /// Model cost cap for the whole order, in millionths of a US dollar.
     pub model_cost_micros: u64,
-    /// Cap on new discrepancy episodes the order may open, so new items cannot dodge the budget.
+    /// Cap on the open, non-fixed episodes one round bounces. Episodes past the cap stay open for
+    /// a later round, so the cap alone never stops the order.
     pub max_episodes: u32,
 }
 
