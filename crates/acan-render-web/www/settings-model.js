@@ -238,6 +238,14 @@ export function appliedNote(applied, paths = Object.keys(applied ?? {})) {
   return "";
 }
 
+// The line under the statemap toggle: the most a scan can spend, from the statemap call limit. No
+// limit means no figure, so no line.
+export function statemapHint(budgets) {
+  const calls = getAt(budgets, "call_limits.statemap");
+  if (!Number.isFinite(calls)) return "";
+  return `Uses up to ${calls} calls × 3k tokens per scan`;
+}
+
 // The server's 409 names its conflict in `what`. Each code gets a short sentence; an unknown code
 // gets the plain fallback.
 const CONFLICT_TEXT = {
