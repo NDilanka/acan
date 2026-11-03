@@ -203,10 +203,10 @@ pub(crate) struct RulingBody {
 ///
 /// # Errors
 ///
-/// Returns 400 when the label is empty or the predicate does not give the decision's answer on the
-/// example it is ruled on, 409 when the draft is stale or the origin refuses the chain, 403 when
-/// the member is neither the order's poster nor an owner, and 404 when the order, episode or
-/// example is missing.
+/// Returns 400 when the label is empty, when the predicate has a fixed base anchor, or when the
+/// predicate does not give the decision's answer on the example it is ruled on. 409 when the draft
+/// is stale or the origin refuses the chain, 403 when the member is neither the order's poster nor
+/// an owner, and 404 when the order, episode or example is missing.
 pub(crate) async fn record<C: ModelClient + 'static>(
     host: &Host<C>,
     member: &MemberId,
@@ -217,6 +217,14 @@ pub(crate) async fn record<C: ModelClient + 'static>(
     let label = body.label.trim().to_owned();
     if label.is_empty() {
         return Err(ApiError::BadRequest("label"));
+    }
+    // A fixed anchor is judged against the saved example it names. The gate builds its receipts
+    // with no saved examples, so a later gate run would find the anchor missing, answer unknown,
+    // and block on the ruling. Until the gate loads them, a fixed anchor is refused.
+    if !body.predicate.fixed_anchors().is_empty() {
+        return Err(ApiError::BadRequest(
+            "predicate with a fresh base anchor: fixed anchors are not supported yet",
+        ));
     }
     let draft = draft(host, order, episode)?;
     if body.scope_hash != draft.scope_hash {

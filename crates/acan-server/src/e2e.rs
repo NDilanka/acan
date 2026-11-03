@@ -23,7 +23,8 @@ use acan_core::{
     Stage, Stamped, TaskId, TaskState, World,
 };
 use acan_intent::{
-    ContrastExample, EpisodeId, ItemClass, LedgerEvent, Scope, ScopeConfirmation, Supersedes,
+    ContrastExample, EpisodeId, ItemClass, LedgerEvent, RulingStatus, Scope, ScopeConfirmation,
+    Supersedes,
 };
 use acan_llm::{
     CallRecord, ChatRequest, ChatResponse, LlmError, ModelClient, Role, Usage, UsageLedger,
@@ -2069,6 +2070,103 @@ async fn a_malformed_or_unlabelled_ruling_is_refused() {
         origin.world().ledger().head().event_seq,
         0,
         "no malformed ruling is recorded"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A fixed base anchor names a saved example, and the gate builds its receipts with none. A ruling
+/// with one would block the next gate run, so the server refuses it with 400 and records nothing.
+/// The forbid here names the example it is on, which the save check alone would have accepted.
+#[tokio::test]
+async fn a_fixed_anchor_is_refused_and_nothing_is_recorded() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let (running, order, episode) = blocked_signup_episode(repo.path()).await;
+    let draft = draft_of(&running, order, episode).await;
+    let fixed = json!({
+        "predicate": "equals_base",
+        "step_id": "s1",
+        "path": "body",
+        "anchor": { "kind": "fixed", "example": draft["ruled_on"] }
+    });
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&draft, "forbid", fixed),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "a fixed anchor is refused: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert_eq!(
+        origin.world().ledger().head().event_seq,
+        0,
+        "no ruling with a fixed anchor is recorded"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A ruling on a fresh base anchor is judged at the gate run that follows it. The agent builds the
+/// regression again after the ruling, and the receipt of that run lists the ruling as held or
+/// violated, never unknown. A fixed anchor would read unknown there, since the gate loads no saved
+/// examples. The verdict depends on which probes the predicate covers, so the test pins only that
+/// the ruling is judged.
+#[tokio::test]
+async fn a_posted_ruling_is_judged_at_the_gate_run_that_follows_it() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let (running, order, episode, task, fence) = blocked_signup_task(root).await;
+    let draft = draft_of(&running, order, episode).await;
+    let (status, body) = post_ruling(
+        &running,
+        OWNER_TOKEN,
+        order,
+        episode,
+        &ruling_body(&draft, "forbid", same_as_base()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the ruling is recorded: {body}"
+    );
+
+    rebuild_regressed(&running, root, task, fence).await;
+    let ruling_id = format!("episode:{episode}");
+    let (verdict, rulings) = settle(&running, "the gate run after the ruling", |log, _| {
+        let ruled_at = log
+            .iter()
+            .position(|stamped| matches!(stamped.event, Event::RulingRecorded { .. }))?;
+        log[ruled_at..]
+            .iter()
+            .rev()
+            .find_map(|stamped| match &stamped.event {
+                Event::ReceiptRecorded { record, .. } => {
+                    Some((record.verdict.clone(), record.receipt.rulings.clone()))
+                }
+                _ => None,
+            })
+    })
+    .await;
+    let judged = rulings
+        .iter()
+        .find(|check| check.ruling_id.to_string() == ruling_id)
+        .map(|check| {
+            matches!(
+                check.status,
+                RulingStatus::Held {} | RulingStatus::Violated { .. }
+            )
+        });
+    assert_eq!(
+        judged,
+        Some(true),
+        "the ruling is judged at the gate run that follows it; verdict {verdict:?}, rulings {rulings:?}"
     );
     running.stop().await.expect("the server stops");
 }
