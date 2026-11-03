@@ -4,6 +4,8 @@
 // instead, and the scrubber folds them all when the map goes live again.
 import { linkQuiet } from "./chrome.js";
 import { requestRender } from "./main.js";
+import { listProjects, startMulti } from "./multi.js";
+import { apiPath, target } from "./projects.js";
 import { createFeed, createHold, eventsBefore } from "./scrub.js";
 import { TOKEN_KEY, freeze, gate, link, replay, state, upto } from "./state.js";
 
@@ -115,7 +117,14 @@ export async function get(path) {
 
 export async function start() {
   setLink("loading");
-  state.app.set_plant(await get("/api/plant"));
+  // An origin that lists several projects puts them all on one canvas. Any other answer, such as
+  // 404 from an origin without the route, keeps the one-plant page.
+  const projects = await listProjects(state.token);
+  if (projects !== null) {
+    await startMulti(projects);
+    return;
+  }
+  state.app.set_plant(await get(apiPath(target(), "/api/plant")));
   await reload();
   if (freeze) {
     setLink(`frozen · seq ${state.app.next_seq()}`);
@@ -125,7 +134,7 @@ export async function start() {
 }
 
 async function reload() {
-  const log = await get("/api/events?from=0");
+  const log = await get(apiPath(target(), "/api/events?from=0"));
   const kept = upto === null ? log : keepBefore(log, upto);
   if (hold.on) {
     hold.replace(JSON.parse(kept));
@@ -150,21 +159,7 @@ function connect() {
     setLink(`live · seq ${state.app.next_seq()}`);
   };
   ws.onmessage = (message) => {
-    if (hold.on) {
-      try {
-        if (hold.push(JSON.parse(message.data))) heldMore();
-      } catch (err) {
-        console.error("a streamed event could not be read while the map is held", err);
-      }
-      return;
-    }
-    try {
-      state.app.ingest(message.data);
-      requestRender();
-    } catch (err) {
-      console.error("the stream could not be applied; reloading the log", err);
-      ws.close();
-    }
+    if (!applyStreamed(message.data)) ws.close();
   };
   ws.onclose = (event) => {
     if (state.socket !== ws) return;
@@ -177,6 +172,27 @@ function connect() {
     setLink("reconnecting");
     setTimeout(resync, RECONNECT_MS);
   };
+}
+
+// Folds one streamed event of the map on screen, or keeps it in the hold while the map shows the
+// past. Returns false when the app refused it, so the stream reloads the log.
+export function applyStreamed(data) {
+  if (hold.on) {
+    try {
+      if (hold.push(JSON.parse(data))) heldMore();
+    } catch (err) {
+      console.error("a streamed event could not be read while the map is held", err);
+    }
+    return true;
+  }
+  try {
+    state.app.ingest(data);
+    requestRender();
+    return true;
+  } catch (err) {
+    console.error("the stream could not be applied; reloading the log", err);
+    return false;
+  }
 }
 
 async function resync() {
