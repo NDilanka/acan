@@ -18,6 +18,7 @@ import {
   testText,
   keyNotes,
   appliedNote,
+  changedPaths,
   updateView,
   exportNote,
   clearNote,
@@ -309,7 +310,7 @@ async function put(section, body, onOk = null) {
     for (const [provider, state] of Object.entries(res.body.keys ?? {})) {
       keyNoteMap.set(provider, { bad: state === "rejected", text: keyNotes({ [provider]: state })[0] ?? "" });
     }
-    notes.set(section, { bad: false, text: appliedNote(res.body.applied) });
+    notes.set(section, { bad: false, text: appliedNote(res.body.applied, changedPaths(body)) });
     onOk?.();
     flash(section);
     return true;

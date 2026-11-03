@@ -204,10 +204,35 @@ export function keyNotes(keys) {
   return Object.values(keys ?? {}).map(keyNote);
 }
 
-// The line under a saved section. "restart" says so; "stored" is saved and no more; "live" and
-// "client" need no line, since the change shows at once.
-export function appliedNote(applied) {
-  const values = Object.values(applied ?? {});
+// The dotted path of each field a PUT body changes, one per leaf: {budgets:{call_limits:{worker:5}}}
+// gives "budgets.call_limits.worker". Only the paths are kept, never the values.
+export function changedPaths(body, base = "") {
+  const out = [];
+  for (const [key, value] of Object.entries(body ?? {})) {
+    const path = base ? `${base}.${key}` : key;
+    if (value && typeof value === "object" && !Array.isArray(value)) out.push(...changedPaths(value, path));
+    else out.push(path);
+  }
+  return out;
+}
+
+// How one changed field takes effect. The server keys `applied` by dotted path, so an exact match
+// wins, then the longest prefix (projects.workers covers projects.workers.acan). The older answer
+// keyed whole sections, which the same lookup reads as prefixes. Unknown gives undefined.
+export function appliedFor(applied, path) {
+  if (!applied || typeof applied !== "object") return undefined;
+  if (typeof applied[path] === "string") return applied[path];
+  for (let at = path.lastIndexOf("."); at > 0; at = path.lastIndexOf(".", at - 1)) {
+    const prefix = path.slice(0, at);
+    if (typeof applied[prefix] === "string") return applied[prefix];
+  }
+  return undefined;
+}
+
+// The line under a saved change. "restart" says so; "stored" is saved and no more; "live" and
+// "client" need no line, since the change shows at once. Without paths, every key in `applied` counts.
+export function appliedNote(applied, paths = Object.keys(applied ?? {})) {
+  const values = paths.map((path) => appliedFor(applied, path));
   if (values.includes("restart")) return "Saved; takes effect after restart.";
   if (values.includes("stored")) return "Saved.";
   return "";
