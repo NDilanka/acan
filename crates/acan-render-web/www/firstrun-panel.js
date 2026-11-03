@@ -1,10 +1,11 @@
 // The first-run checklist on the page: an island at the top right that walks a new tester from
-// sign-in to watching the map, until they dismiss it. What each step says is decided in firstrun.js.
+// sign-in to watching the map, until every step is done or they dismiss it. What each step says is decided in firstrun.js.
 // It reads GET /api/setup and GET /api/plant itself, with its own fetch, so a server without a
 // route (404) or a refused read never signs the tester out. GET /api/workers is read once for the
 // page, in workers.js, so the lanes strip says the same.
 import { $, gate, params, replay, state } from "./state.js";
-import { DONE, FIRSTRUN_KEY, UNAVAILABLE, UNKNOWN, contractOf, progressShort, shouldShow, steps } from "./firstrun.js";
+import { DONE, FIRSTRUN_KEY, UNAVAILABLE, UNKNOWN, allDone, contractOf, progressShort, shouldShow, steps } from "./firstrun.js";
+import { isLive } from "./stream.js";
 import { loadWorkers, onWorkers, refreshWorkers, workersAnswer } from "./workers.js";
 
 const panel = $("firstrun");
@@ -125,8 +126,16 @@ export function paintFirstRun() {
     workers: workersAnswer(),
     view: state.view,
     watched: false,
+    live: isLive(),
     origin: location.origin,
   });
+  // All seven done: the checklist goes for good, as a dismiss would, so a reload keeps it gone.
+  if (allDone(list)) {
+    remember();
+    if (panel.contains(document.activeElement)) $("plant").focus();
+    panel.hidden = true;
+    return;
+  }
   const focused = panel.contains(document.activeElement) ? document.activeElement.dataset.focus : undefined;
   const folded = collapsed();
   const head = element("div", "fr-head");

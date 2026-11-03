@@ -1,6 +1,7 @@
 // Node tests for the first-run checklist's page logic. Run with:
 //   node --test crates/acan-render-web/tests/js/firstrun.test.mjs
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -10,6 +11,7 @@ import {
   TODO,
   UNAVAILABLE,
   UNKNOWN,
+  allDone,
   contractOf,
   contractState,
   progressShort,
@@ -187,4 +189,24 @@ test("the folded checklist reads Setup N/7", () => {
   assert.equal(progressShort(steps()), "0/7");
   const list = steps({ token: true, setup: KEYED, contract: CONTRACT, view: view({ agents: 1, orders: 1, lanes: [{ state: "confirmed" }] }), watched: true });
   assert.equal(progressShort(list), "7/7");
+});
+
+test("the checklist hides by itself once all seven steps are done, with no dismiss", () => {
+  const done = { token: true, setup: KEYED, contract: CONTRACT, view: view({ agents: 1, orders: 1, lanes: [{ state: "confirmed" }] }) };
+  const live = steps({ ...done, live: true });
+  assert.equal(byId(live).watch.state, DONE, "a sealed lane on the live map is the watch surface");
+  assert.equal(allDone(live), true);
+  assert.equal(allDone(steps({ ...done, setup: { status: 404, body: null }, live: true })), true, "a step not offered counts as done");
+  const panel = readFileSync(new URL("../../www/firstrun-panel.js", import.meta.url), "utf8");
+  assert.match(panel, /if \(allDone\(list\)\) \{\s*remember\(\);[\s\S]*?panel\.hidden = true;\s*return;/, "hidden for good, so a reload keeps it gone");
+});
+
+test("the checklist still shows while any step is open", () => {
+  const done = { token: true, setup: KEYED, contract: CONTRACT, view: view({ agents: 1, orders: 1, lanes: [{ state: "confirmed" }] }) };
+  const held = steps({ ...done, live: false });
+  assert.equal(byId(held).watch.state, TODO, "a rewound or replayed map is not watching");
+  assert.equal(allDone(held), false);
+  assert.equal(allDone(steps({ ...done, view: view({ agents: 1, orders: 1, lanes: [{ state: "unconfirmed" }] }), live: true })), false, "no lane sealed");
+  assert.equal(allDone(steps({ ...done, contract: null, live: true })), false, "a contract the server cannot report");
+  assert.equal(allDone(steps({ ...done, token: false, live: true })), false, "signed out");
 });

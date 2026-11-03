@@ -133,11 +133,13 @@ function contractStep(token, contract) {
 
 // Each step, in order, with its state, its words and the control that does it. `current` marks the
 // first step still to do. A step this page cannot check is never current, so a server that cannot
-// say yet does not hold the tester at it.
-export function steps({ token = false, setup = null, contract, workers = null, view = null, watched = false, origin = "" } = {}) {
+// say yet does not hold the tester at it. `live` is whether the page shows the live map: once a
+// lane is sealed, the live map in front of the tester is the watch surface, so watching is done.
+export function steps({ token = false, setup = null, contract, workers = null, view = null, watched = false, live = false, origin = "" } = {}) {
   const agents = view?.agents?.length ?? 0;
   const orders = view?.orders?.length ?? 0;
   const sealed = (view?.lanes ?? []).some((lane) => lane.state === "confirmed");
+  watched = watched || (sealed && live);
   const list = [
     token
       ? { id: "signin", title: "Sign in", state: DONE, detail: "Signed in with the owner token.", action: null }
@@ -163,6 +165,12 @@ export function steps({ token = false, setup = null, contract, workers = null, v
 export function progressText(list) {
   const done = list.filter((step) => step.state === DONE || step.state === UNAVAILABLE).length;
   return `${done} of ${list.length} done`;
+}
+
+// Whether every step is done, a step this server does not offer counting as done. A step the page
+// cannot check yet (unknown) keeps the checklist open.
+export function allDone(list) {
+  return list.every((step) => step.state === DONE || step.state === UNAVAILABLE);
 }
 
 // The folded checklist's count, such as "3/7".
