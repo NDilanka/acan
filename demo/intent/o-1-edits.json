@@ -27,6 +27,14 @@
       "when_no_option_matches": "fail",
       "decided_by": "coordinator, delegated by the owner",
       "reason": "The order says ten requests per 60 seconds. The window items in this file already state a fixed window anchored on the first request (anchor first_match), with the first request at or after 60 s allowed again (recovers), and the probe sends a request at 59999 ms that must still get 429. So the answer is fixed. This run asks it as window-reset with the option \"Fixed window from first request\"."
+    },
+    {
+      "id": "cr-window-boundary",
+      "question_match": "(?i)(boundary|exactly 60|at 60 ?s|old window|new window)",
+      "option_label_match": "(?i)(new window|allowed again|^allowed)",
+      "when_no_option_matches": "fail",
+      "decided_by": "coordinator, delegated by the owner",
+      "reason": "The window items in this file state boundary exclusive with the recovers obligation: the first request at or after 60 s starts a new window and is allowed. So a request at the boundary is in the new window and allowed. The x01-r6 m-broad-scope draft asks it as window-boundary with the option \"In new window and allowed\"."
     }
   ],
   "scope_edits": [
