@@ -503,6 +503,7 @@
   #lanes .when.away { color: var(--ink); }
   #lanes .doing { grid-column: 2; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #lanes .chip { grid-column: 3; justify-self: end; }
+  #lanes .hold { margin: 0 2px 4px; font: 11px/1.4 var(--mono); overflow-wrap: anywhere; }
   /* The replay panel shows on a recorded run only (`?replay=1`). */
   #replay { right: 12px; bottom: 12px; display: flex; gap: 8px; align-items: center; padding: 5px 10px; }
   #replay button { width: 24px; height: 24px; padding: 0; font: 12px/22px var(--mono); text-align: center; background: var(--face);
@@ -637,7 +638,7 @@
 <div class="island" id="usage" hidden>
   <button type="button" id="meta-badge" aria-expanded="false" aria-controls="usage-meta"></button>
   <section id="usage-meta">
-    <h3 title="provider = config name: meta = Meta Model API, baseten = Baseten-hosted Muse Spark Open, fireworks = Fireworks-hosted Muse Spark Open">Meta attribution · since server start</h3>
+    <h3 title="provider = config name: meta = Meta Model API, baseten = Baseten-hosted Muse Spark Open, fireworks = Fireworks-hosted Muse Spark Open">Foreman · since server start</h3>
     <table>
       <thead>
         <tr><th>role</th><th>provider</th><th>model</th><th class="num">calls</th><th class="num">in</th><th class="num">out</th></tr>
@@ -648,7 +649,7 @@
     <p class="note" id="meta-note"></p>
   </section>
   <section id="usage-history" hidden>
-    <h3>Meta attribution · this log</h3>
+    <h3>Foreman · this log</h3>
     <table>
       <thead>
         <tr><th>step</th><th>model</th><th class="num">calls</th><th class="num">in</th><th class="num">out</th></tr>

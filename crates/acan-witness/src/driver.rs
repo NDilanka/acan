@@ -96,6 +96,9 @@ pub(crate) struct Reply {
     pub binary: bool,
     #[serde(default)]
     pub truncated: bool,
+    /// The last lines the app wrote, sent only with a start that failed.
+    #[serde(default)]
+    pub app_output: Option<String>,
 }
 
 /// Why an operation got no usable reply.

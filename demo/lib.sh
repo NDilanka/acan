@@ -62,8 +62,28 @@ process_start() {
 }
 
 # True only when the pid is still alive and started at the recorded time, so a reused pid is not mistaken for it.
+# The watch lock uses this.
 process_alive() {
   [ -n "$2" ] && [ "$(process_start "$1")" = "$2" ]
+}
+
+# A stamp that identifies one process for as long as it runs: its start time in clock ticks since boot, read
+# from /proc. Ticks do not move when the wall clock is set, which the wall-clock start time from ps does. Where
+# /proc is missing, the start time as ps prints it. Prints nothing when the process is gone or a zombie.
+process_stamp() {
+  if [ -r "/proc/$1/stat" ]; then
+    sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | awk '$1 != "Z" { print "ticks " $20 }'
+  else
+    stamp_start=$(process_start "$1")
+    if [ -n "$stamp_start" ]; then
+      printf 'lstart %s\n' "$stamp_start"
+    fi
+  fi
+}
+
+# True only when the pid is still the process the pid file recorded, by its stamp.
+process_is() {
+  [ -n "$2" ] && [ "$(process_stamp "$1")" = "$2" ]
 }
 
 # Records a started process in the run state. $1 state file, $2 name, $3 pid.
@@ -72,7 +92,8 @@ record_process() {
     '.processes += [{name: $name, pid: $pid, lstart: $lstart}]' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
 }
 
-# Starts a detached process with its output in the logs folder and records it in the run state.
+# Starts a detached process with its output in the logs folder and records it in the run state. It also writes
+# the pid file that stop.sh stops it by: the pid, then the process's stamp.
 # Arguments: state file, logs folder, name, working folder, then the command and its arguments.
 start_logged() {
   start_state=$1
@@ -82,7 +103,9 @@ start_logged() {
   shift 4
   (cd "$start_dir" && exec nohup "$@") \
     > "$start_logs/$start_name.out.log" 2> "$start_logs/$start_name.err.log" < /dev/null &
-  record_process "$start_state" "$start_name" "$!"
+  start_pid=$!
+  record_process "$start_state" "$start_name" "$start_pid"
+  printf '%s %s\n' "$start_pid" "$(process_stamp "$start_pid")" > "$start_logs/$start_name.pid"
 }
 
 # Sends a signal to a process and then to its children, children first. This is what taskkill /T does on Windows.
@@ -94,13 +117,21 @@ signal_tree() {
   return 0
 }
 
-# Stops one recorded process tree. acan gets SIGINT, so it shuts down cleanly. Everything else gets SIGTERM.
-# A process still alive after 10 seconds gets SIGKILL.
+# Stops one process tree from its pid file: $1 name, $2 pid, $3 stamp. acan gets SIGINT, so it shuts down
+# cleanly. Everything else gets SIGTERM. A process still alive after 10 seconds gets SIGKILL.
 stop_recorded() {
   stop_name=$1
   stop_pid=$2
-  stop_start=$3
-  if ! process_alive "$stop_pid" "$stop_start"; then
+  stop_stamp=$3
+  if [ -z "$stop_stamp" ]; then
+    if kill -0 "$stop_pid" 2>/dev/null; then
+      printf 'left %s (pid %s) running: its pid file has no stamp to check it by\n' "$stop_name" "$stop_pid"
+    else
+      printf '%s was not running\n' "$stop_name"
+    fi
+    return 0
+  fi
+  if ! process_is "$stop_pid" "$stop_stamp"; then
     printf '%s was not running\n' "$stop_name"
     return 0
   fi
@@ -111,11 +142,11 @@ stop_recorded() {
   fi
   signal_tree "$stop_pid" "$stop_sig"
   stop_waited=0
-  while process_alive "$stop_pid" "$stop_start" && [ "$stop_waited" -lt 10 ]; do
+  while process_is "$stop_pid" "$stop_stamp" && [ "$stop_waited" -lt 10 ]; do
     sleep 1
     stop_waited=$((stop_waited + 1))
   done
-  if process_alive "$stop_pid" "$stop_start"; then
+  if process_is "$stop_pid" "$stop_stamp"; then
     signal_tree "$stop_pid" KILL
     printf 'stopped %s (pid %s) with SIGKILL after it ignored SIG%s\n' "$stop_name" "$stop_pid" "$stop_sig"
   else

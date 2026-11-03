@@ -45,6 +45,23 @@ function byId(list) {
   return Object.fromEntries(list.map((step) => [step.id, step]));
 }
 
+// Runs a test body with navigator stubbed to nav, so the worker command follows the stub's platform
+// and not the host's. The real navigator is put back after the body, however it ends.
+const POSIX = { platform: "Linux x86_64", userAgent: "Mozilla/5.0 (X11; Linux x86_64)" };
+const WINDOWS = { platform: "Win32", userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" };
+function onPlatform(nav, body) {
+  return () => {
+    const had = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    Object.defineProperty(globalThis, "navigator", { value: nav, configurable: true, writable: true });
+    try {
+      body();
+    } finally {
+      if (had) Object.defineProperty(globalThis, "navigator", had);
+      else delete globalThis.navigator;
+    }
+  };
+}
+
 test("the steps come in the order a first run takes them", () => {
   assert.deepEqual(steps().map((step) => step.id), ["signin", "key", "contract", "worker", "order", "seal", "watch"]);
   assert.equal(FIRSTRUN_KEY, "acan.firstrun");
@@ -140,7 +157,7 @@ test("GET /api/workers decides the worker step when the server has it", () => {
   for (const step of [running, waiting, none]) assert.doesNotMatch(step.detail, /tokens\.json/);
 });
 
-test("a server without GET /api/workers falls back to the view's agents and the outside command", () => {
+test("a server without GET /api/workers falls back to the view's agents and the outside command", onPlatform(POSIX, () => {
   const waiting = byId(steps({ token: true, setup: KEYED, contract: CONTRACT, workers: { status: 404, body: null }, view: view(), origin: ORIGIN })).worker;
   assert.equal(waiting.state, TODO);
   assert.equal(waiting.current, true);
@@ -154,7 +171,7 @@ test("a server without GET /api/workers falls back to the view's agents and the 
   const connected = byId(steps({ token: true, view: view({ agents: 2 }) })).worker;
   assert.equal(connected.state, DONE);
   assert.equal(connected.detail, "2 workers connected.");
-});
+}));
 
 test("the worker command passes the token in the environment, in the one form its platform's shell reads", () => {
   const token = "<agent token from .acan/tokens.json>";
@@ -178,17 +195,11 @@ test("a Windows browser is told by its client hints, its platform or its user ag
   assert.equal(isWindows(null), false);
 });
 
-test("the checklist's worker step shows the PowerShell form in a Windows browser", () => {
-  const { navigator } = globalThis;
-  Object.defineProperty(globalThis, "navigator", { value: { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }, configurable: true });
-  try {
-    const worker = byId(steps({ token: true, setup: KEYED, contract: CONTRACT, workers: { status: 404, body: null }, view: view(), origin: ORIGIN })).worker;
-    assert.equal(worker.command, workerCommand(ORIGIN, true));
-    assert.match(worker.command, /^\$env:ACAN_AGENT_TOKEN=/);
-  } finally {
-    Object.defineProperty(globalThis, "navigator", { value: navigator, configurable: true });
-  }
-});
+test("the checklist's worker step shows the PowerShell form in a Windows browser", onPlatform(WINDOWS, () => {
+  const worker = byId(steps({ token: true, setup: KEYED, contract: CONTRACT, workers: { status: 404, body: null }, view: view(), origin: ORIGIN })).worker;
+  assert.equal(worker.command, workerCommand(ORIGIN, true));
+  assert.match(worker.command, /^\$env:ACAN_AGENT_TOKEN=/);
+}));
 
 test("the order and seal steps follow the view's orders and lanes", () => {
   const before = byId(steps({ token: true, setup: KEYED, contract: CONTRACT, view: view({ agents: 1 }) }));

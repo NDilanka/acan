@@ -1560,6 +1560,7 @@ fn a_new_probe_spelling_never_resets_the_budget() {
         );
     }
     let (run3, prepared3) = fx.prepared_run(&scope, fx.task1);
+    let pre_stop = fx.fence(fx.task1).expect("claimed while gating");
     let third = fx.failing_receipt(&scope, &prepared3, 10, 9);
     fx.send_receipt(run3, third).expect("recorded");
     let (episode, state) = fx.lane_episode(10);
@@ -1585,17 +1586,28 @@ fn a_new_probe_spelling_never_resets_the_budget() {
         .agent(&agent, AgentCmd::Claim { task: fx.task2 })
         .unwrap_err();
     assert_eq!(claim, Rejection::BudgetExhausted { order: fx.order });
-    let fence = fx.fence(fx.task1).expect("still claimed");
+    let reclaim = fx
+        .agent(&agent, AgentCmd::Claim { task: fx.task1 })
+        .unwrap_err();
+    assert_eq!(reclaim, Rejection::BudgetExhausted { order: fx.order });
+    assert!(
+        fx.fence(fx.task1).is_none(),
+        "the stop ends task1's lease, so no fence stands"
+    );
     let build = fx
         .agent(
             &agent,
             AgentCmd::ReportBuilt {
-                fence,
+                fence: pre_stop,
                 head: commit(9).parse().expect("a commit id"),
             },
         )
         .unwrap_err();
-    assert_eq!(build, Rejection::BudgetExhausted { order: fx.order });
+    assert_eq!(
+        build,
+        Rejection::StaleGeneration { current: None },
+        "a build on the ended lease is refused"
+    );
     fx.assert_replays();
 }
 
@@ -1747,6 +1759,202 @@ fn the_rounds_budget_still_stops_a_lane_with_bounceable_work_left() {
         ),
         "exhaustion shows as stopped, with all nine episodes"
     );
+    fx.assert_replays();
+}
+
+/// The stage, lease and stop of `task` in the terms of the StoppedLane model: the stage from
+/// `TaskState` (`open` when unclaimed), whether the task holds a lease, and `lane.stopped`.
+fn abstract_world(fx: &Fx, task: TaskId) -> (&'static str, bool, bool) {
+    let world = fx.origin.world();
+    let state = &world.task(task).expect("the task exists").state;
+    let stage = match state {
+        TaskState::Open => "open",
+        TaskState::Claimed { stage, .. } => match stage {
+            Stage::Declaring => "declaring",
+            Stage::Declared { .. } => "declared",
+            Stage::Building { .. } => "building",
+            Stage::Gating { .. } => "gating",
+        },
+        TaskState::Queued { .. } => "queued",
+        TaskState::Landed { .. } => "landed",
+        TaskState::Dropped => "dropped",
+    };
+    let stopped = world.lane(fx.order).is_some_and(|lane| lane.stopped);
+    (stage, matches!(state, TaskState::Claimed { .. }), stopped)
+}
+
+/// The shortest TLC path to a `NoBuildWhenStopped` break, from
+/// `tla/out/StoppedLane_today/tlc.out`: Claim a, Clear a, Built a, Stop a, Clear a. It is
+/// replayed on the real scheduler for task1 (`a`). Each row is the abstracted world after the
+/// step: the stage, whether a lease is held, and whether the lane is stopped.
+///
+/// | TLC state | TLC step | `_today` trace (stage, lease, stopped) | expected after the fix | replayed as |
+/// |---|---|---|---|---|
+/// | 2 | Claim a | declared, lease, not stopped | declared, lease, not stopped | readback, claim, declare |
+/// | 3 | Clear a | building, lease, not stopped | building, lease, not stopped | the barrier lifts and the origin clears the build |
+/// | 4 | Built a | gating, lease, not stopped | gating, lease, not stopped | `ReportBuilt`, then the run is prepared |
+/// | 5 | Stop a | declared, lease, stopped | open, no lease, stopped | the third receipt |
+/// | 6 | Clear a | building, lease, stopped | open, no lease, stopped | a `Tick` runs the origin's build pass |
+///
+/// The model's Stop is one action, but the budget runs out only after two repair rounds have
+/// bounced. Each bounced round runs Fail, then the origin's clear and the rebuild, so rows 3 and 4
+/// repeat before the third receipt, which is row 5.
+#[test]
+fn a_stopped_lane_trace_replays() {
+    let mut fx = Fx::new();
+    let scope = fx.open_lane();
+    let agent = fx.agent_a.clone();
+    let task = fx.task1;
+
+    // Row 2: Claim a.
+    fx.readback(task, &scope, vec![]);
+    fx.claim_scoped(task);
+    let fence = fx.fence(task).expect("the claim is granted");
+    let footprint = DeclarationInput {
+        symbols: vec![sym("src/auth/login.rs", "login")],
+        ..DeclarationInput::default()
+    };
+    fx.declare(&agent, fence, footprint)
+        .expect("the footprint is declared");
+    assert_eq!(
+        abstract_world(&fx, task),
+        ("declared", true, false),
+        "row 2: Claim a"
+    );
+
+    // Row 3: Clear a. The declare barrier lifts, and the origin clears the build.
+    fx.run_out_barrier(fx.order);
+    let cleared = fx
+        .log
+        .iter()
+        .any(|stamped| matches!(&stamped.event, Event::BuildCleared { task: t } if *t == task));
+    assert!(cleared, "row 3: the origin clears the build");
+    assert_eq!(
+        abstract_world(&fx, task),
+        ("building", true, false),
+        "row 3: Clear a"
+    );
+
+    // Row 4: Built a. Each bounced round below repeats rows 3 and 4.
+    let findings: Vec<u8> = (10..17).collect();
+    let (mut run, mut prepared) = fx.prepared_run(&scope, task);
+    assert_eq!(
+        abstract_world(&fx, task),
+        ("gating", true, false),
+        "row 4: Built a"
+    );
+    for probe in [7, 8] {
+        let receipt = many_failing(&fx, &scope, &prepared, &findings, probe);
+        fx.send_receipt(run, receipt)
+            .expect("the bounced receipt is recorded");
+        assert_eq!(
+            abstract_world(&fx, task),
+            ("building", true, false),
+            "a bounced round clears and rebuilds the task"
+        );
+        (run, prepared) = fx.prepared_run(&scope, task);
+    }
+    assert_eq!(
+        fx.origin
+            .world()
+            .lane(fx.order)
+            .expect("the lane")
+            .rounds
+            .len(),
+        2,
+        "two rounds bounced before the stop"
+    );
+
+    // Row 5: Stop a. The third receipt spends the repair budget.
+    let receipt = many_failing(&fx, &scope, &prepared, &findings, 9);
+    let stop = fx
+        .send_receipt(run, receipt)
+        .expect("the stopping receipt is recorded");
+    let cleared_after_stop = stop
+        .iter()
+        .any(|stamped| matches!(&stamped.event, Event::BuildCleared { task: t } if *t == task));
+    let renewed = stop
+        .iter()
+        .any(|stamped| matches!(&stamped.event, Event::LeaseRenewed { .. }));
+    assert!(
+        !cleared_after_stop,
+        "row 5: a stopped lane clears no build, but the stop batch cleared task1 \
+         (LeaseRenewed in the stop batch: {renewed})"
+    );
+    let ended = stop.iter().any(|stamped| {
+        matches!(
+            &stamped.event,
+            Event::LeaseEnded { task: t, why: LeaseEnd::BudgetSpent, .. } if *t == task
+        )
+    });
+    assert!(ended, "row 5: the stop ends task1's lease as BudgetSpent");
+    assert_eq!(
+        abstract_world(&fx, task),
+        ("open", false, true),
+        "row 5: Stop a"
+    );
+    assert!(fx.fence(task).is_none(), "row 5: the stop leaves no fence");
+
+    // Row 6: Clear a. The next command runs the origin's build pass, and it clears nothing.
+    let pass = fx.system(SystemCmd::Tick).expect("the tick is accepted");
+    assert!(
+        !pass
+            .iter()
+            .any(|stamped| matches!(&stamped.event, Event::BuildCleared { .. })),
+        "row 6: the build pass clears nothing on a stopped lane"
+    );
+    assert_eq!(
+        abstract_world(&fx, task),
+        ("open", false, true),
+        "row 6: Clear a"
+    );
+    fx.assert_replays();
+}
+
+/// A stop ends every live lease in the lane, not only the lease of the task that spent the budget.
+#[test]
+fn a_stop_ends_every_lease_in_the_lane() {
+    let mut fx = Fx::new();
+    let scope = fx.open_lane();
+    fx.readback(fx.task1, &scope, vec![]);
+    fx.readback(fx.task2, &scope, vec![]);
+    fx.claim_scoped(fx.task2);
+    let findings: Vec<u8> = (10..17).collect();
+    let (mut run, mut prepared) = fx.prepared_run(&scope, fx.task1);
+    for probe in [7, 8] {
+        let receipt = many_failing(&fx, &scope, &prepared, &findings, probe);
+        fx.send_receipt(run, receipt)
+            .expect("the bounced receipt is recorded");
+        (run, prepared) = fx.prepared_run(&scope, fx.task1);
+    }
+    let receipt = many_failing(&fx, &scope, &prepared, &findings, 9);
+    let stop = fx
+        .send_receipt(run, receipt)
+        .expect("the stopping receipt is recorded");
+    let ended: Vec<TaskId> = stop
+        .iter()
+        .filter_map(|stamped| match &stamped.event {
+            Event::LeaseEnded {
+                task,
+                why: LeaseEnd::BudgetSpent,
+                ..
+            } => Some(*task),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ended.len(), 2, "one LeaseEnded per claimed task: {ended:?}");
+    assert!(
+        ended.contains(&fx.task1) && ended.contains(&fx.task2),
+        "both tasks of the lane end: {ended:?}"
+    );
+    let world = fx.origin.world();
+    for task in [fx.task1, fx.task2] {
+        assert!(
+            matches!(world.task(task).map(|t| &t.state), Some(TaskState::Open)),
+            "{task:?} is open after the stop"
+        );
+    }
+    assert!(world.lane(fx.order).expect("the lane").stopped);
     fx.assert_replays();
 }
 

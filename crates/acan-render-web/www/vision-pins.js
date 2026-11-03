@@ -21,6 +21,7 @@ import {
   summarize,
   visionTasks,
 } from "./vision.js";
+import { capWords } from "./words.js";
 
 // A record is pending while the witness runs, and the view carries no event when it ends, so a
 // pending record is asked for again every POLL_MS, at most POLL_TRIES times.
@@ -293,6 +294,18 @@ function element(tag, text, className) {
   return el;
 }
 
+// A reason cut to CARD_WORDS words, with the full text on hover and in its label, and in full while
+// Alt is held.
+function reasonElement(tag, text, className) {
+  const shown = capWords(text);
+  const el = element(tag, state.altDown ? text : shown, className);
+  if (shown !== text) {
+    el.title = text;
+    el.setAttribute("aria-label", text);
+  }
+  return el;
+}
+
 function button(text, onClick, pressed) {
   const el = element("button", text);
   el.type = "button";
@@ -304,7 +317,7 @@ function button(text, onClick, pressed) {
 
 // Paints the viewer for the record it holds: the advisory line, the verdict over all pages, then
 // one page at a time with its two screenshots, its verdict and reason, and the second look.
-function paintViewer() {
+export function paintViewer() {
   if (open === null) return;
   const held = records.get(open.task);
   const record = held?.record ?? null;
@@ -354,13 +367,13 @@ function checkParts(record, checks) {
   parts.push(compare(record.task ?? open.task, check));
   const line = element("p", undefined, `vverdict tone-${view.tone}`);
   line.append(element("i"), element("b", view.word));
-  if (view.reason) line.append(element("span", view.reason));
+  if (view.reason) line.append(reasonElement("span", view.reason));
   parts.push(line);
   const second = secondLook(check);
   if (second !== null) {
     const section = element("section", undefined, `vsecond tone-${second.tone}`);
     section.append(element("h3", "Muse Wonder's second look"), element("p", second.line));
-    if (second.reason) section.append(element("p", second.reason, "vreason"));
+    if (second.reason) section.append(reasonElement("p", second.reason, "vreason"));
     if (second.model) section.append(element("p", second.model, "muted"));
     parts.push(section);
   }

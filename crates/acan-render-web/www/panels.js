@@ -27,7 +27,7 @@ import {
   usagePanel,
 } from "./state.js";
 import { metaBadgeText } from "./chrome.js";
-import { OFFLINE_PROVIDER, roleLabel, splitUsage } from "./usage.js";
+import { OFFLINE_PROVIDER, foremanLine, roleLabel, splitUsage } from "./usage.js";
 
 // The usage panel shows this many rows at rest. Alt shows every row.
 const USAGE_REST_ROWS = 3;
@@ -221,8 +221,13 @@ function metaRow(row) {
   return tr;
 }
 
+// The step cell holds the step word, with a tour's verdict. The row's full detail is the cell's
+// hover title.
 function historyRow(row) {
-  return tableRow([row.role, row.model, row.calls, row.input, row.output], 2);
+  const line = foremanLine(row);
+  const tr = tableRow([line.step, line.model, row.calls, row.input, row.output], 2);
+  if (line.title !== null) tr.cells[0].title = line.title;
+  return tr;
 }
 
 // A table row with one cell per value. Values from `firstNumeric` on are right-aligned.

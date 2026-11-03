@@ -208,18 +208,27 @@ impl ShadowReceipt {
     }
 }
 
-/// Runs the contrast between `args.base` and `args.head` and builds the receipt.
+/// Runs the contrast between `args.base` and `args.head` and builds the receipt. When `diagnostics`
+/// is given, a run whose start fails keeps the app's last output there. The output is not part of
+/// the receipt.
 ///
 /// # Errors
 ///
 /// Returns [`ShadowError`] when a ref cannot be used, the protected contract cannot be read,
 /// Docker cannot run the pinned image, the head conflicts with the base, or the contrast cannot
 /// be made or is incomplete.
-pub async fn run(args: &ShadowArgs) -> Result<ShadowReceipt, ShadowError> {
-    run_with(args, Path::new(RUNNER_PROGRAM)).await
+pub async fn run(
+    args: &ShadowArgs,
+    diagnostics: Option<&Path>,
+) -> Result<ShadowReceipt, ShadowError> {
+    run_with(args, Path::new(RUNNER_PROGRAM), diagnostics).await
 }
 
-async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, ShadowError> {
+async fn run_with(
+    args: &ShadowArgs,
+    docker: &Path,
+    diagnostics: Option<&Path>,
+) -> Result<ShadowReceipt, ShadowError> {
     let head = args.head.as_deref().ok_or_else(|| {
         ShadowError::Usage(
             "--head is required; it is only omitted with --check-contract".to_owned(),
@@ -331,6 +340,7 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
         runner: &runner,
         slots: &slots,
         probes_at_once: DEFAULT_WITNESS_CONCURRENCY,
+        diagnostics,
     };
     let judged = Box::pin(observe::judge(&plan, &order))
         .await
@@ -882,32 +892,38 @@ fn first_incomplete<'a>(
 ///
 /// # Errors
 ///
-/// Returns [`ShadowError::Output`] when the directory or a file cannot be written.
+/// Returns [`ShadowError::Output`] when the directory or a file cannot be written, or when a file
+/// that already exists cannot be read. Nothing is written in the last case.
 pub fn write_out(report: &ShadowReceipt, dir: &Path) -> Result<(), ShadowError> {
     fs::create_dir_all(dir)
         .map_err(|err| ShadowError::Output(format!("cannot create {}: {err}", dir.display())))?;
-    let json = json_text(report)?;
-    let markdown = markdown_text(report)?;
+    let texts = [
+        ("shadow-receipt.json", json_text(report)?),
+        ("shadow-receipt.md", markdown_text(report)?),
+    ];
+    // The earlier bytes are read before anything is written, because they are what a failed pair
+    // puts back. A file that exists but cannot be read is refused rather than replaced.
+    let mut earlier = Vec::with_capacity(2);
+    for (name, _) in &texts {
+        let path = dir.join(name);
+        let bytes = read_earlier(&path)?;
+        earlier.push((path, bytes));
+    }
     // Both files are staged in the directory first, so a write that fails here changes nothing.
     let mut staged = Vec::with_capacity(2);
-    for (name, text) in [
-        ("shadow-receipt.json", json),
-        ("shadow-receipt.md", markdown),
-    ] {
-        let path = dir.join(name);
+    for ((_, text), (path, _)) in texts.iter().zip(&earlier) {
         let mut file = tempfile::NamedTempFile::new_in(dir).map_err(|err| {
             ShadowError::Output(format!("cannot write {}: {err}", path.display()))
         })?;
         file.write_all(text.as_bytes()).map_err(|err| {
             ShadowError::Output(format!("cannot write {}: {err}", path.display()))
         })?;
-        staged.push((path, file));
+        staged.push(file);
     }
     // Then each staged file takes its place. When one cannot, the files already placed go back
     // to what they were, so the pair is either both new or both as they were before.
     let mut placed: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::with_capacity(2);
-    for (path, file) in staged {
-        let previous = fs::read(&path).ok();
+    for (file, (path, bytes)) in staged.into_iter().zip(earlier) {
         if let Err(err) = file.persist(&path) {
             restore(&placed);
             return Err(ShadowError::Output(format!(
@@ -916,9 +932,22 @@ pub fn write_out(report: &ShadowReceipt, dir: &Path) -> Result<(), ShadowError> 
                 err.error
             )));
         }
-        placed.push((path, previous));
+        placed.push((path, bytes));
     }
     Ok(())
+}
+
+/// The bytes of a file that already exists, or `None` when it does not. A file that exists but
+/// cannot be read is an error, because its bytes could not be put back after a failed pair.
+fn read_earlier(path: &Path) -> Result<Option<Vec<u8>>, ShadowError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(ShadowError::Output(format!(
+            "cannot read {}, so it is not replaced: {err}",
+            path.display()
+        ))),
+    }
 }
 
 /// Puts back the files a failed `write_out` had already replaced: their earlier bytes, or nothing
@@ -1279,7 +1308,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_directory_is_refused_as_not_a_repository() {
         let dir = tempfile::tempdir().expect("temporary directory");
-        let error = run_with(&args(dir.path(), "main", "main"), &missing_docker())
+        let error = run_with(&args(dir.path(), "main", "main"), &missing_docker(), None)
             .await
             .expect_err("a directory that is not a clone is refused");
         assert!(
@@ -1294,6 +1323,7 @@ mod tests {
         let error = run_with(
             &args(repo.path(), "no-such-branch", "main"),
             &missing_docker(),
+            None,
         )
         .await
         .expect_err("a base that is not a branch is refused");
@@ -1309,6 +1339,7 @@ mod tests {
         let error = run_with(
             &args(repo.path(), "main", "does-not-exist"),
             &missing_docker(),
+            None,
         )
         .await
         .expect_err("a head that names no commit is refused");
@@ -1324,6 +1355,7 @@ mod tests {
         let error = run_with(
             &args(repo.path(), "main", "--output=/tmp/x"),
             &missing_docker(),
+            None,
         )
         .await
         .expect_err("an option-like ref is refused");
@@ -1338,7 +1370,7 @@ mod tests {
         let repo = clone_with(&contract_files());
         let mut without = args(repo.path(), "main", "main");
         without.head = None;
-        let error = run_with(&without, &missing_docker())
+        let error = run_with(&without, &missing_docker(), None)
             .await
             .expect_err("a run needs a head");
         assert!(
@@ -1792,7 +1824,7 @@ mod tests {
     #[tokio::test]
     async fn a_clone_without_a_protected_contract_is_refused_before_docker() {
         let repo = clone_with(&[("README.md", "no contract here\n")]);
-        let error = run_with(&args(repo.path(), "main", "main"), &missing_docker())
+        let error = run_with(&args(repo.path(), "main", "main"), &missing_docker(), None)
             .await
             .expect_err("a clone without .acan/app.json is refused");
         assert!(
@@ -1807,7 +1839,7 @@ mod tests {
             (".acan/app.json", "{}"),
             (".acan/probes/core.json", PROBE_CORPUS),
         ]);
-        let error = run_with(&args(repo.path(), "main", "main"), &missing_docker())
+        let error = run_with(&args(repo.path(), "main", "main"), &missing_docker(), None)
             .await
             .expect_err("an app contract that does not decode is refused");
         assert!(
@@ -1819,7 +1851,7 @@ mod tests {
     #[tokio::test]
     async fn a_missing_docker_is_refused_with_no_unisolated_fallback() {
         let repo = clone_with(&contract_files());
-        let error = run_with(&args(repo.path(), "main", "main"), &missing_docker())
+        let error = run_with(&args(repo.path(), "main", "main"), &missing_docker(), None)
             .await
             .expect_err("a run without docker is refused");
         assert!(
@@ -2157,6 +2189,50 @@ mod tests {
             1,
             "no staged file is left behind"
         );
+    }
+
+    #[test]
+    fn an_existing_receipt_that_cannot_be_read_is_not_replaced() {
+        let report = report_for(Path::new("clone"), fixture_receipt());
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let out = dir.path();
+        // A directory cannot be read as a receipt, so the write is refused before anything moves.
+        fs::create_dir(out.join("shadow-receipt.json")).expect("a directory in the way");
+        let error = write_out(&report, out).expect_err("the json cannot be read");
+        assert!(matches!(error, ShadowError::Output(_)), "output: {error}");
+        assert!(
+            out.join("shadow-receipt.json").is_dir(),
+            "the directory is kept"
+        );
+        assert!(
+            !out.join("shadow-receipt.md").exists(),
+            "the markdown is not written either"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_earlier_receipt_without_read_permission_is_not_overwritten() {
+        use std::os::unix::fs::PermissionsExt;
+        let report = report_for(Path::new("clone"), fixture_receipt());
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let out = dir.path();
+        let json = out.join("shadow-receipt.json");
+        fs::write(&json, "earlier json").expect("an earlier json");
+        fs::set_permissions(&json, fs::Permissions::from_mode(0o200)).expect("write only");
+        // A root user reads any file, so there is no unreadable receipt to refuse.
+        if fs::read(&json).is_ok() {
+            return;
+        }
+        let error = write_out(&report, out).expect_err("the json cannot be read");
+        assert!(matches!(error, ShadowError::Output(_)), "output: {error}");
+        fs::set_permissions(&json, fs::Permissions::from_mode(0o600)).expect("readable again");
+        assert_eq!(
+            fs::read_to_string(&json).expect("the json"),
+            "earlier json",
+            "the earlier json is kept"
+        );
+        assert!(!out.join("shadow-receipt.md").exists());
     }
 
     #[test]

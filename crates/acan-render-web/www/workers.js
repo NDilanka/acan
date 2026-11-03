@@ -28,13 +28,19 @@ export async function loadWorkers() {
   if (!state.token || inFlight) return;
   inFlight = true;
   askedAt = Date.now();
+  const project = target();
   try {
-    const res = await fetch(apiPath(target(), "/api/workers"), { headers: { Authorization: `Bearer ${state.token}` } });
-    answer = { status: res.status, body: res.ok ? await res.json().catch(() => null) : null };
+    const res = await fetch(apiPath(project, "/api/workers"), { headers: { Authorization: `Bearer ${state.token}` } });
+    answer = { status: res.status, body: res.ok ? await res.json().catch(() => null) : null, project };
   } catch {
-    answer = { status: 0, body: null };
+    answer = { status: 0, body: null, project };
   }
   inFlight = false;
+  // Another project went on screen while this read was out, so its own workers are read now.
+  if (project !== target()) {
+    loadWorkers();
+    return;
+  }
   for (const listener of listeners) listener();
 }
 
@@ -43,7 +49,8 @@ export async function loadWorkers() {
 // is not asked again.
 export function refreshWorkers() {
   if (!state.token) return;
-  if (answer === null) {
+  // Each project has its own workers, so a project going on screen reads its own at once.
+  if (answer === null || answer.project !== target()) {
     loadWorkers();
     return;
   }

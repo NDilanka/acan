@@ -64,6 +64,20 @@ Acan is a Rust workspace. Each crate under `crates/` has one job.
 
 The demo app that the live take runs against is a separate public repository: https://github.com/NDilanka/acan-demo.
 
+## Acan and the Super-agent design
+
+In the Super-agent design, a single writer keeps the sequence, a foreman splits the work, workers each build one task, and a person decides. Acan maps onto its parts as follows.
+
+| Super-agent part | In Acan | Status |
+| --- | --- | --- |
+| Router | The single writer (`crates/acan-server/src/writer.rs`) owns the origin. The foreman's splits and scope drafts turn orders into tasks. | On main |
+| Workers | Each `acan-worker` takes one task over MCP, builds it and reports. Muse Spark Open runs them. | On main |
+| Threads | An order's work shows as trails: each drone leaves a trail of its recent moves on the plant map. | On main |
+| Watchdog | A drone that holds a task and goes quiet turns stale after 2 minutes and away after 10. Drift marks (stuck, or a candidate out of scope) are planned. | Liveness on main, drift planned |
+| Needs you (short channel) | The inbox lists each open question, clash, seal and residue that waits on you. The 100-word card cap is planned. | Inbox on main, cap planned |
+
+The tour director orders a receipt's tour over the plant view. It routes no work, so it is not the Router.
+
 ## Run steps
 
 ### Prerequisites
@@ -84,6 +98,8 @@ pwsh demo/replay.ps1
 This checks each receipt in `receipts/` against `receipts/SHA256SUMS`, then prints it. It reads no keys and makes no network calls. It has run on Windows and on Linux (PowerShell 7.4 in a container). macOS has not been tested.
 
 `sh demo/replay.sh` does the same check with a POSIX shell and prints the same lines. `sh demo/replay.sh -v` checks the checksums only.
+
+`replay/` holds one recorded run from 1 November 2026, exported with `acan export-replay`. The Pages site plays it at `?replay=1` with no keys. Its log has two scope drafts, three candidate receipts, one landed change and one failed land attempt. It has no clashes, so the clash and trail beats are not in it, and its log records no director call.
 
 ### Live take (needs your keys)
 
@@ -106,7 +122,7 @@ In progress. No numbers are published before the run finishes.
 - The take and the worker slots pass each worker its per-take local acan agent token in the `ACAN_AGENT_TOKEN` variable, not on the command line, so the process list does not show it. The control identity's token goes the same way. These tokens are created by the take for its own server. They are not provider keys.
 - The probe driver runs in the same container as the candidate code. The container has a read-only root and all Linux capabilities dropped.
 - `model_cost_micros` is stored in each order's repair budget, but no check reads it. The model cost cap is not enforced.
-- There is no hosted replay yet. The recorded receipts replay the provider calls, not the full UI.
+- The hosted replay is one recorded run without clashes (see Replay without keys). The recorded receipts replay the provider calls, not the full UI.
 
 ## Rulings disclosure
 

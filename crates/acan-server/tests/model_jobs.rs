@@ -8,29 +8,41 @@
 mod support;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::Path;
+use std::process::Command as Process;
 use std::str::FromStr;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use acan_core::{
-    Command, Judgement, MachineKey, OrderId, OrderRev, ReadbackId, ReadbackVerdict, SystemCmd,
-    TaskId, TaskSpec, WitnessId,
+    AgentCmd, AgentId, CallFailure, ClashId, CodeIndex, Command, Ctx, DeclarationInput, Event,
+    HumanCmd, Judgement, Locus, MachineKey, MemberId, OrderId, OrderRev, Origin, ReadbackId,
+    ReadbackVerdict, Seq, Stamped, Step, SystemCmd, TaskId, TaskSpec, TaskState, Timestamp,
+    WitnessId, WorldId, WorldRef,
 };
+use acan_git::Repo;
 use acan_intent::{
     AppContract, CorpusProbe, Fixture, HumanRef, HumanSpec, ModelRef, ProbeCorpus, ProbeProposal,
     RouteEntry, RunLimits, ScopeBody, UnixMillis,
 };
 use acan_llm::{
-    ApiKey, ApiKeys, ChatRequest, LlmConfig, LlmError, Message, ModelClient, OpenAiCompatible, Role,
+    ApiKey, ApiKeys, ChatRequest, Destination, LlmConfig, LlmError, Message, ModelClient,
+    OpenAiCompatible, Reply, Role, Stub, UsageLedger,
 };
-use acan_server::Models;
 use acan_server::model::{
     self, DraftBounds, DraftError, DraftReply, ReplyError, SplitReply, SplitTask,
+};
+use acan_server::{
+    DEFAULT_PROBE_CONCURRENCY, DEFAULT_WITNESS_CONCURRENCY, EventStore, Host, HostParts, Models,
+    Tokens, scan, spawn_jobs,
 };
 use serde_json::{Value, json};
 use support::Demo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
 
 const ORDER_SENTENCE: &str = "make the greeting configurable from the settings file";
 const RATE_LIMIT_ORDER: &str =
@@ -45,7 +57,34 @@ fn user_json(request: &ChatRequest) -> Value {
     let text = request
         .last_user_text()
         .expect("every model request carries its context as the user message");
-    serde_json::from_str(text).expect("the context is JSON")
+    serde_json::from_str(acan_llm::outside::unfence(text).unwrap_or(text))
+        .expect("the context is JSON")
+}
+
+/// Asserts that a request states the data rule in its system prompt and fences its context as one
+/// block that closes once.
+fn assert_fenced(request: &ChatRequest) {
+    let [system, user] = &request.messages[..] else {
+        panic!(
+            "a request is a system and a user message: {:?}",
+            request.messages
+        );
+    };
+    let Message::System { content: system } = system else {
+        panic!("the system message comes first");
+    };
+    assert!(
+        system.contains(acan_llm::outside::DATA_RULE),
+        "the prompt carries the data rule: {system}"
+    );
+    let Message::User { content: context } = user else {
+        panic!("the context is a user message");
+    };
+    assert!(
+        context.starts_with("<outside-text>\n") && context.ends_with("\n</outside-text>"),
+        "{context}"
+    );
+    assert_eq!(context.matches("</outside-text>").count(), 1, "{context}");
 }
 
 /// Splits `order` into two fixed tasks, the way a live split would.
@@ -103,6 +142,7 @@ fn the_split_prompt_lists_the_plant_machines_and_the_order() {
     let machines = model::plant_machines(demo.index());
 
     let request = model::split_request(demo.world(), order, &machines).expect("the order exists");
+    assert_fenced(&request);
     let context = user_json(&request);
 
     assert_eq!(
@@ -151,6 +191,7 @@ fn the_explain_prompt_carries_both_declared_footprints_and_the_menu() {
     let clash = support::claim_and_declare(&mut demo, tasks);
 
     let request = model::explain_request(demo.world(), clash).expect("the clash exists");
+    assert_fenced(&request);
     let context = user_json(&request);
 
     let declared = json!([{ "file": support::GREET_FILE, "name": support::GREET }]);
@@ -671,6 +712,90 @@ fn an_empty_scope_is_refused_and_never_stands_for_a_reply() {
 }
 
 #[test]
+fn a_scope_obligation_over_thirty_words_is_refused() {
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["may"][0]["acceptance"][0]["text"] = json!(vec!["word"; 31].join(" "));
+
+    let err = check_scope_json(scope, &plant).expect_err("31 words is over the 30-word cap");
+
+    assert!(
+        matches!(
+            &err,
+            DraftError::TooLong {
+                field: "obligation text",
+                words: 31,
+                cap: 30,
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_scope_option_over_eight_words_is_refused() {
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["open"][0]["options"][0]["label"] = json!(["word"; 9].join(" "));
+
+    let err = check_scope_json(scope, &plant).expect_err("9 words is over the 8-word cap");
+
+    assert!(
+        matches!(
+            &err,
+            DraftError::TooLong {
+                field: "option label",
+                words: 9,
+                cap: 8,
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_scope_at_each_word_cap_is_accepted() {
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["may"][0]["acceptance"][0]["text"] = json!(vec!["word"; 30].join(" "));
+    scope["open"][0]["question"] = json!(vec!["word"; 30].join(" "));
+    scope["open"][0]["options"][0]["label"] = json!(["word"; 8].join(" "));
+
+    check_scope_json(scope, &plant)
+        .expect("a 30-word obligation, a 30-word question and an 8-word option fit their caps");
+}
+
+#[test]
+fn a_must_keep_rule_over_thirty_words_is_refused() {
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["must_keep"][0]["text"] = json!(vec!["word"; 31].join(" "));
+
+    let err = check_scope_json(scope, &plant).expect_err("31 words is over the 30-word cap");
+
+    assert!(
+        matches!(
+            &err,
+            DraftError::TooLong {
+                field: "must-keep rule",
+                words: 31,
+                cap: 30,
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_must_keep_rule_at_thirty_words_is_accepted() {
+    let plant = plant_with(fixed_machines());
+    let mut scope = fixture_scope();
+    scope["must_keep"][0]["text"] = json!(vec!["word"; 30].join(" "));
+
+    check_scope_json(scope, &plant).expect("a 30-word must-keep rule fits its cap");
+}
+
+#[test]
 fn the_probe_fixture_is_accepted_as_a_proposal() {
     let plant = plant_with(fixed_machines());
     let proposal: ProbeProposal = serde_json::from_value(probe_json()).expect("the probe decodes");
@@ -893,7 +1018,9 @@ fn the_scope_request_lists_the_steps_and_side_effects_the_corpus_defines() {
             _ => None,
         })
         .expect("the request has a user message");
-    let context: Value = serde_json::from_str(&content).expect("the context is JSON");
+    let context: Value =
+        serde_json::from_str(acan_llm::outside::unfence(&content).unwrap_or(&content))
+            .expect("the context is JSON");
 
     let steps = context["steps"].as_array().expect("the steps are a list");
     assert!(
@@ -939,7 +1066,8 @@ fn the_scope_request_states_the_side_effect_rule_and_carries_the_last_error() {
                 _ => None,
             })
             .expect("the request has a user message");
-        serde_json::from_str(&content).expect("the context is JSON")
+        serde_json::from_str(acan_llm::outside::unfence(&content).unwrap_or(&content))
+            .expect("the context is JSON")
     };
     let schema = context(&retry)["schema"].to_string();
     assert!(
@@ -950,6 +1078,23 @@ fn the_scope_request_states_the_side_effect_rule_and_carries_the_last_error() {
     assert!(
         context(&first)["previous_error"].is_null(),
         "a first attempt carries no error"
+    );
+}
+
+#[test]
+fn the_scope_prompt_pairs_a_status_item_with_body_and_header_items_on_its_route() {
+    let prompt = model::SCOPE_PROMPT;
+    assert!(
+        prompt.contains("Add a body item and a header item on the same route for it"),
+        "a status item gets its body and header items on the same route: {prompt}"
+    );
+    assert!(
+        prompt.contains("never give it channel any"),
+        "the prompt keeps a status item off channel any: {prompt}"
+    );
+    assert!(
+        !prompt.contains("give it channel any, or"),
+        "the old choice of channel any is gone: {prompt}"
     );
 }
 
@@ -1291,4 +1436,713 @@ async fn muse_spark_drafts_the_scope_of_the_rate_limit_order() {
         !draft.proposal().may.is_empty(),
         "the draft has may-change items"
     );
+}
+
+/// The app contract a scope draft reads from the protected branch.
+const APP_CONTRACT: &str = include_str!("../../acan-intent/fixtures/app-contract.json");
+
+fn owner() -> MemberId {
+    MemberId::from_str("owner").expect("a member id")
+}
+
+/// Runs git in `dir`, failing the test on a non-zero exit.
+fn git(dir: &Path, args: &[&str]) {
+    let out = Process::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("spawn git");
+    assert!(
+        out.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A host over a git checkout whose protected branch holds the app contract and the probe corpus,
+/// and whose foreman is `client`. The checkout has no code, so its plant has no machines.
+async fn scope_host(root: &Path, client: Stub) -> Host<Stub> {
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "user.name", "Tester"]);
+    git(root, &["config", "user.email", "tester@example.com"]);
+    fs::create_dir_all(root.join(".acan/probes")).expect("the protected directory");
+    fs::write(root.join(".acan/app.json"), APP_CONTRACT).expect("the app contract");
+    fs::write(root.join(".acan/probes/core.json"), CORPUS).expect("the probe corpus");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "protected inputs"]);
+
+    let state = root.join(".acan");
+    let store = EventStore::open(&state.join("world.db"))
+        .await
+        .expect("the event store opens");
+    let (origin, opened) = Origin::open(
+        WorldRef {
+            id: WorldId::from_str("scope-draft").expect("a world id"),
+            repo: root.display().to_string(),
+        },
+        owner(),
+        Timestamp::from_millis(1),
+    );
+    store
+        .append(&[opened])
+        .await
+        .expect("the open event stores");
+    let (tokens, _) = Tokens::load_or_create(&state, &owner()).expect("the tokens load");
+    let (_shutdown, shutdown) = tokio::sync::watch::channel(false);
+    let repo = Repo::open_with_protected(root, "main")
+        .await
+        .expect("the checkout opens");
+    Host::new(HostParts {
+        origin,
+        store,
+        tokens,
+        scan: scan(root).expect("the scan succeeds"),
+        ledger: UsageLedger::default(),
+        client,
+        repo: root.to_path_buf(),
+        shutdown,
+        git: Some(repo),
+        witness_http_base_url: None,
+        witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
+        probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
+        vision: None,
+    })
+}
+
+/// Posts one order on the `ui` machine as the owner, so its scope draft job is derived. Returns
+/// the order and its revision.
+async fn post_order(host: &Host<Stub>) -> (OrderId, OrderRev) {
+    let events = host
+        .submit(Command::Human {
+            member: owner(),
+            cmd: HumanCmd::PostOrder {
+                machine: support::machine(support::UI),
+                sentence: RATE_LIMIT_ORDER.to_owned(),
+                witnesses: Vec::new(),
+            },
+        })
+        .await
+        .expect("the order posts");
+    let order = events
+        .iter()
+        .find_map(|stamped| match &stamped.event {
+            Event::OrderPosted { order, .. } => Some(*order),
+            _ => None,
+        })
+        .expect("the order is posted");
+    let rev = host.read(|world| world.order(order).expect("the order exists").rev);
+    (order, rev)
+}
+
+/// Stops the job loop, then drains the writer, so nothing writes after this returns.
+async fn stop(host: &Host<Stub>, jobs: JoinHandle<()>) {
+    jobs.abort();
+    let _ = jobs.await;
+    host.shutdown().await.expect("the writer drains");
+}
+
+/// The log's events, polled until `done` holds. The job loop writes in the background, so a test
+/// waits for the events it expects, and fails after ten seconds.
+async fn logged_until(host: &Host<Stub>, done: impl Fn(&[Event]) -> bool) -> Vec<Event> {
+    let started = Instant::now();
+    loop {
+        let events: Vec<Event> = host
+            .store()
+            .load_from(Seq::new(0))
+            .await
+            .expect("the stored log reads")
+            .into_iter()
+            .map(|stamped| stamped.event)
+            .collect();
+        if done(&events) {
+            return events;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the expected events never reached the log: {events:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A foreman draft that is a valid scope reply is metered under the scope step, with the order and
+/// revision it drafts. The plant of this checkout has no machines, so Acan refuses the scope after
+/// the call; the call is still recorded.
+#[tokio::test]
+async fn a_scope_draft_records_model_used_with_step_scope() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let scope = fixture_scope().to_string();
+    let client = Stub::default().when(Role::Foreman, |_| true, Reply::text(scope));
+    let host = scope_host(dir.path(), client).await;
+    let (order, rev) = post_order(&host).await;
+    let jobs = spawn_jobs(host.clone());
+    host.wake_jobs();
+
+    let events = logged_until(&host, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                Event::ModelUsed {
+                    step: Step::Scope,
+                    ..
+                }
+            )
+        })
+    })
+    .await;
+    let calls = host.client().ledger().records();
+    stop(&host, jobs).await;
+
+    let (model, provider, failure, input, output, detail) = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ModelUsed {
+                model,
+                provider,
+                step: Step::Scope,
+                input_tokens,
+                output_tokens,
+                failure,
+                detail,
+            } => Some((
+                model.clone(),
+                provider.clone(),
+                *failure,
+                *input_tokens,
+                *output_tokens,
+                detail.clone(),
+            )),
+            _ => None,
+        })
+        .expect("the draft's call is recorded");
+    let call = calls.first().expect("the stub counted the foreman call");
+    assert_eq!(
+        model, call.model,
+        "the record names the model that answered"
+    );
+    assert_eq!(
+        provider.as_deref(),
+        Some(call.provider.as_str()),
+        "the record names the provider that answered"
+    );
+    assert_eq!(failure, None, "a reply is not a failure");
+    assert_eq!(
+        (input, output),
+        (
+            Some(call.usage.prompt_tokens),
+            Some(call.usage.completion_tokens)
+        ),
+        "the reply's tokens are recorded"
+    );
+    assert_eq!(
+        detail,
+        Some(format!("scope draft for {order} rev {}", rev.get())),
+        "the record says which draft the call was for"
+    );
+}
+
+/// A foreman reply that is not a scope is still a call: it is recorded under the scope step, and
+/// the draft then fails and is reported as `ScopeDraftFailed`, as before.
+#[tokio::test]
+async fn a_failed_scope_draft_still_records_its_call() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let client = Stub::default().when(
+        Role::Foreman,
+        |_| true,
+        Reply::text("this is prose, not the scope draft the schema asks for"),
+    );
+    let host = scope_host(dir.path(), client).await;
+    let (order, rev) = post_order(&host).await;
+    let jobs = spawn_jobs(host.clone());
+    host.wake_jobs();
+
+    let events = logged_until(&host, |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, Event::ScopeDraftFailed { .. }))
+    })
+    .await;
+    stop(&host, jobs).await;
+
+    let expected = format!("scope draft for {order} rev {}", rev.get());
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::ModelUsed { step: Step::Scope, detail, .. }
+                if detail.as_deref() == Some(expected.as_str())
+        )),
+        "the failed draft's call is recorded: {events:?}"
+    );
+}
+
+/// A foreman that times out is recorded as a failed call under the scope step, with the provider and
+/// model of its route, no token counts, and a detail that names the timeout. The draft is attempted
+/// five times and each attempt is one call, so the log holds five such entries. A failed call counts
+/// nothing: the usage totals and the ledger stay empty.
+#[tokio::test]
+async fn a_scope_draft_timeout_records_a_failed_entry_with_provider_and_model() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let route = Destination {
+        provider: "example-host".to_owned(),
+        model: "example-model-1".to_owned(),
+    };
+    let client = Stub::default().routed(Role::Foreman, route).fails_when(
+        Role::Foreman,
+        |_| true,
+        |provider| LlmError::Timeout { provider },
+    );
+    let host = scope_host(dir.path(), client).await;
+    let (order, rev) = post_order(&host).await;
+    let jobs = spawn_jobs(host.clone());
+    host.wake_jobs();
+
+    // The failure is reported only after the last attempt, so every attempt is in the log by then.
+    let events = logged_until(&host, |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, Event::ScopeDraftFailed { .. }))
+    })
+    .await;
+    let totals = host.read(|world| world.usage().totals.clone());
+    let ledger = host.client().ledger().records();
+    stop(&host, jobs).await;
+
+    let expected = Event::ModelUsed {
+        model: "example-model-1".to_owned(),
+        provider: Some("example-host".to_owned()),
+        step: Step::Scope,
+        input_tokens: None,
+        output_tokens: None,
+        failure: Some(CallFailure::Timeout),
+        detail: Some(format!(
+            "scope draft for {order} rev {}: timeout",
+            rev.get()
+        )),
+    };
+    let entries: Vec<&Event> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::ModelUsed {
+                    step: Step::Scope,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        entries.len(),
+        5,
+        "each of the draft's five attempts is one failed call: {events:?}"
+    );
+    for entry in entries {
+        assert_eq!(entry, &expected);
+    }
+    assert!(
+        totals.is_empty(),
+        "a failed call counts nothing: {totals:?}"
+    );
+    assert!(
+        ledger.is_empty(),
+        "a failed call sends no reply: {ledger:?}"
+    );
+}
+
+/// A foreman whose client refuses the call before any request, for want of a key, made no call. No
+/// usage row is recorded for it, and the draft still fails as reported.
+#[tokio::test]
+async fn a_scope_draft_refused_before_its_request_records_no_usage() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let route = Destination {
+        provider: "example-host".to_owned(),
+        model: "example-model-1".to_owned(),
+    };
+    let client = Stub::default().routed(Role::Foreman, route).fails_when(
+        Role::Foreman,
+        |_| true,
+        |provider| LlmError::MissingKey {
+            provider,
+            env_var: "EXAMPLE_KEY".to_owned(),
+        },
+    );
+    let host = scope_host(dir.path(), client).await;
+    post_order(&host).await;
+    let jobs = spawn_jobs(host.clone());
+    host.wake_jobs();
+
+    let events = logged_until(&host, |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, Event::ScopeDraftFailed { .. }))
+    })
+    .await;
+    let totals = host.read(|world| world.usage().totals.clone());
+    let ledger = host.client().ledger().records();
+    stop(&host, jobs).await;
+
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, Event::ModelUsed { .. })),
+        "a call refused before its request is not recorded: {events:?}"
+    );
+    assert!(totals.is_empty(), "no call counts: {totals:?}");
+    assert!(
+        ledger.is_empty(),
+        "no request reached the provider: {ledger:?}"
+    );
+}
+
+/// The clock the explain setup and its host share.
+fn clock() -> Timestamp {
+    Timestamp::from_millis(1_800_000_000_000)
+}
+
+/// Runs one setup command through `origin` against the demo's code index, and stores what the
+/// origin accepted. The host starts from this log, so its events and its origin agree.
+async fn settle(
+    origin: &mut Origin,
+    store: &EventStore,
+    index: &CodeIndex,
+    cmd: Command,
+) -> Vec<Stamped> {
+    let ctx = Ctx {
+        now: clock(),
+        index,
+    };
+    let events = origin
+        .execute(&ctx, cmd)
+        .unwrap_or_else(|rejection| panic!("the origin refused a setup command: {rejection}"));
+    store.append(&events).await.expect("the setup events store");
+    events
+}
+
+/// A host whose log holds one clash: two tasks of one order, each read back, each claimed, and
+/// both declaring the same symbol. The foreman is `client`. Returns the host and the clash.
+async fn clashed_host(root: &Path, client: Stub) -> (Host<Stub>, ClashId) {
+    let state = root.join(".acan");
+    fs::create_dir_all(&state).expect("the state directory");
+    let store = EventStore::open(&state.join("world.db"))
+        .await
+        .expect("the event store opens");
+    let index = support::code_index();
+    let (mut origin, opened) = Origin::open(
+        WorldRef {
+            id: WorldId::from_str("clash-explain").expect("a world id"),
+            repo: root.display().to_string(),
+        },
+        owner(),
+        clock(),
+    );
+    store
+        .append(&[opened])
+        .await
+        .expect("the open event stores");
+
+    let posted = settle(
+        &mut origin,
+        &store,
+        &index,
+        Command::Human {
+            member: owner(),
+            cmd: HumanCmd::PostOrder {
+                machine: support::machine(support::UI),
+                sentence: ORDER_SENTENCE.to_owned(),
+                witnesses: Vec::new(),
+            },
+        },
+    )
+    .await;
+    let order = posted
+        .iter()
+        .find_map(|stamped| match &stamped.event {
+            Event::OrderPosted { order, .. } => Some(*order),
+            _ => None,
+        })
+        .expect("posting an order emits OrderPosted");
+
+    let rev = origin.world().order(order).expect("the order exists").rev;
+    let spec = |title: &str| TaskSpec {
+        title: title.to_owned(),
+        brief: format!("{title}, then run the greet tests"),
+        scope: vec![support::machine(support::UI)],
+    };
+    settle(
+        &mut origin,
+        &store,
+        &index,
+        Command::System(SystemCmd::SplitReady {
+            order,
+            rev,
+            tasks: vec![spec("Read the greeting"), spec("Add the setting")],
+        }),
+    )
+    .await;
+    let tasks: [TaskId; 2] = origin
+        .world()
+        .tasks_of(order)
+        .map(|task| task.id)
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("the split makes two tasks");
+
+    let agents = [
+        AgentId::from_str("agent-a").expect("a valid agent id"),
+        AgentId::from_str("agent-b").expect("a valid agent id"),
+    ];
+    let mut readbacks = BTreeSet::new();
+    for (agent, task) in agents.iter().zip(tasks) {
+        settle(
+            &mut origin,
+            &store,
+            &index,
+            Command::Human {
+                member: owner(),
+                cmd: HumanCmd::RegisterAgent {
+                    agent: agent.clone(),
+                },
+            },
+        )
+        .await;
+        let posted = settle(
+            &mut origin,
+            &store,
+            &index,
+            Command::Agent {
+                agent: agent.clone(),
+                cmd: AgentCmd::PostReadback {
+                    task,
+                    summary: "Read the greeting from the settings file.".to_owned(),
+                    touches: vec![Locus::Machine {
+                        machine: support::machine(support::UI),
+                    }],
+                },
+            },
+        )
+        .await;
+        readbacks.insert(
+            posted
+                .iter()
+                .find_map(|stamped| match &stamped.event {
+                    Event::ReadbackPosted { readback } => Some(readback.id),
+                    _ => None,
+                })
+                .expect("posting a readback emits ReadbackPosted"),
+        );
+    }
+    let rev = origin.world().order(order).expect("the order exists").rev;
+    let verdicts = readbacks
+        .iter()
+        .map(|readback| {
+            (
+                *readback,
+                ReadbackVerdict {
+                    rev,
+                    per_witness: BTreeMap::new(),
+                },
+            )
+        })
+        .collect();
+    settle(
+        &mut origin,
+        &store,
+        &index,
+        Command::System(SystemCmd::ReadbacksReviewed {
+            order,
+            rev,
+            verdicts,
+            question: None,
+        }),
+    )
+    .await;
+
+    for (agent, task) in agents.iter().zip(tasks) {
+        settle(
+            &mut origin,
+            &store,
+            &index,
+            Command::Agent {
+                agent: agent.clone(),
+                cmd: AgentCmd::Claim { task },
+            },
+        )
+        .await;
+        let fence = match &origin.world().task(task).expect("the task exists").state {
+            TaskState::Claimed { claim, .. } => claim.fence(task),
+            other => panic!("the claim left {task} as {other:?}"),
+        };
+        settle(
+            &mut origin,
+            &store,
+            &index,
+            Command::Agent {
+                agent: agent.clone(),
+                cmd: AgentCmd::Declare {
+                    fence,
+                    footprint: DeclarationInput {
+                        symbols: vec![support::greet_symbol()],
+                        ..DeclarationInput::default()
+                    },
+                },
+            },
+        )
+        .await;
+    }
+    let clash = origin
+        .world()
+        .clashes()
+        .next()
+        .map(|clash| clash.id)
+        .expect("two declarations of one symbol raise a clash");
+
+    let (tokens, _) = Tokens::load_or_create(&state, &owner()).expect("the tokens load");
+    let (_shutdown, shutdown) = tokio::sync::watch::channel(false);
+    let host = Host::new(HostParts {
+        origin,
+        store,
+        tokens,
+        scan: scan(root).expect("the scan succeeds"),
+        ledger: UsageLedger::default(),
+        client,
+        repo: root.to_path_buf(),
+        shutdown,
+        git: None,
+        witness_http_base_url: None,
+        witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
+        probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
+        vision: None,
+    });
+    (host, clash)
+}
+
+/// A foreman reply to an explain call, whose consequence is `consequence`.
+fn explain_reply(consequence: &str) -> Reply {
+    Reply::text(
+        json!({ "consequence": consequence, "breaks": null, "suggested": null }).to_string(),
+    )
+}
+
+/// How many explain calls the log records, each a `ModelUsed` under the explain step.
+fn explain_entries(events: &[Event]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::ModelUsed {
+                    step: Step::Explain,
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// An explanation over the consequence cap is refused, so the explain job fails and takes its
+/// retry. The job makes five attempts, the limit of its retries, and each attempt records its
+/// usage before the reply is read. No clash explanation reaches the log.
+#[tokio::test]
+async fn an_explanation_over_sixty_words_fails_the_job_and_is_retried() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let too_long = vec!["word"; 61].join(" ");
+    let client = Stub::default().when(Role::Fast, |_| true, explain_reply(&too_long));
+    let (host, _clash) = clashed_host(dir.path(), client).await;
+    let jobs = spawn_jobs(host.clone());
+    host.wake_jobs();
+
+    let events = logged_until(&host, |events| explain_entries(events) == 5).await;
+    stop(&host, jobs).await;
+
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, Event::ClashExplained { .. })),
+        "a refused explanation is never recorded: {events:?}"
+    );
+}
+
+/// An explanation at the consequence cap is recorded as the clash's explanation.
+#[tokio::test]
+async fn an_explanation_at_sixty_words_is_recorded() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let at_cap = vec!["word"; 60].join(" ");
+    let client = Stub::default().when(Role::Fast, |_| true, explain_reply(&at_cap));
+    let (host, clash) = clashed_host(dir.path(), client).await;
+    let jobs = spawn_jobs(host.clone());
+    host.wake_jobs();
+
+    let events = logged_until(&host, |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, Event::ClashExplained { .. }))
+    })
+    .await;
+    stop(&host, jobs).await;
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::ClashExplained { clash: recorded, explanation }
+                if *recorded == clash && explanation.consequence == at_cap
+        )),
+        "the explanation at the cap is recorded: {events:?}"
+    );
+}
+
+/// A scope draft whose open question is forty words is refused. Each retry carries the refusal as
+/// its previous error, which names the field and its cap, so the model is told what to shorten.
+#[tokio::test]
+async fn a_scope_draft_with_a_forty_word_question_fails_with_the_cap_in_previous_error() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mut scope = fixture_scope();
+    scope["open"][0]["question"] = json!(vec!["word"; 40].join(" "));
+    let drafts: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let seen = Arc::clone(&drafts);
+    let client = Stub::default().when(
+        Role::Foreman,
+        move |request| {
+            let context = user_json(request);
+            // Only a scope draft carries previous_error, so a split call is not counted here.
+            let is_draft = context.get("previous_error").is_some();
+            if is_draft {
+                seen.lock()
+                    .expect("the draft log is not poisoned")
+                    .push(context);
+            }
+            is_draft
+        },
+        Reply::text(scope.to_string()),
+    );
+    let host = scope_host(dir.path(), client).await;
+    post_order(&host).await;
+    let jobs = spawn_jobs(host.clone());
+    host.wake_jobs();
+
+    logged_until(&host, |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, Event::ScopeDraftFailed { .. }))
+    })
+    .await;
+    stop(&host, jobs).await;
+
+    let drafts = drafts.lock().expect("the draft log is not poisoned");
+    assert_eq!(drafts.len(), 5, "each of the five attempts sends the draft");
+    assert!(
+        drafts[0]["previous_error"].is_null(),
+        "a first attempt carries no error"
+    );
+    for retry in &drafts[1..] {
+        let previous = retry["previous_error"]
+            .as_str()
+            .expect("a retry carries the last error");
+        assert!(
+            previous.contains("open question has 40 words, more than the 30 allowed"),
+            "the retry names the field and the cap: {previous}"
+        );
+    }
 }

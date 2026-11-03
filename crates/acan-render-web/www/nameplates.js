@@ -1,6 +1,7 @@
 // One quiet plate per project on a canvas of several: its name, the count of what waits on you
 // there when above zero, and its status when it is degraded. A plate hangs under its plant. A
 // click puts the project on screen, a double-click flies there, and a drag moves the plant.
+import { plateSpots } from "./overlays.js";
 import { canvasState } from "./projects.js";
 import { state } from "./state.js";
 
@@ -8,6 +9,12 @@ import { state } from "./state.js";
 const DROP_PX = 30;
 
 const CLICK_PX = 4;
+
+// The room a plate keeps round itself, from the names, the flags and the other plates.
+const PLATE_PAD_PX = 3;
+
+// What a plate must not cover: every machine name and flag shown this frame.
+const BLOCKING = "#labels .label, #flags > .flag, #parked-flags > .flag";
 
 let layer = null;
 
@@ -104,24 +111,50 @@ export function paintPlates(counts = shown) {
   }
 }
 
-// Hangs each plate under its plant, as the camera stands this frame.
+// Whether every corner of a plant lies in front of the camera. A point behind it still projects,
+// mirrored, onto the screen, so a ride close to one plant would hang another's plate over it. A
+// corner in front maps back to itself through the ground under its screen point.
+function inFront(ground, corners, box) {
+  const slack = 0.05 * Math.hypot(box[2] - box[0], box[3] - box[1]) + 1;
+  return corners.every(([sx, sy], i) => {
+    const back = state.app.screen_to_ground(sx, sy);
+    return back.length === 2 && Math.hypot(back[0] - ground[i][0], back[1] - ground[i][1]) <= slack;
+  });
+}
+
+// Hangs each plate under its plant, as the camera stands this frame, moved down clear of the
+// names, the flags and the plates placed before it. The plate of the project on screen goes first.
 export function placePlates() {
   if (layer === null || state.app === null) return;
   const width = layer.clientWidth;
   const height = layer.clientHeight;
+  const wanted = [];
   for (const [id, plate] of plates) {
     const box = hooks.boundsOf(id);
     if (box === null) {
       plate.el.style.visibility = "hidden";
       continue;
     }
-    const corners = [[box[0], box[1]], [box[2], box[1]], [box[0], box[3]], [box[2], box[3]]]
-      .map(([x, y]) => state.app.world_to_screen(x, y));
+    const ground = [[box[0], box[1]], [box[2], box[1]], [box[0], box[3]], [box[2], box[3]]];
+    const corners = ground.map(([x, y]) => state.app.world_to_screen(x, y));
     const xs = corners.map((p) => p[0]);
     const x = (Math.min(...xs) + Math.max(...xs)) / 2;
     const y = Math.max(...corners.map((p) => p[1])) + DROP_PX;
-    const on = x > -100 && x < width + 100 && y > 0 && y < height + 40;
+    const on = x > -100 && x < width + 100 && y > 0 && y < height + 40 && inFront(ground, corners, box);
     plate.el.style.visibility = on ? "visible" : "hidden";
-    plate.el.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px) translate(-50%, 0)`;
+    if (on) wanted.push({ id, x, y, w: plate.el.offsetWidth, h: plate.el.offsetHeight });
+  }
+  wanted.sort((a, b) => (b.id === canvasState.active) - (a.id === canvasState.active));
+  const blocked = [];
+  for (const el of document.querySelectorAll(BLOCKING)) {
+    if (el.hidden || el.style.visibility !== "visible") continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.width > 0) blocked.push({ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom });
+  }
+  const spots = plateSpots(wanted, blocked, PLATE_PAD_PX);
+  for (const { id } of wanted) {
+    const { el } = plates.get(id);
+    const { left, top } = spots.get(id);
+    el.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
   }
 }

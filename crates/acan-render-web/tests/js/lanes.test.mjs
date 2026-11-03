@@ -24,6 +24,22 @@ import {
 } from "../../www/lanes.js";
 import { steps, workerCommand } from "../../www/firstrun.js";
 
+test("a drifting agent's lane row carries the drift word, and an agent without drift none", () => {
+  const view = {
+    tasks: [{ id: 1, order: 1, title: "Limit the login", machine: "src/api", check: null }],
+    lanes: [],
+    clashes: [],
+    questions: [],
+    agents: [
+      { id: "ada", task: 1, activity: "building", machine: "src/api", body: null, drift: { kind: "stuck", quiet_ms: 360_000 } },
+      { id: "bo", task: null, activity: "idle", machine: null, body: null, drift: { kind: "none" } },
+    ],
+  };
+  const rows = laneRows(view, new Map([["ada", { at: 1_000, seq: 1 }]]), 1_000, { live: true });
+  assert.equal(rows[0].drift, "drift");
+  assert.equal(rows[1].drift, null);
+});
+
 const T0 = 1_760_000_000_000;
 
 function stamped(seq, at, actor, event) {
@@ -33,6 +49,22 @@ function stamped(seq, at, actor, event) {
 const SYSTEM = { kind: "system" };
 const OWNER = { kind: "member", id: "owner" };
 const agent = (id) => ({ kind: "agent", id });
+
+// Runs a test body with navigator stubbed to nav, so the worker command follows the stub's platform
+// and not the host's. The real navigator is put back after the body, however it ends.
+const POSIX = { platform: "Linux x86_64", userAgent: "Mozilla/5.0 (X11; Linux x86_64)" };
+function onPlatform(nav, body) {
+  return () => {
+    const had = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    Object.defineProperty(globalThis, "navigator", { value: nav, configurable: true, writable: true });
+    try {
+      body();
+    } finally {
+      if (had) Object.defineProperty(globalThis, "navigator", had);
+      else delete globalThis.navigator;
+    }
+  };
+}
 
 // Two agents register; agent-a takes t-1 and renews; agent-b takes t-2, and its task lands later
 // under a system event. agent-c registers and never works.
@@ -135,13 +167,13 @@ test("the check reads as words for the row's label", () => {
   assert.equal(checkWords(null), "");
 });
 
-test("with no agent the strip names the worker command against this origin", () => {
+test("with no agent the strip names the worker command against this origin", onPlatform(POSIX, () => {
   const { line, command } = emptyLines("http://127.0.0.1:7311");
   assert.equal(line, "No worker connected.");
   assert.equal(command, "ACAN_AGENT_TOKEN=<agent token from .acan/tokens.json> acan-worker --server http://127.0.0.1:7311 --repo <path to your repo>");
   assert.equal(command, workerCommand("http://127.0.0.1:7311"), "the checklist offers the same command");
   assert.doesNotMatch(line + command, /\$|cost|token usage/i);
-});
+}));
 
 test("G then a digit rides; the digit alone and a late digit are left to the page", () => {
   const armed = goStep(null, "g", 100);
@@ -175,16 +207,16 @@ test("with GET /api/workers the strip's status and empty state read the server's
   assert.match(none.line, /--workers 1/);
 });
 
-test("without GET /api/workers the strip infers from the view's agents, as before", () => {
+test("without GET /api/workers the strip infers from the view's agents, as before", onPlatform(POSIX, () => {
   const origin = "http://127.0.0.1:7311";
   for (const answer of [{ status: 404, body: null }, { status: 403, body: null }, null]) {
     const empty = workerLines(answer, 0, origin);
     assert.deepEqual(empty, { kind: "outside", status: "no worker connected", ...emptyLines(origin), setKey: false });
     assert.equal(workerLines(answer, 2, origin).status, "2 workers connected");
   }
-});
+}));
 
-test("the strip and the first-run worker step never disagree on the same answer", () => {
+test("the strip and the first-run worker step never disagree on the same answer", onPlatform(POSIX, () => {
   const origin = "http://127.0.0.1:7311";
   const answers = [workersAnswer("running"), workersAnswer("no_key", "no_key"), workersAnswer(), { status: 404, body: null }, null];
   for (const answer of answers) {
@@ -198,7 +230,7 @@ test("the strip and the first-run worker step never disagree on the same answer"
       if (step.command) assert.equal(lanes.command, step.command);
     }
   }
-});
+}));
 
 // A stand-in for the strip: rows with a dataset and a class list, as the page builds them.
 function fakeStrip(agents) {
@@ -273,6 +305,28 @@ test("an agent whose task is in an open clash, or whose order asks, waits and is
   assert.deepEqual([...waitingAgents(asked)].sort(), ["agent-a", "agent-b"]);
   const rows = laneRows(v, lastActivity(log()), T0 + 30_000 + AWAY_MS);
   assert.equal(rows.some((row) => row.quiet !== null), false);
+});
+
+test("a_stopped_or_contested_order_holds_its_agents", () => {
+  const stopped = { ...view(), clashes: [], questions: [], lanes: [{ order: 1, stopped: true, open_contests: 0 }] };
+  assert.deepEqual([...waitingAgents(stopped)].sort(), ["agent-a", "agent-b"]);
+  const contested = { ...view(), clashes: [], questions: [], lanes: [{ order: 1, stopped: false, open_contests: 1 }] };
+  assert.deepEqual([...waitingAgents(contested)].sort(), ["agent-a", "agent-b"]);
+  const live = { ...view(), clashes: [], questions: [], lanes: [{ order: 1, stopped: false, open_contests: 0 }] };
+  assert.deepEqual([...waitingAgents(live)], []);
+});
+
+test("a_held_order_row_carries_its_sentence", () => {
+  const sentence = "Budget spent: 10 findings against a cap of 4, 0 of 2 repair rounds used. Cancel the order to free it.";
+  const held = { ...view(), lanes: [{ order: 1, stopped: true, open_contests: 0, hold: sentence }] };
+  const heldRows = Object.fromEntries(laneRows(held, lastActivity(log()), T0 + 60_000).map((row) => [row.agent, row.hold]));
+  assert.equal(heldRows["agent-a"], sentence);
+  assert.equal(heldRows["agent-b"], sentence, "every row on the held order carries it");
+  assert.equal(heldRows["agent-c"], null, "an idle agent is on no order");
+  const empty = { ...view(), lanes: [{ order: 1, stopped: false, open_contests: 0, hold: "" }] };
+  assert.deepEqual(laneRows(empty, lastActivity(log()), T0 + 60_000).map((row) => row.hold), [null, null, null]);
+  const live = { ...view(), lanes: [{ order: 1, stopped: false, open_contests: 0, hold: null }] };
+  assert.deepEqual(laneRows(live, lastActivity(log()), T0 + 60_000).map((row) => row.hold), [null, null, null]);
 });
 
 test("stale is muted and away is ink in the strip; neither is red", () => {

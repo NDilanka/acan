@@ -63,8 +63,8 @@ import { installScrub } from "./scrub.js";
 import { installFirstRun, paintFirstRun } from "./firstrun-panel.js";
 import { onWorkers, refreshWorkers, workersAnswer } from "./workers.js";
 import { nextFrame } from "./frames.js";
-import { closeViewer, installVision, placeVisionPins, syncVision, viewerOpen, viewerTakesEscape } from "./vision-pins.js";
-import { installMulti, nameOf } from "./multi.js";
+import { closeViewer, installVision, paintViewer, placeVisionPins, syncVision, viewerOpen, viewerTakesEscape } from "./vision-pins.js";
+import { installMulti, nameOf, zoomAround } from "./multi.js";
 import { placePlates } from "./nameplates.js";
 import { placeParked } from "./parked.js";
 import { canvasState } from "./projects.js";
@@ -140,8 +140,9 @@ function drawFrame(now = performance.now()) {
     paintRide();
     placeLabels();
     placeVisionPins();
-    placePlates();
+    // The parked names are placed before the plates, which move clear of them.
     placeParked();
+    placePlates();
     const next = nextFrame({ moving: turning, hidden: document.hidden, gapMs: state.app.frame_gap_ms() });
     if (next === "stop") {
       state.lastFrame = null;
@@ -208,7 +209,7 @@ function showNotice(text) {
 
 function zoomAtCentre(factor) {
   const rect = canvas.getBoundingClientRect();
-  state.app.zoom_at(rect.width / 2, rect.height / 2, factor);
+  zoomAround(rect.width / 2, rect.height / 2, factor);
   requestRender();
 }
 
@@ -298,7 +299,7 @@ function bindCanvas() {
       const factor = Math.exp(-event.deltaY * lines * WHEEL_RATE);
       // Wheel up brings the drone closer: the distance scale shrinks as the wheel turns up.
       if (state.ridden !== "") state.app.pov_scale(1 / factor);
-      else state.app.zoom_at(event.clientX - rect.left, event.clientY - rect.top, factor);
+      else zoomAround(event.clientX - rect.left, event.clientY - rect.top, factor);
       requestRender();
     },
     { passive: false },
@@ -310,6 +311,8 @@ function setAlt(down) {
   state.altDown = down;
   labelsEl.classList.toggle("alt", down);
   paintUsage();
+  paintSlip();
+  paintViewer();
   // The chips and the landed dots change their words with Alt, so the flags are redrawn.
   if (state.view !== null) paintMarks();
   requestRender();

@@ -11,6 +11,9 @@ use crate::usage::{CallRecord, Usage, UsageLedger};
 
 type Matcher = Box<dyn Fn(&ChatRequest) -> bool + Send + Sync>;
 
+/// Builds the error a scripted failure returns, from the name of the provider the call is routed to.
+type Failure = Box<dyn Fn(String) -> LlmError + Send + Sync>;
+
 /// An offline provider. Replies come from a script keyed by role and a request matcher.
 #[derive(Default)]
 pub struct Stub {
@@ -23,6 +26,8 @@ struct Rule {
     role: Role,
     matches: Matcher,
     reply: Reply,
+    /// Set when the call fails instead of replying. A failed call sends no reply.
+    failure: Option<Failure>,
 }
 
 /// What a scripted call returns.
@@ -94,6 +99,25 @@ impl Stub {
             role,
             matches: Box::new(matches),
             reply,
+            failure: None,
+        });
+        self
+    }
+
+    /// Adds a call for `role` that fails when `matches` returns true. `error` builds the error from
+    /// the name of the provider the role is routed to, or `stub`. A failed call sends no reply, so
+    /// it is not recorded in the ledger. The first matching rule wins.
+    pub fn fails_when(
+        mut self,
+        role: Role,
+        matches: impl Fn(&ChatRequest) -> bool + Send + Sync + 'static,
+        error: impl Fn(String) -> LlmError + Send + Sync + 'static,
+    ) -> Self {
+        self.rules.push(Rule {
+            role,
+            matches: Box::new(matches),
+            reply: Reply::default(),
+            failure: Some(Box::new(error)),
         });
         self
     }
@@ -126,6 +150,9 @@ impl ModelClient for Stub {
             Some(destination) => (destination.provider.clone(), destination.model.clone()),
             None => ("stub".to_owned(), "stub".to_owned()),
         };
+        if let Some(error) = &rule.failure {
+            return Err(error(provider));
+        }
         let call = CallRecord {
             role,
             provider,

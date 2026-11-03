@@ -207,6 +207,8 @@ pub(crate) struct Plan<'a> {
     pub(crate) slots: &'a Semaphore,
     /// How many probes of the contrast are in flight at once. One runs them in corpus order.
     pub(crate) probes_at_once: usize,
+    /// Where a run whose start fails keeps the app's last output. None keeps no output.
+    pub(crate) diagnostics: Option<&'a Path>,
 }
 
 /// The order a candidate is judged against: its confirmed scope, the confirmation of that scope,
@@ -1059,6 +1061,7 @@ fn sequence<'a>(
         snapshot: plan.snapshot,
         dependencies,
         config: plan.runner,
+        diagnostics_dir: plan.diagnostics,
     }
 }
 

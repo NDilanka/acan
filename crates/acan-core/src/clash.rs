@@ -819,8 +819,8 @@ pub(crate) fn expire_barriers(world: &World, ctx: &Ctx<'_>) -> Vec<Event> {
 }
 
 /// `BuildCleared` for every `Declared` task whose order's barrier does not hold, with no
-/// blocking clash and no `Serialize` predecessor that is still to land. The origin runs this
-/// after every accepted command.
+/// blocking clash and no `Serialize` predecessor that is still to land, in a lane that is not
+/// stopped: a stopped lane clears no build. The origin runs this after every accepted command.
 pub(crate) fn build_clear(world: &World) -> Vec<Event> {
     let waiting_on = |first: TaskId| {
         world
@@ -846,7 +846,143 @@ pub(crate) fn build_clear(world: &World) -> Vec<Event> {
                 }
             ) && !blocked(t.id)
                 && world.barrier(t.order).is_none()
+                && !world.lane(t.order).is_some_and(|lane| lane.stopped)
         })
         .map(|t| Event::BuildCleared { task: t.id })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use acan_intent::Scope;
+    use serde_json::json;
+
+    use super::*;
+    use crate::ids::{OrderId, OrderRev, ReadbackId, WorldId};
+    use crate::lane::ScopeLane;
+    use crate::lease::{Claim, Lease};
+    use crate::order::{Order, Task, TaskSpec};
+    use crate::world::{Origin, WorldRef};
+
+    /// One split order with one task that holds a claim and a declaration. The order's barrier
+    /// is lifted and the task has no clash, so only the lane's stop flag can hold its build back.
+    ///
+    /// The stop batch ends every lease in the lane before the build pass runs, so no command
+    /// sequence leaves a declared task on a stopped lane. The world is built directly instead.
+    fn declared_world() -> (World, TaskId, OrderId) {
+        let founder: MemberId = "ada".parse().expect("a member id");
+        let world_ref = WorldRef {
+            id: "world-1".parse::<WorldId>().expect("a world id"),
+            repo: "acan".to_owned(),
+        };
+        let (origin, _) = Origin::open(world_ref, founder.clone(), Timestamp::from_millis(0));
+        let mut world = origin.world().clone();
+
+        let order = OrderId::new(1);
+        let task = TaskId::new(1);
+        let agent: AgentId = "ada-agent".parse().expect("an agent id");
+        let scope: Scope = serde_json::from_value(json!({
+            "version": "acan-scope/1",
+            "order": "o-1",
+            "rev": 1,
+            "base_commit": "1111111111111111111111111111111111111111",
+            "body": {
+                "may": [{
+                    "id": "i-limit",
+                    "selector": {
+                        "surface": "http", "method": "POST", "route_template": "/api/login",
+                        "step_context": {"kind": "step", "step_id": "s6"},
+                        "principal": {"kind": "anonymous"}, "channel": "status"
+                    },
+                    "change": "add",
+                    "acceptance": [{
+                        "obligation_id": "obl-limit",
+                        "predicate": {"predicate": "present", "at": {"ref": "field", "run": "candidate", "step_id": "s6", "path": "status"}},
+                        "text": "the 429 status shows"
+                    }],
+                    "provenance": "user",
+                    "example": {"kind": "target", "step_id": "s6", "path": "status", "after": {"state": "present", "value": 429}},
+                    "machine_ids": ["api"]
+                }],
+                "must_keep": [],
+                "open": []
+            }
+        }))
+        .expect("the scope decodes");
+        let scope_hash = scope.scope_hash().expect("the scope hashes");
+
+        world.orders.insert(
+            order,
+            Order {
+                id: order,
+                machine: "api".parse().expect("a machine key"),
+                sentence: "limit failed logins".to_owned(),
+                rev: OrderRev::new(0),
+                witnesses: Vec::new(),
+                posted_by: founder,
+                state: OrderState::Split,
+                barrier: Barrier::Lifted,
+            },
+        );
+        world
+            .lanes
+            .insert(order, ScopeLane::opened(order, scope, scope_hash));
+        world.tasks.insert(
+            task,
+            Task {
+                id: task,
+                order,
+                spec: TaskSpec {
+                    title: "login rate limit".to_owned(),
+                    brief: "answer 429 after repeated failures".to_owned(),
+                    scope: Vec::new(),
+                },
+                state: TaskState::Claimed {
+                    claim: Claim {
+                        lease: Lease {
+                            holder: agent,
+                            generation: Generation::new(1),
+                            expires_at: Timestamp::from_millis(60_000),
+                        },
+                        readback: ReadbackId::new(1),
+                    },
+                    stage: Stage::Declared {
+                        decl: Declaration {
+                            task,
+                            generation: Generation::new(1),
+                            index: "rev-1".parse().expect("a code rev"),
+                            footprint: DeclarationInput {
+                                files: vec!["src/auth/login.rs".parse().expect("a repo path")],
+                                ..DeclarationInput::default()
+                            },
+                        },
+                    },
+                },
+                last_generation: Some(Generation::new(1)),
+            },
+        );
+        (world, task, order)
+    }
+
+    /// A stopped lane clears no build for a declared task. The same world without the stop
+    /// clears it, so the lane's stop flag is what holds the build back.
+    #[test]
+    fn a_stopped_lane_clears_no_build_for_a_declared_task() {
+        let (mut world, task, order) = declared_world();
+        let cleared = |world: &World| {
+            build_clear(world)
+                .iter()
+                .any(|event| matches!(event, Event::BuildCleared { task: t } if *t == task))
+        };
+        assert!(
+            cleared(&world),
+            "the unstopped lane clears the declared task"
+        );
+
+        world.lanes.get_mut(&order).expect("the lane").stopped = true;
+        assert!(
+            !cleared(&world),
+            "a stopped lane clears no build for the declared task"
+        );
+    }
 }

@@ -104,3 +104,73 @@ async fn a_pinned_image_the_runtime_does_not_hold_is_isolation_unavailable() {
     assert_eq!(observed.observations().count(), 0, "no step ran");
     assert_no_container(&run.id);
 }
+
+/// An app that writes more output than the driver keeps, then exits before it answers the ready
+/// check. Its last message has no newline.
+const CHATTY_APP: &str = r#"process.stdout.write("x".repeat(5000) + "\n");
+for (let i = 0; i < 300; i++) console.log(`line ${i}`);
+process.stderr.write("the last message");
+process.exit(4);
+"#;
+
+#[tokio::test]
+async fn a_start_that_fails_keeps_the_last_app_output_in_the_diagnostics_directory() {
+    let _docker = support::DOCKER.lock().await;
+    let mut setup = Setup::base();
+    std::fs::write(setup.worktree.join("chatty-app.ts"), CHATTY_APP)
+        .expect("the chatty app can be written into the worktree");
+    setup.app.boot = NonEmpty::new(
+        "bun".to_owned(),
+        vec!["run".to_owned(), "chatty-app.ts".to_owned()],
+    );
+    let config = runner_config();
+    let probe = setup.probe("signup-store");
+    let diagnostics = tempfile::tempdir().expect("a temp dir");
+    let mut input = setup.input(&probe, RunRole::BaseA, &config);
+    input.diagnostics_dir = Some(diagnostics.path());
+
+    let observed = run_sequence(&input, pending::<()>())
+        .await
+        .expect("the runner's record admits");
+
+    let run = observed.run();
+    let detail = match &run.outcome {
+        RunOutcome::SetupFailed { detail, .. } => detail.clone(),
+        other => panic!("expected a setup failure, got {other:?}"),
+    };
+    assert!(
+        !detail.contains("line 299"),
+        "the app output stays out of the outcome: {detail}"
+    );
+    let kept = std::fs::read_to_string(diagnostics.path().join("app-output.txt"))
+        .expect("the app output is kept");
+    let lines: Vec<&str> = kept.lines().collect();
+    assert_eq!(lines.last(), Some(&"the last message"), "{kept}");
+    assert!(lines.contains(&"line 299"), "{kept}");
+    assert!(
+        !lines.contains(&"line 0"),
+        "the oldest lines are dropped: {kept}"
+    );
+    assert_no_container(&run.id);
+}
+
+#[tokio::test]
+async fn a_start_that_succeeds_keeps_no_app_output() {
+    let _docker = support::DOCKER.lock().await;
+    let setup = Setup::base();
+    let config = runner_config();
+    let probe = setup.probe("signup-store");
+    let diagnostics = tempfile::tempdir().expect("a temp dir");
+    let mut input = setup.input(&probe, RunRole::BaseA, &config);
+    input.diagnostics_dir = Some(diagnostics.path());
+
+    let observed = run_sequence(&input, pending::<()>())
+        .await
+        .expect("the runner's record admits");
+
+    assert!(
+        !diagnostics.path().join("app-output.txt").exists(),
+        "a start that works keeps no app output"
+    );
+    assert_no_container(&observed.run().id);
+}

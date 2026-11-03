@@ -1,17 +1,21 @@
 // The needs-you inbox: one count and one list of everything that waits on the human. That is
-// each open question, each clash not yet settled, each scope lane that waits for a seal, each
-// stopped lane, each order whose receipt has residue to rule on, and each advisory vision check
-// that found something inconsistent or unclear. A click flies to the machine. The list logic has
-// no DOM, so Node can test it. `installInbox` binds it to the page.
+// each open question, each clash not yet settled, each agent that drifts from its task, each scope
+// lane that waits for a seal, each stopped lane, each order whose receipt has residue to rule on,
+// and each advisory vision check that found something inconsistent or unclear. A click flies to
+// the machine. The list logic has no DOM, so Node can test it. `installInbox` binds it to the page.
 import { flyTo, goKeys } from "./lanes.js";
 import { countsByProject, entityKey } from "./projects.js";
+import { firstWords } from "./words.js";
+
+// words.js owns firstWords; it stays exported here for the callers that import it from the inbox.
+export { firstWords };
 
 export const NOTIFY_KEY = "acan.notify";
 
 const PLANT_VIEW_CHECK_MS = 2000;
 
 // The order a kind sorts in: what blocks work first, then what only asks for a look.
-const KIND_ORDER = ["clash", "question", "stopped", "seal", "residue", "vision"];
+const KIND_ORDER = ["clash", "drift", "question", "stopped", "seal", "residue", "vision"];
 
 const DONE_PHASES = ["landed", "cancelled"];
 
@@ -30,12 +34,6 @@ export function visionDoubts(events) {
     }
   }
   return doubts;
-}
-
-// The first `count` words of a text, with "…" when it has more. Whitespace is trimmed.
-export function firstWords(text, count = 6) {
-  const words = String(text ?? "").trim().split(/\s+/).filter((word) => word !== "");
-  return words.length <= count ? words.join(" ") : `${words.slice(0, count).join(" ")}…`;
 }
 
 // A question row's line: its id and the question's first words, or the id alone.
@@ -103,6 +101,19 @@ export function inboxItems(view, plantViews = new Map(), doubts = new Map()) {
     add({ key: `vision:${doubt.task}:${doubt.run}`, kind: "vision", id: doubt.task,
       ...words(`t-${doubt.task} vision`, `${found} (advisory)`), machine: task.machine ?? null });
   }
+  // One row per agent that drifts from the task it holds. The drift is derived in Rust, so this
+  // only reads it.
+  for (const agent of view.agents ?? []) {
+    const drift = agent.drift;
+    if (drift?.kind !== "stuck" && drift?.kind !== "beyond_scope") continue;
+    const task = tasks.get(agent.task);
+    if (task === undefined || !live(task.order)) continue;
+    const detail = drift.kind === "stuck"
+      ? `${agent.id} quiet ${Math.floor(drift.quiet_ms / 60000)}m, no next step`
+      : `${agent.id} edits beyond its scope`;
+    add({ key: `drift:${agent.id}`, kind: "drift", id: task.id,
+      ...words(`t-${task.id} drift`, detail), machine: agent.machine ?? task.machine ?? null });
+  }
   return [...items.values()].sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.id - b.id);
 }
 
@@ -156,6 +167,7 @@ function element(tag, className, text) {
 
 const KIND_WORDS = {
   clash: "clash",
+  drift: "drift",
   question: "question",
   stopped: "stopped",
   seal: "seal",

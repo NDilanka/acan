@@ -5,11 +5,11 @@
 import { openCard } from "./cards.js";
 import { HUD_SELECTORS } from "./marks.js";
 import {
-  BADGE_PX, agentFlagShown, badgeBoxes, boxAt, clearOf, foldColumn, inView, overlaps, standsBeside,
+  BADGE_PX, agentFlagShown, badgeBoxes, boxAt, clearOf, flagSpot, foldColumn, inView, overlaps, standsBeside,
 } from "./place.js";
-import { flagGroups, parkedEntries, parkedKind, splitByProject } from "./overlays.js";
+import { flagGroups, flagLeader, parkedEntries, parkedKind, splitByProject } from "./overlays.js";
 import { canvasState } from "./projects.js";
-import { canvas, flagsEl, labelsEl, state } from "./state.js";
+import { canvas, flagsEl, labelsEl, leadersEl, state } from "./state.js";
 
 const PAD_PX = 4;
 const LABEL_OFFSET_PX = 6;
@@ -18,6 +18,8 @@ const POINTER_PX = 5;
 const POINTER_INSET_PX = 6;
 const FLAG_ROW_GAP_PX = 4;
 const BEACON_RING_PX = 1.5;
+
+const SVG_NS = "http://www.w3.org/2000/svg";
 
 const parked = {
   // What `actions` the page gave: `select(id)` and `fly(id)` from multi.js.
@@ -31,6 +33,9 @@ const parked = {
   rings: [],
   flagsEl: null,
   labelsEl: null,
+  leadersEl: null,
+  leaderEls: [],
+  leaderCount: 0,
 };
 
 export function installParked(actions) {
@@ -44,6 +49,15 @@ function layers() {
     parked.flagsEl.setAttribute("aria-hidden", "true");
     Object.assign(parked.flagsEl.style, { position: "fixed", inset: "0", pointerEvents: "none", overflow: "hidden" });
     flagsEl.before(parked.flagsEl);
+  }
+  if (parked.leadersEl === null) {
+    parked.leadersEl = document.createElementNS(SVG_NS, "svg");
+    parked.leadersEl.id = "parked-leaders";
+    parked.leadersEl.setAttribute("aria-hidden", "true");
+    Object.assign(parked.leadersEl.style, {
+      position: "fixed", inset: "0", width: "100%", height: "100%", pointerEvents: "none", overflow: "visible",
+    });
+    leadersEl.after(parked.leadersEl);
   }
   if (parked.labelsEl === null) {
     parked.labelsEl = document.createElement("div");
@@ -199,6 +213,7 @@ export function placeParked() {
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
   const placed = hudBoxes();
+  parked.leaderCount = 0;
   const discs = state.app.all_drone_layout();
   for (let k = 0; k + 4 <= discs.length; k += 4) {
     if (discs[k] === skip) continue;
@@ -225,13 +240,14 @@ export function placeParked() {
   }
   for (const [project, rows] of splitByProject(state.app.all_flag_layout(), 5, skip)) {
     const entry = parked.entries.get(project);
-    if (entry !== undefined) placeFlags(entry, rows, placed);
+    if (entry !== undefined) placeFlags(entry, rows, placed, width);
   }
+  for (let i = parked.leaderCount; i < parked.leaderEls.length; i += 1) parked.leaderEls[i].style.display = "none";
   placeNames(placed, skip, width, height);
   placeRings(skip);
 }
 
-function placeFlags(entry, rows, placed) {
+function placeFlags(entry, rows, placed, width) {
   const { columns, alone } = flagGroups(rows);
   for (const { index, x, y } of alone) {
     const el = entry.flagEls[index];
@@ -256,15 +272,33 @@ function placeFlags(entry, rows, placed) {
       if (item.el.size === undefined) item.el.size = [item.el.offsetWidth, item.el.offsetHeight];
       const [w, h] = item.el.size;
       const wantLeft = single ? item.x - POINTER_INSET_PX : centre - w / 2;
-      // A parked flag draws no leader, so it only moves up clear of what is placed, never
-      // sideways, and one pushed off the top hides rather than stand over another plant.
-      const left = wantLeft;
-      const top = clearOf(left, bottom - h, w, h, placed, PAD_PX);
-      show(item.el, left, top, placed);
-      if (item.el.pointer !== undefined) item.el.pointer.style.display = single && top === bottom - h ? "" : "none";
+      const { left, top } = flagSpot(wantLeft, bottom - h, w, h, placed, PAD_PX, width);
+      const visible = show(item.el, left, top, placed);
+      const leader = flagLeader({ left, top, w, h }, wantLeft, bottom - h, item, single, POINTER_INSET_PX);
+      if (item.el.pointer !== undefined) item.el.pointer.style.display = leader === null ? "" : "none";
+      if (visible && leader !== null) drawLeader(leader, item.flag.hue ?? "");
       bottom = top - FLAG_ROW_GAP_PX;
     }
   }
+}
+
+// A line in the flag's hue, 1 px wide, as the on-screen project draws an agent's leader.
+function drawLeader({ x1, y1, x2, y2 }, tint) {
+  let line = parked.leaderEls[parked.leaderCount];
+  if (line === undefined) {
+    line = document.createElementNS(SVG_NS, "line");
+    line.style.stroke = "#8a8a8f";
+    parked.leadersEl.append(line);
+    parked.leaderEls[parked.leaderCount] = line;
+  }
+  parked.leaderCount += 1;
+  line.setAttribute("x1", String(x1));
+  line.setAttribute("y1", String(y1));
+  line.setAttribute("x2", String(x2));
+  line.setAttribute("y2", String(y2));
+  if (tint !== "") line.style.stroke = tint;
+  line.style.strokeWidth = "1px";
+  line.style.display = "";
 }
 
 // A parked plant's machine names, after its flags, each shown only clear of everything placed.

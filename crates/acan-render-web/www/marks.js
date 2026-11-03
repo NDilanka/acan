@@ -657,6 +657,7 @@ function flagElement(flag) {
     el.append(text);
   }
   if (flag.kind === "agent") pillStyle(el, flag);
+  if (flag.kind === "agent" && flag.drone?.state === "drift") chevronStyle(el);
   if (flag.check) el.append(checkChip(flag.check, flag.kind === "agent"));
   if (flag.kind === "plot") el.classList.add(flag.text.includes(" confirmed ") ? "confirmed" : "draft");
   if (flag.scope) {
@@ -754,6 +755,28 @@ function pillStyle(el, flag) {
   });
   el.append(pointer);
   el.pointer = pointer;
+}
+
+// A drifting drone's flag carries a hollow grey chevron, 10 px, just above its pill. The drone keeps
+// its hue, so the drift reads in grey and needs no colour of its own.
+function chevronStyle(el) {
+  const chevron = document.createElement("span");
+  chevron.className = "chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  Object.assign(chevron.style, {
+    position: "absolute",
+    left: "50%",
+    bottom: "100%",
+    width: "10px",
+    height: "10px",
+    marginLeft: "-5px",
+    boxSizing: "border-box",
+    background: "none",
+    borderTop: "2px solid var(--muted)",
+    borderLeft: "2px solid var(--muted)",
+    transform: "rotate(45deg)",
+  });
+  el.append(chevron);
 }
 
 // An away dot is a bare hollow ring in the agent's hue with its quiet time in muted mono, so it
