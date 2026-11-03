@@ -19,6 +19,16 @@ test("hovering a clash's diamond or badges shows its detail", () => {
   assert.equal(markWords(clash, null, true), "open", "Alt shows every word");
 });
 
+const order = { kind: "order", clash: null, on: "crates/acan-agent/src", text: "o-0 · src · clashing" };
+
+test("an order's tag is hidden until its machine is hovered", () => {
+  assert.equal(markWords(order, null, false), "hidden");
+  assert.equal(markWords(order, { machine: "crates/acan-core/src" }, false), "hidden", "another machine");
+  assert.equal(markWords(order, { clash: 0 }, false), "hidden", "a clash's diamond shows the clash, not the tag");
+  assert.equal(markWords(order, { machine: "crates/acan-agent/src" }, false), "open");
+  assert.equal(markWords(order, null, true), "open", "Alt");
+});
+
 test("an agent's name pill and the other marks keep their words", () => {
   for (const kind of ["agent", "landed", "away", "question", "stage"]) {
     assert.equal(markWords({ kind, clash: null, on: null, text: "x" }, null, false), "open", kind);

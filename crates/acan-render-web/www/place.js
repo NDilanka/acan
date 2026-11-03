@@ -166,7 +166,7 @@ export function standsBeside(kind) {
 
 // The flag kinds whose words wait for a hover: a clash's detail, an order's tag and a plot's
 // scope line. Everything else on the map keeps its words.
-export const HOVER_KINDS = new Set(["clash"]);
+export const HOVER_KINDS = new Set(["clash", "order"]);
 
 // What a flag shows now: "open" for its words, "mark" for a plot's small mark, or "hidden".
 // `hover` is `{ clash }` while a clash diamond or its badges are under the pointer, `{ machine }`

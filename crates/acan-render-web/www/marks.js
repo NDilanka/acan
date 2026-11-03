@@ -3,7 +3,7 @@
 // only places the elements.
 import { openCard, openQuestionCard, paintCard, placeQuestion, syncQuestions } from "./cards.js";
 import { placeCompose, syncCompose } from "./compose.js";
-import { machineQuad } from "./order.js";
+import { guessTop, machineAt, machineQuad } from "./order.js";
 import { canvas, flagsEl, labelsEl, leadersEl, state } from "./state.js";
 import { requestRender } from "./main.js";
 import {
@@ -317,10 +317,24 @@ export function droneHover(x, y) {
 }
 
 // What else on the map the pointer is over, as `markWords` reads it: a clash diamond as
-// `{ clash }`, or null.
+// `{ clash }`, else a machine as `{ machine }`, or null. Machines are looked up only while a
+// flag waits on one, so a plant with no order spends nothing on the pointer.
 function markAt(x, y) {
   const clash = pinAt(x, y);
-  return clash === null ? null : { clash };
+  if (clash !== null) return { clash };
+  if (state.view === null || !state.markState.flags.some((flag) => flag.on && flag.kind !== "clash")) return null;
+  const project = (wx, wy) => state.app.world_to_screen(wx, wy);
+  const topOf = (machine) => {
+    const top = state.app.machine_top(machine.name);
+    return top >= 0 ? top : guessTop(machine);
+  };
+  // A machine behind a close camera projects to a huge outline that would swallow the pointer,
+  // so only machines whose footprint lies near the view are picked.
+  const [w, h] = [canvas.clientWidth, canvas.clientHeight];
+  const near = state.view.machines.filter((machine) => machineQuad(machine, project)
+    .every(([px, py]) => px >= -w && px <= 2 * w && py >= -h && py <= 2 * h));
+  const machine = machineAt(near, project, x, y, [], topOf);
+  return machine === null ? null : { machine };
 }
 
 // The map mark under the pointer, besides a drone, as `markAt` gives it.
@@ -722,7 +736,8 @@ function checkChip(check, onPill = false) {
 // FLAGS_PER_COLUMN with the rest folded into `+N`, and a flag never sits on a drone because the
 // column starts above the crowns. A lone flag that keeps its place points at its drone; any other
 // draws a leader in its hue. An idle drone's flag shows only with Alt. A clash's detail shows only
-// while its diamond is hovered, and starts to the right of it; the order flag sits above its machine. A flag that would cover a flag or a panel placed before it moves up clear of
+// while its diamond is hovered, and starts to the right of it; the order's tag sits above its
+// machine and shows only while that machine is hovered. A flag that would cover a flag or a panel placed before it moves up clear of
 // it. Each flag keeps its place as the drones and diamonds move. The plot flags are the exception:
 // they are returned, not placed here, and placed after the names, so they move clear of a name.
 // Returns the plot flags and how many leader lines the flags drew.

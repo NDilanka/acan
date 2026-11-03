@@ -1191,6 +1191,17 @@ impl App {
             .map_or(0, |machine| machine.files as u32)
     }
 
+    /// The height of machine `name`'s model top, in world units, or -1 when the plant has no such
+    /// machine. The page picks the machine under the pointer by its true outline with it.
+    pub fn machine_top(&self, name: &str) -> f32 {
+        let (Some(plan), Some(loaded)) = (self.plan.as_ref(), self.plant.as_ref()) else {
+            return -1.0;
+        };
+        plan.index_of(name)
+            .and_then(|index| loaded.stands.get(index))
+            .map_or(-1.0, |stand| stand.top)
+    }
+
     pub fn machine_count(&self) -> u32 {
         self.plant
             .as_ref()

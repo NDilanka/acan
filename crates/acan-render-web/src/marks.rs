@@ -2294,7 +2294,7 @@ fn flags(
         out.push(agent_flag(view, body, clock));
     }
     out.extend(landed_flags(view, plan));
-    // One flag for the order in progress, the same one the page's order strip names.
+    // One flag for the order in progress. The page shows it only while its machine is hovered.
     let active = view
         .orders
         .iter()
