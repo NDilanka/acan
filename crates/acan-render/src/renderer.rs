@@ -19,7 +19,7 @@ use crate::geometry::{
 };
 use crate::model::{Mesh, Model};
 use crate::scene::{Lod, Scene};
-use crate::theme::{self, PALETTE_LEN, TINT_LEN};
+use crate::theme::{self, Look, PALETTE_LEN, TINT_LEN};
 
 pub type TintTable = [[f32; 4]; TINT_LEN];
 
@@ -208,6 +208,7 @@ pub struct Renderer {
     camera_buf: wgpu::Buffer,
     theme_buf: wgpu::Buffer,
     srgb: bool,
+    look: Look,
     uniform_bind: wgpu::BindGroup,
     ink_layout: wgpu::BindGroupLayout,
     ink_bind: wgpu::BindGroup,
@@ -341,6 +342,7 @@ impl Renderer {
             camera_buf,
             theme_buf,
             srgb,
+            look: Look::Paper,
             uniform_bind,
             ink_layout,
             ink_bind,
@@ -440,8 +442,31 @@ impl Renderer {
     /// instance's tint slot multiplies the colour of its mesh faces.
     pub fn set_tints(&mut self, tints: &TintTable) {
         let uniform = ThemeUniform {
-            palette: theme::palette(self.srgb),
+            palette: theme::palette_of(self.look, self.srgb),
             tints: tints.map(|c| theme::surface_colour(c, self.srgb)),
+        };
+        self.queue
+            .write_buffer(&self.theme_buf, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    /// The look the page shows.
+    pub fn look(&self) -> Look {
+        self.look
+    }
+
+    /// Shows a look: its palette, its tints and its page colour. The next frame draws it.
+    pub fn set_look(&mut self, look: Look) {
+        self.look = look;
+        let page = theme::page_of(look, self.srgb);
+        self.clear = wgpu::Color {
+            r: page[0] as f64,
+            g: page[1] as f64,
+            b: page[2] as f64,
+            a: page[3] as f64,
+        };
+        let uniform = ThemeUniform {
+            palette: theme::palette_of(look, self.srgb),
+            tints: theme::tints_of(look).map(|c| theme::surface_colour(c, self.srgb)),
         };
         self.queue
             .write_buffer(&self.theme_buf, 0, bytemuck::bytes_of(&uniform));

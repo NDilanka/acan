@@ -1,0 +1,392 @@
+/* The settings drawer and its cog. Every rule is scoped to #settings, #settings-cog or the theme
+   attribute. The page's own palette and type come from index.html; the four tokens below are new
+   and have the light paper values there too. */
+
+:root {
+  --on-ink: #ffffff;
+  --label: #57575a;
+  --halo: #ffffff;
+  --leader: #8a8a8f;
+}
+
+/* The desk changes in each theme; the plant stays paper. Light paper is the :root default. Values
+   from the design, section 4.1. */
+html[data-theme="dark"] {
+  --page: #1c1c1b;
+  --card: #232321;
+  --face: #2b2b29;
+  --ink: #ecebe6;
+  --muted: #9e9d95;
+  --rule: #41413d;
+  --red: #f0695c;
+  --amber: #e0a536;
+  --soft: #c8c7bf;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.25);
+  --on-ink: #1c1c1b;
+  --label: #b9b8b0;
+  --halo: #262624;
+  --leader: #77776f;
+}
+
+html[data-theme="blueprint"] {
+  --page: #1f3a5c;
+  --card: #f3f6fa;
+  --face: #ffffff;
+  --ink: #14263d;
+  --muted: #5b6b80;
+  --rule: #c8d3e0;
+  --red: #c63a2f;
+  --amber: #b57a12;
+  --soft: #34475e;
+  --shadow: 0 1px 2px rgba(5, 15, 30, 0.25), 0 2px 8px rgba(5, 15, 30, 0.2);
+  --on-ink: #ffffff;
+  --label: #dbe5f1;
+  --halo: #1f3a5c;
+  --leader: #8fa6c4;
+}
+
+html[data-theme="high_contrast"] {
+  --page: #ffffff;
+  --card: #ffffff;
+  --face: #ffffff;
+  --ink: #000000;
+  --muted: #3d3d3d;
+  --rule: #6b6b6b;
+  --red: #b3261e;
+  --amber: #8a5a00;
+  --soft: #1a1a1a;
+  --shadow: none;
+  --on-ink: #ffffff;
+  --label: #000000;
+  --halo: #ffffff;
+  --leader: #3d3d3d;
+}
+
+/* The cog: its own island at the bottom left, beside the usage badge. */
+#settings-cog {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  z-index: 4;
+  box-sizing: border-box;
+  width: 26px;
+  height: 26px;
+  margin: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--soft);
+  background: var(--face);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+#settings-cog[hidden] { display: none; }
+#settings-cog:hover { border-color: var(--ink); }
+#settings-cog[aria-expanded="true"] { color: var(--on-ink); background: var(--ink); border-color: var(--ink); }
+#settings-cog svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.25; stroke-linejoin: round; stroke-linecap: round; }
+#settings-cog:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+/* The drawer: a non-modal aside on the left. It slides in over 180 ms and out over 140 ms. */
+#settings {
+  position: fixed;
+  left: 12px;
+  top: 52px;
+  bottom: 46px;
+  z-index: 4;
+  width: 380px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 14px;
+  background: var(--face);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius, 8px);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  font: 12px/1.4 var(--sans);
+  overflow: hidden;
+  transform: translateX(calc(-100% - 12px));
+  transition: transform 140ms ease-in;
+}
+#settings.open {
+  transform: none;
+  transition: transform 180ms var(--pov-ease, cubic-bezier(0.22, 1, 0.36, 1));
+}
+#settings[hidden] { display: none; }
+
+/* The header is one line over a rule: the title, the read-only tag, then Esc and close at the right. */
+#settings > .head {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--rule);
+}
+#settings-title { margin: 0; font: 600 13px/1.3 var(--mono); outline: none; }
+#settings-who {
+  margin: 0;
+  padding: 0 4px;
+  font: 600 10px/1.4 var(--mono);
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  border: 1px dashed var(--muted);
+  border-radius: 3px;
+}
+#settings-who[hidden] { display: none; }
+#settings > .head .keys { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+#settings-close {
+  padding: 0;
+  font: 11px/1.4 var(--mono);
+  color: var(--muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+#settings-close:hover { color: var(--ink); }
+#settings-close:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+#settings-note { flex: none; margin: 6px 0 0; font: 11px/1.4 var(--sans); color: var(--muted); }
+#settings-note[hidden] { display: none; }
+#settings-note.bad { color: var(--red); }
+
+/* The body is the one scrolling column of nine headings. */
+#settings-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule) transparent;
+}
+#settings h3 { margin: 0; font: inherit; }
+#settings .sec-head {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 30px;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  border-radius: 0;
+  color: var(--ink);
+  font: 600 12px/1.2 var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+#settings .sec-head:hover .sec-name { text-decoration: underline; }
+#settings .chev { flex: none; width: 8px; font: 12px/1 var(--sans); color: var(--muted); transition: transform 120ms ease; }
+#settings .sec-head[aria-expanded="true"] .chev { transform: rotate(90deg); }
+#settings .sec-name { min-width: 0; }
+#settings .sec-sum {
+  margin-left: auto;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 11px/1.2 var(--mono);
+  color: var(--muted);
+}
+#settings .sec-sum.update { color: var(--ink); font-weight: 600; }
+#settings .sec-body { padding: 6px 0 10px; }
+
+/* Groups, notes and status lines. */
+#settings .group { margin: 10px 0 4px; }
+#settings .group:first-child { margin-top: 4px; }
+#settings .group h4 { margin: 0; font: 600 10px/1.2 var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+#settings .group .gnote { margin: 2px 0 0; font: 11px/1.4 var(--sans); color: var(--muted); }
+#settings .lead { margin: 0 0 6px; font: 12px/1.4 var(--sans); color: var(--ink); }
+#settings .muted { color: var(--muted); }
+#settings .status { min-height: 1.4em; margin: 4px 0 0; font: 11px/1.4 var(--sans); color: var(--muted); }
+#settings .status.bad { color: var(--red); }
+#settings .foot { margin: 8px 0 0; padding-top: 6px; border-top: 1px solid var(--rule); font: 11px/1.4 var(--sans); color: var(--muted); }
+
+/* Rows reuse the setup row grid: a name, the control, and an action. */
+#settings .row {
+  display: grid;
+  grid-template-columns: 5.5em minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--rule);
+}
+#settings .row.wide { grid-template-columns: minmax(0, 1fr) auto; }
+#settings .row.roles { grid-template-columns: 5em minmax(0, 1fr) auto; }
+#settings .row.proj { grid-template-columns: minmax(0, 1fr) auto; }
+#settings .row .name { font: 12px/1.3 var(--mono); overflow-wrap: anywhere; }
+#settings .row .label { font: 12px/1.3 var(--sans); }
+#settings .row .state { min-width: 0; display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; }
+#settings .row .acts { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: flex-end; justify-self: end; }
+#settings .row .fill { grid-column: 1 / -1; }
+#settings .row .fieldnote { grid-column: 1 / -1; font: 11px/1.4 var(--sans); color: var(--red); }
+#settings .row.notif { grid-template-columns: minmax(0, 1fr) auto auto; }
+#settings .row.addrow,
+#settings .row.tokrow { grid-template-columns: minmax(0, 1fr) auto; }
+#settings .row .pinfo { display: grid; min-width: 0; gap: 1px; }
+#settings .row .ppath { min-width: 0; overflow: hidden; direction: rtl; text-align: left; text-overflow: ellipsis; white-space: nowrap; font: 11px/1.3 var(--mono); color: var(--muted); }
+#settings .row .pname { font: 600 12px/1.3 var(--mono); overflow-wrap: anywhere; }
+#settings .row.keyedit { grid-template-columns: minmax(0, 1fr); }
+#settings .keyedit .acts { justify-content: flex-start; justify-self: start; }
+#settings .gh { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#settings .note { margin: 4px 0 0; font: 11px/1.4 var(--sans); color: var(--muted); }
+#settings .ublock { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 6px 0; }
+#settings .test { grid-column: 2 / -1; display: flex; align-items: center; gap: 6px; min-width: 0; font: 11px/1.4 var(--mono); color: var(--muted); }
+#settings .test .msg { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#settings .test .msg.bad { color: var(--red); }
+
+/* Buttons, selects and fields share one look. */
+#settings button,
+#settings select,
+#settings input[type="text"],
+#settings input[type="password"],
+#settings input[type="number"] {
+  font: 12px/1.3 var(--mono);
+  color: var(--ink);
+  background: var(--face);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 2px 8px;
+}
+#settings button { cursor: pointer; }
+#settings button:hover:not(:disabled):not([aria-disabled="true"]),
+#settings select:hover:not(:disabled):not([aria-disabled="true"]) { border-color: var(--ink); }
+#settings button:disabled,
+#settings [aria-disabled="true"] { color: var(--muted); cursor: default; }
+#settings button.primary,
+#settings button[aria-pressed="true"],
+#settings button.armed { background: var(--ink); color: var(--on-ink); border-color: var(--ink); }
+#settings button.cancel { font: 11px/1.3 var(--mono); padding: 1px 6px; color: var(--muted); }
+#settings button.cancel:hover:not(:disabled) { color: var(--ink); }
+#settings select { max-width: 100%; padding: 2px 6px; }
+#settings select[aria-disabled="true"] { cursor: default; }
+#settings input[type="text"],
+#settings input[type="password"] { display: block; width: 100%; box-sizing: border-box; padding: 4px 8px; }
+#settings input[type="number"] { box-sizing: border-box; width: 6em; padding: 2px 6px; text-align: right; }
+#settings input[aria-invalid="true"] { border-color: var(--red); }
+#settings input[aria-disabled="true"] { color: var(--muted); }
+#settings button:focus-visible,
+#settings select:focus-visible,
+#settings input:focus-visible,
+#settings summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+#settings-title:focus { outline: none; }
+#settings .unit { font: 11px/1.3 var(--mono); color: var(--muted); }
+#settings .num { display: inline-flex; align-items: center; gap: 4px; justify-self: end; }
+#settings .copied { font: 11px/1.3 var(--mono); color: var(--muted); }
+
+/* Segmented choices, as in the receipt modes. */
+#settings .seg { display: inline-flex; flex-wrap: wrap; gap: 0; row-gap: 4px; }
+#settings .seg button { display: inline-flex; align-items: center; gap: 6px; border-radius: 0; }
+#settings .seg button + button { border-left: none; }
+#settings .seg button:first-child { border-radius: 4px 0 0 4px; }
+#settings .seg button:last-child { border-radius: 0 4px 4px 0; }
+#settings .seg button:only-child { border-radius: 4px; }
+#settings .seg button + button:not(:last-child):not(:first-child) { border-radius: 0; }
+#settings .sw {
+  position: relative;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border: 1px solid var(--muted);
+  background: var(--sw-page);
+}
+#settings .sw::after { content: ""; position: absolute; left: 2px; top: 2px; width: 4px; height: 4px; background: var(--sw-face); }
+#settings .sw[data-swatch="paper"] { --sw-page: #f2f2ef; --sw-face: #ffffff; }
+#settings .sw[data-swatch="dark"] { --sw-page: #1c1c1b; --sw-face: #2b2b29; }
+#settings .sw[data-swatch="blueprint"] { --sw-page: #1f3a5c; --sw-face: #ffffff; }
+#settings .sw[data-swatch="high_contrast"] { --sw-page: #ffffff; --sw-face: #ffffff; }
+
+/* The on and off switch: no words, right aligned. */
+#settings .switch {
+  position: relative;
+  flex: none;
+  justify-self: end;
+  box-sizing: border-box;
+  width: 26px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  background: var(--face);
+  cursor: pointer;
+}
+#settings .switch::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 120ms ease;
+}
+#settings .switch[aria-checked="true"] { background: var(--ink); border-color: var(--ink); }
+#settings .switch[aria-checked="true"]::after { background: var(--on-ink); transform: translateX(12px); }
+#settings .switch[aria-disabled="true"] { cursor: default; }
+#settings .switch[aria-disabled="true"]:not([aria-checked="true"]) { border-color: var(--rule); }
+
+/* Chips for key, harness and update states. */
+#settings .chip { display: inline-flex; align-items: center; gap: 5px; font: 11px/1.3 var(--mono); color: var(--muted); }
+#settings .chip i { display: block; flex: none; width: 9px; height: 9px; box-sizing: border-box; border-radius: 50%; }
+#settings .chip.pending i { border: 1.5px solid var(--muted); }
+#settings .chip.idle i { background: var(--muted); }
+#settings .chip.warn i { background: var(--amber); }
+#settings .chip.passed { color: var(--ink); }
+#settings .chip.passed i { width: 4px; height: 8px; border-radius: 0; border-right: 2px solid var(--ink); border-bottom: 2px solid var(--ink); transform: translateY(-1px) rotate(45deg); }
+#settings .chip.failed { color: var(--red); }
+#settings .chip.failed i { background: var(--red); }
+
+/* Harness rows: a status line and an optional login hint. */
+#settings .harness { padding: 6px 0; border-bottom: 1px solid var(--rule); }
+#settings .h-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+#settings .h-line .chip { align-self: center; }
+#settings .h-name { font: 600 12px/1.3 var(--mono); }
+#settings .h-ver { font: 11px/1.3 var(--mono); color: var(--muted); }
+#settings .h-roles { margin-left: auto; white-space: nowrap; font: 11px/1.3 var(--sans); color: var(--muted); }
+#settings .hint { margin: 2px 0 0; font: 11px/1.4 var(--sans); color: var(--muted); overflow-wrap: anywhere; }
+#settings .hint code { font: 11px var(--mono); color: var(--ink); }
+#settings .detect { display: flex; gap: 6px; align-items: center; margin: 6px 0 0; }
+#settings .detect input[type="text"] { flex: 1; min-width: 0; }
+
+/* Access: the token values are masked by the server. */
+#settings .tok { font: 12px/1.3 var(--mono); overflow-wrap: anywhere; min-width: 0; }
+
+/* About and update. */
+#settings .ver { font: 12px/1.3 var(--mono); overflow-wrap: anywhere; }
+#settings .ustatus { margin: 0; font: 12px/1.4 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+#settings .ustatus.ink { color: var(--ink); font-weight: 600; }
+#settings .ustatus.bad { color: var(--red); }
+#settings details { margin: 4px 0 0; }
+#settings details summary { font: 11px/1.4 var(--mono); color: var(--muted); cursor: pointer; }
+#settings details pre {
+  max-height: 12em;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 11px/1.45 var(--mono);
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+}
+
+/* Motion: the slide follows the design; the Look setting and the OS preference both turn it off. */
+html.reduce-motion #settings,
+html.reduce-motion #settings.open { transform: none; transition: none; }
+html.reduce-motion #settings .chev,
+html.reduce-motion #settings .switch::after { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  #settings,
+  #settings.open { transform: none; transition: none; }
+  #settings .chev,
+  #settings .switch::after { transition: none; }
+}

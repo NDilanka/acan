@@ -9,7 +9,7 @@ import { goStep } from "./lanes.js";
 
 // The open panels Esc closes, topmost first. The command bar sits over everything, the compose
 // panel over the map's cards, the vision viewer over the pins, then the question and clash cards.
-export const ESCAPE_ORDER = ["command", "compose", "viewer", "question", "clash"];
+export const ESCAPE_ORDER = ["command", "compose", "settings", "viewer", "question", "clash"];
 
 const PAN_PX = 80;
 
@@ -25,6 +25,7 @@ const ARROWS = {
 const SINGLE = {
   "/": { kind: "open-command", repeats: false, prevent: true },
   "?": { kind: "toggle-help", repeats: false, prevent: true },
+  ",": { kind: "settings", repeats: false },
   a: { kind: "toggle-question", repeats: false },
   o: { kind: "order-here", repeats: false, prevent: true },
   c: { kind: "toggle-card", repeats: false },
