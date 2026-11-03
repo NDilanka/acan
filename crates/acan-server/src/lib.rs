@@ -587,9 +587,9 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
         settings_file,
         stored,
         Arc::clone(&registry),
-        founder,
+        founder.clone(),
     ));
-    let app = http::router(registry, web, shared_settings);
+    let app = http::router(registry, web, shared_settings, founder);
     let mut shutdown_seen = shutdown.subscribe();
     let server = tokio::spawn(async move {
         axum::serve(listener, app)

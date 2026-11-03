@@ -41,6 +41,7 @@ use crate::public::{self, PublicRoot};
 use crate::registry::{self, Registry};
 use crate::release::{self, BugReport, UpdateStatus, VersionInfo};
 use crate::ruling::{self, RulingBody, RulingDraftView};
+use crate::settings::data::{self, DataOwner};
 use crate::settings::{self, Settings};
 use crate::vision::{self, Side, VisionWitness};
 use crate::workers::{Board, WorkersView};
@@ -56,11 +57,13 @@ pub(crate) struct Mount<'a> {
 }
 
 /// The routes one project's host answers under `mount`. The board is this project's own local
-/// workers, which `GET .../workers` reports.
+/// workers, which `GET .../workers` reports. The owner names who may export or clear the project's
+/// data, and the project it belongs to.
 fn project_routes<C: ModelClient + 'static>(
     mount: Mount<'_>,
     host: Host<C>,
     board: Board,
+    owner: DataOwner,
 ) -> Router {
     let api = mount.api;
     Router::new()
@@ -85,6 +88,14 @@ fn project_routes<C: ModelClient + 'static>(
             put(setup::put_role::<C>),
         )
         .route(&format!("{api}/stream"), get(stream::upgrade::<C>))
+        .route(
+            &format!("{api}/settings/data/export"),
+            get(data::get_export::<C>),
+        )
+        .route(
+            &format!("{api}/settings/data/clear"),
+            post(data::post_clear::<C>),
+        )
         .route(
             &format!("{api}/tasks/{{task}}/worktree"),
             get(get_worktree::<C>),
@@ -131,6 +142,7 @@ fn project_routes<C: ModelClient + 'static>(
             get(get_vision_baseline::<C>),
         )
         .layer(Extension(board))
+        .layer(Extension(owner))
         .layer(middleware::from_fn_with_state(
             host.clone(),
             refuse_when_stopped::<C>,
@@ -155,10 +167,13 @@ async fn refuse_when_stopped<C: ModelClient + 'static>(
 /// project also answers at the unprefixed paths, which the setup page and older clients use. The
 /// server's own health and version are not any project's. The public files are served for every
 /// path the API does not claim. The settings are the server's, so their route is global too.
+/// `founder` is the member whose token is the owner's: only it may export or clear a project's
+/// data.
 pub(crate) fn router<C: ModelClient + 'static>(
     projects: Arc<Registry<C>>,
     web: Option<PublicRoot>,
     settings: Arc<Settings<C>>,
+    founder: MemberId,
 ) -> Router {
     let mut router = Router::new()
         .route("/health", get(health))
@@ -174,6 +189,10 @@ pub(crate) fn router<C: ModelClient + 'static>(
     for entry in projects.entries() {
         let api = format!("/api/p/{}", entry.id);
         let mcp = format!("{api}/mcp");
+        let owner = DataOwner {
+            project: entry.id.clone(),
+            founder: founder.clone(),
+        };
         router = router.merge(project_routes(
             Mount {
                 api: &api,
@@ -181,6 +200,7 @@ pub(crate) fn router<C: ModelClient + 'static>(
             },
             entry.host.clone(),
             entry.board.clone(),
+            owner.clone(),
         ));
         if entry.id == projects.default_id() {
             router = router.merge(project_routes(
@@ -190,6 +210,7 @@ pub(crate) fn router<C: ModelClient + 'static>(
                 },
                 entry.host.clone(),
                 entry.board.clone(),
+                owner,
             ));
         }
     }
@@ -893,7 +914,7 @@ async fn vision_png<C: ModelClient>(
 }
 
 /// A task id from a path. One that has no contract spelling names no task.
-fn task_ref(raw: &str) -> Result<TaskRef, ApiError> {
+pub(crate) fn task_ref(raw: &str) -> Result<TaskRef, ApiError> {
     TaskRef::from_str(raw).map_err(|_| ApiError::NotFound("task"))
 }
 

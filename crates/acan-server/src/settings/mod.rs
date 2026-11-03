@@ -6,6 +6,7 @@
 //! them, and only the owner may do that. A change is checked as a whole before anything is written,
 //! so a change that fails leaves every setting as it was. See [`validate`] for the rules.
 
+pub(crate) mod data;
 pub(crate) mod file;
 mod validate;
 

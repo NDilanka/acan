@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use acan_core::{Event, Stamped};
 use acan_llm::{KeyFile, UsageLedger};
 use acan_server::{Models, Running, ServerConfig, start};
 use futures_util::{SinkExt, StreamExt};
@@ -25,6 +26,18 @@ const AGENT_TOKEN: &str = "acan_00000000000000000000000000000012";
 const MEMBER_TOKEN: &str = "acan_00000000000000000000000000000013";
 /// A key the keys file holds before the server starts. No response may carry it.
 const SAVED_KEY: &str = "meta-saved-key-0123456789";
+/// A fake key the repository's `.env` file holds. No export may carry its text.
+const FAKE_KEY: &str = "fake-key-for-data-test";
+/// A fake token the tokens file holds besides the test tokens. No export may carry its text.
+const FAKE_TOKEN: &str = "acan_fake-token-for-data-test";
+/// The body that clears the local data. Any other body is refused.
+const CLEAR_BODY: &str = r#"{"what":"local","confirm":true}"#;
+/// The refusal of an export by anyone but the owner.
+const ONLY_OWNER_EXPORTS: &str = "only the owner may export data";
+/// The refusal of a clear by anyone but the owner.
+const ONLY_OWNER_CLEARS: &str = "only the owner may clear data";
+/// The order the split tests post. It names the one machine a temp repository has.
+const SPLIT_SENTENCE: &str = "split the store into a reader and a writer";
 /// How long a test waits for the server before it gives up.
 const WAIT: Duration = Duration::from_secs(10);
 /// A WebSocket the tests open to the server.
@@ -1047,6 +1060,565 @@ async fn a_model_test_with_no_provider_sends_nothing_and_reports_no_key() {
     assert_eq!(body["model"], Value::Null);
     assert_eq!(body["ms"], 0);
     assert_eq!(body["error"], "no_key");
+
+    running.stop().await.expect("the server stops");
+}
+
+/// A `GET` of `path` with `token` as the bearer, when there is one.
+async fn get_path(running: &Running, path: &str, token: Option<&str>) -> reqwest::Response {
+    let mut request = reqwest::Client::new().get(format!("http://{}{path}", running.local_addr));
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    request.send().await.expect("the request is sent")
+}
+
+/// A POST of `body`, sent as JSON, to `path` with `token` as the bearer, when there is one.
+async fn post_text(
+    running: &Running,
+    path: &str,
+    token: Option<&str>,
+    body: &str,
+) -> reqwest::Response {
+    let mut request = reqwest::Client::new()
+        .post(format!("http://{}{path}", running.local_addr))
+        .header("content-type", "application/json")
+        .body(body.to_owned());
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    request.send().await.expect("the request is sent")
+}
+
+/// The id of the default project, as `GET /api/projects` lists it.
+async fn default_project(running: &Running) -> String {
+    let list = json(get_path(running, "/api/projects", Some(OWNER_TOKEN)).await).await;
+    list.as_array()
+        .expect("a list of projects")
+        .iter()
+        .find(|project| project["default"] == json!(true))
+        .and_then(|project| project["id"].as_str())
+        .expect("a default project")
+        .to_owned()
+}
+
+/// Whether `bytes` holds `text`.
+fn holds(bytes: &[u8], text: &str) -> bool {
+    bytes
+        .windows(text.len())
+        .any(|window| window == text.as_bytes())
+}
+
+/// The entries of a ZIP archive the server writes, read from its central directory: each name with
+/// its bytes. Every entry is stored, so its bytes sit where its local header says they do.
+fn zip_entries(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let u16_at = |at: usize| usize::from(u16::from_le_bytes([archive[at], archive[at + 1]]));
+    let u32_at = |at: usize| {
+        u32::from_le_bytes([
+            archive[at],
+            archive[at + 1],
+            archive[at + 2],
+            archive[at + 3],
+        ]) as usize
+    };
+    // The end record is 22 bytes, since no archive here has a comment.
+    let end = archive.len() - 22;
+    assert_eq!(
+        u32_at(end),
+        0x0605_4b50,
+        "the archive ends with its end record"
+    );
+    let count = u16_at(end + 10);
+    let mut at = u32_at(end + 16);
+    let mut entries = Vec::new();
+    for _ in 0..count {
+        assert_eq!(u32_at(at), 0x0201_4b50, "a central directory header");
+        let size = u32_at(at + 24);
+        let name_len = u16_at(at + 28);
+        let extra_len = u16_at(at + 30);
+        let comment_len = u16_at(at + 32);
+        let local = u32_at(at + 42);
+        let name =
+            String::from_utf8(archive[at + 46..at + 46 + name_len].to_vec()).expect("a UTF-8 name");
+        let data = local + 30 + u16_at(local + 26) + u16_at(local + 28);
+        entries.push((name, archive[data..data + size].to_vec()));
+        at += 46 + name_len + extra_len + comment_len;
+    }
+    entries
+}
+
+/// The names of the entries, in archive order.
+fn names_of(entries: &[(String, Vec<u8>)]) -> Vec<&str> {
+    entries.iter().map(|(name, _)| name.as_str()).collect()
+}
+
+/// The manifest entry of an export, parsed.
+fn manifest_of(entries: &[(String, Vec<u8>)]) -> Value {
+    let (_, bytes) = entries
+        .iter()
+        .find(|(name, _)| name == "manifest.json")
+        .expect("a manifest entry");
+    serde_json::from_slice(bytes).expect("the manifest is JSON")
+}
+
+/// Waits until the offline split of the posted order lands in the event log.
+async fn wait_for_split(running: &Running) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let body = json(get_path(running, "/api/events?from=0", Some(OWNER_TOKEN)).await).await;
+        let events: Vec<Stamped> = serde_json::from_value(body).expect("events JSON");
+        if events
+            .iter()
+            .any(|stamped| matches!(stamped.event, Event::OrderSplit { .. }))
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the offline split never landed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn the_data_routes_refuse_a_member_an_agent_and_an_unknown_token() {
+    let repo = temp_repo();
+    let running = boot(repo.path(), models(repo.path(), &[])).await;
+    let project = default_project(&running).await;
+    let deps = repo.path().join(".acan").join("deps").join("x");
+    fs::create_dir_all(&deps).expect("a dependency folder");
+
+    let exports = [
+        "/api/settings/data/export?what=all".to_owned(),
+        format!("/api/p/{project}/settings/data/export?what=all"),
+    ];
+    let clears = [
+        "/api/settings/data/clear".to_owned(),
+        format!("/api/p/{project}/settings/data/clear"),
+    ];
+    for path in &exports {
+        for token in [Some(MEMBER_TOKEN), Some(AGENT_TOKEN)] {
+            let response = get_path(&running, path, token).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+            let body = json(response).await;
+            assert_eq!(
+                body,
+                json!({ "error": "forbidden", "why": ONLY_OWNER_EXPORTS })
+            );
+        }
+        for token in [None, Some("acan_not_a_token")] {
+            let response = get_path(&running, path, token).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+    }
+    for path in &clears {
+        for token in [Some(MEMBER_TOKEN), Some(AGENT_TOKEN)] {
+            let response = post_text(&running, path, token, CLEAR_BODY).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+            let body = json(response).await;
+            assert_eq!(
+                body,
+                json!({ "error": "forbidden", "why": ONLY_OWNER_CLEARS })
+            );
+        }
+        for token in [None, Some("acan_not_a_token")] {
+            let response = post_text(&running, path, token, CLEAR_BODY).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+    }
+    assert!(deps.is_dir(), "a refused clear deletes nothing");
+
+    running.stop().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn the_owner_exports_the_receipts_and_the_recorded_run_as_one_archive() {
+    let repo = temp_repo();
+    let running = boot(repo.path(), models(repo.path(), &[])).await;
+    let project = default_project(&running).await;
+
+    let response = get_path(
+        &running,
+        "/api/settings/data/export?what=all",
+        Some(OWNER_TOKEN),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "application/zip");
+    let disposition = response.headers()["content-disposition"]
+        .to_str()
+        .expect("a text header")
+        .to_owned();
+    assert!(
+        disposition.starts_with(&format!("attachment; filename=\"acan-export-{project}-")),
+        "{disposition}"
+    );
+    assert!(disposition.ends_with(".zip\""), "{disposition}");
+    let archive = response.bytes().await.expect("the archive");
+    let entries = zip_entries(&archive);
+    assert_eq!(
+        names_of(&entries),
+        [
+            "manifest.json",
+            "replay/plant.json",
+            "replay/events.json",
+            "replay/manifest.json",
+        ],
+        "the repository has no task, so no receipt, and the recorded run is three files"
+    );
+    let manifest = manifest_of(&entries);
+    assert_eq!(manifest["format"], json!(1));
+    assert_eq!(manifest["what"], "all");
+    assert_eq!(manifest["project"], project);
+    assert_eq!(manifest["receipts"], json!(0));
+    assert_eq!(manifest["replay"], json!(true));
+    assert!(manifest["version"].is_string());
+    assert!(manifest["commit"].is_string());
+    assert!(manifest["exported_at"].is_u64());
+    let (_, events) = entries
+        .iter()
+        .find(|(name, _)| name == "replay/events.json")
+        .expect("the events");
+    let events: Value = serde_json::from_slice(events).expect("the events are JSON");
+    assert!(
+        !events.as_array().expect("a list").is_empty(),
+        "the boot events are recorded"
+    );
+
+    // The replay alone, and the receipts alone, each hold their own files.
+    let response = get_path(
+        &running,
+        "/api/settings/data/export?what=replay",
+        Some(OWNER_TOKEN),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let replay = zip_entries(&response.bytes().await.expect("the archive"));
+    assert_eq!(
+        names_of(&replay),
+        [
+            "manifest.json",
+            "replay/plant.json",
+            "replay/events.json",
+            "replay/manifest.json",
+        ]
+    );
+    let response = get_path(
+        &running,
+        &format!("/api/p/{project}/settings/data/export?what=receipts"),
+        Some(OWNER_TOKEN),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let receipts = zip_entries(&response.bytes().await.expect("the archive"));
+    assert_eq!(names_of(&receipts), ["manifest.json"]);
+    let manifest = manifest_of(&receipts);
+    assert_eq!(manifest["replay"], json!(false));
+    assert_eq!(manifest["what"], "receipts");
+    assert_eq!(manifest["project"], project);
+
+    running.stop().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn an_export_with_no_recorded_run_is_a_conflict_and_receipts_still_answer() {
+    let repo = temp_repo();
+    let running = boot(repo.path(), models(repo.path(), &[])).await;
+    // The event log is the recorded run. The server keeps it open, but the export looks for the file.
+    fs::remove_file(repo.path().join(".acan").join("world.db")).expect("the event log is removed");
+
+    for what in ["all", "replay"] {
+        let response = get_path(
+            &running,
+            &format!("/api/settings/data/export?what={what}"),
+            Some(OWNER_TOKEN),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{what}");
+        let body = json(response).await;
+        assert_eq!(
+            body,
+            json!({ "error": "conflict", "what": "no_recorded_run" })
+        );
+    }
+
+    let response = get_path(
+        &running,
+        "/api/settings/data/export?what=receipts",
+        Some(OWNER_TOKEN),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let entries = zip_entries(&response.bytes().await.expect("the archive"));
+    assert_eq!(names_of(&entries), ["manifest.json"]);
+    assert_eq!(manifest_of(&entries)["replay"], json!(false));
+
+    running.stop().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn an_export_names_one_of_three_kinds_and_refuses_any_other() {
+    let repo = temp_repo();
+    let running = boot(repo.path(), models(repo.path(), &[])).await;
+
+    for query in ["", "?what=", "?what=zip", "?what=Receipts", "?what=all%20"] {
+        let response = get_path(
+            &running,
+            &format!("/api/settings/data/export{query}"),
+            Some(OWNER_TOKEN),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query:?}");
+        let body = json(response).await;
+        assert_eq!(
+            body,
+            json!({
+                "error": "bad_request",
+                "what": "what must be receipts, replay or all",
+            }),
+            "{query:?}"
+        );
+    }
+
+    running.stop().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn no_export_holds_the_text_of_a_dotenv_value_or_of_a_token() {
+    let repo = temp_repo();
+    fs::write(
+        repo.path().join(".env"),
+        format!("DATA_TEST_KEY={FAKE_KEY}\n"),
+    )
+    .expect(".env");
+    // The tokens file holds one token more than the test tokens. boot writes its own file, so this
+    // server starts from a file written here.
+    let state = repo.path().join(".acan");
+    fs::create_dir_all(&state).expect("the state dir");
+    let tokens = json!([
+        { "token": OWNER_TOKEN, "principal": { "kind": "member", "id": "owner" } },
+        { "token": MEMBER_TOKEN, "principal": { "kind": "member", "id": "dana" } },
+        { "token": AGENT_TOKEN, "principal": { "kind": "agent", "id": "agent-1" } },
+        { "token": FAKE_TOKEN, "principal": { "kind": "agent", "id": "agent-2" } },
+    ]);
+    fs::write(state.join("tokens.json"), tokens.to_string()).expect("the tokens file");
+    let served = models(repo.path(), &[]);
+    let ledger: UsageLedger = served.ledger();
+    let running = start(config(repo.path()), served, ledger)
+        .await
+        .expect("the server starts");
+
+    let response = get_path(
+        &running,
+        "/api/settings/data/export?what=all",
+        Some(OWNER_TOKEN),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let archive = response.bytes().await.expect("the archive").to_vec();
+    assert!(
+        !holds(&archive, FAKE_KEY),
+        "the archive holds no .env value"
+    );
+    assert!(!holds(&archive, FAKE_TOKEN), "the archive holds no token");
+    for (name, bytes) in zip_entries(&archive) {
+        assert!(!holds(&bytes, FAKE_KEY), "{name} holds no .env value");
+        assert!(!holds(&bytes, FAKE_TOKEN), "{name} holds no token");
+    }
+
+    running.stop().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn an_export_skips_a_task_that_has_no_receipt() {
+    let repo = temp_repo();
+    let running = boot(repo.path(), models(repo.path(), &[])).await;
+    let order = json!({
+        "cmd": "post_order",
+        "machine": "model",
+        "sentence": SPLIT_SENTENCE,
+        "witnesses": []
+    });
+    let response = post_text(
+        &running,
+        "/api/commands",
+        Some(OWNER_TOKEN),
+        &order.to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "the order is accepted");
+    let register = json!({ "cmd": "register_agent", "agent": "agent-1" });
+    let response = post_text(
+        &running,
+        "/api/commands",
+        Some(OWNER_TOKEN),
+        &register.to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "the agent is registered");
+    wait_for_split(&running).await;
+
+    // The split made a task, and no gate run has given it a receipt. Its export is skipped.
+    let response = get_path(
+        &running,
+        "/api/settings/data/export?what=receipts",
+        Some(OWNER_TOKEN),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let entries = zip_entries(&response.bytes().await.expect("the archive"));
+    assert_eq!(names_of(&entries), ["manifest.json"]);
+    assert_eq!(manifest_of(&entries)["receipts"], json!(0));
+
+    running.stop().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn the_owner_clears_the_dependency_cache_and_nothing_else() {
+    let repo = temp_repo();
+    let running = boot(repo.path(), models(repo.path(), &[])).await;
+    let state = repo.path().join(".acan");
+    fs::create_dir_all(state.join("deps").join("x")).expect("a dependency folder");
+    fs::write(state.join("deps").join("x").join("file"), "installed").expect("an entry");
+    fs::create_dir_all(state.join("examples")).expect("examples");
+    fs::write(state.join("examples").join("keep.json"), "{}").expect("an example");
+    fs::create_dir_all(state.join("observations")).expect("observations");
+    fs::write(state.join("observations").join("keep.json"), "{}").expect("an observation");
+    let log_before = fs::read(state.join("world.db")).expect("the event log");
+    let tokens_before = tokens_text(repo.path());
+
+    let response = post_text(
+        &running,
+        "/api/settings/data/clear",
+        Some(OWNER_TOKEN),
+        CLEAR_BODY,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    assert_eq!(
+        body,
+        json!({
+            "cleared": ["deps", "tour_cache"],
+            "kept": [
+                "receipts",
+                "event_log",
+                "repo",
+                "tokens",
+                "examples",
+                "observations",
+                "vision",
+            ],
+        })
+    );
+    assert!(!state.join("deps").exists(), "the dependency cache is gone");
+    assert_eq!(
+        fs::read(state.join("world.db")).expect("the event log"),
+        log_before,
+        "the event log is unchanged"
+    );
+    assert_eq!(
+        tokens_text(repo.path()),
+        tokens_before,
+        "the tokens are unchanged"
+    );
+    assert!(state.join("examples").join("keep.json").is_file());
+    assert!(state.join("observations").join("keep.json").is_file());
+    assert!(repo.path().join("model").join("store.ts").is_file());
+
+    // With no cache left, a clear is not an error.
+    let response = post_text(
+        &running,
+        "/api/settings/data/clear",
+        Some(OWNER_TOKEN),
+        CLEAR_BODY,
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a missing cache is not an error"
+    );
+
+    running.stop().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn a_clear_refuses_every_body_but_the_exact_one_and_deletes_nothing() {
+    let repo = temp_repo();
+    let running = boot(repo.path(), models(repo.path(), &[])).await;
+    let deps_entry = repo
+        .path()
+        .join(".acan")
+        .join("deps")
+        .join("x")
+        .join("file");
+    fs::create_dir_all(deps_entry.parent().expect("a folder")).expect("a dependency folder");
+    fs::write(&deps_entry, "installed").expect("an entry");
+
+    let refused = [
+        r#"{"what":"local","confirm":false}"#,
+        r#"{"what":"local"}"#,
+        r#"{"what":"all","confirm":true}"#,
+        r#"{"what":"local","confirm":true,"extra":1}"#,
+        r#"{"what":"local","confirm":"true"}"#,
+        r#"{"what":"local","confirm":1}"#,
+        r#"{"confirm":true}"#,
+        "not json",
+        "",
+    ];
+    for body in refused {
+        let response = post_text(
+            &running,
+            "/api/settings/data/clear",
+            Some(OWNER_TOKEN),
+            body,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body:?}");
+        let answer = json(response).await;
+        assert_eq!(answer["error"], "bad_request", "{body:?}");
+        assert!(deps_entry.is_file(), "{body:?} deletes nothing");
+    }
+    // A request with no body at all is a bad body too.
+    let response = post_to(&running, "/api/settings/data/clear", Some(OWNER_TOKEN)).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        deps_entry.is_file(),
+        "a request with no body deletes nothing"
+    );
+
+    running.stop().await.expect("the server stops");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dependency_cache_that_is_a_link_is_refused_and_its_target_kept() {
+    let repo = temp_repo();
+    let running = boot(repo.path(), models(repo.path(), &[])).await;
+    let elsewhere = tempfile::tempdir().expect("temp dir");
+    fs::write(elsewhere.path().join("keep"), "kept").expect("a file outside the state dir");
+    std::os::unix::fs::symlink(elsewhere.path(), repo.path().join(".acan").join("deps"))
+        .expect("the link is made");
+
+    let response = post_text(
+        &running,
+        "/api/settings/data/clear",
+        Some(OWNER_TOKEN),
+        CLEAR_BODY,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json(response).await;
+    assert_eq!(
+        body,
+        json!({ "error": "conflict", "what": "the dependency cache is a link" })
+    );
+    assert!(
+        elsewhere.path().join("keep").is_file(),
+        "the link's target is kept"
+    );
 
     running.stop().await.expect("the server stops");
 }
