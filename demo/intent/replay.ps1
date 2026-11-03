@@ -1146,7 +1146,11 @@ if (-not $DryRun) {
         }
         Assert-OwnRepo
         $head = (Invoke-Git rev-parse HEAD | Out-String).Trim()
-        if ($head -ne $Pin) { throw "the resumed clone's HEAD is $head, not the pin $Pin" }
+        # An order that landed earlier in this run moves HEAD past the pin, so the pin only has to be an ancestor.
+        if ($head -ne $Pin) {
+            & git -C $script:Repo merge-base --is-ancestor $Pin $head
+            if ($LASTEXITCODE -ne 0) { throw "the resumed clone's HEAD is $head, which does not descend from the pin $Pin" }
+        }
         $keys = Read-KeyFile -Path $script:EnvPath
         foreach ($value in $keys.Values) { if ($value.Length -ge 8) { $script:Secrets.Add($value) } }
         $existingTokens = Get-Content -LiteralPath (Join-Path $script:Repo '.acan\tokens.json') -Raw | ConvertFrom-Json
