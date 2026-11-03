@@ -1918,6 +1918,31 @@ pub fn disc_under(discs: &[([f32; 2], f32)], p: [f32; 2]) -> Option<usize> {
         .map(|(i, _, _)| i)
 }
 
+/// Each working drone's beacon on screen, as its centre in CSS px and its radius there, at the
+/// size the renderer draws it now, pulse included. The page rings each in paper, so the hue dot
+/// still reads on a grey machine top.
+#[must_use]
+pub fn beacon_discs(
+    motion: &Motion,
+    marks: &Marks,
+    project: impl Fn([f32; 3]) -> [f32; 2],
+) -> Vec<([f32; 2], f32)> {
+    let swell = 1.0 + BEACON_SWING * motion.pulse();
+    marks
+        .bodies
+        .iter()
+        .filter(|body| body.working() && motion.body_at(&body.agent).is_some())
+        .map(|body| {
+            let (centre, height) = visual_extent(
+                body.target,
+                2.0 * BEACON_RADIUS,
+                BEACON_PX * swell,
+                &project,
+            );
+            (centre, height * 0.5)
+        })
+        .collect()
+}
 /// A drone's centre on screen, in CSS px, and its radius there. The radius is half the drone's
 /// screen height, which the screen floor sets when the drone is small.
 #[must_use]
@@ -3975,6 +4000,29 @@ mod tests {
             "a working beacon swells: {}",
             beacons[0]
         );
+    }
+
+    #[test]
+    fn a_working_beacon_has_a_disc_for_its_paper_ring_and_an_idle_drone_none() {
+        let at = [0.0, 0.0, PLINTH_TOP];
+        let target = [4.0, 0.0, 9.0];
+        let marks = marks_of(vec![
+            drone("idle", at, target, "idle"),
+            drone("busy", at, target, "building"),
+        ]);
+        let mut motion = Motion::default();
+        motion.sync(&marks);
+        let flat = |p: [f32; 3]| [p[0], -p[2]];
+        let rest = beacon_discs(&motion, &marks, flat);
+        assert_eq!(rest.len(), 1, "only the working drone has a beacon");
+        assert_eq!(rest[0].0, [4.0, -9.0], "the disc is centred on the beacon");
+        assert!(
+            (rest[0].1 - BEACON_PX / 2.0).abs() < 1e-4,
+            "at rest it is the floor"
+        );
+        motion.advance(PULSE_MS / 2.0);
+        let swollen = beacon_discs(&motion, &marks, flat);
+        assert!(swollen[0].1 > rest[0].1, "the ring follows the pulse");
     }
 
     #[test]

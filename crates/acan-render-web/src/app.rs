@@ -1122,6 +1122,14 @@ impl App {
         self.motion.clear_ghosts()
     }
 
+    /// Each working drone's beacon on screen, as flat `[css x, css y, css radius]` triples, at its
+    /// pulse now. The page rings each in paper.
+    pub fn beacon_layout(&self) -> Vec<f32> {
+        marks::beacon_discs(&self.motion, &self.marks, |p| self.screen(p))
+            .into_iter()
+            .flat_map(|([x, y], radius)| [x, y, radius])
+            .collect()
+    }
     /// Each drone's disc on screen, as flat `[css x, css y, css radius]` triples, in the order the
     /// marks list the drones. The page keeps flags and names clear of them.
     pub fn drone_layout(&self) -> Vec<f32> {

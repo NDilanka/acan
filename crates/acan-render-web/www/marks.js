@@ -347,6 +347,42 @@ function placeHalo() {
   haloEl.style.transform = `translate(${x - size / 2}px, ${y - size / 2}px)`;
 }
 
+// The 1.5 px paper ring round each working drone's beacon, so the 7 px hue dot reads on a grey
+// machine top. One ring per beacon, made on first use and kept across paints.
+const BEACON_RING_PX = 1.5;
+const beaconRingEls = [];
+
+function placeBeaconRings() {
+  const discs = state.app.beacon_layout();
+  const count = discs.length / 3;
+  for (let i = 0; i < count; i += 1) {
+    if (beaconRingEls[i] === undefined) {
+      const el = document.createElement("div");
+      el.className = "beacon-ring";
+      el.setAttribute("aria-hidden", "true");
+      Object.assign(el.style, {
+        position: "absolute",
+        left: "0",
+        top: "0",
+        borderRadius: "50%",
+        border: `${BEACON_RING_PX}px solid var(--page)`,
+        boxSizing: "border-box",
+        pointerEvents: "none",
+      });
+      beaconRingEls[i] = el;
+    }
+    const el = beaconRingEls[i];
+    if (el.parentNode !== flagsEl) flagsEl.prepend(el);
+    const [x, y, r] = [discs[3 * i], discs[3 * i + 1], discs[3 * i + 2]];
+    const size = 2 * (r + BEACON_RING_PX);
+    el.hidden = false;
+    el.style.width = `${size}px`;
+    el.style.height = `${size}px`;
+    el.style.transform = `translate(${x - size / 2}px, ${y - size / 2}px)`;
+  }
+  for (let i = count; i < beaconRingEls.length; i += 1) beaconRingEls[i].hidden = true;
+}
+
 // The ghosts' Alt chips, made on first use. paintMarks empties the flags, and these with them.
 let ghostEls = [];
 
@@ -739,6 +775,7 @@ function placeFlags(placedBoxes) {
   }
   for (let i = more; i < moreEls.length; i += 1) moreEls[i].hidden = true;
   placeGhostFlags(placedBoxes);
+  placeBeaconRings();
   placeHalo();
   return { plots, leaders };
 }
