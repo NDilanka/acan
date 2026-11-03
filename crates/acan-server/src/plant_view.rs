@@ -24,7 +24,8 @@ use crate::tour;
 /// What a plant view answers when the order has no receipt for its confirmed scope yet.
 const NO_RECEIPT: &str = "no receipt for this order yet";
 
-/// The plant view of `order`'s latest receipt, with its tour filled in.
+/// The plant view of `order`'s latest receipt, with its tour filled in. The tour is never waited
+/// for, so the view is served at once: see [`tour::fill`].
 ///
 /// # Errors
 ///
@@ -33,6 +34,20 @@ const NO_RECEIPT: &str = "no receipt for this order yet";
 /// cannot be read or does not match the receipt, or when the view cannot be built from the
 /// receipt; the detail goes to the log.
 pub(crate) async fn order_view<C: ModelClient + 'static>(
+    host: &Host<C>,
+    order: OrderId,
+) -> Result<PlantView, ApiError> {
+    let view = untoured_view(host, order).await?;
+    Ok(tour::fill(host, view).await)
+}
+
+/// The plant view of `order`'s latest receipt before its tour is filled in. The director's call for
+/// a new receipt starts from this view, so it is built the same way [`order_view`] builds it.
+///
+/// # Errors
+///
+/// The same errors as [`order_view`].
+pub(crate) async fn untoured_view<C: ModelClient + 'static>(
     host: &Host<C>,
     order: OrderId,
 ) -> Result<PlantView, ApiError> {
@@ -49,8 +64,7 @@ pub(crate) async fn order_view<C: ModelClient + 'static>(
     let (_app, corpus) =
         observe::read_protected(&snapshot).map_err(|err| ApiError::Internal(err.into()))?;
     let machines = model::plant_machines(&host.scan().index);
-    let view = assemble(&receipt, &scope, &plate, &machines, &corpus)?;
-    Ok(tour::fill(host, view).await)
+    assemble(&receipt, &scope, &plate, &machines, &corpus)
 }
 
 /// The receipt the plant view answers for: the latest one whose scope revision is the order's

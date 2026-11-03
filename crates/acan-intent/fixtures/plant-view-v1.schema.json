@@ -1670,7 +1670,7 @@
           ]
         },
         {
-          "description": "The deterministic order: residue, then violations, then bounced, then fulfilled.",
+          "description": "The deterministic order: residue, then violations, then bounced, then the other mandatory\nitems, then fulfilled, then a few open preserved checks.",
           "type": "object",
           "properties": {
             "bindings": {

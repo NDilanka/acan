@@ -418,6 +418,10 @@ async fn schema_invalid_reply_is_a_validation_error_and_still_metered() {
         .await
         .expect_err("reply must not parse");
 
+    let trace = err
+        .reply_trace()
+        .expect("the unusable reply keeps its trace");
+    assert_eq!(trace.call.provider, "meta");
     match err {
         LlmError::SchemaValidation { raw, .. } => assert!(raw.contains("maybe")),
         other => panic!("expected SchemaValidation, got {other:?}"),
@@ -430,14 +434,16 @@ async fn structured_reply_cut_at_the_output_cap_is_refused_and_names_the_cap() {
     let meta = MockServer::start().await;
     let baseten = MockServer::start().await;
     // A cut reply can still parse as a prefix of valid JSON, so the finish reason must decide.
-    let cut = ResponseTemplate::new(200).set_body_json(json!({
-        "choices": [{
-            "index": 0,
-            "finish_reason": "length",
-            "message": {"role": "assistant", "content": r#"{"clash":true,"files":[]}"#}
-        }],
-        "usage": {"prompt_tokens": 120, "completion_tokens": 8000, "total_tokens": 8120}
-    }));
+    let cut = ResponseTemplate::new(200)
+        .insert_header("x-request-id", "req-cap-1")
+        .set_body_json(json!({
+            "choices": [{
+                "index": 0,
+                "finish_reason": "length",
+                "message": {"role": "assistant", "content": r#"{"clash":true,"files":[]}"#}
+            }],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 8000, "total_tokens": 8120}
+        }));
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .and(body_partial_json(json!({"max_tokens": 8000})))
@@ -463,12 +469,23 @@ async fn structured_reply_cut_at_the_output_cap_is_refused_and_names_the_cap() {
         LlmError::OutputCapped {
             provider,
             max_tokens,
+            ..
         } => {
             assert_eq!(provider, "meta");
             assert_eq!(*max_tokens, Some(8_000));
         }
         other => panic!("expected OutputCapped, got {other:?}"),
     }
+    // The cut call's tokens, latency and request id survive the refusal.
+    let trace = err.reply_trace().expect("the cut reply keeps its trace");
+    assert_eq!(trace.request_id.as_deref(), Some("req-cap-1"));
+    assert_eq!(trace.call.provider, "meta");
+    assert_eq!(trace.call.usage.prompt_tokens, 120);
+    assert_eq!(trace.call.usage.completion_tokens, 8_000);
+    assert!(
+        trace.call.latency > std::time::Duration::ZERO,
+        "the call's latency is kept"
+    );
     assert_eq!(
         err.to_string(),
         "meta stopped the reply at the 8000-token output cap before it finished"

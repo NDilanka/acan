@@ -24,7 +24,7 @@ pub use chat::{
 };
 pub use client::{Destination, MUSE_SPARK_MODELS, MUSE_SPARK_PROVIDER, ModelClient, Structured};
 pub use config::{ConfigError, LlmConfig, ProviderConfig, StructuredOutput, TokenLimitField};
-pub use error::{LlmError, UnknownRole};
+pub use error::{LlmError, ReplyTrace, UnknownRole};
 pub use key::{ApiKey, ApiKeys};
 pub use openai::{OpenAiCompatible, RetryPolicy};
 pub use plan::{

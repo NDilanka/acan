@@ -1,6 +1,6 @@
 {
   "version": "acan-caption-catalog/2",
-  "catalog_version": "captions-4",
+  "catalog_version": "captions-5",
   "templates": [
     {
       "template_id": "unspecified.authorized",
@@ -248,6 +248,20 @@
       "text": "Classified: preserved. Recorded state: stopped.",
       "classes": ["preserved"],
       "states": ["stopped"],
+      "slots": {}
+    },
+    {
+      "template_id": "preserved.open",
+      "text": "Classified: preserved. Recorded state: open.",
+      "classes": ["preserved"],
+      "states": ["open"],
+      "slots": {}
+    },
+    {
+      "template_id": "preserved.fixed",
+      "text": "Classified: preserved. Recorded state: fixed.",
+      "classes": ["preserved"],
+      "states": ["fixed"],
       "slots": {}
     }
   ]

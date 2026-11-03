@@ -25,12 +25,21 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::host::Host;
 
-/// The most output one director reply may use.
-const DIRECTOR_MAX_TOKENS: u32 = 2_000;
+/// The most output one director reply may use. Muse Spark spends hidden reasoning tokens from this
+/// cap. A reply under the old 2000 cap stopped before its tour was written (receipt VIS02 director),
+/// and a live draft spent 5687 reasoning tokens, so the director gets the draft's 16000.
+const DIRECTOR_MAX_TOKENS: u32 = 16_000;
 
-/// How long a plant view waits for the director before it serves the deterministic tour. The call
-/// keeps running after the wait, and its answer is cached for the receipt.
-pub(crate) const DIRECTOR_WAIT: Duration = Duration::from_secs(20);
+const _: () = assert!(
+    DIRECTOR_MAX_TOKENS >= 8_000,
+    "a director reply needs room for hidden reasoning as well as the tour"
+);
+
+/// How long a plant view waits for the director before it serves the deterministic tour. No view
+/// waits: a call keeps running after the view is served, and its answer is cached for the receipt,
+/// so a view opened after the answer gets the director's tour. The call starts when the receipt is
+/// recorded ([`prefetch`]), which leaves it time to answer before the view is opened.
+pub(crate) const DIRECTOR_WAIT: Duration = Duration::ZERO;
 
 /// How long one director call may take, counted from when it is accepted, so the wait for a slot
 /// is part of it. A call still running then is refused, and the receipt is asked again after
@@ -142,6 +151,15 @@ pub(crate) async fn direct<C: ModelClient>(
         ..ChatRequest::default()
     };
     let reply = client.chat_json::<Tour>(Role::Director, request).await?;
+    tracing::info!(
+        receipt = %view.receipt_hash,
+        model = %reply.call.model,
+        request_id = ?reply.request_id,
+        prompt_tokens = reply.call.usage.prompt_tokens,
+        completion_tokens = reply.call.usage.completion_tokens,
+        latency = ?reply.call.latency,
+        "the director replied"
+    );
     let model: ModelRef = reply.call.model.parse()?;
     Ok(ModelProposal::new(reply.value, model))
 }
@@ -159,12 +177,22 @@ pub(crate) fn admit(
     let catalog = CaptionCatalog::trusted()?;
     let model = proposal.model().clone();
     let tour = proposal.proposal().clone();
-    let bindings = acan_intent::admit::tour(view, &catalog, &tour)?;
-    Ok(TourView::Directed {
-        model,
-        tour,
-        bindings,
-    })
+    match acan_intent::admit::tour(view, &catalog, &tour) {
+        Ok(bindings) => Ok(TourView::Directed {
+            model,
+            tour,
+            bindings,
+        }),
+        Err(rejection) => {
+            tracing::warn!(
+                receipt = %view.receipt_hash,
+                model = %model,
+                reason = %rejection,
+                "the director's tour is refused by admission; the plant view serves the deterministic tour"
+            );
+            Err(rejection.into())
+        }
+    }
 }
 
 /// The deterministic tour of `view` with its bindings, from [`acan_intent::deterministic`].
@@ -362,10 +390,23 @@ impl TourCache {
     }
 }
 
-/// The view with its tour filled: the director's admitted tour when it answers in time, else the
-/// deterministic tour. The plant view never waits longer than [`DIRECTOR_WAIT`] for the model.
+/// The view with its tour filled: the director's admitted tour when its answer is already cached,
+/// else the deterministic tour. The plant view never waits longer than [`DIRECTOR_WAIT`] for the
+/// model.
 pub(crate) async fn fill<C: ModelClient + 'static>(host: &Host<C>, view: PlantView) -> PlantView {
     fill_within(host, view, DIRECTOR_WAIT).await
+}
+
+/// Starts the director's call for `view` without waiting for it, so its answer is cached before a
+/// view of the receipt is opened. A receipt with an answer or a running call starts nothing, and
+/// a call that finds every ticket taken is not started here, so a view asks again when it is shown.
+pub(crate) fn prefetch<C: ModelClient + 'static>(host: &Host<C>, view: &PlantView) {
+    if *host.shutdown_signal().borrow() {
+        return;
+    }
+    if let Claim::Accepted(job, ticket) = host.tours().claim(&view.receipt_hash, Instant::now()) {
+        spawn(host, view.clone(), job, ticket);
+    }
 }
 
 /// [`fill`] with the wait given. The director's call runs in its own task, so a wait that ends
@@ -377,16 +418,8 @@ pub(crate) async fn fill_within<C: ModelClient + 'static>(
     wait: Duration,
 ) -> PlantView {
     let admitted = match directed(host, &view, wait).await {
-        Some(DirectorAnswer::Proposal(proposal)) => match admit(&view, proposal) {
-            Ok(tour) => Some(tour),
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "the director's tour does not fit this view; the plant view serves the deterministic tour"
-                );
-                None
-            }
-        },
+        // `admit` logs the refusal and its reason.
+        Some(DirectorAnswer::Proposal(proposal)) => admit(&view, proposal).ok(),
         Some(DirectorAnswer::Refused(_) | DirectorAnswer::Transient { .. }) | None => None,
     };
     view.tour = match admitted {
@@ -394,7 +427,11 @@ pub(crate) async fn fill_within<C: ModelClient + 'static>(
         None => match deterministic(&view) {
             Ok(tour) => Some(tour),
             Err(err) => {
-                tracing::warn!(error = %err, "no deterministic tour; the plant view has none");
+                tracing::warn!(
+                    receipt = %view.receipt_hash,
+                    error = %err,
+                    "no deterministic tour; the plant view has none"
+                );
                 None
             }
         },
@@ -466,6 +503,7 @@ fn spawn<C: ModelClient + 'static>(
             DirectorAnswer::Proposal(_) => {}
             DirectorAnswer::Refused(reason) | DirectorAnswer::Transient { reason, .. } => {
                 tracing::warn!(
+                    receipt = %view.receipt_hash,
                     reason = %reason,
                     "the director's tour was not served; the plant view serves the deterministic tour"
                 );
@@ -507,9 +545,37 @@ async fn answer_within<C: ModelClient>(
 async fn ask<C: ModelClient>(client: &C, view: &PlantView) -> DirectorAnswer {
     match direct(client, view).await {
         Ok(proposal) => DirectorAnswer::Proposal(proposal),
-        Err(err) if err.is_transient() => DirectorAnswer::transient(err.to_string()),
-        Err(err) => DirectorAnswer::Refused(err.to_string()),
+        Err(err) => {
+            log_unusable_reply(view, &err);
+            if err.is_transient() {
+                DirectorAnswer::transient(err.to_string())
+            } else {
+                DirectorAnswer::Refused(err.to_string())
+            }
+        }
     }
+}
+
+/// Logs the tokens, latency and request id of a director reply that could not be used, so the
+/// refusal keeps what the call cost. An error with no reply, such as a timeout, logs nothing here.
+fn log_unusable_reply(view: &PlantView, err: &TourError) {
+    let TourError::Director(llm) = err else {
+        return;
+    };
+    let Some(trace) = llm.reply_trace() else {
+        return;
+    };
+    let call = &trace.call;
+    tracing::warn!(
+        receipt = %view.receipt_hash,
+        model = %call.model,
+        request_id = ?trace.request_id,
+        prompt_tokens = call.usage.prompt_tokens,
+        completion_tokens = call.usage.completion_tokens,
+        latency = ?call.latency,
+        error = %err,
+        "the director's reply was not usable; the plant view serves the deterministic tour"
+    );
 }
 
 /// The director's context: the view without any tour, the mandatory item ids and the catalog.
@@ -673,7 +739,7 @@ mod tests {
                 Role::Director,
                 |request| {
                     request.temperature == Some(0.0)
-                        && request.max_tokens == Some(2_000)
+                        && request.max_tokens == Some(DIRECTOR_MAX_TOKENS)
                         && request
                             .response_format
                             .as_ref()
@@ -899,6 +965,50 @@ mod tests {
         let mut view = fixture(text);
         view.tour = None;
         view
+    }
+
+    #[tokio::test]
+    async fn a_view_is_served_at_once_when_the_director_has_not_answered() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let host = host_with(dir.path(), Stalled::default()).await;
+
+        let filled = tokio::time::timeout(Duration::from_secs(5), fill(&host, untoured(VIEW)))
+            .await
+            .expect("the view is not held for the director");
+
+        assert!(matches!(filled.tour, Some(TourView::Deterministic { .. })));
+        assert_eq!(
+            host.tours().calls_accepted(),
+            1,
+            "the call keeps running, for the cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prefetched_answer_fills_the_view_without_a_second_call() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let view = untoured(VIEW);
+        let tour = directed_tour(&fixture(VIEW));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let host = host_with(
+            dir.path(),
+            Counting {
+                inner: director(Reply::json(&tour)),
+                calls: Arc::clone(&calls),
+            },
+        )
+        .await;
+
+        prefetch(&host, &view);
+        prefetch(&host, &view);
+        let filled = fill_within(&host, view, Duration::from_secs(5)).await;
+
+        assert!(matches!(filled.tour, Some(TourView::Directed { .. })));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the prefetched call is the only call"
+        );
     }
 
     #[tokio::test]
@@ -1392,9 +1502,19 @@ mod tests {
         );
         assert!(
             !TourError::Director(LlmError::SchemaValidation {
-                provider,
+                provider: provider.clone(),
                 detail: String::new(),
                 raw: String::new(),
+                trace: Box::new(acan_llm::ReplyTrace {
+                    call: acan_llm::CallRecord {
+                        role: Role::Director,
+                        provider,
+                        model: "muse-spark-1.3".to_owned(),
+                        usage: acan_llm::Usage::default(),
+                        latency: Duration::ZERO,
+                    },
+                    request_id: None,
+                }),
             })
             .is_transient()
         );

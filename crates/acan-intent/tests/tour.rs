@@ -151,6 +151,7 @@ fn the_deterministic_order_is_residue_then_violations_then_bounced_then_the_rest
             "chk-links-delete",
             "chk-signup-store",
             "i-login-limit",
+            "chk-health",
         ]
     );
 }
@@ -225,7 +226,7 @@ fn an_optional_item_that_cannot_be_bound_is_left_out() {
     let tour = deterministic_tour(&view);
 
     assert!(!tour.reaches(&"i-login-limit".parse().expect("an id")));
-    assert_eq!(tour.steps.len(), 7);
+    assert_eq!(tour.steps.len(), 8);
 }
 
 #[test]
@@ -255,6 +256,48 @@ fn a_view_with_nothing_to_visit_has_no_tour() {
         deterministic(&view),
         Err(DeterministicError::NothingToVisit)
     ));
+}
+
+#[test]
+fn a_view_of_passing_checks_only_still_has_a_tour_of_its_open_preserved_checks() {
+    // A clean receipt: nothing to rule on, every check passed and is open. The walk still has a
+    // step, so the page has a tour before the director answers.
+    let mut view = view(DIRECTED);
+    view.items.retain(|item| item.class == ItemClass::Preserved);
+
+    let tour = deterministic_tour(&view);
+
+    assert_eq!(order(&tour), ["chk-health"]);
+    assert_eq!(template_of(&tour, "chk-health"), "preserved.open");
+    assert!(admit::tour(&view, &trusted(), &tour).is_ok());
+}
+
+/// The directed fixture with `count` more open preserved checks, each a copy of `chk-health`.
+fn with_open_preserved_checks(count: usize) -> PlantView {
+    let mut value = raw_view();
+    item_mut(&mut value, "chk-health")["state"] = json!("open");
+    let copy = item_mut(&mut value, "chk-health").clone();
+    let items = value["items"].as_array_mut().expect("items");
+    for number in 1..=count {
+        let mut item = copy.clone();
+        item["item_id"] = json!(format!("chk-health-{number}"));
+        items.push(item);
+    }
+    serde_json::from_value(value).expect("decoding the view")
+}
+
+#[test]
+fn the_fallback_visits_at_most_three_open_preserved_checks() {
+    let view = with_open_preserved_checks(4);
+
+    let tour = deterministic_tour(&view);
+
+    let preserved: Vec<&str> = order(&tour)
+        .into_iter()
+        .filter(|item| item.starts_with("chk-health"))
+        .collect();
+    assert_eq!(preserved, ["chk-health", "chk-health-1", "chk-health-2"]);
+    assert!(admit::tour(&view, &trusted(), &tour).is_ok());
 }
 
 #[test]
@@ -416,6 +459,52 @@ fn every_mandatory_class_and_state_has_a_caption() {
         }
     }
     assert!(uncaptioned.is_empty(), "uncaptioned: {uncaptioned:?}");
+}
+
+#[test]
+fn every_class_and_state_has_a_caption() {
+    // Not only the mandatory pairs: a tour may visit any item. A check that passed and is open
+    // is the usual state of a clean receipt, and no template described it before captions-5.
+    let catalog = trusted();
+    let mut uncaptioned = Vec::new();
+    for class in ItemClass::ALL {
+        for state in ALL_STATES {
+            let fitted = catalog.templates.iter().any(|template| {
+                template.classes.contains(&class) && template.states.contains(&state)
+            });
+            if !fitted {
+                uncaptioned.push((class, state));
+            }
+        }
+    }
+    assert!(uncaptioned.is_empty(), "uncaptioned: {uncaptioned:?}");
+}
+
+#[test]
+fn an_open_preserved_check_is_captioned_and_its_step_is_admitted() {
+    // The director's step on a check that passed and is open. Admission may still refuse the
+    // whole tour for a mandatory item it does not reach, but not for this step.
+    let mut value = raw_view();
+    item_mut(&mut value, "chk-health")["state"] = json!("open");
+    let view: PlantView = serde_json::from_value(value.clone()).expect("decoding the view");
+    let tour: Tour = serde_json::from_value(json!({
+        "receipt_hash": value["receipt_hash"],
+        "steps": [{
+            "item_id": "chk-health",
+            "camera": { "machine_id": "server", "zoom": "machine" },
+            "stage": [],
+            "evidence_refs": [],
+            "caption": { "template_id": "preserved.open", "slots": {} }
+        }]
+    }))
+    .expect("the tour decodes");
+
+    assert_eq!(template_of(&tour, "chk-health"), "preserved.open");
+    assert!(text_of("preserved.open").ends_with("Recorded state: open."));
+    assert!(!matches!(
+        admit::tour(&view, &trusted(), &tour),
+        Err(TourRejection::Step { .. })
+    ));
 }
 
 #[test]
