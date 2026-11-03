@@ -1081,6 +1081,23 @@ fn the_scope_request_states_the_side_effect_rule_and_carries_the_last_error() {
     );
 }
 
+#[test]
+fn the_scope_prompt_pairs_a_status_item_with_body_and_header_items_on_its_route() {
+    let prompt = model::SCOPE_PROMPT;
+    assert!(
+        prompt.contains("Add a body item and a header item on the same route for it"),
+        "a status item gets its body and header items on the same route: {prompt}"
+    );
+    assert!(
+        prompt.contains("never give it channel any"),
+        "the prompt keeps a status item off channel any: {prompt}"
+    );
+    assert!(
+        !prompt.contains("give it channel any, or"),
+        "the old choice of channel any is gone: {prompt}"
+    );
+}
+
 #[tokio::test]
 async fn an_offline_client_gives_no_scope_draft() {
     let models = Models::load(Path::new("no-such-routing-file.toml")).expect("the offline client");

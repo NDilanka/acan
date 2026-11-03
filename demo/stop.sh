@@ -1,6 +1,7 @@
 #!/bin/sh
-# Stops every process the take started, and only those, as stop.ps1 does. Each process is matched by pid and
-# start time, so a pid the OS has reused is left alone. With no -d it stops the latest take.
+# Stops every process the take started, and only those, as stop.ps1 does. Each process is stopped by the pid file
+# that start_logged wrote for it in the run's logs folder. The pid file holds the pid and the stamp the process had
+# when it started, so a pid the OS has reused is left alone. With no -d it stops the latest take.
 # acan gets SIGINT, so it shuts down cleanly. Every other process gets SIGTERM, and SIGKILL if it is still
 # alive after 10 seconds.
 #
@@ -18,7 +19,7 @@ while getopts 'd:h' opt; do
   esac
 done
 
-require_tools jq ps pgrep
+require_tools ps pgrep
 
 if [ -z "$run_dir" ]; then
   run_dir=$(current_run_dir)
@@ -27,14 +28,23 @@ if [ -z "$run_dir" ]; then
   printf '%s\n' 'no run folder given and no current run; nothing to stop'
   exit 0
 fi
-state="$run_dir/logs/run.json"
-if [ ! -f "$state" ]; then
-  printf 'no run state in %s; nothing to stop\n' "$run_dir"
+logs="$run_dir/logs"
+if [ ! -d "$logs" ]; then
+  printf 'no logs in %s; nothing to stop\n' "$run_dir"
   exit 0
 fi
 
-tab=$(printf '\t')
-jq -r '.processes[] | [.name, (.pid | tostring), .lstart] | join("\t")' "$state" |
-  while IFS=$tab read -r name pid lstart; do
-    stop_recorded "$name" "$pid" "$lstart"
-  done
+found=0
+for pid_file in "$logs"/*.pid; do
+  if [ ! -f "$pid_file" ]; then
+    continue
+  fi
+  found=1
+  stop_pid=
+  stop_stamp=
+  read -r stop_pid stop_stamp < "$pid_file"
+  stop_recorded "$(basename "$pid_file" .pid)" "$stop_pid" "$stop_stamp"
+done
+if [ "$found" = 0 ]; then
+  printf 'no pid files in %s; nothing to stop\n' "$logs"
+fi
