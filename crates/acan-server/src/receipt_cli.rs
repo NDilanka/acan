@@ -14,6 +14,7 @@
 //! merges are written to its object store, and every run writes into a temporary directory that
 //! is removed when the command ends.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -21,12 +22,12 @@ use std::process::Stdio;
 use std::str::FromStr;
 use std::time::Duration;
 
-use acan_git::{Preparation, PrepareOutcome, ProtectedPaths, Repo};
+use acan_git::{Preparation, PrepareOutcome, ProtectedPaths, Repo, git_env};
 use acan_intent::fold::fold;
 use acan_intent::{
     CanonicalError, CommitSha, GateState, HumanRef, ImageName, OrderRef, Receipt, RepairBudget,
-    RepairRounds, RunOutcome, Scope, ScopeBody, ScopeConfirmation, ScopeConfirmationV1, ScopeRev,
-    ScopeV1, UnixMillis,
+    RepairRounds, RepoPath, RunOutcome, Scope, ScopeBody, ScopeConfirmation, ScopeConfirmationV1,
+    ScopeRev, ScopeV1, UnixMillis,
 };
 use acan_witness::RunnerConfig;
 use clap::ValueEnum;
@@ -35,6 +36,8 @@ use tokio::process::Command as ProcessCommand;
 use tokio::sync::Semaphore;
 
 use crate::DEFAULT_WITNESS_CONCURRENCY;
+use crate::deps::{self, InstallRecord, Installer, Role};
+use crate::init;
 use crate::jobs::{APP_PORT, RUNNER_PROGRAM};
 use crate::observe::{self, Judged, ObserveError, Order, Plan};
 use crate::receipt::render_markdown;
@@ -126,6 +129,9 @@ pub enum ShadowError {
     /// The receipt could not be written.
     #[error("cannot write the receipt: {0}")]
     Output(String),
+    /// The arguments do not name what the mode needs.
+    #[error("{0}")]
+    Usage(String),
 }
 
 /// The arguments of `acan receipt`.
@@ -138,9 +144,17 @@ pub struct ShadowArgs {
     /// `git branch <name> <sha>` when the base is a commit.
     #[arg(long)]
     pub base: String,
-    /// The head ref, observed against the base.
+    /// The head ref, observed against the base. Required, except with `--check-contract`.
     #[arg(long)]
-    pub head: String,
+    pub head: Option<String>,
+    /// Where a node app's installed dependencies are cached. Defaults to `$XDG_CACHE_HOME/acan/deps`,
+    /// or `~/.cache/acan/deps`.
+    #[arg(long)]
+    pub cache_dir: Option<PathBuf>,
+    /// Checks the base's protected contract without running it, and needs no `--head`. Docker is
+    /// reported as information only, and no container starts.
+    #[arg(long)]
+    pub check_contract: bool,
 }
 
 /// The format `acan receipt` prints.
@@ -170,6 +184,9 @@ pub struct ShadowReceipt {
     pub receipt_hash: String,
     /// The receipt the core built.
     pub receipt: Receipt,
+    /// The installs the runs mounted, one per side of the contrast. Empty for an app with no
+    /// install, and then the envelope leaves the field out.
+    pub installs: Vec<InstallRecord>,
 }
 
 impl ShadowReceipt {
@@ -180,7 +197,7 @@ impl ShadowReceipt {
             "acan receipt --repo {} --base {} --head {}",
             shell_word(&self.args.repo.display().to_string()),
             shell_word(&self.args.base),
-            shell_word(&self.args.head),
+            shell_word(self.args.head.as_deref().unwrap_or_default()),
         )
     }
 
@@ -203,44 +220,35 @@ pub async fn run(args: &ShadowArgs) -> Result<ShadowReceipt, ShadowError> {
 }
 
 async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, ShadowError> {
-    check_ref("--base", &args.base)?;
-    check_ref("--head", &args.head)?;
-    let repo = Repo::open_with_protected(&args.repo, args.base.as_str())
-        .await
-        .map_err(|err| ShadowError::Repo {
-            repo: args.repo.clone(),
-            detail: err.to_string(),
-        })?;
-    let base_head = repo.protected_head().await.map_err(|_| ShadowError::Ref {
-        flag: "--base",
-        name: args.base.clone(),
-        detail: "--base must be a local branch; create one with `git branch <name> <sha>`"
-            .to_owned(),
+    let head = args.head.as_deref().ok_or_else(|| {
+        ShadowError::Usage(
+            "--head is required; it is only omitted with --check-contract".to_owned(),
+        )
     })?;
-    let base_read = commit_sha(&base_head.to_string())?;
-    let head_commit = match resolve_commit(repo.root(), &args.head).await {
+    check_ref("--base", &args.base)?;
+    check_ref("--head", head)?;
+    let (repo, base_read) = open_base(args).await?;
+    let head_commit = match resolve_commit(repo.root(), head).await {
         Ok(Some(commit)) => commit,
         Ok(None) => {
             return Err(ShadowError::Ref {
                 flag: "--head",
-                name: args.head.clone(),
+                name: head.to_owned(),
                 detail: "it does not name a commit of the clone".to_owned(),
             });
         }
         Err(detail) => {
             return Err(ShadowError::Ref {
                 flag: "--head",
-                name: args.head.clone(),
+                name: head.to_owned(),
                 detail: format!("git could not resolve it: {detail}"),
             });
         }
     };
 
-    let policy = observe::runner_policy();
-    policy
-        .check_environment()
-        .map_err(|err| ShadowError::Observe(format!("the container policy is invalid: {err}")))?;
-    let protected = observe::protected_paths(&policy);
+    // The protected paths are the same for every app; the run policy depends on the app's runtime,
+    // which the protected contract names, so it is chosen once the contract is read.
+    let protected = observe::protected_paths(&observe::runner_policy());
     let base = prepare(&repo, &base_read, &protected, "the base").await?;
     // Every run names the commit the base was prepared on, so the envelope names what was tested.
     ensure_unmoved(base.protected_head(), &base_read, &args.base)?;
@@ -256,6 +264,10 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
         .map_err(|err| ShadowError::Observe(err.to_string()))?;
     let (app, corpus) =
         observe::read_protected(&snapshot).map_err(|err| ShadowError::Contract(err.to_string()))?;
+    let policy = observe::policy_for(&app).map_err(|err| ShadowError::Contract(err.to_string()))?;
+    policy
+        .check_environment()
+        .map_err(|err| ShadowError::Observe(format!("the container policy is invalid: {err}")))?;
 
     let candidate = prepare(&repo, &head_commit, &protected, "the head").await?;
     ensure_unmoved(candidate.protected_head(), &base_commit, &args.base)?;
@@ -276,6 +288,30 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
     let observations = scratch_root.path().join("observations");
     let slots = Semaphore::new(DEFAULT_WITNESS_CONCURRENCY);
     let runner = RunnerConfig::new(docker.to_path_buf(), APP_PORT);
+    let cache = deps::cache_dir(args.cache_dir.as_deref()).map_err(ShadowError::Observe)?;
+    let installer = Installer {
+        repo: &repo,
+        config: &runner,
+        slots: &slots,
+        cache: &cache,
+        scratch: &scratch_root.path().join("installs"),
+    };
+    let install = |err: deps::DepsError| {
+        ShadowError::Observe(format!("the dependencies cannot be installed: {err}"))
+    };
+    let base_installed = installer
+        .install(&base, Role::Base, &app)
+        .await
+        .map_err(install)?;
+    let candidate_installed = installer
+        .install(&candidate, Role::Candidate, &app)
+        .await
+        .map_err(install)?;
+    let installs: Vec<InstallRecord> = [base_installed.as_ref(), candidate_installed.as_ref()]
+        .into_iter()
+        .flatten()
+        .map(|installed| installed.record.clone())
+        .collect();
     let plan = Plan {
         repo: &repo,
         base: &base,
@@ -286,6 +322,12 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
         app: &app,
         corpus: &corpus,
         policy: &policy,
+        base_dependencies: base_installed
+            .as_ref()
+            .map(|installed| installed.modules.as_path()),
+        candidate_dependencies: candidate_installed
+            .as_ref()
+            .map(|installed| installed.modules.as_path()),
         runner: &runner,
         slots: &slots,
         probes_at_once: DEFAULT_WITNESS_CONCURRENCY,
@@ -314,7 +356,101 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
             .collect(),
         receipt_hash,
         receipt: judged.receipt,
+        installs,
     })
+}
+
+/// Opens the clone and resolves the protected head that `--base` names. The base must be a local
+/// branch.
+async fn open_base(args: &ShadowArgs) -> Result<(Repo, CommitSha), ShadowError> {
+    let repo = Repo::open_with_protected(&args.repo, args.base.as_str())
+        .await
+        .map_err(|err| ShadowError::Repo {
+            repo: args.repo.clone(),
+            detail: err.to_string(),
+        })?;
+    let base_head = repo.protected_head().await.map_err(|_| ShadowError::Ref {
+        flag: "--base",
+        name: args.base.clone(),
+        detail: "--base must be a local branch; create one with `git branch <name> <sha>`"
+            .to_owned(),
+    })?;
+    let base_commit = commit_sha(&base_head.to_string())?;
+    Ok((repo, base_commit))
+}
+
+/// What `--check-contract` found in the base's protected contract.
+#[derive(Debug, Clone)]
+pub struct ContractCheck {
+    /// The base commit the contract was read from.
+    pub base_commit: String,
+    /// The runtime the contract names.
+    pub runtime: String,
+    /// Whether the contract names an install phase.
+    pub install: bool,
+    /// How many probes the corpus holds.
+    pub probes: usize,
+    /// Whether Docker answered. This is information only: the check starts no container.
+    pub docker: Result<(), String>,
+}
+
+/// Checks the base's protected contract without running the app. It reads the contract from the
+/// base's protected paths, as a receipt does, decodes it, runs the contract's own checks and the
+/// corpus cross-checks, and checks the container policy the runs would use. Docker is asked
+/// whether it answers, and that answer is information only.
+///
+/// # Errors
+///
+/// Returns [`ShadowError`] when the base cannot be used, the clone cannot be read, the contract
+/// does not decode or fails its checks, or its container policy is invalid.
+pub async fn check_contract(args: &ShadowArgs) -> Result<ContractCheck, ShadowError> {
+    check_contract_with(args, Path::new(RUNNER_PROGRAM)).await
+}
+
+async fn check_contract_with(
+    args: &ShadowArgs,
+    docker: &Path,
+) -> Result<ContractCheck, ShadowError> {
+    check_ref("--base", &args.base)?;
+    let (repo, base_commit) = open_base(args).await?;
+    let protected = observe::runner_policy().mounts.protected;
+    let scratch_root = tempfile::TempDir::new()
+        .map_err(|err| ShadowError::Observe(format!("cannot create a scratch directory: {err}")))?;
+    let snapshot = scratch_root.path().join("snapshot");
+    write_protected(repo.root(), &base_commit, &protected, &snapshot).await?;
+    let (app, corpus) =
+        observe::read_protected(&snapshot).map_err(|err| ShadowError::Contract(err.to_string()))?;
+    init::cross_check(&corpus).map_err(|err| ShadowError::Contract(err.to_string()))?;
+    let policy = observe::policy_for(&app).map_err(|err| ShadowError::Contract(err.to_string()))?;
+    policy
+        .check_environment()
+        .map_err(|err| ShadowError::Observe(format!("the container policy is invalid: {err}")))?;
+    Ok(ContractCheck {
+        base_commit: base_commit.to_string(),
+        runtime: app.runtime.as_str().to_owned(),
+        install: app.install.is_some(),
+        probes: corpus.probes.len(),
+        docker: docker_command(docker, &["version", "--format", "{{.Server.Version}}"]).await,
+    })
+}
+
+/// The check as a person reads it: the contract's facts, then Docker as information.
+#[must_use]
+pub fn check_text(check: &ContractCheck) -> String {
+    let install = if check.install {
+        "with an install phase"
+    } else {
+        "with no install phase"
+    };
+    let docker = match &check.docker {
+        Ok(()) => "available".to_owned(),
+        Err(detail) => format!("not available: {detail}"),
+    };
+    format!(
+        "contract ok at base {}: runtime {}, {install}, {} probes\n\
+         docker: {docker} (information only; the check starts no container)",
+        check.base_commit, check.runtime, check.probes
+    )
 }
 
 /// Refuses a ref that is empty, looks like an option, or has whitespace or control characters.
@@ -348,6 +484,7 @@ async fn resolve_commit_with(
     limit: Duration,
 ) -> Result<Option<CommitSha>, String> {
     let mut command = ProcessCommand::new(git);
+    git_env::prepare(command.as_std_mut());
     command
         .arg("-C")
         .arg(root)
@@ -397,6 +534,181 @@ fn ensure_unmoved(now: &CommitSha, pinned: &CommitSha, base: &str) -> Result<(),
         name: base.to_owned(),
         detail: "the branch moved while the receipt was prepared; run it again".to_owned(),
     })
+}
+
+/// Writes the protected paths of `commit` into `dir`, in the layout `observe::read_protected`
+/// reads. The files are listed and read with git's read-only commands, so the clone gets no
+/// index, objects or refs. A link or a submodule under a protected path is refused, because a
+/// contract is only ever plain files. Every listed name must be a portable repo path, and no two
+/// names may name one file. The whole listing is checked before the first file is written.
+async fn write_protected(
+    root: &Path,
+    commit: &CommitSha,
+    protected: &BTreeSet<RepoPath>,
+    dir: &Path,
+) -> Result<(), ShadowError> {
+    let commit = commit.to_string();
+    let mut files: BTreeMap<RepoPath, String> = BTreeMap::new();
+    for path in protected {
+        let listing = git_stdout(
+            root,
+            &[
+                "ls-tree",
+                "-r",
+                "-z",
+                "--full-tree",
+                &commit,
+                "--",
+                path.as_str(),
+            ],
+        )
+        .await?;
+        for entry in listing
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+        {
+            let (name, oid) = listed_blob(entry)?;
+            files.insert(name, oid);
+        }
+    }
+    check_no_collisions(&files)?;
+    for (name, oid) in &files {
+        let bytes = git_stdout(root, &["cat-file", "blob", oid]).await?;
+        let target = dir.join(name.as_str());
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                ShadowError::Observe(format!("cannot create {}: {err}", parent.display()))
+            })?;
+        }
+        write_new(&target, &bytes)?;
+    }
+    Ok(())
+}
+
+/// One entry of `git ls-tree -z`, read as the portable repo path it names and its blob id. The
+/// name is decoded strictly, so bytes that are not UTF-8 are refused rather than replaced.
+fn listed_blob(entry: &[u8]) -> Result<(RepoPath, String), ShadowError> {
+    let malformed = || {
+        ShadowError::Observe(format!(
+            "git listed {:?} oddly",
+            String::from_utf8_lossy(entry)
+        ))
+    };
+    let tab = entry
+        .iter()
+        .position(|byte| *byte == b'\t')
+        .ok_or_else(malformed)?;
+    let (meta, name) = (&entry[..tab], &entry[tab + 1..]);
+    let name = std::str::from_utf8(name).map_err(|_| {
+        ShadowError::Contract(format!(
+            "{:?} is not UTF-8; a contract is only plain files with portable names",
+            String::from_utf8_lossy(name)
+        ))
+    })?;
+    let meta = std::str::from_utf8(meta).map_err(|_| malformed())?;
+    let mut fields = meta.split(' ');
+    let (Some(mode), Some(kind), Some(oid), None) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return Err(malformed());
+    };
+    if kind != "blob" || mode == "120000" {
+        return Err(ShadowError::Contract(format!(
+            "{name} is a link or a submodule; a contract is only plain files"
+        )));
+    }
+    let path = RepoPath::from_str(name).map_err(|_| {
+        ShadowError::Contract(format!(
+            "{name:?} is not a portable repo path, so it is refused: it may hold a backslash, a \
+             colon, a reserved device name, or a segment that ends in a dot or a space"
+        ))
+    })?;
+    // Windows gives a long name a short alias such as `LONGFI~1.TXT`, and a `~` before a digit can
+    // be that alias. A name outside ASCII folds to another name there. Neither is a contract name.
+    if !name.is_ascii()
+        || name
+            .as_bytes()
+            .windows(2)
+            .any(|pair| pair[0] == b'~' && pair[1].is_ascii_digit())
+    {
+        return Err(ShadowError::Contract(format!(
+            "{name:?} is refused: a contract's names are ASCII, and no `~` is followed by a digit, \
+             because Windows would read such a name as the short alias of another"
+        )));
+    }
+    Ok((path, oid.to_owned()))
+}
+
+/// Refuses names that cannot all be written as files of one tree. Two names that differ only by
+/// case name one file on a case-insensitive file system, and a name that is a file cannot also
+/// be a directory on the way to another name, in any case.
+fn check_no_collisions(files: &BTreeMap<RepoPath, String>) -> Result<(), ShadowError> {
+    let mut folded: BTreeMap<String, &str> = BTreeMap::new();
+    for path in files.keys() {
+        if let Some(other) = folded.insert(path.as_str().to_ascii_lowercase(), path.as_str()) {
+            return Err(ShadowError::Contract(format!(
+                "{other:?} and {:?} name one file on a case-insensitive file system, so a \
+                 contract cannot hold both",
+                path.as_str()
+            )));
+        }
+    }
+    for (name, original) in &folded {
+        for (end, _) in name.match_indices('/') {
+            if let Some(ancestor) = folded.get(&name[..end]) {
+                return Err(ShadowError::Contract(format!(
+                    "{ancestor:?} is a file and {original:?} lies under it, so a contract cannot \
+                     hold both"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Writes `bytes` to `target`, which must not exist yet. A second name that reaches a file already
+/// written is refused, so no name can replace another one in the snapshot.
+fn write_new(target: &Path, bytes: &[u8]) -> Result<(), ShadowError> {
+    use std::io::Write;
+    let failed = |err: std::io::Error| {
+        ShadowError::Observe(format!("cannot write {}: {err}", target.display()))
+    };
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .map_err(|err| match err.kind() {
+            std::io::ErrorKind::AlreadyExists => ShadowError::Contract(format!(
+                "{} is already written, so two names of the contract name one file",
+                target.display()
+            )),
+            _ => failed(err),
+        })?;
+    file.write_all(bytes).map_err(failed)
+}
+
+/// Runs git in `root` and returns its standard output. A failure carries git's message, and a
+/// missing object is a failure, because git is not allowed to fetch it.
+async fn git_stdout(root: &Path, args: &[&str]) -> Result<Vec<u8>, ShadowError> {
+    let mut command = ProcessCommand::new("git");
+    git_env::prepare(command.as_std_mut());
+    let output = command
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|err| ShadowError::Observe(format!("cannot run git: {err}")))?;
+    if !output.status.success() {
+        return Err(ShadowError::Observe(format!(
+            "git {} failed: {}",
+            args.first().copied().unwrap_or_default(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(output.stdout)
 }
 
 /// Prepares `commit` on the protected head. A conflict is a refusal: there is no merged commit
@@ -641,6 +953,11 @@ pub fn json_text(report: &ShadowReceipt) -> Result<String, ShadowError> {
         "receipt_hash": report.receipt_hash,
         "receipt": receipt,
     });
+    if !report.installs.is_empty() {
+        envelope["installs"] = serde_json::to_value(&report.installs).map_err(|err| {
+            ShadowError::Output(format!("the installs cannot be serialized: {err}"))
+        })?;
+    }
     redact_value(&mut envelope, &env_secrets(&report.args.repo));
     serde_json::to_string_pretty(&envelope)
         .map_err(|err| ShadowError::Output(format!("the envelope cannot be serialized: {err}")))
@@ -682,7 +999,7 @@ fn markdown_header(report: &ShadowReceipt) -> String {
         ),
         format!(
             "- Head: {} at {}",
-            code(&report.args.head),
+            code(report.args.head.as_deref().unwrap_or_default()),
             code(&report.head_commit)
         ),
         format!("- Merged commit tested: {}", code(&report.merged_commit)),
@@ -919,7 +1236,17 @@ mod tests {
         ShadowArgs {
             repo: repo.to_path_buf(),
             base: base.to_owned(),
-            head: head.to_owned(),
+            head: Some(head.to_owned()),
+            cache_dir: None,
+            check_contract: false,
+        }
+    }
+
+    fn check_args(repo: &Path, base: &str) -> ShadowArgs {
+        ShadowArgs {
+            head: None,
+            check_contract: true,
+            ..args(repo, base, "")
         }
     }
 
@@ -940,6 +1267,7 @@ mod tests {
             discarded: vec![".acan/app.json".to_owned()],
             receipt_hash: "abc123".to_owned(),
             receipt,
+            installs: Vec::new(),
         }
     }
 
@@ -997,6 +1325,462 @@ mod tests {
         assert!(
             matches!(&error, ShadowError::Ref { flag: "--head", .. }),
             "option-like ref: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_without_a_head_is_refused_before_anything_runs() {
+        let repo = clone_with(&contract_files());
+        let mut without = args(repo.path(), "main", "main");
+        without.head = None;
+        let error = run_with(&without, &missing_docker())
+            .await
+            .expect_err("a run needs a head");
+        assert!(
+            matches!(&error, ShadowError::Usage(text) if text.contains("--check-contract")),
+            "missing head: {error}"
+        );
+    }
+
+    /// Every path under `dir` with its length, sorted, so a change to a directory shows.
+    fn listing(dir: &Path) -> Vec<(PathBuf, u64)> {
+        let mut found = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(current) = pending.pop() {
+            for entry in fs::read_dir(&current).expect("a directory") {
+                let path = entry.expect("an entry").path();
+                let meta = fs::symlink_metadata(&path).expect("metadata");
+                if meta.is_dir() {
+                    pending.push(path.clone());
+                }
+                found.push((path, meta.len()));
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[cfg(unix)]
+    fn set_writable(dir: &Path, writable: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if writable { 0o755 } else { 0o555 };
+        fs::set_permissions(dir, fs::Permissions::from_mode(mode)).expect("the mode is set");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn check_contract_writes_nothing_to_the_clone() {
+        let repo = clone_with(&contract_files());
+        let git_dir = repo.path().join(".git");
+        let before = listing(&git_dir);
+        // A check that needs a file in the git directory, such as an index, fails here.
+        set_writable(&git_dir, false);
+        let probe_refused = fs::write(git_dir.join("probe"), "").is_err();
+        let checked =
+            check_contract_with(&check_args(repo.path(), "main"), &missing_docker()).await;
+        set_writable(&git_dir, true);
+
+        assert!(
+            probe_refused,
+            "the test needs a git directory its user cannot write"
+        );
+        checked.expect("the check passes with a git directory it cannot write");
+        assert_eq!(
+            listing(&git_dir),
+            before,
+            "the check left the clone's git directory as it found it"
+        );
+    }
+
+    /// A partial clone of `origin` whose file contents are not local. Its promisor remote runs a
+    /// script that only records that it ran, so a fetch leaves a marker. Returns the clone and the
+    /// marker's path.
+    #[cfg(unix)]
+    fn promisor_clone_of(origin: &Path) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        git(origin, &["config", "uploadpack.allowFilter", "true"]);
+        let dir = tempfile::tempdir().expect("a directory for the partial clone");
+        let partial = dir.path().join("partial");
+        let source = format!("file://{}", origin.display());
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                "--no-checkout",
+                "--filter=blob:none",
+                &source,
+                &partial.to_string_lossy(),
+            ],
+        );
+        let marker = dir.path().join("fetch-ran");
+        let transport = dir.path().join("fake-upload-pack");
+        fs::write(
+            &transport,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .expect("the transport script");
+        fs::set_permissions(&transport, fs::Permissions::from_mode(0o755)).expect("executable");
+        git(
+            &partial,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                &transport.to_string_lossy(),
+            ],
+        );
+        (dir, partial, marker)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn check_contract_fetches_nothing_from_a_promisor_remote() {
+        let origin = clone_with(&contract_files());
+        let (_dir, partial, marker) = promisor_clone_of(origin.path());
+
+        let error = check_contract_with(&check_args(&partial, "main"), &missing_docker())
+            .await
+            .expect_err("the contract's contents are missing and are not fetched");
+
+        assert!(!marker.exists(), "git fetched a missing object: {error}");
+    }
+
+    /// The clone's HEAD and the snapshot a protected `.acan` is written to. Returns the result of
+    /// the write, the snapshot directory, and the scratch directory that holds it.
+    async fn write_protected_at_head(
+        repo: &Path,
+    ) -> (Result<(), ShadowError>, PathBuf, tempfile::TempDir) {
+        let head = git_output(repo, &["rev-parse", "HEAD"]);
+        let commit = commit_sha(&head).expect("HEAD is a commit");
+        let protected: BTreeSet<RepoPath> = [RepoPath::from_str(".acan").expect("a path")].into();
+        let scratch = tempfile::TempDir::new().expect("scratch directory");
+        let snapshot = scratch.path().join("snapshot");
+        let written = write_protected(repo, &commit, &protected, &snapshot).await;
+        (written, snapshot, scratch)
+    }
+
+    /// Trimmed standard output of git in `dir`.
+    fn git_output(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    #[tokio::test]
+    async fn names_that_escape_or_are_not_portable_are_refused_before_any_file_is_written() {
+        // Each name is one that Windows would read as a path outside `.acan`, as a device, or as a
+        // name it cannot store. Each sorts after the valid contract files, so a materializer that
+        // wrote as it listed would have written the contract before it refused the name.
+        let names = [
+            ".acan/zz..\\..\\escape.txt",
+            ".acan/zzC:escape.txt",
+            ".acan/zz/NUL.json",
+            ".acan/zzapp.json.",
+            ".acan/zzapp.json ",
+        ];
+        for name in names {
+            let mut files = contract_files();
+            files.push((name, "not a contract"));
+            let repo = commit_files(&files);
+
+            let (written, snapshot, scratch) = write_protected_at_head(repo.path()).await;
+
+            let error = written.expect_err(name);
+            assert!(
+                matches!(error, ShadowError::Contract(_)),
+                "{name}: {error:?}"
+            );
+            assert!(
+                !snapshot.join(".acan").exists(),
+                "{name}: nothing under .acan was written"
+            );
+            assert!(
+                !scratch.path().join("escape.txt").exists(),
+                "{name}: nothing was written outside the snapshot"
+            );
+        }
+    }
+
+    /// Runs git in `dir` with `input` on standard input. Returns its standard output, trimmed.
+    fn git_in(dir: &Path, args: &[&str], input: &[u8]) -> String {
+        use std::io::Write;
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("git runs");
+        child
+            .stdin
+            .take()
+            .expect("git's input")
+            .write_all(input)
+            .expect("the input is written");
+        let output = child.wait_with_output().expect("git finishes");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// A repository whose `main` is one commit of `files`, built with git's plumbing and not the
+    /// file system. A name that Windows would store differently, such as one with a backslash or a
+    /// trailing dot, reaches the commit exactly as written, so the test is the same on every
+    /// platform. The trees are written as raw bytes with `--literally`: git's index and tree
+    /// checks refuse some of these names on Windows before any commit is made.
+    fn commit_files(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temporary repository");
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        git(dir.path(), &["config", "user.name", "Tester"]);
+        git(dir.path(), &["config", "user.email", "tester@localhost"]);
+        let mut root = FixtureTree::default();
+        for (path, text) in files {
+            let blob = git_in(
+                dir.path(),
+                &["hash-object", "-w", "--stdin"],
+                text.as_bytes(),
+            );
+            root.insert(path, &blob);
+        }
+        let tree = root.write(dir.path());
+        let commit = git_in(dir.path(), &["commit-tree", &tree, "-m", "base"], &[]);
+        git(dir.path(), &["update-ref", "refs/heads/main", &commit]);
+        dir
+    }
+
+    /// The directories and files of one fixture tree, by name.
+    #[derive(Default)]
+    struct FixtureTree {
+        files: BTreeMap<String, String>,
+        dirs: BTreeMap<String, FixtureTree>,
+    }
+
+    impl FixtureTree {
+        /// Adds the blob `blob` at `path`, making each directory the path names on the way.
+        fn insert(&mut self, path: &str, blob: &str) {
+            match path.split_once('/') {
+                Some((dir, rest)) => self
+                    .dirs
+                    .entry(dir.to_owned())
+                    .or_default()
+                    .insert(rest, blob),
+                None => {
+                    self.files.insert(path.to_owned(), blob.to_owned());
+                }
+            }
+        }
+
+        /// Writes this tree and every tree under it, and returns the id of this one. Entries are
+        /// sorted as git sorts them, a directory by its name followed by a slash.
+        fn write(&self, repo: &Path) -> String {
+            let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+            for (name, blob) in &self.files {
+                let entry = tree_entry(b"100644", name, &hex_bytes(blob));
+                entries.push((name.as_bytes().to_vec(), entry));
+            }
+            for (name, tree) in &self.dirs {
+                let id = tree.write(repo);
+                let entry = tree_entry(b"40000", name, &hex_bytes(&id));
+                entries.push((format!("{name}/").into_bytes(), entry));
+            }
+            entries.sort();
+            let raw: Vec<u8> = entries.into_iter().flat_map(|(_, entry)| entry).collect();
+            git_in(
+                repo,
+                &["hash-object", "-t", "tree", "-w", "--literally", "--stdin"],
+                &raw,
+            )
+        }
+    }
+
+    /// One tree entry as git stores it: the mode, the name, a zero byte and the id in binary.
+    fn tree_entry(mode: &[u8], name: &str, id: &[u8]) -> Vec<u8> {
+        let mut entry = mode.to_vec();
+        entry.push(b' ');
+        entry.extend_from_slice(name.as_bytes());
+        entry.push(0);
+        entry.extend_from_slice(id);
+        entry
+    }
+
+    /// The bytes of a hexadecimal object id.
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("a hexadecimal id"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn names_windows_would_read_as_another_name_are_refused_before_any_file_is_written() {
+        // `LONGFI~1.TXT` is the short alias Windows gives a long name, and a name outside ASCII
+        // folds to another name there, so neither is a contract name.
+        let names = [
+            ".acan/zzlongfi~1.txt",
+            ".acan/zz~1.json",
+            ".acan/\u{3c2}zz.json",
+            ".acan/\u{3a3}zz.json",
+        ];
+        for name in names {
+            let mut files = contract_files();
+            files.push((name, "not a contract"));
+            let repo = commit_files(&files);
+
+            let (written, snapshot, _scratch) = write_protected_at_head(repo.path()).await;
+
+            let error = written.expect_err(name);
+            assert!(
+                matches!(error, ShadowError::Contract(_)),
+                "{name}: {error:?}"
+            );
+            assert!(
+                !snapshot.join(".acan").exists(),
+                "{name}: nothing under .acan was written"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tilde_that_no_digit_follows_is_an_ordinary_contract_name() {
+        let mut files = contract_files();
+        files.push((".acan/zz~a.json", "a name with a tilde"));
+        let repo = commit_files(&files);
+
+        let (written, snapshot, _scratch) = write_protected_at_head(repo.path()).await;
+
+        written.expect("the name is written");
+        assert!(snapshot.join(".acan/zz~a.json").is_file());
+    }
+
+    #[test]
+    fn a_name_that_would_overwrite_a_written_file_is_refused() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let target = dir.path().join("app.json");
+        write_new(&target, b"first").expect("a new file is written");
+
+        let error = write_new(&target, b"second").expect_err("an existing file is not overwritten");
+
+        assert!(matches!(error, ShadowError::Contract(_)), "{error:?}");
+        assert_eq!(fs::read(&target).expect("the file"), b"first");
+    }
+
+    #[tokio::test]
+    async fn names_that_differ_only_by_case_are_refused_before_any_file_is_written() {
+        let mut files = contract_files();
+        files.push((".acan/APP.json", "a second app"));
+        let repo = commit_files(&files);
+
+        let (written, snapshot, _scratch) = write_protected_at_head(repo.path()).await;
+
+        let error = written.expect_err("two names for one file are refused");
+        assert!(error.to_string().contains("one file"), "{error}");
+        assert!(!snapshot.join(".acan").exists(), "nothing was written");
+    }
+
+    #[tokio::test]
+    async fn a_file_that_differs_only_by_case_from_a_directory_is_refused() {
+        // `.acan/Probes` is a file, and `.acan/probes/` is a directory on a case-insensitive
+        // file system, so the two cannot both be written.
+        let mut files = contract_files();
+        files.push((".acan/Probes", "a file, not a directory"));
+        let repo = commit_files(&files);
+
+        let (written, snapshot, _scratch) = write_protected_at_head(repo.path()).await;
+
+        let error = written.expect_err("a file and a directory of one name are refused");
+        assert!(error.to_string().contains("lies under it"), "{error}");
+        assert!(!snapshot.join(".acan").exists(), "nothing was written");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_name_that_is_not_utf8_is_refused_before_any_file_is_written() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let repo = clone_with(&contract_files());
+        let name = repo.path().join(OsStr::from_bytes(b".acan/zz\xff.json"));
+        fs::write(&name, "not UTF-8").expect("a file with a byte that is not UTF-8");
+        git(repo.path(), &["add", "-A"]);
+        git(repo.path(), &["commit", "-q", "-m", "odd name"]);
+
+        let (written, snapshot, _scratch) = write_protected_at_head(repo.path()).await;
+
+        let error = written.expect_err("a name that is not UTF-8 is refused");
+        assert!(error.to_string().contains("not UTF-8"), "{error}");
+        assert!(!snapshot.join(".acan").exists(), "nothing was written");
+    }
+
+    #[tokio::test]
+    async fn check_contract_passes_a_valid_contract_and_needs_no_head() {
+        let repo = clone_with(&contract_files());
+        let check = check_contract_with(&check_args(repo.path(), "main"), &missing_docker())
+            .await
+            .expect("the contract passes");
+        assert_eq!(check.runtime, "bun-1.4.4");
+        assert!(!check.install, "the bun fixture has no install phase");
+        assert!(check.probes > 0, "the corpus has probes");
+        assert!(
+            check.docker.is_err(),
+            "docker is information, not a failure"
+        );
+        let text = check_text(&check);
+        assert!(text.contains("information only"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn check_contract_refuses_a_contract_that_fails_its_checks() {
+        // An install phase is only for acan-app/2, so this version 1 contract cannot pass.
+        let app = APP_CONTRACT.replacen(
+            '{',
+            "{\n  \"install\": [\"npm\", \"ci\", \"--ignore-scripts\"],",
+            1,
+        );
+        let repo = clone_with(&[
+            (".acan/app.json", app.as_str()),
+            (".acan/probes/core.json", PROBE_CORPUS),
+        ]);
+        let error = check_contract_with(&check_args(repo.path(), "main"), &missing_docker())
+            .await
+            .expect_err("a contract that fails its checks is refused");
+        assert!(
+            matches!(error, ShadowError::Contract(_)),
+            "failing check: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn check_contract_asks_docker_only_for_its_version() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = clone_with(&contract_files());
+        let tools = tempfile::tempdir().expect("a directory for a fake docker");
+        let calls = tools.path().join("calls.txt");
+        let docker = tools.path().join("docker");
+        fs::write(
+            &docker,
+            format!("#!/bin/sh\necho \"$@\" >> {}\nexit 1\n", calls.display()),
+        )
+        .expect("the fake docker");
+        fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).expect("executable");
+        let check = check_contract_with(&check_args(repo.path(), "main"), &docker)
+            .await
+            .expect("the contract passes without docker");
+        assert!(check.docker.is_err(), "the fake docker failed");
+        let text = fs::read_to_string(&calls).expect("docker was asked");
+        assert_eq!(
+            text.trim(),
+            "version --format {{.Server.Version}}",
+            "only the version was asked: {text}"
         );
     }
 
@@ -1157,6 +1941,35 @@ mod tests {
             value["receipt"].is_object(),
             "the receipt is inside the envelope"
         );
+    }
+
+    #[test]
+    fn installs_are_named_in_the_envelope_only_when_a_run_mounted_one() {
+        let repo = Path::new("clone");
+        let without = json_text(&report_for(repo, fixture_receipt())).expect("the envelope");
+        let value: Value = serde_json::from_str(&without).expect("the envelope is JSON");
+        assert!(value.get("installs").is_none(), "no install, no field");
+
+        let mut report = report_for(repo, fixture_receipt());
+        report.installs = vec![InstallRecord {
+            role: Role::Candidate,
+            commit: "3".repeat(40),
+            key: "sha256:0".to_owned(),
+            lockfile_sha256: "sha256:1".to_owned(),
+            cache: deps::Cache::Hit,
+            image_digest: "sha256:2".to_owned(),
+            argv: vec!["npm".to_owned(), "ci".to_owned()],
+            install_scripts: "ignored",
+            network: "egress",
+            duration_ms: 10,
+        }];
+        let text = json_text(&report).expect("the envelope serializes");
+        let value: Value = serde_json::from_str(&text).expect("the envelope is JSON");
+        assert_eq!(value["installs"][0]["role"], "candidate");
+        assert_eq!(value["installs"][0]["cache"], "hit");
+        assert_eq!(value["installs"][0]["install_scripts"], "ignored");
+        assert_eq!(value["installs"][0]["network"], "egress");
+        assert_eq!(value["installs"][0]["argv"][1], "ci");
     }
 
     #[test]

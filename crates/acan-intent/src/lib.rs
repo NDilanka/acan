@@ -41,8 +41,9 @@ mod version;
 mod view;
 
 pub use container::{
-    ContainerImage, ContainerNetwork, ContainerPolicy, ContainerUser, MissingProtected,
-    MountPolicy, Privileges, RootFilesystem,
+    BUN_RUNTIME, ContainerImage, ContainerNetwork, ContainerPolicy, ContainerUser, Driver,
+    MissingProtected, MountPolicy, NODE_RUNTIME, NPM_REGISTRY, PLACEHOLDER_PREFIX, Privileges,
+    RootFilesystem, is_credential_name,
 };
 pub use episode::{
     CandidateAttempt, Contest, ContestKind, ContestStatus, DiscrepancyEpisode, EpisodeKey,
@@ -82,11 +83,11 @@ pub use observation::{
     Relation, RequestRecord, StepPath, TypedCapture,
 };
 pub use probe::{
-    AdvanceTimeStep, AppContract, CaptureKind, CaptureOutcome, CaptureSource, CaptureStep,
-    ClockControl, CompletionBarrier, CorpusProbe, Fixture, HttpStep, Isolation, MissingCapture,
-    ProbeCorpus, ProbeOrigin, ProbeProposal, ProbeSpec, ReadyCheck, RedirectPolicy,
-    RequestTemplate, RouteEntry, RoutePath, RouteSource, RouteStatus, Run, RunEnv, RunLimits,
-    RunOutcome, RunRole, SideEffectStep, Step, StoreIsolation, Template,
+    AdvanceTimeStep, AppContract, AppContractVersion, CaptureKind, CaptureOutcome, CaptureSource,
+    CaptureStep, ClockControl, CompletionBarrier, CorpusProbe, Fixture, HttpStep, Isolation,
+    MAX_SEQUENCE_TIMEOUT_MS, MissingCapture, ProbeCorpus, ProbeOrigin, ProbeProposal, ProbeSpec,
+    ReadyCheck, RedirectPolicy, RequestTemplate, RouteEntry, RoutePath, RouteSource, RouteStatus,
+    Run, RunEnv, RunLimits, RunOutcome, RunRole, SideEffectStep, Step, StoreIsolation, Template,
 };
 pub use provenance::{
     CoreDerived, EvidenceAddress, HumanSpec, ModelProposal, Observed, Proposable, Provenance,

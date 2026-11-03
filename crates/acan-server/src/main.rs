@@ -4,6 +4,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
+use acan_server::init_cli::{self, InitArgs};
 use acan_server::receipt_cli::{self, Format, ShadowArgs};
 use acan_server::{
     DEFAULT_WITNESS_CONCURRENCY, Models, ServerConfig, VisionConfig, default_browser,
@@ -31,7 +32,16 @@ enum Command {
     ///
     /// Exit status: 0 when a receipt is printed, even one that blocks; 2 when it blocks and
     /// --fail-on-block is given; 1 when the run is refused, with no receipt.
+    ///
+    /// With --check-contract, no run happens and --head is not needed: the base's protected
+    /// contract is checked, and the command exits 0 only when it passes.
     Receipt(ReceiptArgs),
+    /// Detects the protected app contract of a clone, shows it, and commits it to a new branch.
+    ///
+    /// It reads the base branch's committed files and runs no code from them. The clone's
+    /// checkout is not touched unless --working-tree is given. Nothing is written until you
+    /// type yes at the prompt.
+    Init(InitArgs),
 }
 
 /// The exit status of a blocked receipt when `--fail-on-block` is given.
@@ -103,11 +113,20 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Serve(args) => serve(args).await,
         Command::Receipt(args) => receipt(args).await,
+        Command::Init(args) => {
+            println!("{}", init_cli::run(&args)?);
+            Ok(())
+        }
     }
 }
 
 /// Prints the shadow receipt of one run. A refusal is an error with no receipt.
 async fn receipt(args: ReceiptArgs) -> Result<()> {
+    if args.shadow.check_contract {
+        let check = receipt_cli::check_contract(&args.shadow).await?;
+        println!("{}", receipt_cli::check_text(&check));
+        return Ok(());
+    }
     let report = receipt_cli::run(&args.shadow).await?;
     if let Some(dir) = &args.out {
         receipt_cli::write_out(&report, dir)?;

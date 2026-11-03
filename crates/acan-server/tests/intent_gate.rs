@@ -26,6 +26,13 @@ mod observations;
 )]
 mod observe;
 
+#[path = "../src/deps.rs"]
+#[allow(
+    dead_code,
+    reason = "the dependency cache has callers outside this test"
+)]
+mod deps;
+
 #[path = "../src/land.rs"]
 #[allow(
     dead_code,
@@ -273,6 +280,8 @@ impl Gate {
             app: &self.app,
             corpus: &self.corpus,
             policy: &self.policy,
+            base_dependencies: None,
+            candidate_dependencies: None,
             runner: &self.runner,
             slots: &self.slots,
             probes_at_once,

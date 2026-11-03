@@ -30,19 +30,20 @@ use acan_intent::admit::AdmitError;
 use acan_intent::compare::{self, CompareError, Contrast};
 use acan_intent::receipt::{self, ProbeResult, ReceiptError, ReceiptInputs};
 use acan_intent::{
-    AppContract, ArtifactHash, CanonicalError, CheckResult, Comparison, ContainerPolicy,
-    ContentHash, ContrastExample, ContrastExampleHash, ContrastExampleV1, CoreDerived, CorpusProbe,
-    DiscrepancyEpisode, EnvHash, EnvManifest, EpisodeKey, EpisodeState, EpisodeV1,
-    EvaluatorVersion, Fixture, FixtureId, FixtureSetHash, FixtureSetManifest, FoldedLedger,
-    GateContext, GateState, InvalidValue, Mask, ObservationHash, ObservedRun, PreparedCommit,
-    ProbeCorpus, ProbeHash, ProbeSetHash, ProbeSetManifest, Receipt, RepoPath, RunManifest,
-    RunOutcome, RunRole, RunnerBuild, RunnerHash, RunnerManifest, RuntimeId, SandboxPolicyHash,
-    Scope, ScopeConfirmation, ScopeRevision, StepId, UnixMillis,
+    AppContract, AppContractVersion, ArtifactHash, CanonicalError, CheckResult, Comparison,
+    ContainerPolicy, ContentHash, ContrastExample, ContrastExampleHash, ContrastExampleV1,
+    CoreDerived, CorpusProbe, DiscrepancyEpisode, EnvHash, EnvManifest, EpisodeKey, EpisodeState,
+    EpisodeV1, EvaluatorVersion, Fixture, FixtureId, FixtureSetHash, FixtureSetManifest,
+    FoldedLedger, GateContext, GateState, InvalidValue, Mask, NODE_RUNTIME, ObservationHash,
+    ObservedRun, PreparedCommit, ProbeCorpus, ProbeHash, ProbeSetHash, ProbeSetManifest, Receipt,
+    RepoPath, RunManifest, RunOutcome, RunRole, RunnerBuild, RunnerHash, RunnerManifest, RuntimeId,
+    SandboxPolicyHash, Scope, ScopeConfirmation, ScopeRevision, StepId, UnixMillis,
 };
 use acan_witness::{KeptBody, RunnerConfig, SequenceInput, run_sequence, run_sequence_keeping};
 use serde::de::DeserializeOwned;
 use tokio::sync::Semaphore;
 
+use crate::deps;
 use crate::land;
 use crate::observations::{self, ObservationError};
 
@@ -52,8 +53,9 @@ const PROTECTED_DIR: &str = ".acan";
 const APP_FILE: &str = "app.json";
 /// The probe corpus inside [`PROTECTED_DIR`].
 const CORPUS_FILE: &str = "probes/core.json";
-/// The lockfile the app was installed from, relative to a worktree's root.
-const LOCKFILE: &str = "bun.lock";
+/// The lockfile a bun app was installed from, relative to a worktree's root. A node app's is
+/// [`deps::LOCKFILE`].
+const BUN_LOCKFILE: &str = "bun.lock";
 /// The directory the candidate's artifact hashes are read from. Nothing runs in it.
 const ARTIFACTS_DIR: &str = "artifacts";
 /// The runner build name `acan_witness` stamps on every run. The receipt refuses runs whose runner
@@ -190,8 +192,13 @@ pub(crate) struct Plan<'a> {
     pub(crate) app: &'a AppContract,
     /// The protected probe corpus, read from the snapshot.
     pub(crate) corpus: &'a ProbeCorpus,
-    /// The container policy the runs apply.
+    /// The container policy the runs apply, chosen by the app's runtime.
     pub(crate) policy: &'a ContainerPolicy,
+    /// The install's `node_modules` the base runs mount read-only, when the app has an install.
+    pub(crate) base_dependencies: Option<&'a Path>,
+    /// The install's `node_modules` the candidate runs mount read-only, when the app has an
+    /// install.
+    pub(crate) candidate_dependencies: Option<&'a Path>,
     /// How the host reaches docker and the app.
     pub(crate) runner: &'a RunnerConfig,
     /// The host's container permits. A container run holds one for as long as it runs. The witness
@@ -275,6 +282,32 @@ pub(crate) fn runner_policy() -> ContainerPolicy {
     ContainerPolicy::default_run()
 }
 
+/// The container policy an app's runs apply: the policy of its runtime and install. An
+/// `acan-app/2` contract adds the environment it names. An `acan-app/1` contract keeps the policy
+/// it has always run under, so its environment is not applied and its hashes do not change.
+///
+/// # Errors
+///
+/// Returns [`ObserveError::Name`] when no policy runs the app's runtime or the app's environment is
+/// refused.
+pub(crate) fn policy_for(app: &AppContract) -> Result<ContainerPolicy, ObserveError> {
+    let mut policy = ContainerPolicy::for_runtime(app.runtime.as_str(), app.install.is_some())?;
+    if app.version == AppContractVersion::V2 {
+        policy.with_app_environment(&app.env)?;
+    }
+    Ok(policy)
+}
+
+/// The lockfile an app's tree is installed from: `package-lock.json` for a node app, `bun.lock`
+/// for a bun app.
+pub(crate) fn lockfile_name(app: &AppContract) -> &'static str {
+    if app.runtime.as_str() == NODE_RUNTIME {
+        deps::LOCKFILE
+    } else {
+        BUN_LOCKFILE
+    }
+}
+
 /// The paths the preparation of every candidate restores from the protected head: the policy's
 /// protected mounts, which are exactly the paths the containers mount from the snapshot.
 pub(crate) fn protected_paths(policy: &ContainerPolicy) -> ProtectedPaths {
@@ -304,7 +337,11 @@ pub(crate) async fn snapshot(
 /// Returns [`ObserveError::Protected`] when either file is missing or does not decode.
 pub(crate) fn read_protected(snapshot: &Path) -> Result<(AppContract, ProbeCorpus), ObserveError> {
     let root = snapshot.join(PROTECTED_DIR);
-    let app = read_json(&root.join(APP_FILE))?;
+    let app: AppContract = read_json(&root.join(APP_FILE))?;
+    app.check().map_err(|err| ObserveError::Protected {
+        path: root.join(APP_FILE),
+        detail: err.to_string(),
+    })?;
     let corpus = read_json(&root.join(CORPUS_FILE))?;
     Ok((app, corpus))
 }
@@ -314,8 +351,8 @@ pub(crate) fn read_protected(snapshot: &Path) -> Result<(AppContract, ProbeCorpu
 /// # Errors
 ///
 /// Returns [`ObserveError::Io`] when the lockfile cannot be read.
-pub(crate) fn lockfile_hash(worktree: &Path) -> Result<ArtifactHash, ObserveError> {
-    let path = worktree.join(LOCKFILE);
+pub(crate) fn lockfile_hash(worktree: &Path, lockfile: &str) -> Result<ArtifactHash, ObserveError> {
+    let path = worktree.join(lockfile);
     let bytes = fs::read(&path).map_err(|source| io_error(&path, source))?;
     Ok(ArtifactHash::from(ContentHash::of_bytes(&bytes)))
 }
@@ -479,7 +516,7 @@ async fn settled(
         &probe.label,
         role,
         |attempt| async move {
-            let staged = stage(plan.repo, preparation, &dir.join(attempt.to_string())).await?;
+            let staged = stage(plan, preparation, &dir.join(attempt.to_string())).await?;
             let input = sequence(plan, probe, fixture, &staged, role);
             // The permit covers the container run only. A run waiting for it has not started, and
             // its budget starts inside `run_sequence`, so the wait never spends that budget.
@@ -519,7 +556,7 @@ pub(crate) async fn keep_page(
     dir: &Path,
 ) -> Result<Option<KeptBody>, ObserveError> {
     let fixture = fixture_of(plan.corpus, probe)?;
-    let staged = stage(plan.repo, preparation, dir).await?;
+    let staged = stage(plan, preparation, dir).await?;
     let input = sequence(plan, probe, fixture, &staged, role);
     let (_, kept) = {
         let _slot = plan
@@ -917,8 +954,9 @@ async fn artifacts(plan: &Plan<'_>) -> Result<BTreeMap<RepoPath, ArtifactHash>, 
     if dir.exists() {
         fs::remove_dir_all(&dir).map_err(|source| io_error(&dir, source))?;
     }
-    let lock = materialize(plan.repo, plan.candidate, &dir).await?;
-    Ok(BTreeMap::from([(LOCKFILE.parse()?, lock)]))
+    let lockfile = lockfile_name(plan.app);
+    let lock = materialize(plan.repo, plan.candidate, &dir, lockfile).await?;
+    Ok(BTreeMap::from([(lockfile.parse()?, lock)]))
 }
 
 /// One run's worktree, the commit it is at, and the hash of its lockfile.
@@ -929,8 +967,12 @@ struct Staged {
 }
 
 /// Writes `preparation`'s merged tree into `dir` and records what a run needs to know about it.
-async fn stage(repo: &Repo, preparation: &Preparation, dir: &Path) -> Result<Staged, ObserveError> {
-    let lockfile = materialize(repo, preparation, dir).await?;
+async fn stage(
+    plan: &Plan<'_>,
+    preparation: &Preparation,
+    dir: &Path,
+) -> Result<Staged, ObserveError> {
+    let lockfile = materialize(plan.repo, preparation, dir, lockfile_name(plan.app)).await?;
     Ok(Staged {
         worktree: dir.to_path_buf(),
         commit: preparation.merged_commit().clone(),
@@ -943,9 +985,10 @@ async fn materialize(
     repo: &Repo,
     preparation: &Preparation,
     dir: &Path,
+    lockfile: &str,
 ) -> Result<ArtifactHash, ObserveError> {
     repo.materialize(preparation, dir).await?;
-    lockfile_hash(dir)
+    lockfile_hash(dir, lockfile)
 }
 
 /// Stores each observation of `run` under `dir` and keeps the run with their hashes.
@@ -976,6 +1019,10 @@ fn sequence<'a>(
     role: RunRole,
 ) -> SequenceInput<'a> {
     let corpus: &'a ProbeCorpus = plan.corpus;
+    let dependencies = match role {
+        RunRole::Candidate => plan.candidate_dependencies,
+        RunRole::BaseA | RunRole::BaseB => plan.base_dependencies,
+    };
     SequenceInput {
         probe,
         fixture,
@@ -987,6 +1034,7 @@ fn sequence<'a>(
         lockfile_hash: staged.lockfile,
         worktree: &staged.worktree,
         snapshot: plan.snapshot,
+        dependencies,
         config: plan.runner,
     }
 }
@@ -1039,6 +1087,45 @@ mod tests {
         assert!(
             policy.image.digest.is_some(),
             "the image is pinned by digest"
+        );
+    }
+
+    /// The protected fixture contract, which is `acan-app/1` with `NODE_ENV=test`, at `version`.
+    fn fixture_app(version: &str) -> AppContract {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../acan-intent/fixtures/app-contract.json"))
+                .expect("the fixture is JSON");
+        value["version"] = serde_json::json!(version);
+        serde_json::from_value(value).expect("the fixture decodes")
+    }
+
+    #[test]
+    fn an_acan_app_1_contract_keeps_the_policy_it_always_ran_under() {
+        let app = fixture_app("acan-app/1");
+        assert_eq!(app.env.get("NODE_ENV").map(String::as_str), Some("test"));
+
+        let policy = policy_for(&app).expect("the policy");
+
+        assert_eq!(policy, runner_policy(), "its environment is not applied");
+        assert_eq!(
+            policy.sandbox_policy_hash().expect("the hash"),
+            runner_policy().sandbox_policy_hash().expect("the hash"),
+            "its policy hash, and so every receipt's, is unchanged"
+        );
+    }
+
+    #[test]
+    fn an_acan_app_2_contract_gives_the_app_its_environment() {
+        let policy = policy_for(&fixture_app("acan-app/2")).expect("the policy");
+
+        assert_eq!(
+            policy.environment.get("NODE_ENV").map(String::as_str),
+            Some("test")
+        );
+        assert_ne!(
+            policy.sandbox_policy_hash().expect("the hash"),
+            runner_policy().sandbox_policy_hash().expect("the hash"),
+            "the environment is part of the policy hash"
         );
     }
 

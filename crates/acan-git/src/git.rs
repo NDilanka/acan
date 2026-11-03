@@ -66,6 +66,8 @@ pub(crate) async fn run_raw(
 ) -> Result<RawOutput, Error> {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(dir).args(args);
+    // Before the caller's variables, so a variable the caller names still applies.
+    crate::git_env::prepare(cmd.as_std_mut());
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     cmd.stdin(if input.is_some() {
