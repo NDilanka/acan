@@ -10,7 +10,8 @@ use crate::clash::{
     self, Barrier, BarrierHold, Clash, ClashKey, ClashState, Declaration, Settlement,
 };
 use crate::event::{
-    Actor, AgentCmd, Command, Event, HumanCmd, Rejection, ReplayError, Stamped, SystemCmd,
+    Actor, AgentCmd, CallFailure, Command, Event, HumanCmd, Rejection, ReplayError, Stamped,
+    SystemCmd,
 };
 use crate::gate::{self, GateRun, GateVerdict};
 use crate::ids::{
@@ -63,6 +64,10 @@ pub enum Step {
     Screenshot,
     /// Comparing a page's screenshots with a vision model.
     Vision,
+    /// Drafting a scope.
+    Scope,
+    /// Asking the director for a tour.
+    Director,
 }
 
 /// Token totals.
@@ -1270,17 +1275,25 @@ impl World {
                 step,
                 input_tokens,
                 output_tokens,
+                failure,
+                ..
             } => {
-                let count = self
-                    .usage
-                    .totals
-                    .entry(model.clone())
-                    .or_default()
-                    .entry(*step)
-                    .or_default();
-                count.input += u64::from(*input_tokens);
-                count.output += u64::from(*output_tokens);
-                count.calls = count.calls.saturating_add(1);
+                // A call that gave no reply is in the log and counts for nothing: it touches no
+                // total, not even to open an entry for its model and step.
+                if failure.is_none() {
+                    let count = self
+                        .usage
+                        .totals
+                        .entry(model.clone())
+                        .or_default()
+                        .entry(*step)
+                        .or_default();
+                    // A reply always carries its token counts. A missing count is a writer bug,
+                    // and it adds nothing rather than failing the fold.
+                    count.input += u64::from(input_tokens.unwrap_or(0));
+                    count.output += u64::from(output_tokens.unwrap_or(0));
+                    count.calls = count.calls.saturating_add(1);
+                }
             }
             Event::ScopeDrafted { order, rev, draft } => {
                 self.scope_drafts.insert(
@@ -1841,6 +1854,48 @@ fn decide_agent(
     }
 }
 
+/// The most words a usage detail holds. The detail is a short note, so a usage row stays readable.
+const USAGE_DETAIL_WORDS: usize = 100;
+
+/// Decides one usage row. A call that gave no reply is a failure and carries no token counts, and
+/// a call that gave a reply carries both counts. A detail holds at most [`USAGE_DETAIL_WORDS`]
+/// words.
+fn decide_model_used(
+    model: String,
+    provider: Option<String>,
+    step: Step,
+    input_tokens: Option<u32>,
+    output_tokens: Option<u32>,
+    failure: Option<CallFailure>,
+    detail: Option<String>,
+) -> Result<Vec<Event>, Rejection> {
+    let counted = input_tokens.is_some() && output_tokens.is_some();
+    let uncounted = input_tokens.is_none() && output_tokens.is_none();
+    if failure.is_some() && !uncounted {
+        return Err(Rejection::invalid("a failed call has no token counts"));
+    }
+    if failure.is_none() && !counted {
+        return Err(Rejection::invalid(
+            "a call that gave a reply has both token counts",
+        ));
+    }
+    if detail
+        .as_deref()
+        .is_some_and(|text| text.split_whitespace().count() > USAGE_DETAIL_WORDS)
+    {
+        return Err(Rejection::invalid("a usage detail has at most 100 words"));
+    }
+    Ok(vec![Event::ModelUsed {
+        model,
+        provider,
+        step,
+        input_tokens,
+        output_tokens,
+        failure,
+        detail,
+    }])
+}
+
 fn decide_system(world: &World, ctx: &Ctx<'_>, cmd: SystemCmd) -> Result<Vec<Event>, Rejection> {
     match cmd {
         SystemCmd::IndexUpdated => clash::decide_index_updated(world, ctx),
@@ -1868,15 +1923,21 @@ fn decide_system(world: &World, ctx: &Ctx<'_>, cmd: SystemCmd) -> Result<Vec<Eve
         SystemCmd::RefuseRun { run, reason } => gate::decide_refused(world, run, reason),
         SystemCmd::ModelUsed {
             model,
+            provider,
             step,
             input_tokens,
             output_tokens,
-        } => Ok(vec![Event::ModelUsed {
+            failure,
+            detail,
+        } => decide_model_used(
             model,
+            provider,
             step,
             input_tokens,
             output_tokens,
-        }]),
+            failure,
+            detail,
+        ),
         SystemCmd::Tick => Ok(Vec::new()),
         SystemCmd::CandidatePrepared { run, prepared } => {
             lane::decide_prepared(world, run, *prepared)

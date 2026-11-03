@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::chat::{ChatRequest, ChatResponse, Message, ToolCall, ToolKind, ToolSpec};
 use crate::client::{Destination, ModelClient, Structured, parse_structured, with_schema};
 use crate::config::{ConfigError, LlmConfig, ProviderConfig, StructuredOutput, TokenLimitField};
-use crate::error::LlmError;
+use crate::error::{LlmError, ReplyTrace};
 use crate::key::{ApiKey, ApiKeys};
 use crate::role::Role;
 use crate::trace::{RequestId, RequestIdSource, Traced};
@@ -134,6 +134,8 @@ impl OpenAiCompatible {
         };
         self.ledger.record(call.clone());
 
+        // The call was metered above, so a reply with no choice keeps its trace: its tokens were
+        // spent and the caller meters them.
         let choice =
             completion
                 .choices
@@ -142,6 +144,10 @@ impl OpenAiCompatible {
                 .ok_or_else(|| LlmError::MalformedResponse {
                     provider: provider.name.clone(),
                     detail: "reply has no choices".to_owned(),
+                    trace: Some(Box::new(ReplyTrace {
+                        call: call.clone(),
+                        request_id: request_id.as_ref().map(|id| id.value.clone()),
+                    })),
                 })?;
         Ok(Traced {
             value: ChatResponse {
@@ -221,6 +227,7 @@ impl OpenAiCompatible {
                     serde_json::from_str(&text).map_err(|err| LlmError::MalformedResponse {
                         provider: provider.name.clone(),
                         detail: self.keys.redact(&err.to_string()),
+                        trace: None,
                     })?;
                 let request_id = header_id.or_else(|| body_request_id(completion.id.as_deref()));
                 return Ok(Posted {

@@ -13,17 +13,20 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use acan_intent::admit::TourRejection;
+use acan_core::{CallFailure, Command, Step, SystemCmd};
+use acan_intent::admit::{StepFault, TourRejection};
 use acan_intent::provenance::ModelProposal;
 use acan_intent::{
     CaptionCatalog, DeterministicError, InvalidValue, ModelRef, PlantView, ReceiptHash, Tour,
     TourView,
 };
-use acan_llm::{ChatRequest, LlmError, Message, ModelClient, Role};
+use acan_llm::{CallRecord, ChatRequest, LlmError, Message, ModelClient, Role};
 use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::host::Host;
+use crate::jobs::{failure_of, failure_word};
+use crate::model::caps;
 
 /// The most output one director reply may use. Muse Spark spends hidden reasoning tokens from this
 /// cap. A reply under the old 2000 cap stopped before its tour was written (receipt VIS02 director),
@@ -117,9 +120,23 @@ impl TourError {
     }
 }
 
+/// What one director call tells the usage panel about the call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CallAccount {
+    /// The provider replied, and the reply may be unusable. Its model, tokens and latency are kept.
+    Reply(CallRecord),
+    /// The request was sent and gave no reply: a timeout, or a provider or transport error.
+    Failed(CallFailure),
+    /// No request was sent. The view has no item, its route is not Muse Spark on Meta, the call
+    /// was still waiting for a slot at its deadline, or the client refused the call before it
+    /// sent a request, as for a missing key. A server shutdown at any point records nothing.
+    NotCalled,
+}
+
 /// Asks the director model for a tour of `view`. The call goes to the director's route, which
 /// falls back to the foreman's. A view with no item is not sent, and neither is a view whose
-/// director route is not Muse Spark on Meta.
+/// director route is not Muse Spark on Meta. `account` says what the call was, as the call goes:
+/// the caller reads it even when the call is cut off before it ends.
 ///
 /// # Errors
 ///
@@ -130,6 +147,7 @@ impl TourError {
 pub(crate) async fn direct<C: ModelClient>(
     client: &C,
     view: &PlantView,
+    account: &mut CallAccount,
 ) -> Result<ModelProposal<Tour>, TourError> {
     if view.items.is_empty() {
         return Err(TourError::NothingToVisit);
@@ -150,7 +168,23 @@ pub(crate) async fn direct<C: ModelClient>(
         max_tokens: Some(DIRECTOR_MAX_TOKENS),
         ..ChatRequest::default()
     };
-    let reply = client.chat_json::<Tour>(Role::Director, request).await?;
+    // The call is under way. Its reply or its error replaces this. A deadline that ends the call
+    // first leaves it as it is, so the cut-off call reads as a timeout.
+    *account = CallAccount::Failed(CallFailure::Timeout);
+    let reply = match client.chat_json::<Tour>(Role::Director, request).await {
+        Ok(reply) => reply,
+        Err(err) => {
+            // A reply that came back keeps its trace. A call the client refused before any request
+            // is not an attempt, so it is not accounted.
+            *account = match err.reply_trace() {
+                Some(trace) => CallAccount::Reply(trace.call.clone()),
+                None if err.was_sent() => CallAccount::Failed(failure_of(&err)),
+                None => CallAccount::NotCalled,
+            };
+            return Err(err.into());
+        }
+    };
+    *account = CallAccount::Reply(reply.call.clone());
     tracing::info!(
         receipt = %view.receipt_hash,
         model = %reply.call.model,
@@ -494,10 +528,10 @@ fn spawn<C: ModelClient + 'static>(
     tokio::spawn(async move {
         let _ticket = ticket;
         let settle = Settle(job);
-        let answer = tokio::select! {
+        let (answer, account) = tokio::select! {
             biased;
             () = stopped(shutdown) => return,
-            answer = answer_within(host.client(), &view, &slots, DIRECTOR_DEADLINE) => answer,
+            asked = answer_within(host.client(), &view, &slots, DIRECTOR_DEADLINE) => asked,
         };
         match &answer {
             DirectorAnswer::Proposal(_) => {}
@@ -509,7 +543,14 @@ fn spawn<C: ModelClient + 'static>(
                 );
             }
         }
+        // The call is metered once, by the view that started it. Its answer is published first, so
+        // no view waits on the usage log, and the usage follows. A call that was never sent is not
+        // metered.
+        let usage = usage_of(&host, &view, &account, &answer);
         settle.answer(answer);
+        if let Some(command) = usage {
+            submit_usage(&host, &view, command).await;
+        }
     });
 }
 
@@ -523,27 +564,37 @@ async fn stopped(mut shutdown: watch::Receiver<bool>) {
 
 /// One director call, given at most `deadline` from now. The wait for a free slot counts toward
 /// the deadline, so a call that waits for a slot for the whole deadline is refused without one.
+/// The account says what was sent: a call cut off by the deadline is a timeout, and a call that
+/// never got a slot was not sent, so it is not accounted.
 async fn answer_within<C: ModelClient>(
     client: &C,
     view: &PlantView,
     slots: &Semaphore,
     deadline: Duration,
-) -> DirectorAnswer {
+) -> (DirectorAnswer, CallAccount) {
+    let mut account = CallAccount::NotCalled;
     let call = async {
         let _slot = slots.acquire().await.expect("the director slots stay open");
-        ask(client, view).await
+        ask(client, view, &mut account).await
     };
-    match tokio::time::timeout(deadline, call).await {
-        Ok(answer) => answer,
-        Err(_) => {
-            DirectorAnswer::transient(format!("the director did not answer within {deadline:?}"))
-        }
+    let outcome = tokio::time::timeout(deadline, call).await;
+    match outcome {
+        Ok(answer) => (answer, account),
+        Err(_) => (
+            DirectorAnswer::transient(format!("the director did not answer within {deadline:?}")),
+            account,
+        ),
     }
 }
 
-/// One director call. The proposal is admitted later, against each view it is served with.
-async fn ask<C: ModelClient>(client: &C, view: &PlantView) -> DirectorAnswer {
-    match direct(client, view).await {
+/// One director call, with its answer. The proposal is admitted later, against each view it is
+/// served with. `account` is the call's accounting, as [`direct`] writes it.
+async fn ask<C: ModelClient>(
+    client: &C,
+    view: &PlantView,
+    account: &mut CallAccount,
+) -> DirectorAnswer {
+    match direct(client, view, account).await {
         Ok(proposal) => DirectorAnswer::Proposal(proposal),
         Err(err) => {
             log_unusable_reply(view, &err);
@@ -578,6 +629,141 @@ fn log_unusable_reply(view: &PlantView, err: &TourError) {
     );
 }
 
+/// The outcome of one director call, as its usage detail names it for the view that started the
+/// call: the proposal is admitted for that view, refused by the code of the rule it breaks, or the
+/// reply is not a tour. The detail is built from fixed codes, so it never carries the model's text.
+/// Code builds it, and it is cut to [`caps::CARD_WORDS`] words.
+fn outcome_detail(view: &PlantView, answer: &DirectorAnswer) -> String {
+    let receipt = short_receipt(&view.receipt_hash);
+    let outcome = match answer {
+        DirectorAnswer::Proposal(proposal) => match check(view, proposal) {
+            Ok(()) => "admitted".to_owned(),
+            Err(code) => format!("refused: {code}"),
+        },
+        DirectorAnswer::Refused(_) | DirectorAnswer::Transient { .. } => "not a tour".to_owned(),
+    };
+    cut_words(
+        &format!("tour for receipt {receipt}: {outcome}"),
+        caps::CARD_WORDS,
+    )
+}
+
+/// Checks `proposal` against `view` as admission does, without logging the refusal: the caller
+/// that serves the view logs it. An error is the code of the rule the tour breaks.
+fn check(view: &PlantView, proposal: &ModelProposal<Tour>) -> Result<(), String> {
+    let catalog = CaptionCatalog::trusted().map_err(|_| "catalog_unavailable".to_owned())?;
+    acan_intent::admit::tour(view, &catalog, proposal.proposal())
+        .map(|_| ())
+        .map_err(|rejection| rejection_code(&rejection))
+}
+
+/// The fixed code of the rule a tour broke. A step's code names its position and its fault.
+fn rejection_code(rejection: &TourRejection) -> String {
+    match rejection {
+        TourRejection::StaleReceipt { .. } => "stale_receipt".to_owned(),
+        TourRejection::CatalogMismatch { .. } => "catalog_mismatch".to_owned(),
+        TourRejection::Step { tour_step, fault } => {
+            format!("step {tour_step}: {}", fault_code(fault))
+        }
+        TourRejection::Unreached { .. } => "unreached_item".to_owned(),
+        // The enum is non-exhaustive, so a rule added in acan-intent has this code until it has its own.
+        _ => "rule_broken".to_owned(),
+    }
+}
+
+/// The fixed code of what is wrong with one tour step.
+fn fault_code(fault: &StepFault) -> &'static str {
+    match fault {
+        StepFault::UnknownItem { .. } => "unknown_item",
+        StepFault::UnknownMachine { .. } => "unknown_machine",
+        StepFault::UnknownMark { .. } => "unknown_mark",
+        StepFault::ForeignItem { .. } => "foreign_item",
+        StepFault::Unresolved { .. } => "unresolved_evidence",
+        StepFault::UnknownTemplate { .. } => "unknown_template",
+        StepFault::TemplateDoesNotFit { .. } => "template_does_not_fit",
+        StepFault::SlotsDiffer { .. } => "slots_differ",
+        StepFault::Slot { .. } => "slot_mismatch",
+        StepFault::MismatchedAddress { .. } => "mismatched_address",
+        // The enum is non-exhaustive, so a fault added in acan-intent has this code until it has its own.
+        _ => "step_rule_broken",
+    }
+}
+
+/// The first eight hex characters of a receipt hash, without its `sha256:` prefix.
+fn short_receipt(hash: &ReceiptHash) -> String {
+    let text = hash.to_string();
+    let hex = text.split_once(':').map_or(text.as_str(), |(_, hex)| hex);
+    hex.chars().take(8).collect()
+}
+
+/// `text` with at most `words` whitespace-separated words. A longer text is cut, and its last word
+/// ends in "...".
+fn cut_words(text: &str, words: usize) -> String {
+    let all: Vec<&str> = text.split_whitespace().collect();
+    if all.len() <= words {
+        return all.join(" ");
+    }
+    format!("{}...", all[..words].join(" "))
+}
+
+/// The usage row of one director call, or none when no request was sent. A call that replied is
+/// metered with its outcome. A call that was sent and gave no reply is metered as a failure, under
+/// the route it was sent to, with no token counts. The row is decided here, while the call's answer
+/// and route are at hand, and it is submitted after the answer is published.
+fn usage_of<C: ModelClient>(
+    host: &Host<C>,
+    view: &PlantView,
+    account: &CallAccount,
+    answer: &DirectorAnswer,
+) -> Option<SystemCmd> {
+    match account {
+        CallAccount::Reply(call) => Some(SystemCmd::ModelUsed {
+            model: call.model.clone(),
+            provider: Some(call.provider.clone()),
+            step: Step::Director,
+            input_tokens: Some(call.usage.prompt_tokens),
+            output_tokens: Some(call.usage.completion_tokens),
+            failure: None,
+            detail: Some(outcome_detail(view, answer)),
+        }),
+        CallAccount::Failed(failure) => match host.client().destination(Role::Director) {
+            Some(destination) => {
+                let receipt = short_receipt(&view.receipt_hash);
+                let text = format!("tour for receipt {receipt}: {}", failure_word(*failure));
+                Some(SystemCmd::ModelUsed {
+                    model: destination.model,
+                    provider: Some(destination.provider),
+                    step: Step::Director,
+                    input_tokens: None,
+                    output_tokens: None,
+                    failure: Some(*failure),
+                    detail: Some(cut_words(&text, caps::CARD_WORDS)),
+                })
+            }
+            None => {
+                tracing::warn!(
+                    receipt = %view.receipt_hash,
+                    "the director call failed with no route to name; its usage is not recorded"
+                );
+                None
+            }
+        },
+        CallAccount::NotCalled => None,
+    }
+}
+
+/// Submits one usage row as advisory, so it moves no gate state. Metering is best-effort, as for
+/// every model call: a failed record is logged, and the call is not made again.
+async fn submit_usage<C: ModelClient>(host: &Host<C>, view: &PlantView, command: SystemCmd) {
+    if let Err(err) = host.submit_advisory(Command::System(command)).await {
+        tracing::warn!(
+            receipt = %view.receipt_hash,
+            error = %err,
+            "recording the director call's usage failed"
+        );
+    }
+}
+
 /// The director's context: the view without any tour, the mandatory item ids and the catalog.
 fn context(view: &PlantView, catalog: &CaptionCatalog) -> Result<String, TourError> {
     let mut view_json = serde_json::to_value(view)?;
@@ -602,7 +788,6 @@ mod tests {
     use std::future::Future;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use acan_intent::admit::StepFault;
     use acan_llm::{
         ChatResponse, Destination, MUSE_SPARK_MODELS, MUSE_SPARK_PROVIDER, Reply, Stub,
     };
@@ -748,7 +933,7 @@ mod tests {
                 Reply::json(&tour),
             );
 
-        let proposal = direct(&stub, &view)
+        let proposal = direct(&stub, &view, &mut CallAccount::NotCalled)
             .await
             .expect("the stub's tour is proposed");
         let admitted = admit(&view, proposal).expect("the proposed tour is admitted");
@@ -779,7 +964,7 @@ mod tests {
         let view = fixture(VIEW);
         let stub = director(Reply::text("not json"));
 
-        let err = direct(&stub, &view)
+        let err = direct(&stub, &view, &mut CallAccount::NotCalled)
             .await
             .expect_err("a reply that is not a tour is refused");
 
@@ -794,7 +979,7 @@ mod tests {
         let view = fixture(VIEW);
         let stub = Stub::default().routed(Role::Director, muse_spark_route());
 
-        let err = direct(&stub, &view)
+        let err = direct(&stub, &view, &mut CallAccount::NotCalled)
             .await
             .expect_err("no reply is scripted for the director");
 
@@ -826,7 +1011,7 @@ mod tests {
                 None => base,
             };
 
-            let err = direct(&stub, &view)
+            let err = direct(&stub, &view, &mut CallAccount::NotCalled)
                 .await
                 .expect_err("only a Muse Spark route is asked");
 
@@ -874,7 +1059,7 @@ mod tests {
         let text = tour_text_with_a_repeated_slot(&directed_tour(&view));
         let stub = director(Reply::text(text));
 
-        let err = direct(&stub, &view)
+        let err = direct(&stub, &view, &mut CallAccount::NotCalled)
             .await
             .expect_err("a repeated slot is not a tour");
 
@@ -890,7 +1075,7 @@ mod tests {
         view.items.clear();
         let stub = Stub::default().routed(Role::Director, muse_spark_route());
 
-        let err = direct(&stub, &view)
+        let err = direct(&stub, &view, &mut CallAccount::NotCalled)
             .await
             .expect_err("an empty view has no tour to order");
 
@@ -1046,6 +1231,315 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    #[test]
+    fn a_usage_detail_is_cut_to_one_hundred_words() {
+        let long = vec!["word"; 150].join(" ");
+
+        let cut = cut_words(&long, caps::CARD_WORDS);
+
+        assert_eq!(cut.split_whitespace().count(), caps::CARD_WORDS);
+        assert!(cut.ends_with("word..."), "{cut}");
+        assert_eq!(
+            cut_words("a short detail", caps::CARD_WORDS),
+            "a short detail"
+        );
+    }
+
+    /// A director routed to Muse Spark whose calls fail with the error `error` builds from the
+    /// provider's name. No call sends a reply.
+    fn failing_director(error: fn(String) -> LlmError) -> Stub {
+        Stub::default()
+            .routed(Role::Director, muse_spark_route())
+            .fails_when(Role::Director, |_| true, error)
+    }
+
+    /// The error of a call the client refuses before any request: no key is saved for the provider.
+    fn missing_key(provider: String) -> LlmError {
+        LlmError::MissingKey {
+            provider,
+            env_var: "EXAMPLE_KEY".to_owned(),
+        }
+    }
+
+    /// The usage entries the log holds now.
+    async fn usage_in_log<C: ModelClient>(host: &Host<C>) -> Vec<acan_core::Event> {
+        use acan_core::{Event, Seq};
+
+        host.store()
+            .load_from(Seq::new(0))
+            .await
+            .expect("the stored log reads")
+            .into_iter()
+            .map(|stamped| stamped.event)
+            .filter(|event| matches!(event, Event::ModelUsed { .. }))
+            .collect()
+    }
+
+    /// The usage entries, once the log holds one. A call's usage is recorded after its answer is
+    /// published, so this waits for it, and fails after five seconds.
+    async fn usage_logged<C: ModelClient>(host: &Host<C>) -> Vec<acan_core::Event> {
+        let started = Instant::now();
+        loop {
+            let logged = usage_in_log(host).await;
+            if !logged.is_empty() {
+                return logged;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "no usage was recorded"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// The directed tour of the fixture, with its first step naming an item the view does not have.
+    fn unknown_item_tour() -> Tour {
+        let mut value =
+            serde_json::to_value(directed_tour(&fixture(VIEW))).expect("the tour encodes");
+        value["steps"][0]["item_id"] = json!("i-not-in-view");
+        serde_json::from_value(value).expect("the tour decodes")
+    }
+
+    /// Runs one director call against `client`, which fails it, and waits for its usage. Returns
+    /// the usage entries the log holds, the receipt's first eight hex digits, and the usage totals.
+    async fn failed_director_call(
+        client: Stub,
+    ) -> (Vec<acan_core::Event>, String, acan_core::ModelUsage) {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let view = untoured(VIEW);
+        let digits = short_receipt(&view.receipt_hash);
+        let host = host_with(dir.path(), client).await;
+
+        let filled = fill_within(&host, view, Duration::from_secs(5)).await;
+        assert!(
+            matches!(filled.tour, Some(TourView::Deterministic { .. })),
+            "a failed call serves the deterministic tour: {:?}",
+            filled.tour
+        );
+
+        let logged = usage_logged(&host).await;
+        let usage = host.read(|world| world.usage().clone());
+        (logged, digits, usage)
+    }
+
+    #[tokio::test]
+    async fn a_director_timeout_records_a_failed_entry() {
+        use acan_core::{CallFailure, Event, Step};
+
+        let client = failing_director(|provider| LlmError::Timeout { provider });
+        let (logged, digits, usage) = failed_director_call(client).await;
+
+        let [
+            Event::ModelUsed {
+                model,
+                provider,
+                step,
+                input_tokens,
+                output_tokens,
+                failure,
+                detail,
+            },
+        ] = logged.as_slice()
+        else {
+            panic!("one timed-out director call is one failed usage record: {logged:?}");
+        };
+        assert_eq!(*step, Step::Director);
+        assert_eq!(model.as_str(), MUSE_SPARK_MODELS[0]);
+        assert_eq!(provider.as_deref(), Some(MUSE_SPARK_PROVIDER));
+        assert_eq!(
+            (*input_tokens, *output_tokens),
+            (None, None),
+            "a call with no reply has no tokens"
+        );
+        assert_eq!(*failure, Some(CallFailure::Timeout));
+        assert_eq!(
+            detail.as_deref(),
+            Some(format!("tour for receipt {digits}: timeout").as_str())
+        );
+        assert!(
+            usage.totals.is_empty(),
+            "a failed call counts nothing: {usage:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_director_provider_error_records_a_failed_entry_with_error() {
+        use acan_core::{CallFailure, Event};
+
+        let client = failing_director(|provider| LlmError::ServerError {
+            provider,
+            status: 503,
+            attempts: 3,
+        });
+        let (logged, digits, usage) = failed_director_call(client).await;
+
+        let [
+            Event::ModelUsed {
+                failure, detail, ..
+            },
+        ] = logged.as_slice()
+        else {
+            panic!("one failed director call is one failed usage record: {logged:?}");
+        };
+        assert_eq!(*failure, Some(CallFailure::Error));
+        assert_eq!(
+            detail.as_deref(),
+            Some(format!("tour for receipt {digits}: error").as_str())
+        );
+        assert!(
+            usage.totals.is_empty(),
+            "a failed call counts nothing: {usage:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_director_call_refused_before_its_request_is_not_accounted() {
+        let view = untoured(VIEW);
+        let stub = failing_director(missing_key);
+        let mut account = CallAccount::Failed(acan_core::CallFailure::Error);
+
+        let err = direct(&stub, &view, &mut account)
+            .await
+            .expect_err("a call with no key is refused");
+
+        assert!(
+            matches!(err, TourError::Director(LlmError::MissingKey { .. })),
+            "{err}"
+        );
+        assert_eq!(account, CallAccount::NotCalled, "no request was sent");
+    }
+
+    #[tokio::test]
+    async fn a_director_call_refused_before_its_request_records_no_usage() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let view = untoured(VIEW);
+        let hash = view.receipt_hash;
+        let host = host_with(dir.path(), failing_director(missing_key)).await;
+
+        let filled = fill_within(&host, view, Duration::from_secs(5)).await;
+
+        assert!(
+            matches!(filled.tour, Some(TourView::Deterministic { .. })),
+            "{:?}",
+            filled.tour
+        );
+        assert!(
+            matches!(
+                host.tours().outcome(&hash),
+                Some(DirectorAnswer::Transient { .. })
+            ),
+            "a missing key is refused for a later retry"
+        );
+        // The answer is published before any usage row, so the log is read once it has settled.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            usage_in_log(&host).await.is_empty(),
+            "no request was sent, so no usage is recorded"
+        );
+        assert!(host.read(|world| world.usage().totals.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn a_director_tour_refused_for_an_unknown_item_is_recorded_by_its_rule_code() {
+        use acan_core::Event;
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let view = untoured(VIEW);
+        let digits = short_receipt(&view.receipt_hash);
+        let host = host_with(dir.path(), director(Reply::json(&unknown_item_tour()))).await;
+
+        let filled = fill_within(&host, view, Duration::from_secs(5)).await;
+        assert!(
+            matches!(filled.tour, Some(TourView::Deterministic { .. })),
+            "{:?}",
+            filled.tour
+        );
+
+        let logged = usage_logged(&host).await;
+        let [
+            Event::ModelUsed {
+                step,
+                failure,
+                detail,
+                ..
+            },
+        ] = logged.as_slice()
+        else {
+            panic!("one refused director tour is one usage record: {logged:?}");
+        };
+        assert_eq!(*step, Step::Director);
+        assert_eq!(*failure, None, "a reply is not a failure");
+        assert_eq!(
+            detail.as_deref(),
+            Some(format!("tour for receipt {digits}: refused: step 0: unknown_item").as_str())
+        );
+    }
+
+    #[test]
+    fn a_refusal_detail_is_built_from_codes_and_never_carries_the_model() {
+        let view = untoured(VIEW);
+        let digits = short_receipt(&view.receipt_hash);
+        let model: ModelRef = "zz-model-id-7".parse().expect("a model id");
+        let answer = DirectorAnswer::Proposal(ModelProposal::new(unknown_item_tour(), model));
+
+        let detail = outcome_detail(&view, &answer);
+
+        assert_eq!(
+            detail,
+            format!("tour for receipt {digits}: refused: step 0: unknown_item")
+        );
+        assert!(!detail.contains("zz-model-id-7"), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn a_director_call_records_model_used_with_step_director_and_its_outcome() {
+        use acan_core::Event;
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let view = untoured(VIEW);
+        let receipt = view.receipt_hash.to_string();
+        let tour = directed_tour(&fixture(VIEW));
+        let host = host_with(dir.path(), director(Reply::json(&tour))).await;
+
+        let filled = fill_within(&host, view, Duration::from_secs(5)).await;
+        assert!(
+            matches!(filled.tour, Some(TourView::Directed { .. })),
+            "{:?}",
+            filled.tour
+        );
+
+        let logged = usage_logged(&host).await;
+        let [
+            Event::ModelUsed {
+                model,
+                provider,
+                step,
+                input_tokens,
+                output_tokens,
+                failure,
+                detail,
+            },
+        ] = logged.as_slice()
+        else {
+            panic!("one director call is one usage record: {logged:?}");
+        };
+        let calls = host.client().ledger().records();
+        let [call] = calls.as_slice() else {
+            panic!("one director call reached the model: {calls:?}");
+        };
+        let digits = &receipt.trim_start_matches("sha256:")[..8];
+        assert_eq!(*step, Step::Director);
+        assert_eq!(model.as_str(), MUSE_SPARK_MODELS[0]);
+        assert_eq!(provider.as_deref(), Some(MUSE_SPARK_PROVIDER));
+        assert_eq!(*input_tokens, Some(call.usage.prompt_tokens));
+        assert_eq!(*output_tokens, Some(call.usage.completion_tokens));
+        assert_eq!(*failure, None, "a reply is not a failure");
+        assert_eq!(
+            detail.as_deref(),
+            Some(format!("tour for receipt {digits}: admitted").as_str())
+        );
+    }
+
     #[tokio::test]
     async fn a_director_tour_for_another_receipt_is_refused_at_admission_and_the_deterministic_tour_is_served()
      {
@@ -1141,6 +1635,17 @@ mod tests {
         };
         assert_eq!(reason, "director needs a Meta Muse Spark route");
         assert_eq!(calls.load(Ordering::SeqCst), 0, "no call was made");
+        let logged = host
+            .store()
+            .load_from(acan_core::Seq::new(0))
+            .await
+            .expect("the stored log reads");
+        assert!(
+            logged
+                .iter()
+                .all(|stamped| !matches!(stamped.event, acan_core::Event::ModelUsed { .. })),
+            "a call that was never sent is not recorded"
+        );
     }
 
     #[tokio::test]
@@ -1173,8 +1678,14 @@ mod tests {
         let slots = Semaphore::new(1);
         let stub = Stalled::default();
 
-        let answer = answer_within(&stub, &untoured(VIEW), &slots, Duration::from_millis(50)).await;
+        let (answer, account) =
+            answer_within(&stub, &untoured(VIEW), &slots, Duration::from_millis(50)).await;
 
+        assert_eq!(
+            account,
+            CallAccount::Failed(CallFailure::Timeout),
+            "a call the deadline cut off was sent and gave no reply"
+        );
         let DirectorAnswer::Transient { reason, .. } = answer else {
             panic!("a call past its deadline is refused for a later retry: {answer:?}");
         };
@@ -1191,7 +1702,7 @@ mod tests {
             .await
             .expect("the slots are open");
 
-        let answer = tokio::time::timeout(
+        let (answer, account) = tokio::time::timeout(
             Duration::from_secs(5),
             answer_within(
                 &Stalled::default(),
@@ -1203,6 +1714,11 @@ mod tests {
         .await
         .expect("the deadline ends the wait for a slot");
 
+        assert_eq!(
+            account,
+            CallAccount::NotCalled,
+            "a call still waiting for a slot at its deadline was never sent"
+        );
         let DirectorAnswer::Transient { reason, .. } = answer else {
             panic!("a call still waiting at its deadline is refused: {answer:?}");
         };

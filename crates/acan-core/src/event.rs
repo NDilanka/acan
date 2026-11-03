@@ -248,16 +248,24 @@ pub enum SystemCmd {
         /// The merge commit, or why it failed.
         result: Result<CommitId, String>,
     },
-    /// A model call finished, for the usage panel.
+    /// A model call finished, for the usage panel. A call that was attempted and gave no reply
+    /// is recorded too, with its `failure` and no token counts.
     ModelUsed {
         /// The model name.
         model: String,
+        /// The provider that answered the call, or that the call was sent to when it failed.
+        provider: Option<String>,
         /// Which step called it.
         step: Step,
-        /// Prompt tokens.
-        input_tokens: u32,
-        /// Completion tokens.
-        output_tokens: u32,
+        /// Prompt tokens. None when the call gave no reply.
+        input_tokens: Option<u32>,
+        /// Completion tokens. None when the call gave no reply.
+        output_tokens: Option<u32>,
+        /// Why the call gave no reply, when it was attempted and failed.
+        failure: Option<CallFailure>,
+        /// A short note on the call's outcome. Built by code, never by a model, at most 100
+        /// words. A command carries it into the event.
+        detail: Option<String>,
     },
     /// A timer tick. Expires due leases and lifts declare barriers past their deadline.
     Tick,
@@ -371,6 +379,16 @@ pub struct VisionCounts {
     pub unclear: u32,
     /// The call failed or a page could not be rendered.
     pub not_checked: u32,
+}
+
+/// Why a model call that was attempted gave no reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallFailure {
+    /// The provider did not answer in time.
+    Timeout,
+    /// The provider failed, or the call did not produce a reply.
+    Error,
 }
 
 /// Who caused an event.
@@ -530,9 +548,25 @@ pub enum Event {
     },
     ModelUsed {
         model: String,
+        /// The provider that answered the call, or that the call was sent to when it failed.
+        /// Absent in logs written before it existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
         step: Step,
-        input_tokens: u32,
-        output_tokens: u32,
+        /// Prompt tokens. Absent when the call gave no reply.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<u32>,
+        /// Completion tokens. Absent when the call gave no reply.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<u32>,
+        /// Set when the call was attempted and gave no reply. Such an entry has no token counts
+        /// and is not counted in the usage totals. Absent in logs written before it existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<CallFailure>,
+        /// A short note on the call's outcome. Built by code, never by a model, at most 100
+        /// words. Absent in logs written before it existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     /// A human set the order's scope revision. Clears any confirmation.
     ScopeRevised {

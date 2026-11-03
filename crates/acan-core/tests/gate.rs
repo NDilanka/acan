@@ -3,9 +3,9 @@ mod common;
 use std::collections::BTreeMap;
 
 use acan_core::{
-    AgentCmd, Claim, CommitId, DECLARE_BARRIER_MS, Event, Fence, GateRun, GateRunId, GateVerdict,
-    Generation, Job, LEASE_TTL_MS, LeaseEnd, OrderRev, Rejection, Stage, Step, SystemCmd, TaskId,
-    TaskState, VisionCounts, VisionStatus, WitnessId, WitnessOutcome,
+    AgentCmd, CallFailure, Claim, CommitId, DECLARE_BARRIER_MS, Event, Fence, GateRun, GateRunId,
+    GateVerdict, Generation, Job, LEASE_TTL_MS, LeaseEnd, OrderRev, Rejection, Stage, Step,
+    SystemCmd, TaskId, TaskState, VisionCounts, VisionStatus, WitnessId, WitnessOutcome,
 };
 use acan_core::{HumanCmd, TaskSpec};
 use common::{Fx, events, machine, sym};
@@ -601,9 +601,12 @@ fn an_advisory_usage_row_leaves_a_declare_barrier_past_its_deadline() {
     let batch = fx
         .advise(SystemCmd::ModelUsed {
             model: "muse-spark".to_owned(),
+            provider: None,
             step: Step::Vision,
-            input_tokens: 900,
-            output_tokens: 120,
+            input_tokens: Some(900),
+            output_tokens: Some(120),
+            failure: None,
+            detail: None,
         })
         .expect("usage recorded");
     assert!(
@@ -617,5 +620,74 @@ fn an_advisory_usage_row_leaves_a_declare_barrier_past_its_deadline() {
             .iter()
             .any(|e| matches!(e, Event::BarrierExpired { order: o } if *o == order)),
         "{ticked:?}"
+    );
+}
+
+/// A usage row for the advisory path, with the given token counts, failure and detail.
+fn usage_row(
+    input: Option<u32>,
+    output: Option<u32>,
+    failure: Option<CallFailure>,
+    detail: Option<String>,
+) -> SystemCmd {
+    SystemCmd::ModelUsed {
+        model: "muse-spark".to_owned(),
+        provider: Some("meta".to_owned()),
+        step: Step::Director,
+        input_tokens: input,
+        output_tokens: output,
+        failure,
+        detail,
+    }
+}
+
+#[test]
+fn a_usage_row_that_failed_carries_no_token_counts() {
+    let mut fx = Fx::new();
+    let before = fx.origin.world().clone();
+
+    let got = fx.advise(usage_row(
+        Some(900),
+        Some(120),
+        Some(CallFailure::Timeout),
+        None,
+    ));
+
+    assert!(matches!(got, Err(Rejection::Invalid { .. })), "got {got:?}");
+    assert_eq!(fx.origin.world(), &before, "a refused row changes nothing");
+}
+
+#[test]
+fn a_usage_row_that_gave_a_reply_carries_both_token_counts() {
+    let mut fx = Fx::new();
+    let before = fx.origin.world().clone();
+
+    for (input, output) in [(None, None), (Some(900), None), (None, Some(120))] {
+        let got = fx.advise(usage_row(input, output, None, None));
+        assert!(
+            matches!(got, Err(Rejection::Invalid { .. })),
+            "{input:?}/{output:?}: got {got:?}"
+        );
+    }
+    assert_eq!(fx.origin.world(), &before, "refused rows change nothing");
+}
+
+#[test]
+fn a_usage_detail_holds_at_most_one_hundred_words() {
+    let mut fx = Fx::new();
+    let words = |count: usize| vec!["word"; count].join(" ");
+
+    let too_long = fx.advise(usage_row(Some(900), Some(120), None, Some(words(101))));
+    assert!(
+        matches!(too_long, Err(Rejection::Invalid { .. })),
+        "got {too_long:?}"
+    );
+
+    let batch = fx
+        .advise(usage_row(Some(900), Some(120), None, Some(words(100))))
+        .expect("a detail of one hundred words is accepted");
+    assert!(
+        matches!(events(&batch).as_slice(), [Event::ModelUsed { .. }]),
+        "{batch:?}"
     );
 }
