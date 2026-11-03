@@ -6,10 +6,12 @@ import { test } from "node:test";
 
 import {
   flagGroups,
+  flagLeader,
   parkedClick,
   parkedEntries,
   parkedKind,
   pinNear,
+  plateSpots,
   splitByProject,
 } from "../../www/overlays.js";
 
@@ -65,4 +67,36 @@ test("flag anchors split into agent columns by machine and lone flags", () => {
 test("a parked plant shows agents, landed and away dots and questions, not hover-only kinds", () => {
   for (const kind of ["agent", "landed", "away", "question"]) assert.equal(parkedKind(kind), true, kind);
   for (const kind of ["clash", "order", "plot", "stage"]) assert.equal(parkedKind(kind), false, kind);
+});
+
+test("a lone flag at its wanted spot needs no leader; a moved or stacked one draws one to its anchor", () => {
+  const anchor = { x: 100, y: 200 };
+  assert.equal(flagLeader({ left: 94, top: 170, w: 60, h: 18 }, 94, 170, anchor, true, 6), null);
+  assert.deepEqual(flagLeader({ left: 30, top: 170, w: 60, h: 18 }, 94, 170, anchor, true, 6), { x1: 36, y1: 188, x2: 100, y2: 200 });
+  assert.deepEqual(flagLeader({ left: 70, top: 150, w: 60, h: 18 }, 70, 150, anchor, false, 6), { x1: 100, y1: 168, x2: 100, y2: 200 });
+});
+
+test("plates of close plants stack downwards, the first keeps its spot", () => {
+  const spots = plateSpots([
+    { id: "demo", x: 100, y: 50, w: 60, h: 20 },
+    { id: "shop", x: 120, y: 55, w: 60, h: 20 },
+    { id: "notes", x: 110, y: 52, w: 60, h: 20 },
+  ], [], 3);
+  assert.deepEqual(spots.get("demo"), { left: 70, top: 50 });
+  assert.equal(spots.get("shop").top, 73);
+  assert.equal(spots.get("notes").top, 96);
+  const boxes = [...spots].map(([id, { left, top }]) => ({ left, right: left + 60, top, bottom: top + 20 }));
+  for (let i = 0; i < boxes.length; i += 1) {
+    for (let j = i + 1; j < boxes.length; j += 1) {
+      const [a, b] = [boxes[i], boxes[j]];
+      assert.ok(!(a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom), `${i} and ${j} overlap`);
+    }
+  }
+});
+
+test("a plate moves below a machine name it would cover, and a plate far away keeps its spot", () => {
+  const names = [{ left: 90, right: 130, top: 45, bottom: 60 }];
+  const spots = plateSpots([{ id: "notes", x: 110, y: 50, w: 60, h: 20 }, { id: "far", x: 600, y: 50, w: 60, h: 20 }], names, 3);
+  assert.equal(spots.get("notes").top, 63);
+  assert.deepEqual(spots.get("far"), { left: 570, top: 50 });
 });

@@ -71,3 +71,44 @@ export function flagGroups(rows) {
 export function parkedKind(kind) {
   return kind === "agent" || kind === "landed" || kind === "away" || kind === "question";
 }
+
+// The leader from a parked agent flag to its drone's crown at `anchor`, in the on-screen
+// project's rule: a lone flag that kept its wanted spot points with its own pointer and needs
+// none; any other draws one from its bottom edge, `inset` in from its left when lone, else from
+// its middle. `spot` is `{ left, top, w, h }`. Returns `{ x1, y1, x2, y2 }` or null.
+export function flagLeader(spot, wantLeft, wantTop, anchor, single, inset) {
+  if (single && spot.left === wantLeft && spot.top === wantTop) return null;
+  return { x1: spot.left + (single ? inset : spot.w / 2), y1: spot.top + spot.h, x2: anchor.x, y2: anchor.y };
+}
+
+function overlapsBox(a, b) {
+  return a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+}
+
+// Where each project's plate shows. `plates` are `{ id, x, y, w, h }` in the order they claim
+// room, the project on screen first: each wants its top centre at (x, y). A plate that would
+// cover a box in `blocked` (the names and flags already placed) or a plate placed before it moves
+// down past it, so plates of plants that sit close on screen stack instead of piling up, and
+// none covers a machine's name. Returns a Map from id to `{ left, top }`.
+export function plateSpots(plates, blocked, pad) {
+  const placed = [...blocked];
+  const out = new Map();
+  for (const { id, x, y, w, h } of plates) {
+    const left = x - w / 2;
+    let top = y;
+    let moved = true;
+    while (moved) {
+      moved = false;
+      for (const box of placed) {
+        const mine = { left: left - pad, right: left + w + pad, top: top - pad, bottom: top + h + pad };
+        if (overlapsBox(mine, box)) {
+          top = box.bottom + pad;
+          moved = true;
+        }
+      }
+    }
+    placed.push({ left, right: left + w, top, bottom: top + h });
+    out.set(id, { left, top });
+  }
+  return out;
+}

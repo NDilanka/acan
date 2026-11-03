@@ -133,8 +133,9 @@ function drawFrame(now = performance.now()) {
     paintRide();
     placeLabels();
     placeVisionPins();
-    placePlates();
+    // The parked names are placed before the plates, which move clear of them.
     placeParked();
+    placePlates();
     if (turning) {
       requestRender();
     } else {
