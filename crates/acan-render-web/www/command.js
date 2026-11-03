@@ -26,9 +26,9 @@ const VERBS = new Map([
 ]);
 
 // The order kinds sort in when two results score the same.
-const KIND_RANK = { question: 0, clash: 1, machine: 2, order: 3, agent: 4, path: 5, item: 6, lane: 7, hint: 8 };
+const KIND_RANK = { project: -1, question: 0, clash: 1, machine: 2, order: 3, agent: 4, path: 5, item: 6, lane: 7, hint: 8 };
 
-export const VERB_WORDS = { go: "go", ride: "ride", order: "order", seal: "seal", question: "answer", clash: "open", hint: "fill" };
+export const VERB_WORDS = { project: "go", go: "go", ride: "ride", order: "order", seal: "seal", question: "answer", clash: "open", hint: "fill" };
 
 export function parseQuery(text) {
   const trimmed = String(text ?? "").trim().replace(/\s+/g, " ");
@@ -86,6 +86,7 @@ export function search(view, text, extra = {}) {
       break;
     case "go":
       if (term === "") return [hint("go", "go ", "a machine, an agent or an order")];
+      if (extra.projects) projects(extra.projects, term, push);
       machines(view, term, "go", push);
       agents(view, term, "go", push);
       orders(view, term, push);
@@ -139,6 +140,34 @@ function suggestions(view, extra) {
 
 function hint(name, fill, detail) {
   return { kind: "hint", key: `hint-${name}`, label: fill.trim(), detail, verb: "hint", target: { fill } };
+}
+
+// The projects of a canvas of several, by id or name, for `go`. Enter flies there.
+function projects(list, term, push) {
+  for (const project of list) {
+    const rank = [score(term, project.id), score(term, project.name)]
+      .filter((value) => value !== null)
+      .reduce((best, value) => Math.min(best, value), Infinity);
+    push({
+      kind: "project",
+      key: `project-${project.id}`,
+      label: project.name,
+      detail: project.status === "degraded" ? `project ${project.id} · degraded` : `project ${project.id}`,
+      verb: "project",
+      target: { project: project.id },
+    }, rank === Infinity ? null : rank);
+  }
+}
+
+// The projects `go <term>` finds in `list`, best first.
+export function projectMatches(list, text) {
+  const { verb, term } = parseQuery(text);
+  if (verb !== "go" || term === "") return [];
+  const found = [];
+  projects(list, term, (result, rank) => {
+    if (rank !== null) found.push({ ...result, rank });
+  });
+  return ranked(found);
 }
 
 function machines(view, term, verb, push) {
