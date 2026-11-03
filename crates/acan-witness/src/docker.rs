@@ -98,7 +98,7 @@ fn dependency_value(source: &DependencyMount<'_>, target: &str) -> Result<String
 
 /// The `--mount` value for one bind mount. A comma or quote in a path would split the value,
 /// so such a path is refused rather than quoted.
-pub(crate) fn bind(source: &Path, target: &str, readonly: bool) -> Result<String, String> {
+fn bind(source: &Path, target: &str, readonly: bool) -> Result<String, String> {
     let Some(source_text) = source.to_str() else {
         return Err(format!("mount source is not UTF-8: {}", source.display()));
     };

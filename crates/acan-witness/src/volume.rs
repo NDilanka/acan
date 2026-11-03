@@ -4,8 +4,9 @@
 //! tree reads so slowly that the app misses its readiness deadline: Docker Desktop on Windows took
 //! about two minutes to load an app that took four seconds from a volume. So there, each
 //! lockfile's `node_modules` is copied once into a named volume, and runs mount that volume
-//! read-only. A finished copy carries a mark file at its root, and a volume without the mark is
-//! copied again.
+//! read-only. The copy is made by `docker cp` from the host, which is much faster than a copy that
+//! reads the tree through a bind mount. A finished copy carries a mark file at its root, and a
+//! volume without the mark is copied again.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -15,8 +16,6 @@ use std::sync::OnceLock;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use crate::docker::bind;
-
 /// Whether this host mounts the dependencies from a volume rather than binding the cache entry.
 pub(crate) const FROM_VOLUME: bool = cfg!(not(target_os = "linux"));
 
@@ -24,8 +23,6 @@ pub(crate) const FROM_VOLUME: bool = cfg!(not(target_os = "linux"));
 const PREFIX: &str = "acan-deps-";
 /// The file at a volume's root that marks a finished copy.
 const MARK: &str = ".acan-populated";
-/// Where the helper container reads the cache entry's `node_modules`.
-const SOURCE: &str = "/src";
 /// Where the helper container writes the volume.
 const COPY: &str = "/dst";
 /// The user a run's app runs as. The copy is owned by it.
@@ -106,37 +103,65 @@ pub(crate) fn mark_check_args(image: &str, volume: &str) -> Vec<String> {
     helper_args("test", &[mount], image, &["-f", mark.as_str()])
 }
 
-/// The arguments of the helper that copies the cache entry's `modules` into `volume`. It reads
-/// the entry through a read-only mount, makes the copy the run user's, and writes the mark last.
+/// The script the helper runs once the copy is in. The copy becomes the run user's, and the mark
+/// is written last, so a copy that stopped part way has no mark.
+fn finish_script() -> String {
+    format!("chown -R {RUN_OWNER} {COPY} && touch {COPY}/{MARK}")
+}
+
+/// The arguments that create the helper container for a copy into `volume`. It mounts the volume
+/// at [`COPY`], and it runs the finishing script when it is started, which is after the copy.
+fn helper_create_args(image: &str, volume: &str) -> Vec<String> {
+    let mount = format!("type=volume,source={volume},target={COPY}");
+    let script = finish_script();
+    let args = [
+        "create",
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--entrypoint",
+        "sh",
+        "--mount",
+        mount.as_str(),
+        image,
+        "-c",
+        script.as_str(),
+    ];
+    args.iter().map(|arg| (*arg).to_owned()).collect()
+}
+
+/// The arguments that copy the cache entry's `modules` into the helper container `id`. Docker
+/// reads the files from the host, so the copy does not go through a bind mount.
 ///
 /// # Errors
 ///
-/// Returns the refusal when the entry's path cannot be written as a mount.
-pub(crate) fn populate_args(
-    image: &str,
-    modules: &Path,
-    volume: &str,
-) -> Result<Vec<String>, String> {
-    let source = bind(modules, SOURCE, true)?;
-    let copy = format!("type=volume,source={volume},target={COPY}");
-    let script =
-        format!("cp -a {SOURCE}/. {COPY}/ && chown -R {RUN_OWNER} {COPY} && touch {COPY}/{MARK}");
-    Ok(helper_args(
-        "sh",
-        &[source, copy],
-        image,
-        &["-c", script.as_str()],
-    ))
+/// Returns the refusal when the entry's path is not UTF-8.
+fn copy_args(id: &str, modules: &Path) -> Result<Vec<String>, String> {
+    let source = modules.join(".");
+    let text = source
+        .to_str()
+        .ok_or_else(|| format!("the dependencies path is not UTF-8: {}", modules.display()))?;
+    Ok(vec![
+        "cp".to_owned(),
+        text.to_owned(),
+        format!("{id}:{COPY}"),
+    ])
+}
+
+/// The arguments that start the helper `id`. It finishes the copy and exits.
+fn start_args(id: &str) -> Vec<String> {
+    vec!["start".to_owned(), "--attach".to_owned(), id.to_owned()]
+}
+
+/// The arguments that remove the helper container `id`.
+fn remove_container_args(id: &str) -> Vec<String> {
+    vec!["rm".to_owned(), "--force".to_owned(), id.to_owned()]
 }
 
 /// The arguments that remove `volume`.
 fn remove_args(volume: &str) -> Vec<String> {
     vec!["volume".to_owned(), "rm".to_owned(), volume.to_owned()]
-}
-
-/// The arguments that create `volume`.
-fn create_args(volume: &str) -> Vec<String> {
-    vec!["volume".to_owned(), "create".to_owned(), volume.to_owned()]
 }
 
 /// The arguments of a short-lived container that runs `entrypoint` with `rest` in `image`. It
@@ -197,28 +222,54 @@ async fn mark_present(program: &Path, image: &str, volume: &str) -> Result<bool,
     }
 }
 
-/// Replaces the contents of `volume` with a copy of `modules`. A copy that fails is removed, so
+/// Replaces the contents of `volume` with a copy of `modules`. A helper container mounts the
+/// volume, takes the copy from the host, and then finishes it. A copy that fails is removed, so
 /// the next run starts from nothing.
 async fn populate(program: &Path, image: &str, modules: &Path, volume: &str) -> Result<(), String> {
     // The volume may hold an earlier copy without its mark. Removing it fails when the volume is
     // absent, which is the usual case, so that result is not read.
     let _ = docker(program, &remove_args(volume)).await;
-    let created = docker(program, &create_args(volume)).await?;
+    let created = docker(program, &helper_create_args(image, volume)).await?;
     if !created.status.success() {
         return Err(format!(
-            "cannot create the dependency volume {volume}: {}",
+            "cannot create the dependency copy in {volume}: {}",
             String::from_utf8_lossy(&created.stderr).trim()
         ));
     }
-    let copied = docker(program, &populate_args(image, modules, volume)?).await?;
-    if copied.status.success() {
-        return Ok(());
+    let id = String::from_utf8_lossy(&created.stdout).trim().to_owned();
+    if id.is_empty() {
+        return Err(format!("docker named no helper container for {volume}"));
     }
-    let _ = docker(program, &remove_args(volume)).await;
-    Err(format!(
-        "cannot copy the dependencies into {volume}: {}",
-        String::from_utf8_lossy(&copied.stderr).trim()
-    ))
+    let copied = copy_and_finish(program, modules, volume, &id).await;
+    let _ = docker(program, &remove_container_args(&id)).await;
+    if copied.is_err() {
+        let _ = docker(program, &remove_args(volume)).await;
+    }
+    copied
+}
+
+/// Copies `modules` into the helper `id`, then starts the helper so that it finishes the copy.
+async fn copy_and_finish(
+    program: &Path,
+    modules: &Path,
+    volume: &str,
+    id: &str,
+) -> Result<(), String> {
+    let copied = docker(program, &copy_args(id, modules)?).await?;
+    if !copied.status.success() {
+        return Err(format!(
+            "cannot copy the dependencies into {volume}: {}",
+            String::from_utf8_lossy(&copied.stderr).trim()
+        ));
+    }
+    let finished = docker(program, &start_args(id)).await?;
+    if !finished.status.success() {
+        return Err(format!(
+            "cannot finish the copy in {volume}: {}",
+            String::from_utf8_lossy(&finished.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 /// Runs docker with `args` and returns its output. A docker that cannot start is an error.
@@ -279,10 +330,9 @@ mod tests {
     }
 
     #[test]
-    fn the_copy_reads_the_entry_read_only_and_writes_the_volume_then_marks_it() {
-        let modules = Path::new("cache/sha256-ab12/node_modules");
-        let args = populate_args("node:24@sha256:x", modules, "acan-deps-sha256-ab12")
-            .expect("the copy's arguments");
+    fn the_helper_mounts_the_volume_and_finishes_the_copy_when_it_is_started() {
+        let args = helper_create_args("node:24@sha256:x", "acan-deps-sha256-ab12");
+        assert_eq!(args[0], "create", "{args:?}");
         let pairs: Vec<(&str, &str)> = args
             .windows(2)
             .map(|pair| (pair[0].as_str(), pair[1].as_str()))
@@ -293,24 +343,30 @@ mod tests {
         assert!(
             pairs.contains(&(
                 "--mount",
-                "type=bind,source=cache/sha256-ab12/node_modules,target=/src,readonly"
-            )),
-            "{args:?}"
-        );
-        assert!(
-            pairs.contains(&(
-                "--mount",
                 "type=volume,source=acan-deps-sha256-ab12,target=/dst"
             )),
             "{args:?}"
         );
-        let script = args.last().expect("the script is the last argument");
-        assert_eq!(args[args.len() - 2], "-c", "{args:?}");
-        let copy = script.find("cp -a /src/.").expect("the copy");
-        let owner = script.find("chown -R 1000:1000 /dst").expect("the owner");
-        let mark = script.find("touch /dst/.acan-populated").expect("the mark");
-        assert!(copy < owner && owner < mark, "{script}");
-        assert!(script.ends_with("touch /dst/.acan-populated"), "{script}");
+        assert_eq!(
+            &args[args.len() - 2..],
+            [
+                "-c",
+                "chown -R 1000:1000 /dst && touch /dst/.acan-populated"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_copy_comes_from_the_host_into_the_helper_and_the_helper_is_then_started() {
+        let modules = Path::new("cache/sha256-ab12/node_modules");
+        let source = modules.join(".");
+        let args = copy_args("abc123", modules).expect("the copy's arguments");
+        assert_eq!(
+            args,
+            ["cp", source.to_str().expect("a UTF-8 path"), "abc123:/dst"]
+        );
+        assert_eq!(start_args("abc123"), ["start", "--attach", "abc123"]);
+        assert_eq!(remove_container_args("abc123"), ["rm", "--force", "abc123"]);
     }
 
     #[test]
