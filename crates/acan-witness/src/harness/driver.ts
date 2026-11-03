@@ -5,7 +5,8 @@
 // so this file never reads a probe.
 //
 // Protocol: one JSON object per line on stdin; one JSON reply per line on stdout, in order.
-// Nothing else is written to stdout. The app's own output is discarded.
+// Nothing else is written to stdout. The app's output is read as it comes, and only the last lines
+// of a start that fails are sent, in the reply's `app_output`.
 
 import * as http from "node:http";
 import * as readline from "node:readline";
@@ -14,6 +15,10 @@ const LOOPBACK = "127.0.0.1";
 const READY_ATTEMPT_MS = 1000;
 const POLL_MS = 5;
 const EXIT_GRACE_MS = 200;
+const TAIL_LINES = 200;
+const TAIL_LINE_BYTES = 512;
+const TAIL_BYTES = 64 * 1024;
+const NEWLINE = 10;
 
 interface RawResponse {
   status: number;
@@ -149,6 +154,58 @@ async function appHasExited(): Promise<boolean> {
   ]);
 }
 
+// The last lines the app wrote, for a start that fails. Each line keeps its first TAIL_LINE_BYTES
+// bytes, and the kept lines with their newlines stay within TAIL_BYTES.
+class OutputTail {
+  private lines: Buffer[] = [];
+  private bytes = 0;
+
+  add(line: Buffer): void {
+    const kept = line.subarray(0, TAIL_LINE_BYTES);
+    this.lines.push(kept);
+    this.bytes += kept.length + 1;
+    while (this.lines.length > TAIL_LINES || this.bytes > TAIL_BYTES) {
+      const dropped = this.lines.shift();
+      this.bytes -= (dropped?.length ?? 0) + 1;
+    }
+  }
+
+  text(): string {
+    return this.lines.map((line) => line.toString("utf8")).join("\n");
+  }
+}
+
+// Reads one of the app's output streams to its end. Whole lines go to the tail, and so does the
+// last line when the stream ends without a newline.
+async function drain(
+  stream: ReadableStream<Uint8Array> | undefined,
+  tail: OutputTail,
+): Promise<void> {
+  if (stream === undefined) return;
+  const reader = stream.getReader();
+  let partial = Buffer.alloc(0);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const data = Buffer.concat([partial, Buffer.from(value)]);
+      let start = 0;
+      for (let end = data.indexOf(NEWLINE); end !== -1; end = data.indexOf(NEWLINE, start)) {
+        tail.add(data.subarray(start, end));
+        start = end + 1;
+      }
+      partial = data.subarray(start, start + TAIL_LINE_BYTES);
+    }
+  } catch {
+    return;
+  }
+  if (partial.length > 0) tail.add(partial);
+}
+
+function startFailed(detail: string, crashed: boolean, tail: OutputTail) {
+  return { ...fail(detail, crashed), app_output: tail.text() };
+}
+
 async function start(op: StartOp) {
   port = op.port;
   maxOutputBytes = op.max_output_bytes;
@@ -160,17 +217,21 @@ async function start(op: StartOp) {
     cwd: op.cwd,
     env: { ...op.environment, [op.port_env]: String(op.port) },
     stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
   });
   app = child;
   child.exited.then((code) => {
     appExitCode = code;
   });
+  // The output is read as it comes, so the app never blocks on a full pipe.
+  const tail = new OutputTail();
+  const drained = Promise.all([drain(child.stdout, tail), drain(child.stderr, tail)]);
   const until = Date.now() + op.ready.timeout_ms;
   while (Date.now() < until) {
     if (appExitCode !== undefined) {
-      return fail(`app exited with code ${appExitCode} before it was ready`, true);
+      await Promise.race([drained, Bun.sleep(EXIT_GRACE_MS)]);
+      return startFailed(`app exited with code ${appExitCode} before it was ready`, true, tail);
     }
     const probe = await withTimeout(
       exchange(LOOPBACK, "GET", op.ready.path, {}, null),
@@ -181,7 +242,7 @@ async function start(op: StartOp) {
     }
     await Bun.sleep(POLL_MS);
   }
-  return fail(`app not ready after ${op.ready.timeout_ms} ms`);
+  return startFailed(`app not ready after ${op.ready.timeout_ms} ms`, false, tail);
 }
 
 async function request(op: RequestOp) {

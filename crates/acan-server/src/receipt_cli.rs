@@ -208,18 +208,27 @@ impl ShadowReceipt {
     }
 }
 
-/// Runs the contrast between `args.base` and `args.head` and builds the receipt.
+/// Runs the contrast between `args.base` and `args.head` and builds the receipt. When `diagnostics`
+/// is given, a run whose start fails keeps the app's last output there. The output is not part of
+/// the receipt.
 ///
 /// # Errors
 ///
 /// Returns [`ShadowError`] when a ref cannot be used, the protected contract cannot be read,
 /// Docker cannot run the pinned image, the head conflicts with the base, or the contrast cannot
 /// be made or is incomplete.
-pub async fn run(args: &ShadowArgs) -> Result<ShadowReceipt, ShadowError> {
-    run_with(args, Path::new(RUNNER_PROGRAM)).await
+pub async fn run(
+    args: &ShadowArgs,
+    diagnostics: Option<&Path>,
+) -> Result<ShadowReceipt, ShadowError> {
+    run_with(args, Path::new(RUNNER_PROGRAM), diagnostics).await
 }
 
-async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, ShadowError> {
+async fn run_with(
+    args: &ShadowArgs,
+    docker: &Path,
+    diagnostics: Option<&Path>,
+) -> Result<ShadowReceipt, ShadowError> {
     let head = args.head.as_deref().ok_or_else(|| {
         ShadowError::Usage(
             "--head is required; it is only omitted with --check-contract".to_owned(),
@@ -331,6 +340,7 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
         runner: &runner,
         slots: &slots,
         probes_at_once: DEFAULT_WITNESS_CONCURRENCY,
+        diagnostics,
     };
     let judged = Box::pin(observe::judge(&plan, &order))
         .await
@@ -1279,7 +1289,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_directory_is_refused_as_not_a_repository() {
         let dir = tempfile::tempdir().expect("temporary directory");
-        let error = run_with(&args(dir.path(), "main", "main"), &missing_docker())
+        let error = run_with(&args(dir.path(), "main", "main"), &missing_docker(), None)
             .await
             .expect_err("a directory that is not a clone is refused");
         assert!(
@@ -1294,6 +1304,7 @@ mod tests {
         let error = run_with(
             &args(repo.path(), "no-such-branch", "main"),
             &missing_docker(),
+            None,
         )
         .await
         .expect_err("a base that is not a branch is refused");
@@ -1309,6 +1320,7 @@ mod tests {
         let error = run_with(
             &args(repo.path(), "main", "does-not-exist"),
             &missing_docker(),
+            None,
         )
         .await
         .expect_err("a head that names no commit is refused");
@@ -1324,6 +1336,7 @@ mod tests {
         let error = run_with(
             &args(repo.path(), "main", "--output=/tmp/x"),
             &missing_docker(),
+            None,
         )
         .await
         .expect_err("an option-like ref is refused");
@@ -1338,7 +1351,7 @@ mod tests {
         let repo = clone_with(&contract_files());
         let mut without = args(repo.path(), "main", "main");
         without.head = None;
-        let error = run_with(&without, &missing_docker())
+        let error = run_with(&without, &missing_docker(), None)
             .await
             .expect_err("a run needs a head");
         assert!(
@@ -1382,7 +1395,7 @@ mod tests {
         set_writable(&git_dir, false);
         let probe_refused = fs::write(git_dir.join("probe"), "").is_err();
         let checked =
-            check_contract_with(&check_args(repo.path(), "main"), &missing_docker()).await;
+            check_contract_with(&check_args(repo.path(), "main"), &missing_docker(), None).await;
         set_writable(&git_dir, true);
 
         assert!(
@@ -1443,7 +1456,7 @@ mod tests {
         let origin = clone_with(&contract_files());
         let (_dir, partial, marker) = promisor_clone_of(origin.path());
 
-        let error = check_contract_with(&check_args(&partial, "main"), &missing_docker())
+        let error = check_contract_with(&check_args(&partial, "main"), &missing_docker(), None)
             .await
             .expect_err("the contract's contents are missing and are not fetched");
 
@@ -1792,7 +1805,7 @@ mod tests {
     #[tokio::test]
     async fn a_clone_without_a_protected_contract_is_refused_before_docker() {
         let repo = clone_with(&[("README.md", "no contract here\n")]);
-        let error = run_with(&args(repo.path(), "main", "main"), &missing_docker())
+        let error = run_with(&args(repo.path(), "main", "main"), &missing_docker(), None)
             .await
             .expect_err("a clone without .acan/app.json is refused");
         assert!(
@@ -1807,7 +1820,7 @@ mod tests {
             (".acan/app.json", "{}"),
             (".acan/probes/core.json", PROBE_CORPUS),
         ]);
-        let error = run_with(&args(repo.path(), "main", "main"), &missing_docker())
+        let error = run_with(&args(repo.path(), "main", "main"), &missing_docker(), None)
             .await
             .expect_err("an app contract that does not decode is refused");
         assert!(
@@ -1819,7 +1832,7 @@ mod tests {
     #[tokio::test]
     async fn a_missing_docker_is_refused_with_no_unisolated_fallback() {
         let repo = clone_with(&contract_files());
-        let error = run_with(&args(repo.path(), "main", "main"), &missing_docker())
+        let error = run_with(&args(repo.path(), "main", "main"), &missing_docker(), None)
             .await
             .expect_err("a run without docker is refused");
         assert!(

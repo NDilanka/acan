@@ -200,6 +200,7 @@ impl Setup {
             snapshot: &self.snapshot,
             dependencies: None,
             config,
+            diagnostics_dir: None,
         }
     }
 }

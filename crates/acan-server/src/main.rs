@@ -178,7 +178,8 @@ async fn receipt(args: ReceiptArgs) -> Result<()> {
         println!("{}", receipt_cli::check_text(&check));
         return Ok(());
     }
-    let report = receipt_cli::run(&args.shadow).await?;
+    let diagnostics = args.out.as_ref().map(|dir| dir.join("diagnostics"));
+    let report = receipt_cli::run(&args.shadow, diagnostics.as_deref()).await?;
     if let Some(dir) = &args.out {
         receipt_cli::write_out(&report, dir)?;
     }

@@ -1072,6 +1072,7 @@ impl Pass {
             runner: &self.runner,
             slots: self.slots.as_ref(),
             probes_at_once: self.probes_at_once,
+            diagnostics: None,
         }
     }
 }

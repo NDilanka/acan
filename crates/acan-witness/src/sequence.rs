@@ -6,7 +6,9 @@
 //! failure becomes a [`RunOutcome`] inside the record; only a bug in this runner fails admission.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::future::Future;
+use std::io::{self, Write};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -122,6 +124,9 @@ pub struct SequenceInput<'a> {
     pub dependencies: Option<&'a Path>,
     /// How the host reaches docker and the app.
     pub config: &'a RunnerConfig,
+    /// Where a start that fails keeps the app's last output, as `app-output.txt`. The output is
+    /// for a person who investigates the failure: it never enters the outcome or a receipt.
+    pub diagnostics_dir: Option<&'a Path>,
 }
 
 /// The whole response body of one HTTP step, as the driver returned it. Observations keep only a
@@ -520,7 +525,16 @@ impl<'a> Sequence<'a> {
         let limit = self.limit(None);
         match self.call_driver(&op, limit).await {
             Ok(reply) if reply.ok => Ok(()),
-            Ok(reply) => Err(setup_failed(reply.detail)),
+            Ok(reply) => {
+                let mut detail = reply.detail;
+                if let Some(dir) = input.diagnostics_dir
+                    && let Some(output) = reply.app_output.as_deref()
+                    && let Err(err) = save_app_output(dir, self.run_id.as_str(), output)
+                {
+                    detail = format!("{detail} (the app output could not be saved: {err})");
+                }
+                Err(setup_failed(detail))
+            }
             Err(Failure::Deadline { .. }) => Err(setup_failed(
                 "the app did not become ready before the sequence deadline",
             )),
@@ -1099,6 +1113,40 @@ fn reply_failure(step_id: &StepId, recipe: bool, crashed: bool, detail: String) 
     }
 }
 
+/// The file a failed start's app output is kept in, under the run's diagnostics directory.
+const APP_OUTPUT_FILE: &str = "app-output.txt";
+
+/// Keeps `output` as `dir/app-output.txt`. The text goes to a file of this run's own, which is then
+/// renamed over the last one. Two failed starts therefore never leave their output mixed, and the
+/// file holds the output of the last start to fail. On Unix the file is readable by its owner only.
+///
+/// # Errors
+///
+/// Returns the I/O error when the directory or the file cannot be written.
+fn save_app_output(dir: &Path, run_id: &str, output: &str) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let temp = dir.join(format!(".app-output-{run_id}.tmp"));
+    let written =
+        write_private(&temp, output).and_then(|()| fs::rename(&temp, dir.join(APP_OUTPUT_FILE)));
+    if written.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    written
+}
+
+/// Writes `text` to `path`, replacing what is there. On Unix a new file is readable by its owner
+/// only.
+fn write_private(path: &Path, text: &str) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(text.as_bytes())
+}
+
 /// What docker's stderr says about a container that did not start or answer: from `docker create`
 /// or from `docker start`. An unreachable runtime is isolation unavailable; anything else is a
 /// setup failure with no step.
@@ -1157,6 +1205,36 @@ fn readiness_deadline(deadline: Instant, now: Instant, ready_ms: u64) -> Instant
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_start_keeps_the_output_of_the_last_one_to_fail() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let diagnostics = dir.path().join("diagnostics");
+        save_app_output(&diagnostics, "run-one", "first\n").expect("the first output is saved");
+        save_app_output(&diagnostics, "run-two", "second\n").expect("the second output is saved");
+        let kept = diagnostics.join(APP_OUTPUT_FILE);
+        assert_eq!(fs::read_to_string(&kept).expect("the file"), "second\n");
+        let entries: Vec<String> = fs::read_dir(&diagnostics)
+            .expect("the directory")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(entries, [APP_OUTPUT_FILE], "no temporary file is left");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&kept)
+                .expect("the metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
 
     #[test]
     fn readiness_keeps_its_whole_budget_past_a_sequence_deadline_that_comes_first() {
