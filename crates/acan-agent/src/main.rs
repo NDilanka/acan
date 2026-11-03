@@ -53,7 +53,7 @@ struct Cli {
     /// Seconds between lease renewals. Keep it well under the origin's 60 second lease.
     #[arg(long, default_value_t = 20)]
     heartbeat_secs: u64,
-    /// The most model calls the edit loop may make.
+    /// The most model calls the first build's edit loop may make. A repair round may make twice as many.
     #[arg(long, default_value_t = 30)]
     max_steps: usize,
 }

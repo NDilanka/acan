@@ -35,6 +35,21 @@ const MCP_VERSION: &str = "acan-mcp/1";
 /// claim, so the worker never starts a fourth build on it.
 const REPEAT_LIMIT: u32 = 3;
 
+/// How many times the first build's model-call limit a repair round may make. A repair round starts a fresh
+/// conversation, so it reads its declared files again before it can fix anything. In a live take the first
+/// build's limit ran out before a repair could commit.
+const REPAIR_STEP_FACTOR: usize = 2;
+
+/// The config one build round runs under. The first build gets the configured limit. A repair round gets
+/// `REPAIR_STEP_FACTOR` times that limit, so it has room to read and commit.
+fn round_config(config: &WorkerConfig, round: u32) -> WorkerConfig {
+    let mut round_config = config.clone();
+    if round > 1 {
+        round_config.max_steps = config.max_steps.saturating_mul(REPAIR_STEP_FACTOR);
+    }
+    round_config
+}
+
 /// How a worker is run. The token is never printed, so `Debug` leaves it out.
 #[derive(Clone)]
 pub struct WorkerConfig {
@@ -47,7 +62,8 @@ pub struct WorkerConfig {
     pub repo: PathBuf,
     /// The command `run_tests` runs in the worktree. `None` means no tests are configured.
     pub test_command: Option<String>,
-    /// The most model calls the edit loop may make before the worker gives up.
+    /// The most model calls the first build's edit loop may make before the worker gives up. A repair
+    /// round may make `REPAIR_STEP_FACTOR` times as many.
     pub max_steps: usize,
     /// How long one wait may last: for work to appear, or build clearance.
     pub wait: Duration,
@@ -647,7 +663,18 @@ async fn work<C: ModelClient>(
             Err(reason) => return Ok(Exit::Failed { reason }),
         };
         let brief = build_brief(&claim, round, &bounced);
-        let head = match edit(config, model, mcp, &mut claim, &mut tools, brief, steps).await? {
+        let build_config = round_config(config, round);
+        let head = match edit(
+            &build_config,
+            model,
+            mcp,
+            &mut claim,
+            &mut tools,
+            brief,
+            steps,
+        )
+        .await?
+        {
             Edit::Committed(head) => head,
             Edit::Stopped(reason) => {
                 return Ok(Exit::NoCommit {
@@ -2342,6 +2369,54 @@ mod tests {
             !seen[3].contains("3 of 4") && !seen[3].contains("2 of 4"),
             "{}",
             seen[3]
+        );
+    }
+
+    #[test]
+    fn a_repair_round_gets_more_model_calls_than_the_first_build() {
+        let config = edit_config(3);
+        assert_eq!(round_config(&config, 1).max_steps, 3);
+        assert_eq!(round_config(&config, 2).max_steps, 3 * REPAIR_STEP_FACTOR);
+        assert_eq!(round_config(&config, 3).max_steps, 3 * REPAIR_STEP_FACTOR);
+        assert_eq!(round_config(&config, 2).repo, config.repo);
+    }
+
+    #[tokio::test]
+    async fn a_repair_round_runs_out_at_its_own_limit() {
+        // A model that only reads never commits, so the round ends when its own limit runs out.
+        let (_root, mut tools) = edit_rig();
+        let read = Reply {
+            tool_calls: vec![tool_call("read_file", json!({ "path": "src/a.ts" }))],
+            ..Reply::default()
+        };
+        let model = Turns::of(Stub::default().when(Role::Worker, |_| true, read));
+        let mcp = McpClient::new("http://127.0.0.1:9", String::new());
+        let repair = round_config(&edit_config(3), 2);
+        let mut steps = Vec::new();
+        let end = edit(
+            &repair,
+            &model,
+            &mcp,
+            &mut claim(),
+            &mut tools,
+            "Task t-1.".to_owned(),
+            &mut steps,
+        )
+        .await
+        .expect("the edit runs");
+        let Edit::Stopped(reason) = end else {
+            panic!("a model that never commits stops the edit");
+        };
+        assert!(
+            reason.starts_with("the step limit ran out before a commit after 6 model calls"),
+            "{reason}"
+        );
+        let seen = model.seen();
+        assert_eq!(seen.len(), 6, "{seen:?}");
+        assert!(
+            seen[0].contains("Budget: 6 of 6 model calls remain."),
+            "{}",
+            seen[0]
         );
     }
 
