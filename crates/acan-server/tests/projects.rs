@@ -518,3 +518,293 @@ async fn cursors_are_per_project() {
     assert_eq!(seqs("beta"), expected_beta, "beta starts from 0");
     running.stop().await.expect("the server stops");
 }
+
+/// Writes a tokens file with `entries` before the server starts.
+fn write_entries(repo: &Path, entries: &Value) {
+    let state = repo.join(".acan");
+    fs::create_dir_all(&state).expect("the state directory");
+    fs::write(state.join("tokens.json"), entries.to_string()).expect("the tokens file");
+}
+
+/// The command that posts an order on the `model` machine.
+fn post_order_cmd(sentence: &str) -> Value {
+    json!({ "cmd": "post_order", "machine": "model", "sentence": sentence, "witnesses": [] })
+}
+
+/// Sends `cmd` to one project's commands route.
+async fn command_in(
+    running: &Running,
+    project: &str,
+    token: &str,
+    cmd: &Value,
+) -> (StatusCode, Value) {
+    let response = client()
+        .post(format!(
+            "http://{}/api/p/{project}/commands",
+            running.local_addr
+        ))
+        .bearer_auth(token)
+        .json(cmd)
+        .send()
+        .await
+        .expect("the command is sent");
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(Value::String(text)),
+    )
+}
+
+/// The status the server answers a stream upgrade on one project with. A refused upgrade is its
+/// HTTP status; an accepted one is 101.
+async fn stream_status(running: &Running, project: &str, token: &str) -> StatusCode {
+    let mut request = format!("ws://{}/api/p/{project}/stream", running.local_addr)
+        .into_client_request()
+        .expect("the stream URL");
+    let value = HeaderValue::from_str(&format!("Bearer {token}")).expect("a header value");
+    request.headers_mut().insert(AUTHORIZATION, value);
+    match tokio_tungstenite::connect_async(request).await {
+        Ok((socket, _)) => {
+            drop(socket);
+            StatusCode::SWITCHING_PROTOCOLS
+        }
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => response.status(),
+        Err(err) => panic!("the stream failed without an HTTP answer: {err}"),
+    }
+}
+
+/// What a write to one project could change in another: its seq, its log, its world file, its
+/// protected branch head, and whether it has a worktrees folder.
+#[derive(Debug, PartialEq)]
+struct Footprint {
+    seq: u64,
+    log: Vec<Value>,
+    world: Vec<u8>,
+    head: String,
+    worktrees: bool,
+}
+
+async fn footprint(running: &Running, project: &str, token: &str, repo: &Path) -> Footprint {
+    let log = events_of(running, project, token).await;
+    Footprint {
+        seq: log.last().map_or(0, seq_of),
+        log,
+        world: fs::read(repo.join(".acan").join("world.db")).expect("the world file"),
+        head: git(repo, &["rev-parse", "main"]),
+        worktrees: repo.join(".acan").join("worktrees").exists(),
+    }
+}
+
+#[tokio::test]
+async fn an_order_in_a_never_touches_b() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let alpha = git_repo(root.path(), "alpha");
+    let beta = git_repo(root.path(), "beta");
+    let running = boot(&[alpha, beta.clone()]).await;
+    let owner = owner_token(&running);
+    let before = footprint(&running, "beta", &owner, &beta).await;
+
+    let (status, body) = command_in(&running, "alpha", &owner, &post_order_cmd("alpha work")).await;
+    assert_eq!(status, StatusCode::OK, "alpha takes the order: {body}");
+    let alpha_log = events_of(&running, "alpha", &owner).await;
+    assert!(
+        alpha_log
+            .iter()
+            .any(|event| event.to_string().contains("alpha work")),
+        "the order is in alpha's log"
+    );
+
+    let after = footprint(&running, "beta", &owner, &beta).await;
+    assert_eq!(
+        after, before,
+        "beta's seq, log, world file, head and worktrees are unchanged"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A scope at revision 1 over `base`, with one open choice and no rules.
+fn scope_with_choice(order: &str, base: &str) -> Value {
+    json!({
+        "version": "acan-scope/1",
+        "order": order,
+        "rev": 1,
+        "base_commit": base,
+        "body": {
+            "may": [],
+            "must_keep": [],
+            "open": [{
+                "id": "c-retry",
+                "machine_id": "model",
+                "question": "Should a failed request be retried?",
+                "options": [
+                    { "key": "never", "label": "Never retry" },
+                    { "key": "once", "label": "Retry once" }
+                ]
+            }]
+        }
+    })
+}
+
+#[tokio::test]
+async fn a_real_order_with_an_open_choice_is_counted_for_its_project_only() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let alpha = git_repo(root.path(), "alpha");
+    let beta = git_repo(root.path(), "beta");
+    let base = git(&alpha, &["rev-parse", "main"]);
+    let running = boot(&[alpha, beta]).await;
+    let owner = owner_token(&running);
+
+    let (status, body) = command_in(&running, "alpha", &owner, &post_order_cmd("alpha work")).await;
+    assert_eq!(status, StatusCode::OK, "alpha takes the order: {body}");
+    let revise = json!({
+        "cmd": "revise_scope",
+        "order": 0,
+        "scope": scope_with_choice("o-0", &base),
+    });
+    let (status, body) = command_in(&running, "alpha", &owner, &revise).await;
+    assert_eq!(status, StatusCode::OK, "the scope is revised: {body}");
+
+    let (status, list) = get(&running, "/api/projects", &owner).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        project(&list, "alpha")["needs_you"],
+        json!({ "total": 1, "asking": 0, "clashing": 0, "contests": 0, "open_choices": 1 }),
+        "the order's open choice is what alpha asks of the human"
+    );
+    assert_eq!(
+        project(&list, "beta")["needs_you"]["total"],
+        json!(0),
+        "beta asks nothing"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+#[tokio::test]
+async fn tokens_are_per_project() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let alpha = repo(root.path(), "alpha");
+    let beta = repo(root.path(), "beta");
+    let member = "acan_member_alpha_0123456789abcdef";
+    let agent = "acan_agent_alpha_0123456789abcdef";
+    let beta_agent = "acan_agent_beta_0123456789abcdef";
+    write_entries(
+        &alpha,
+        &json!([
+            { "token": member, "principal": { "kind": "member", "id": "lee" } },
+            { "token": agent, "principal": { "kind": "agent", "id": "worker-a" } }
+        ]),
+    );
+    grant_agent(&beta, beta_agent, "worker-b");
+    let running = boot(&[alpha, beta]).await;
+
+    let owners = [("alpha", member), ("alpha", agent), ("beta", beta_agent)];
+    for (home, token) in owners {
+        let other = if home == "alpha" { "beta" } else { "alpha" };
+        assert_eq!(
+            get(&running, &format!("/api/p/{home}/plant"), token)
+                .await
+                .0,
+            StatusCode::OK,
+            "{token} opens its own project"
+        );
+        assert_eq!(
+            get(&running, &format!("/api/p/{other}/plant"), token)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED,
+            "{token} gets 401 on the plant of {other}"
+        );
+        assert_eq!(
+            get(&running, &format!("/api/p/{other}/events?from=0"), token)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED,
+            "{token} gets 401 on the events of {other}"
+        );
+        let (status, _) = command_in(&running, other, token, &post_order_cmd("stray")).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{token} gets 401 on the commands of {other}"
+        );
+        assert_eq!(
+            stream_status(&running, other, token).await,
+            StatusCode::UNAUTHORIZED,
+            "{token} gets 401 on the stream of {other}"
+        );
+        let (status, _) = rpc(&running, &format!("/api/p/{other}/mcp"), token).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{token} gets 401 on the MCP endpoint of {other}"
+        );
+    }
+
+    let (_, list) = get(&running, "/api/projects", member).await;
+    assert_eq!(
+        list.as_array().expect("a list").len(),
+        1,
+        "the member lists only alpha"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// One tools/list call to a project's MCP endpoint, and the status it answers with.
+async fn rpc(running: &Running, path: &str, token: &str) -> (StatusCode, Value) {
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} });
+    let response = client()
+        .post(format!("http://{}{path}", running.local_addr))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .expect("the MCP call is sent");
+    let status = response.status();
+    (
+        status,
+        response.json::<Value>().await.unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn unprefixed_equals_default() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let alpha = git_repo(root.path(), "alpha");
+    let beta = repo(root.path(), "beta");
+    let agent = "acan_agent_alpha_0123456789abcdef";
+    grant_agent(&alpha, agent, "worker-a");
+    let running = boot(&[alpha, beta]).await;
+    let owner = owner_token(&running);
+    let (status, body) = command_in(&running, "alpha", &owner, &post_order_cmd("alpha work")).await;
+    assert_eq!(status, StatusCode::OK, "alpha takes the order: {body}");
+
+    for path in [
+        "/plant",
+        "/events?from=0",
+        "/usage",
+        "/setup",
+        "/orders/o-0/plant-view",
+    ] {
+        let (unprefixed_status, unprefixed) = get(&running, &format!("/api{path}"), &owner).await;
+        let (prefixed_status, prefixed) =
+            get(&running, &format!("/api/p/alpha{path}"), &owner).await;
+        assert_eq!(
+            unprefixed_status, prefixed_status,
+            "{path}: the same status"
+        );
+        assert_eq!(
+            unprefixed, prefixed,
+            "{path}: the same answer from the default project"
+        );
+    }
+
+    let (unprefixed_status, unprefixed) = rpc(&running, "/mcp", agent).await;
+    let (prefixed_status, prefixed) = rpc(&running, "/api/p/alpha/mcp", agent).await;
+    assert_eq!(unprefixed_status, prefixed_status);
+    assert_eq!(
+        unprefixed, prefixed,
+        "MCP answers the same from the default"
+    );
+    running.stop().await.expect("the server stops");
+}

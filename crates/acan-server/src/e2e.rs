@@ -40,7 +40,10 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
 use crate::model::{self, Ask};
 use crate::offline::Offline;
-use crate::{DEFAULT_WITNESS_CONCURRENCY, Running, ServerConfig, start};
+use crate::projects::{ProjectSet, ProjectSpec};
+use crate::{
+    DEFAULT_WITNESS_CONCURRENCY, Running, ServeConfig, ServerConfig, start, start_projects,
+};
 
 const OWNER_TOKEN: &str = "acan_owner_e2e";
 const AGENT_TOKEN: &str = "acan_agent_e2e";
@@ -155,6 +158,66 @@ async fn an_order_is_gated_in_its_worktree_and_lands_on_the_protected_branch() {
     assert!(
         !root.join(LANDED).exists(),
         "the land never writes the user's working tree"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A land in one project moves that project's branch and nothing else. The second project is a
+/// plain repository on the same server, and its branch, working tree, and worktrees stay as they
+/// were. The land runs the same flow as the test above, through the default project.
+#[tokio::test]
+async fn a_land_in_one_project_moves_only_its_branch() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let plain = plain_repo();
+    let plain_root = plain.path();
+    let plain_head = git(plain_root, &["rev-parse", PROTECTED_BRANCH]);
+    let plain_status = git(plain_root, &["status", "--porcelain"]);
+    let running = start_pair(root, plain_root).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+
+    post_order(&running).await;
+    let _scope = scope_first(&running, root, task).await;
+    let fence = claim(&running, task).await;
+    let worktree = worktree_dir(root, task);
+    wait_for_worktree(root, task, fence.generation).await;
+    assert!(
+        worktree.is_dir(),
+        "the claim's worktree is in the demo project's state folder"
+    );
+    let built = build(&running, root, task, fence, LANDED, AGENT_CONTENT).await;
+    settle(&running, "the task to land", |_, world| {
+        in_state(world, task, |state| {
+            matches!(state, TaskState::Landed { .. })
+        })
+        .then_some(())
+    })
+    .await;
+    assert_eq!(
+        git(root, &["rev-parse", PROTECTED_BRANCH]).trim(),
+        built.to_string(),
+        "the demo project's branch moved to the built commit"
+    );
+
+    assert_eq!(
+        git(plain_root, &["rev-parse", PROTECTED_BRANCH]),
+        plain_head,
+        "the plain project's branch did not move"
+    );
+    assert_eq!(
+        git(plain_root, &["status", "--porcelain"]),
+        plain_status,
+        "the plain project's working tree did not change"
+    );
+    assert!(
+        !plain_root.join(".acan").join("worktrees").exists(),
+        "the plain project has no worktree folder"
+    );
+    let plain_worktrees = git(plain_root, &["worktree", "list", "--porcelain"]);
+    assert!(
+        !plain_worktrees.contains(&root.display().to_string()),
+        "the plain project's git lists no worktree of the demo project: {plain_worktrees}"
     );
     running.stop().await.expect("the server stops");
 }
@@ -2634,6 +2697,55 @@ async fn start_with<C: ModelClient + 'static>(
     start(config, client, ledger)
         .await
         .expect("the server starts on the test repository")
+}
+
+/// Starts one server over two projects. `root` comes first, so the unprefixed routes reach it,
+/// and `other` is the second project. Both protect `main`.
+async fn start_pair(root: &Path, other: &Path) -> Running {
+    write_tokens(root);
+    let project = |id: &str, name: &str, repo: &Path| ProjectSpec {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        repo: repo.to_path_buf(),
+        protected_branch: Some(PROTECTED_BRANCH.to_owned()),
+        llm: None,
+        witness_http_base_url: None,
+    };
+    let config = ServeConfig {
+        projects: ProjectSet {
+            default: "demo".to_owned(),
+            projects: vec![
+                project("demo", "Demo", root),
+                project("plain", "Plain", other),
+            ],
+        },
+        addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        team: false,
+        web: None,
+        witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
+        vision: None,
+    };
+    let first = Offline::default();
+    let first_ledger = first.ledger().clone();
+    let second = Offline::default();
+    let second_ledger = second.ledger().clone();
+    start_projects(config, vec![(first, first_ledger), (second, second_ledger)])
+        .await
+        .expect("the server starts on both projects")
+}
+
+/// A plain repository with one commit on `main` and a file of its own.
+fn plain_repo() -> DemoRepo {
+    let dir = tempfile::tempdir().expect("temporary repository");
+    let root = dir.path().join("plain");
+    fs::create_dir_all(&root).expect("the repository folder");
+    git(&root, &["init", "-q", "-b", PROTECTED_BRANCH]);
+    git(&root, &["config", "user.name", "Test User"]);
+    git(&root, &["config", "user.email", "test@example.test"]);
+    fs::write(root.join("notes.txt"), "the plain project\n").expect("a file");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "initial"]);
+    DemoRepo { _dir: dir, root }
 }
 
 fn url(running: &Running, path: &str) -> String {
