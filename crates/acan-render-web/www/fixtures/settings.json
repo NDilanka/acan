@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "you": "owner",
+  "editable": true,
+  "models": {
+    "configured": true,
+    "can_save": true,
+    "source": "saved",
+    "keys": [
+      { "provider": "meta", "set": true, "source": "saved" },
+      { "provider": "baseten", "set": false, "source": null },
+      { "provider": "fireworks", "set": false, "source": null }
+    ],
+    "roles": [
+      { "role": "foreman", "provider": "meta", "picked": null, "off_reason": null, "meta_only": false },
+      { "role": "worker", "provider": "meta", "picked": null, "off_reason": null, "meta_only": false },
+      { "role": "fast", "provider": "meta", "picked": null, "off_reason": null, "meta_only": false },
+      { "role": "vision", "provider": "meta", "picked": null, "off_reason": null, "meta_only": true },
+      { "role": "director", "provider": null, "picked": null, "off_reason": "needs a key", "meta_only": false },
+      { "role": "wonder", "provider": null, "picked": null, "off_reason": "needs a key", "meta_only": false },
+      { "role": "statemap", "provider": "meta", "picked": null, "off_reason": null, "meta_only": false }
+    ]
+  },
+  "harness": {
+    "roles": {
+      "foreman": "builtin",
+      "worker": "builtin",
+      "fast": "builtin",
+      "vision": "builtin",
+      "director": "builtin",
+      "wonder": "builtin",
+      "statemap": "builtin"
+    },
+    "custom_command": []
+  },
+  "projects": [
+    { "id": "acan", "name": "acan", "workers": 2, "statemap_llm": false },
+    { "id": "acan-web", "name": "acan-web", "workers": 1, "statemap_llm": false }
+  ],
+  "budgets": {
+    "repair_rounds": 3,
+    "max_episodes": 12,
+    "wall_time_ms": 1800000,
+    "model_cost_micros": 5000000,
+    "call_limits": {
+      "foreman": 200,
+      "worker": 400,
+      "fast": 120,
+      "vision": 40,
+      "director": 60,
+      "wonder": 60,
+      "statemap": 30
+    },
+    "stuck_declare_ms": 300000,
+    "stuck_build_ms": 900000,
+    "drift_threshold": 0.4
+  },
+  "look": {
+    "theme": "paper",
+    "top_down_default": false,
+    "motion": true,
+    "idle_bob": true,
+    "reduced_motion": false,
+    "label_density": "normal"
+  },
+  "notifications": {
+    "needs_you": true,
+    "sound": false,
+    "browser": false
+  },
+  "tokens": {
+    "owner": "ac_own_••••••7d2e",
+    "agents": [
+      { "id": "agent-a", "masked": "ac_agt_••••••b41c" },
+      { "id": "agent-b", "masked": "ac_agt_••••••90fa" }
+    ]
+  },
+  "about": {
+    "name": "Acan",
+    "version": "0.9.3-pre.4",
+    "commit": "dda9f92",
+    "os": "linux",
+    "arch": "x86_64"
+  }
+}

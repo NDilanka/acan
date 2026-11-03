@@ -179,6 +179,126 @@ const PALETTE: [[f32; 4]; PALETTE_LEN] = [
     rgb(0xa8a8a8, 1.0), // seam
 ];
 
+/// A look the page shows. Only the desk changes: the grid, the shadow and the page colour. The
+/// plant's paper, line art and the agent hues stay the same, so an agent keeps its colour when the
+/// look changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Look {
+    /// Light paper: the page's own look.
+    Paper,
+    Dark,
+    Blueprint,
+    HighContrast,
+}
+
+impl Look {
+    /// The look a settings value names: `paper`, `dark`, `blueprint` or `high_contrast`.
+    pub fn from_name(name: &str) -> Option<Look> {
+        match name {
+            "paper" => Some(Look::Paper),
+            "dark" => Some(Look::Dark),
+            "blueprint" => Some(Look::Blueprint),
+            "high_contrast" => Some(Look::HighContrast),
+            _ => None,
+        }
+    }
+
+    /// The look's palette, sRGB with straight alpha.
+    pub fn colours(self) -> [[f32; 4]; PALETTE_LEN] {
+        match self {
+            Look::Paper => PALETTE,
+            Look::Dark => DARK,
+            Look::Blueprint => BLUEPRINT,
+            Look::HighContrast => HIGH_CONTRAST,
+        }
+    }
+
+    /// The ghost grey: a ghost drone's outline on the desk.
+    fn ghost_grey(self) -> u32 {
+        match self {
+            Look::Paper => GHOST_GREY,
+            Look::Dark => 0xa0a0a5,
+            Look::Blueprint => 0xb4b4b8,
+            Look::HighContrast => 0x4a4a4f,
+        }
+    }
+}
+
+/// Dark: a dark desk with a light grid. The paper models stay white.
+const DARK: [[f32; 4]; PALETTE_LEN] = [
+    rgb(0x262624, 1.0),  // page
+    rgb(0xd99a1e, 1.0),  // lit
+    rgb(0xf2f2f2, 1.0),  // glass
+    rgb(0x000000, 0.30), // contact shadow
+    rgb(0xffffff, 1.0),  // grid, at its alpha
+    rgb(0x26262a, 1.0),  // hi
+    rgb(0x8a8a8f, 1.0),  // mid
+    rgb(0xb4b4b8, 1.0),  // lo
+    rgb(0xd4d4d6, 1.0),  // faint
+    rgb(0x3a3a3e, 1.0),  // dot
+    rgb(CLASH_RED, 1.0), // red: the clash pin
+    rgb(0x30a46c, 1.0),  // green
+    rgb(0x3e63dd, 1.0),  // blue
+    rgb(AGENT_HUES[0], 1.0),
+    rgb(AGENT_HUES[1], 1.0),
+    rgb(AGENT_HUES[2], 1.0),
+    rgb(AGENT_HUES[3], 1.0),
+    rgb(0xe9e9e9, 1.0), // belt
+    rgb(0xb8b8b8, 1.0), // belt edge
+    rgb(0x767676, 1.0), // contour and crease
+    rgb(0xa8a8a8, 1.0), // seam
+];
+
+/// Blueprint: a blue desk with a light grid.
+const BLUEPRINT: [[f32; 4]; PALETTE_LEN] = [
+    rgb(0x1f3a5c, 1.0),  // page
+    rgb(0xd99a1e, 1.0),  // lit
+    rgb(0xf2f2f2, 1.0),  // glass
+    rgb(0x0a1626, 0.35), // contact shadow
+    rgb(0xffffff, 1.0),  // grid, at its alpha
+    rgb(0x26324f, 1.0),  // hi
+    rgb(0x8a94b4, 1.0),  // mid
+    rgb(0xb4bcd8, 1.0),  // lo
+    rgb(0xd4d8e8, 1.0),  // faint
+    rgb(0x3a3a3e, 1.0),  // dot
+    rgb(CLASH_RED, 1.0), // red: the clash pin
+    rgb(0x30a46c, 1.0),  // green
+    rgb(0x3e63dd, 1.0),  // blue
+    rgb(AGENT_HUES[0], 1.0),
+    rgb(AGENT_HUES[1], 1.0),
+    rgb(AGENT_HUES[2], 1.0),
+    rgb(AGENT_HUES[3], 1.0),
+    rgb(0xe9e9e9, 1.0), // belt
+    rgb(0xb8b8b8, 1.0), // belt edge
+    rgb(0x76829c, 1.0), // contour and crease
+    rgb(0xa8b0c8, 1.0), // seam
+];
+
+/// High contrast: a white desk with a black grid and darker line art.
+const HIGH_CONTRAST: [[f32; 4]; PALETTE_LEN] = [
+    rgb(0xffffff, 1.0),  // page
+    rgb(0xd99a1e, 1.0),  // lit
+    rgb(0xf2f2f2, 1.0),  // glass
+    rgb(0x000000, 0.14), // contact shadow
+    rgb(0x000000, 1.0),  // grid, at its alpha
+    rgb(0x000000, 1.0),  // hi
+    rgb(0x555555, 1.0),  // mid
+    rgb(0x808080, 1.0),  // lo
+    rgb(0xa6a6a6, 1.0),  // faint
+    rgb(0x000000, 1.0),  // dot
+    rgb(CLASH_RED, 1.0), // red: the clash pin
+    rgb(0x30a46c, 1.0),  // green
+    rgb(0x3e63dd, 1.0),  // blue
+    rgb(AGENT_HUES[0], 1.0),
+    rgb(AGENT_HUES[1], 1.0),
+    rgb(AGENT_HUES[2], 1.0),
+    rgb(AGENT_HUES[3], 1.0),
+    rgb(0xe6e6e6, 1.0), // belt
+    rgb(0x6b6b6b, 1.0), // belt edge
+    rgb(0x505050, 1.0), // contour and crease
+    rgb(0x707070, 1.0), // seam
+];
+
 /// Palette slot of an ink used by a line.
 pub fn ink_slot(ink: Ink) -> u32 {
     match ink {
@@ -216,12 +336,22 @@ pub fn flat_code(surface: Surface) -> u32 {
 
 /// The palette as the surface wants it: linear when the surface is an sRGB format.
 pub fn palette(srgb_surface: bool) -> [[f32; 4]; PALETTE_LEN] {
-    PALETTE.map(|c| if srgb_surface { to_linear(c) } else { c })
+    palette_of(Look::Paper, srgb_surface)
+}
+
+/// The palette of a look, as the surface wants it.
+pub fn palette_of(look: Look, srgb_surface: bool) -> [[f32; 4]; PALETTE_LEN] {
+    look.colours().map(|c| if srgb_surface { to_linear(c) } else { c })
 }
 
 /// The tint table in sRGB. Slot 0 is the identity, each agent has a body slot at full hue, and the
 /// shadow, stale, ghost, clash and scope slots follow.
 pub fn tints() -> [[f32; 4]; TINT_LEN] {
+    tints_of(Look::Paper)
+}
+
+/// The tint table of a look, in sRGB. Only the ghost grey differs between looks.
+pub fn tints_of(look: Look) -> [[f32; 4]; TINT_LEN] {
     let mut table = [[1.0; 4]; TINT_LEN];
     for slot in 0..AGENT_SLOTS {
         let hue = agent_colour(slot);
@@ -229,7 +359,7 @@ pub fn tints() -> [[f32; 4]; TINT_LEN] {
     }
     table[TINT_SHADOW as usize] = rgb(0x000000, 1.0);
     table[TINT_STALE as usize] = rgb(STALE_GREY, 1.0);
-    table[TINT_GHOST as usize] = rgb(GHOST_GREY, 1.0);
+    table[TINT_GHOST as usize] = rgb(look.ghost_grey(), 1.0);
     table[TINT_CLASH as usize] = mixed_into_white(rgb(CLASH_RED, 1.0), CLASH_MIX);
     for (i, (hue, share)) in SCOPE_TINTS.into_iter().enumerate() {
         table[TINT_SCOPE0 as usize + i] = mixed_into_white(rgb(hue, 1.0), share);
@@ -273,7 +403,12 @@ pub fn surface_colour(colour: [f32; 4], srgb_surface: bool) -> [f32; 4] {
 
 /// The page colour for the clear, linear when the surface is an sRGB format.
 pub fn page(srgb_surface: bool) -> [f32; 4] {
-    palette(srgb_surface)[SLOT_PAGE as usize]
+    page_of(Look::Paper, srgb_surface)
+}
+
+/// The page colour of a look, for the clear.
+pub fn page_of(look: Look, srgb_surface: bool) -> [f32; 4] {
+    palette_of(look, srgb_surface)[SLOT_PAGE as usize]
 }
 
 /// The slots and tuning constants the shader reads, as WGSL constant declarations.
@@ -388,51 +523,105 @@ mod tests {
         assert_eq!(flat_code(Surface::Ink(Ink::Hi)), SLOT_HI + 1);
     }
 
+    const LOOKS: [Look; 4] = [
+        Look::Paper,
+        Look::Dark,
+        Look::Blueprint,
+        Look::HighContrast,
+    ];
+
     #[test]
     fn the_grid_stays_under_the_line_art() {
-        let grid = PALETTE[SLOT_GRID as usize];
-        assert_eq!(&grid[..3], &[0.0, 0.0, 0.0]);
-        let faintest_line = [SLOT_EDGE, SLOT_LINE, SLOT_BELT_EDGE]
-            .map(|slot| ink(PALETTE[slot as usize]))
-            .into_iter()
-            .chain([CONTOUR_FAR_ALPHA * ink(PALETTE[SLOT_LINE as usize])])
-            .fold(f32::INFINITY, f32::min);
-        assert!(
-            GRID_MAJOR_ALPHA < faintest_line,
-            "major grid ink {GRID_MAJOR_ALPHA} must stay under every line, {faintest_line}"
-        );
+        for look in LOOKS {
+            let palette = look.colours();
+            // A dark desk has a white grid, a light one a black grid.
+            let grid = palette[SLOT_GRID as usize];
+            assert!(
+                grid[..3] == [0.0; 3] || grid[..3] == [1.0; 3],
+                "{look:?} grid is black or white"
+            );
+            let faintest_line = [SLOT_EDGE, SLOT_LINE, SLOT_BELT_EDGE]
+                .map(|slot| ink(palette[slot as usize]))
+                .into_iter()
+                .chain([CONTOUR_FAR_ALPHA * ink(palette[SLOT_LINE as usize])])
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                GRID_MAJOR_ALPHA < faintest_line,
+                "{look:?}: major grid ink {GRID_MAJOR_ALPHA} must stay under every line, {faintest_line}"
+            );
+        }
     }
 
     #[test]
     fn the_inks_lines_are_drawn_in_are_near_grey() {
         // Lines draw as the grey of their ink's luminance, so a slight tint is all they lose.
-        let slots = [Ink::Hi, Ink::Mid, Ink::Lo, Ink::Faint, Ink::Edge]
-            .map(ink_slot)
-            .into_iter()
-            .chain([SLOT_LINE]);
-        for slot in slots {
-            let [r, g, b, _] = PALETTE[slot as usize];
-            let spread = r.max(g).max(b) - r.min(g).min(b);
-            assert!(spread <= 6.0 / 255.0, "slot {slot} is tinted by {spread}");
+        for look in LOOKS {
+            let palette = look.colours();
+            let slots = [Ink::Hi, Ink::Mid, Ink::Lo, Ink::Faint, Ink::Edge]
+                .map(ink_slot)
+                .into_iter()
+                .chain([SLOT_LINE]);
+            // A blueprint's lines are blue-grey: the red channel, which the ink reads, is the paper's.
+            let limit = if look == Look::Blueprint { 48.0 / 255.0 } else { 6.0 / 255.0 };
+            for slot in slots {
+                let [r, g, b, _] = palette[slot as usize];
+                let spread = r.max(g).max(b) - r.min(g).min(b);
+                assert!(spread <= limit, "{look:?} slot {slot} is tinted by {spread}");
+                if look == Look::Blueprint {
+                    assert_eq!(r, PALETTE[slot as usize][0], "blueprint slot {slot} keeps its ink");
+                }
+            }
         }
     }
 
     #[test]
     fn a_crease_is_darker_than_a_seam() {
-        let line = PALETTE[SLOT_LINE as usize];
-        let seam = PALETTE[SLOT_EDGE as usize];
-        assert!(ink(line) > ink(seam));
-        assert!(ink(line) < 0.7, "the line is grey, not black");
+        for look in LOOKS {
+            let palette = look.colours();
+            let line = palette[SLOT_LINE as usize];
+            let seam = palette[SLOT_EDGE as usize];
+            assert!(ink(line) > ink(seam), "{look:?}");
+            assert!(ink(line) < 0.7, "{look:?}: the line is grey, not black");
+        }
     }
 
     #[test]
     fn a_belt_is_a_step_darker_than_a_plate_top() {
-        let belt = ink(PALETTE[SLOT_BELT as usize]);
-        assert!(
-            belt > PAPER_TOP && belt < PAPER_LIT * 2.0,
-            "belt ink {belt}"
-        );
-        assert!(ink(PALETTE[SLOT_BELT_EDGE as usize]) > belt);
+        for look in LOOKS {
+            let palette = look.colours();
+            let belt = ink(palette[SLOT_BELT as usize]);
+            assert!(
+                belt > PAPER_TOP && belt < PAPER_LIT * 2.0,
+                "{look:?} belt ink {belt}"
+            );
+            assert!(ink(palette[SLOT_BELT_EDGE as usize]) > belt, "{look:?}");
+        }
+    }
+
+    #[test]
+    fn every_look_keeps_the_agent_hues_and_the_clash_red() {
+        for look in LOOKS {
+            let palette = look.colours();
+            for slot in [SLOT_RED, SLOT_AGENT0, SLOT_AGENT0 + 1, SLOT_AGENT0 + 2, SLOT_AGENT0 + 3] {
+                assert_eq!(palette[slot as usize], PALETTE[slot as usize], "{look:?} slot {slot}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_look_name_maps_to_its_look() {
+        assert_eq!(Look::from_name("paper"), Some(Look::Paper));
+        assert_eq!(Look::from_name("dark"), Some(Look::Dark));
+        assert_eq!(Look::from_name("blueprint"), Some(Look::Blueprint));
+        assert_eq!(Look::from_name("high_contrast"), Some(Look::HighContrast));
+        assert_eq!(Look::from_name("sepia"), None);
+    }
+
+    #[test]
+    fn the_paper_look_is_the_palette_the_page_has_always_had() {
+        assert_eq!(palette_of(Look::Paper, false), palette(false));
+        assert_eq!(tints_of(Look::Paper), tints());
+        assert_eq!(page_of(Look::Paper, false), page(false));
     }
 
     /// The WCAG contrast ratio of two sRGB colours.
@@ -486,10 +675,13 @@ mod tests {
             "the clash tint is red"
         );
         assert!(ink(clash) < 0.05 && clash[1] > 0.85, "and faint: {clash:?}");
-        for slot in [TINT_STALE, TINT_GHOST] {
-            let [r, g, b, _] = table[slot as usize];
-            let spread = r.max(g).max(b) - r.min(g).min(b);
-            assert!(spread <= 6.0 / 255.0, "slot {slot} is grey");
+        for look in LOOKS {
+            let table = tints_of(look);
+            for slot in [TINT_STALE, TINT_GHOST] {
+                let [r, g, b, _] = table[slot as usize];
+                let spread = r.max(g).max(b) - r.min(g).min(b);
+                assert!(spread <= 6.0 / 255.0, "{look:?} slot {slot} is grey");
+            }
         }
     }
 

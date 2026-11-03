@@ -9,6 +9,11 @@
     --page: #f2f2ef;
     --card: #fbfbfa;
     --face: #ffffff;
+    /* On an ink fill, and the map's label, halo and leader colours. settings.css sets them per look. */
+    --on-ink: #ffffff;
+    --label: #57575a;
+    --halo: #ffffff;
+    --leader: #8a8a8f;
     --ink: #1f1f1d;
     --muted: #7a7a72;
     --rule: #dcdcd6;
@@ -31,12 +36,12 @@
   #labels { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
   /* A paper halo round the text, so no belt or grid line crosses a word. */
   #labels .label { position: absolute; left: 0; top: 0; white-space: nowrap;
-    font: 12px system-ui, sans-serif; color: #57575a;
-    text-shadow: 1.5px 0 0 #fff, -1.5px 0 0 #fff, 0 1.5px 0 #fff, 0 -1.5px 0 #fff,
-      1px 1px 0 #fff, -1px 1px 0 #fff, 1px -1px 0 #fff, -1px -1px 0 #fff, 0 0 3px #fff; }
-  #labels.alt .label { background: rgba(255, 255, 255, 0.92); border-radius: 4px; padding: 0 5px;
+    font: 12px system-ui, sans-serif; color: var(--label);
+    text-shadow: 1.5px 0 0 var(--halo), -1.5px 0 0 var(--halo), 0 1.5px 0 var(--halo), 0 -1.5px 0 var(--halo),
+      1px 1px 0 var(--halo), -1px 1px 0 var(--halo), 1px -1px 0 var(--halo), -1px -1px 0 var(--halo), 0 0 3px var(--halo); }
+  #labels.alt .label { background: var(--halo); border-radius: 4px; padding: 0 5px;
     box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.05); }
-  #labels .label .count { display: none; margin-left: 6px; color: #8a8a8f; }
+  #labels .label .count { display: none; margin-left: 6px; color: var(--leader); }
   #labels.alt .count { display: inline; }
   /* A canvas of several projects: one plate under each plant. The page makes them only then. */
   #nameplates { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
@@ -47,13 +52,13 @@
   #nameplates .nameplate.here { border-color: var(--ink); }
   #nameplates .nameplate.dragging { cursor: grabbing; }
   #nameplates .badge { min-width: 16px; padding: 0 5px; box-sizing: border-box; border-radius: 8px; text-align: center;
-    font: 600 10px/16px var(--mono); color: #ffffff; background: var(--ink); }
+    font: 600 10px/16px var(--mono); color: var(--on-ink); background: var(--ink); }
   #nameplates .status { font: 11px var(--mono); color: var(--muted); }
   #nameplates [hidden] { display: none; }
   /* Flags are the marks the plant draws: an agent with its activity, the order, a clash, a
      question. Each is one fixed-size label with a hue dot; an amber dot means it waits on you. */
   #leaders { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
-  #leaders line { stroke: #8a8a8f; stroke-width: 1; }
+  #leaders line { stroke: var(--leader); stroke-width: 1; }
   #flags { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
   .flag { position: absolute; left: 0; top: 0; display: flex; gap: 6px; align-items: center; white-space: nowrap;
     font: 13px/1.2 var(--mono); color: var(--ink); background: var(--face); border: 1px solid var(--rule);
@@ -131,7 +136,7 @@
     border: 1px solid var(--rule); background: var(--face); color: var(--ink); cursor: pointer; text-decoration: none; }
   .dialog-actions button:hover, .dialog-actions a:hover { border-color: var(--ink); }
   .dialog-actions #bug-copy { margin-right: auto; }
-  .dialog-actions .primary { background: var(--ink); color: #ffffff; border-color: var(--ink); }
+  .dialog-actions .primary { background: var(--ink); color: var(--on-ink); border-color: var(--ink); }
   dialog fieldset { border: 0; margin: 10px 0 0; padding: 0; }
   dialog legend { font: 600 12px/1.3 var(--sans); margin-bottom: 6px; padding: 0; }
   dialog .choice { display: flex; gap: 8px; align-items: center; padding: 6px 10px; margin-bottom: 6px;
@@ -170,7 +175,7 @@
   #setup-result.warn { color: var(--ink); font-weight: 600; }
   #setup-result.bad { color: var(--red); }
   #setup-banner { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; align-items: center; color: var(--ink); }
-  #setup-open { font: 11px var(--mono); padding: 2px 8px; background: var(--ink); color: #ffffff; border: 1px solid var(--ink);
+  #setup-open { font: 11px var(--mono); padding: 2px 8px; background: var(--ink); color: var(--on-ink); border: 1px solid var(--ink);
     border-radius: 4px; cursor: pointer; }
   #setup-banner[hidden] { display: none; }
   /* The key bar ends left of the rail (300 px wide, 12 px from the window, 12 px gap), so it never
@@ -220,7 +225,7 @@
   #compose .actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
   #compose .actions .muted { margin-left: auto; font-size: 11px; }
   #compose button { font: 12px/1.3 var(--mono); padding: 3px 10px; border-radius: 4px; border: 1px solid var(--ink);
-    background: var(--ink); color: #ffffff; cursor: pointer; }
+    background: var(--ink); color: var(--on-ink); cursor: pointer; }
   #compose button:disabled { opacity: 0.6; cursor: default; }
   #compose button.close { background: none; border: none; color: var(--muted); padding: 0; font-size: 11px; }
   #compose .note { margin: 6px 0 0; font: 11px/1.4 var(--mono); color: var(--ink); }
@@ -265,7 +270,7 @@
   #command li .detail { grid-column: 2; font: 11px/1.3 var(--sans); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #command li .verb { grid-column: 3; grid-row: 1; font: 11px var(--mono); color: var(--muted); }
   #command li.question .kind, #command li.clash .kind { color: var(--ink); font-weight: 600; }
-  #command li[aria-selected="true"] { background: var(--ink); color: #ffffff; }
+  #command li[aria-selected="true"] { background: var(--ink); color: var(--on-ink); }
   #command li[aria-selected="true"] .kind, #command li[aria-selected="true"] .detail, #command li[aria-selected="true"] .verb { color: #d5d5d0; }
   #command .note { margin: 6px 4px 0; font: 11px/1.4 var(--mono); color: var(--muted); }
   #command .note:empty { display: none; }
@@ -275,7 +280,7 @@
   #gate form { background: var(--card); border: 1px solid var(--rule); border-radius: 6px; padding: 16px; display: flex; gap: 8px; align-items: center; }
   #gate input { font: 12px var(--mono); padding: 4px 6px; width: 280px; }
   #gate button { font: 12px var(--mono); padding: 4px 10px; }
-  #usage { left: 12px; bottom: 12px; color: var(--soft); padding: 4px 10px; }
+  #usage { left: 44px; bottom: 12px; color: var(--soft); padding: 4px 10px; }
   #usage #meta-badge { display: block; margin: 0; padding: 0; font: 11px var(--mono); color: var(--ink);
     background: none; border: none; cursor: pointer; }
   #usage #meta-badge::after { content: " ›"; color: var(--muted); }
@@ -317,10 +322,10 @@
     border-radius: 4px; padding: 3px 8px; margin: 2px 0; cursor: pointer; }
   #slip button:hover { border-color: var(--ink); }
   #slip button:disabled { color: var(--muted); cursor: default; border-color: var(--rule); }
-  #slip button[aria-pressed="true"] { background: var(--ink); color: #ffffff; border-color: var(--ink); }
+  #slip button[aria-pressed="true"] { background: var(--ink); color: var(--on-ink); border-color: var(--ink); }
   #slip button.danger { color: var(--red); border-color: var(--red); }
-  #slip button.primary { background: var(--ink); color: #ffffff; border-color: var(--ink); padding: 4px 12px; }
-  #slip button.primary:disabled { opacity: 0.6; color: #ffffff; }
+  #slip button.primary { background: var(--ink); color: var(--on-ink); border-color: var(--ink); padding: 4px 12px; }
+  #slip button.primary:disabled { opacity: 0.6; color: var(--on-ink); }
   #slip .counts { margin: 8px 0 2px; font: 12px/1.4 var(--mono); color: var(--muted); }
   #slip .counts b { color: var(--ink); font-weight: 600; }
   #slip .warn { border-left: 2px solid var(--red); padding: 4px 0 4px 8px; margin-top: 6px; }
@@ -366,7 +371,7 @@
     border: 1px solid var(--rule); border-radius: 4px; padding: 3px 8px; cursor: pointer; }
   #receipt button:hover:not(:disabled) { border-color: var(--ink); }
   #receipt button:disabled { color: var(--muted); cursor: default; border-color: var(--rule); }
-  #receipt button[aria-pressed="true"] { background: var(--ink); color: #ffffff; border-color: var(--ink); }
+  #receipt button[aria-pressed="true"] { background: var(--ink); color: var(--on-ink); border-color: var(--ink); }
   #receipt .tour-chip { font: 11px var(--mono); color: var(--ink); border: 1px solid var(--rule);
     border-radius: 10px; padding: 1px 8px; white-space: nowrap; }
   #receipt .caption { margin: 6px 0 4px; font: 13px/1.4 var(--sans); min-height: 2.8em; }
@@ -423,7 +428,7 @@
   #watch .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   #inbox .badge { display: inline-block; min-width: 16px; margin-left: 4px; padding: 0 5px; box-sizing: border-box; border-radius: 8px;
     font: 600 11px/16px var(--mono); text-align: center; letter-spacing: 0; color: var(--muted); background: var(--page); }
-  #inbox .badge.some { color: #ffffff; background: var(--ink); }
+  #inbox .badge.some { color: var(--on-ink); background: var(--ink); }
   #inbox .badge.bump { animation: watch-bump 500ms ease-out; }
   @keyframes watch-bump { 30% { transform: scale(1.25); } }
   @media (prefers-reduced-motion: reduce) { #inbox .badge.bump { animation: none; } }
@@ -466,7 +471,7 @@
   #history button.cancel { flex: none; font: 11px var(--mono); padding: 1px 6px; background: var(--face); color: var(--muted);
     border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
   #history button.cancel:hover:not(:disabled) { color: var(--ink); border-color: var(--ink); }
-  #history button.cancel.armed { color: #ffffff; background: var(--ink); border-color: var(--ink); }
+  #history button.cancel.armed { color: var(--on-ink); background: var(--ink); border-color: var(--ink); }
   #history button.cancel:disabled { cursor: default; opacity: 0.6; }
   #history .more, #history .note { margin: 4px 0 0; font: 11px/1.4 var(--sans); color: var(--muted); }
   #history .note:not(:empty) { color: var(--ink); }
@@ -478,7 +483,7 @@
   #scrub.held { border-color: var(--ink); }
   #scrub.held input[type=range] { accent-color: var(--ink); }
   #scrub.held .where { color: var(--ink); font-weight: 600; }
-  #scrub .live { font: 11px var(--mono); padding: 1px 8px; background: var(--ink); color: #ffffff; border: 1px solid var(--ink);
+  #scrub .live { font: 11px var(--mono); padding: 1px 8px; background: var(--ink); color: var(--on-ink); border: 1px solid var(--ink);
     border-radius: 4px; cursor: pointer; }
   /* The one-sentence reason a control is off, such as "Go live to send." on a rewound map. */
   .reason { margin: 4px 0 0; padding-left: 6px; border-left: 2px solid var(--ink); font: 11px/1.4 var(--sans); color: var(--ink); }
@@ -515,6 +520,7 @@
   #replay progress::-moz-progress-bar { background: var(--ink); border-radius: 2px; }
 </style>
 <link rel="stylesheet" href="review.css">
+<link rel="stylesheet" href="settings.css">
 </head>
 <body>
 <canvas id="plant" tabindex="0"></canvas>
@@ -658,6 +664,12 @@
     </table>
   </section>
 </div>
+<button type="button" id="settings-cog" aria-controls="settings" aria-expanded="false" aria-label="Settings" title="Settings (,)" hidden><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.4 3.4l1.2 1.2M11.4 11.4l1.2 1.2M3.4 12.6l1.2-1.2M11.4 4.6l1.2-1.2"/></svg></button>
+<aside id="settings" role="dialog" aria-modal="false" aria-labelledby="settings-title" hidden>
+  <header class="head"><h2 id="settings-title" tabindex="-1">Settings</h2><span id="settings-who" class="who" hidden></span><span class="keys"><kbd>Esc</kbd> <button type="button" id="settings-close" class="close">close</button></span></header>
+  <p id="settings-note" class="note" hidden></p>
+  <div id="settings-body"></div>
+</aside>
 <div class="island" id="replay" hidden>
   <button type="button" id="replay-toggle" aria-label="Pause">&#9208;</button>
   <progress id="replay-progress" max="1" value="0" aria-label="Replay progress"></progress>

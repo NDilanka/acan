@@ -64,8 +64,8 @@ test("A answers, O orders and / opens the command bar, each once per press", () 
 });
 
 test("Esc closes the topmost open panel: command bar, compose, viewer, question, clash card", () => {
-  assert.deepEqual(ESCAPE_ORDER, ["command", "compose", "viewer", "question", "clash"]);
-  const all = { command: true, compose: true, viewer: true, question: true, clash: true };
+  assert.deepEqual(ESCAPE_ORDER, ["command", "compose", "settings", "viewer", "question", "clash"]);
+  const all = { command: true, compose: true, settings: true, viewer: true, question: true, clash: true };
   const closed = [];
   const open = { ...all };
   for (;;) {
@@ -109,4 +109,10 @@ test("a held G does not re-arm the chord", () => {
   const step = keyAction(press("g", { repeat: true }), ctx({ armed: 1000, now: 1100 }));
   assert.equal(step.armed, 1000);
   assert.equal(step.action, null);
+});
+
+test("the comma key toggles settings, and Esc closes an open settings drawer first", () => {
+  assert.deepEqual(keyAction(press(","), ctx()).action, { kind: "settings" });
+  const step = keyAction(press("Escape"), ctx({ open: { ...NONE, settings: true, clash: true } }));
+  assert.deepEqual(step.action, { kind: "close", panel: "settings" });
 });
