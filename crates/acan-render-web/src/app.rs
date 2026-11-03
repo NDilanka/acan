@@ -621,7 +621,8 @@ impl App {
         }
         self.moving = moving;
         let riding = self.advance_ride(dt_ms);
-        self.calm = moving && self.motion.calm() && !(turning || touring || riding || parked_moving);
+        self.calm =
+            moving && self.motion.calm() && !(turning || touring || riding || parked_moving);
         turning || touring || moving || riding || parked_moving
     }
 
