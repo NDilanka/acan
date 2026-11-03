@@ -222,6 +222,7 @@ async fn the_status_marks_the_roles_that_need_meta_and_a_pick_of_another_provide
             ("vision", true),
             ("director", true),
             ("wonder", true),
+            ("statemap", false),
         ]
     );
 
