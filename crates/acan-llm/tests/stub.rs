@@ -69,6 +69,7 @@ async fn unscripted_role_fails_with_no_scripted_reply() {
         matches!(err, LlmError::NoScriptedReply { role: Role::Fast }),
         "got {err:?}"
     );
+    assert!(!err.was_sent(), "a call with no script sends no request");
 }
 
 #[tokio::test]

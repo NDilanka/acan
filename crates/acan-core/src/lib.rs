@@ -32,8 +32,8 @@ pub use clash::{
     Explanation, Overlap, OverlapKind, Settlement, SymbolRef, detect,
 };
 pub use event::{
-    Actor, AgentCmd, Command, Event, HumanCmd, Rejection, ReplayError, Stamped, SystemCmd,
-    VisionCounts, VisionStatus,
+    Actor, AgentCmd, CallFailure, Command, Event, HumanCmd, Rejection, ReplayError, Stamped,
+    SystemCmd, VisionCounts, VisionStatus,
 };
 pub use gate::{GateRun, GateVerdict, WitnessOutcome};
 pub use ids::{

@@ -101,9 +101,10 @@ pub use report::{
     UncoveredRoute,
 };
 pub use scope::{
-    BroadGrantAck, Change, ChoiceAnswer, ChoiceOption, ItemProvenance, MustKeep, OpenChoice,
-    PredicateRef, Principal, RepairBudget, RepairRounds, RulingVersion, Scope, ScopeBody,
-    ScopeConfirmation, ScopeDraft, ScopeItem, Selector, StepContext, TargetExample, TargetKind,
+    BroadGrantAck, Change, ChoiceAnswer, ChoiceOption, ItemProvenance, MUST_KEEP_WORDS, MustKeep,
+    OpenChoice, PredicateRef, Principal, RepairBudget, RepairRounds, RulingVersion, Scope,
+    ScopeBody, ScopeConfirmation, ScopeDraft, ScopeItem, Selector, StepContext, TargetExample,
+    TargetKind,
 };
 pub use twin::{
     RepeatCount, TWIN_CAPS, TwinCap, TwinCaps, TwinEdit, TwinError, TwinErrorCode, TwinRun,

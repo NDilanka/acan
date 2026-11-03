@@ -221,7 +221,14 @@ impl Mirror {
                     }
                 }
             }
-            Event::ModelUsed { model, step, .. } => {
+            // A call that gave no reply adds no row and moves none, so only an answered call
+            // matches here.
+            Event::ModelUsed {
+                model,
+                step,
+                failure: None,
+                ..
+            } => {
                 self.last_used.insert((model.clone(), *step), stamped.seq);
             }
             _ => {}
@@ -973,6 +980,8 @@ fn step_key(step: Step) -> &'static str {
         Step::Explain => "explain",
         Step::Screenshot => "screenshot",
         Step::Vision => "vision",
+        Step::Scope => "scope",
+        Step::Director => "director",
     }
 }
 
@@ -982,10 +991,10 @@ mod tests {
     use std::str::FromStr;
 
     use acan_core::{
-        AgentCmd, Belt, Check, CodeIndex, CodeRev, Command, CommitId, Ctx, DeclarationInput, Fence,
-        FilePath, HumanCmd, IndexedFile, IndexedSymbol, MachineKey, MemberId, Origin, Scope,
-        ScopeBinding, ScopeConfirmation, Seq, Step, SystemCmd, TaskSpec, Timestamp, WitnessSpec,
-        WorldId, WorldRef,
+        AgentCmd, Belt, CallFailure, Check, CodeIndex, CodeRev, Command, CommitId, Ctx,
+        DeclarationInput, Fence, FilePath, HumanCmd, IndexedFile, IndexedSymbol, MachineKey,
+        MemberId, Origin, Scope, ScopeBinding, ScopeConfirmation, Seq, Step, SystemCmd, TaskSpec,
+        Timestamp, WitnessSpec, WorldId, WorldRef,
     };
     use serde_json::json;
 
@@ -1568,9 +1577,12 @@ mod tests {
             &index,
             Command::System(SystemCmd::ModelUsed {
                 model: "test-model".to_owned(),
+                provider: None,
                 step: Step::Explain,
-                input_tokens: 30,
-                output_tokens: 4,
+                input_tokens: Some(30),
+                output_tokens: Some(4),
+                failure: None,
+                detail: None,
             }),
         ));
         let after = Mirror::from_log(log).expect("the log replays").view(&plan);
@@ -1601,9 +1613,12 @@ mod tests {
                 &index,
                 Command::System(SystemCmd::ModelUsed {
                     model: model.to_owned(),
+                    provider: None,
                     step: Step::Explain,
-                    input_tokens: 10,
-                    output_tokens: 1,
+                    input_tokens: Some(10),
+                    output_tokens: Some(1),
+                    failure: None,
+                    detail: None,
                 }),
             ));
         };
@@ -1624,6 +1639,78 @@ mod tests {
         assert_eq!(models, ["test-model-0", "test-model-9", "test-model-8"]);
         assert_eq!(view.usage[0].calls, 2);
         assert_eq!(view.usage_earlier, 7);
+    }
+
+    #[test]
+    fn a_failed_model_used_is_not_counted_in_usage_rows() {
+        let plan = plan();
+        let (mut origin, mut log, index) = scripted();
+        log.extend(
+            scenario::land_script(
+                &mut origin,
+                &index,
+                &founder(),
+                Timestamp::from_millis(2_000),
+            )
+            .expect("the story runs"),
+        );
+        let mut send = |log: &mut Vec<Stamped>, cmd: SystemCmd| {
+            log.extend(accepted(&mut origin, &index, Command::System(cmd)));
+        };
+        let answered = |model: &str, input: u32, output: u32| SystemCmd::ModelUsed {
+            model: model.to_owned(),
+            provider: Some("meta".to_owned()),
+            step: Step::Explain,
+            input_tokens: Some(input),
+            output_tokens: Some(output),
+            failure: None,
+            detail: None,
+        };
+        send(&mut log, answered("test-model-a", 10, 1));
+        send(&mut log, answered("test-model-b", 20, 2));
+        // A timed-out call to A, after B was answered, and a failed call to a model with no row.
+        send(
+            &mut log,
+            SystemCmd::ModelUsed {
+                model: "test-model-a".to_owned(),
+                provider: Some("meta".to_owned()),
+                step: Step::Explain,
+                input_tokens: None,
+                output_tokens: None,
+                failure: Some(CallFailure::Timeout),
+                detail: Some("explained c-1: timeout".to_owned()),
+            },
+        );
+        send(
+            &mut log,
+            SystemCmd::ModelUsed {
+                model: "test-model-c".to_owned(),
+                provider: Some("meta".to_owned()),
+                step: Step::Director,
+                input_tokens: None,
+                output_tokens: None,
+                failure: Some(CallFailure::Error),
+                detail: Some("tour for receipt 1a2b3c4d: error".to_owned()),
+            },
+        );
+
+        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let models: Vec<&str> = view.usage.iter().map(|row| row.model.as_str()).collect();
+        assert_eq!(
+            models,
+            ["test-model-b", "test-model-a"],
+            "the failed calls add no row and move none"
+        );
+        let [b, a] = view.usage.as_slice() else {
+            panic!("two answered models are two rows");
+        };
+        assert_eq!((b.calls, b.input, b.output), (1, 20, 2));
+        assert_eq!(
+            (a.calls, a.input, a.output),
+            (1, 10, 1),
+            "the timed-out call to A is not counted"
+        );
+        assert_eq!(view.usage_earlier, 0);
     }
 
     /// The commit the lane fixtures' scopes sit on.

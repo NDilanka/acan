@@ -1414,7 +1414,7 @@ mod tests {
         set_writable(&git_dir, false);
         let probe_refused = fs::write(git_dir.join("probe"), "").is_err();
         let checked =
-            check_contract_with(&check_args(repo.path(), "main"), &missing_docker(), None).await;
+            check_contract_with(&check_args(repo.path(), "main"), &missing_docker()).await;
         set_writable(&git_dir, true);
 
         assert!(
@@ -1475,7 +1475,7 @@ mod tests {
         let origin = clone_with(&contract_files());
         let (_dir, partial, marker) = promisor_clone_of(origin.path());
 
-        let error = check_contract_with(&check_args(&partial, "main"), &missing_docker(), None)
+        let error = check_contract_with(&check_args(&partial, "main"), &missing_docker())
             .await
             .expect_err("the contract's contents are missing and are not fetched");
 

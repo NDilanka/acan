@@ -174,6 +174,7 @@ async fn an_unrouted_wonder_role_sends_nothing() {
         ),
         "got {err:?}"
     );
+    assert!(!err.was_sent(), "an unrouted role sends no request");
 }
 
 #[test]
