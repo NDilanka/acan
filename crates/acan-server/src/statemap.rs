@@ -54,10 +54,37 @@ pub(crate) struct RefineSettings {
 }
 
 impl RefineSettings {
+    #[cfg(test)]
     pub(crate) const OFF: Self = Self {
         enabled: false,
         call_limit: DEFAULT_CALL_LIMIT,
     };
+}
+
+/// Where a project's statemap settings are read: the settings file, and the project's id in it.
+/// Each scan reads the file again, so a changed flag or limit applies from the next scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SettingsSource {
+    file: PathBuf,
+    project: String,
+}
+
+impl SettingsSource {
+    pub(crate) fn new(file: PathBuf, project: String) -> Self {
+        Self { file, project }
+    }
+
+    /// The settings as the file says now. A file that cannot be read keeps the flag off and the
+    /// limit at its default.
+    pub(crate) fn current(&self) -> RefineSettings {
+        RefineSettings {
+            enabled: crate::settings::statemap_llm_enabled(&self.file, &self.project),
+            call_limit: crate::settings::file::load(&self.file)
+                .map_or(DEFAULT_CALL_LIMIT, |stored| {
+                    stored.budgets.call_limits.statemap
+                }),
+        }
+    }
 }
 
 /// What one refinement did. A job is cached, called, skipped, or failed; a failed call is also a call.

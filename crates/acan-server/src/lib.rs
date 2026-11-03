@@ -460,9 +460,10 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
         let mut scan = tokio::task::spawn_blocking(move || scan(&repo))
             .await
             .context("the scan task did not finish")??;
-        // Off until the settings file says otherwise: no model call, no cache write.
-        let statemap = statemap::RefineSettings::OFF;
-        statemap::refine(&client, &mut scan.plant, statemap).await;
+        // Read from the settings file at each scan. A flag that is off makes no model call and
+        // writes no cache.
+        let statemap = statemap::SettingsSource::new(settings_file.clone(), spec.id.clone());
+        statemap::refine(&client, &mut scan.plant, statemap.current()).await;
         openings.push(Opening {
             spec,
             store,
@@ -520,7 +521,7 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
                 vision,
             },
             Arc::clone(&slots),
-            statemap,
+            Some(statemap),
         );
         entries.push(Entry {
             id: spec.id,
@@ -637,8 +638,8 @@ struct Opening<C> {
     vision: Option<Vision>,
     client: C,
     ledger: UsageLedger,
-    /// The statemap refinement the project's scans run with.
-    statemap: statemap::RefineSettings,
+    /// Where the project's scans read their statemap settings.
+    statemap: statemap::SettingsSource,
     /// The tokens of this project's local workers, in worker order.
     worker_tokens: Vec<String>,
 }

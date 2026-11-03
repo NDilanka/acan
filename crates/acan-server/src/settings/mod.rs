@@ -968,10 +968,6 @@ pub(crate) fn routes<C: ModelClient + 'static>(state: Arc<Settings<C>>) -> Route
 /// settings file at `settings_path` says now. The file is read on each call, so a change takes
 /// effect at once. A missing file, or a project with no entry, is off. A file that cannot be read
 /// is off too, and the warning names no part of it.
-#[allow(
-    dead_code,
-    reason = "the statemap refinement does not read this flag in this crate yet"
-)]
 pub(crate) fn statemap_llm_enabled(settings_path: &Path, project_id: &str) -> bool {
     match file::load(settings_path) {
         Ok(stored) => stored

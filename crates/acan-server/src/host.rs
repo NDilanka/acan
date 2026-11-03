@@ -89,7 +89,8 @@ struct Inner<C> {
     wake: Arc<Notify>,
     ledger: UsageLedger,
     client: C,
-    statemap: crate::statemap::RefineSettings,
+    /// Where each rescan reads its statemap settings. `None` runs no statemap pass.
+    statemap: Option<crate::statemap::SettingsSource>,
     repo: PathBuf,
     shutdown: watch::Receiver<bool>,
     streams: Arc<Mutex<JoinSet<()>>>,
@@ -139,10 +140,11 @@ impl<C: ModelClient> Host<C> {
     /// Panics when called outside a Tokio runtime, or when `probe_concurrency` is zero.
     #[must_use]
     pub fn new_with_slots(parts: HostParts<C>, slots: Arc<Semaphore>) -> Self {
-        Self::new_with_statemap(parts, slots, crate::statemap::RefineSettings::OFF)
+        Self::new_with_statemap(parts, slots, None)
     }
 
-    /// [`new_with_slots`](Self::new_with_slots), with the statemap refinement each rescan runs with.
+    /// [`new_with_slots`](Self::new_with_slots), with the statemap settings each rescan reads. `None`
+    /// runs no statemap pass.
     ///
     /// # Panics
     ///
@@ -151,7 +153,7 @@ impl<C: ModelClient> Host<C> {
     pub(crate) fn new_with_statemap(
         parts: HostParts<C>,
         slots: Arc<Semaphore>,
-        statemap: crate::statemap::RefineSettings,
+        statemap: Option<crate::statemap::SettingsSource>,
     ) -> Self {
         assert!(
             parts.probe_concurrency > 0,
@@ -420,7 +422,9 @@ impl<C: ModelClient> Host<C> {
         let mut scan = tokio::task::spawn_blocking(move || crate::index::scan(&repo))
             .await
             .context("the scan task did not finish")??;
-        crate::statemap::refine(&self.inner.client, &mut scan.plant, self.inner.statemap).await;
+        if let Some(statemap) = &self.inner.statemap {
+            crate::statemap::refine(&self.inner.client, &mut scan.plant, statemap.current()).await;
+        }
         self.inner.writer.rescan(scan).await
     }
 
