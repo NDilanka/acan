@@ -23,6 +23,7 @@ import {
   clearNote,
   conflictNote,
   hasTokens,
+  stepWorkers,
   providerLabel,
 } from "./settings-model.js";
 import { THEMES, applyTheme } from "./themes.js";
@@ -984,7 +985,6 @@ function projectRow(project) {
     line: "Leaves the map. Files stay.",
     onRun: () => removeProject(project.id),
   });
-  const count = `${project.workers ?? 0} ${project.workers === 1 ? "worker" : "workers"}`;
   const row = el(
     "div",
     { class: "row proj", "data-path": `projects.${project.id}` },
@@ -993,7 +993,6 @@ function projectRow(project) {
       { class: "pinfo" },
       el("span", { class: "pname", text: project.name ?? project.id }),
       project.path ? el("span", { class: "ppath", text: project.path }) : null,
-      el("span", { class: "muted", text: count }),
     ),
     el("span", { class: "acts" }, cf.buttons),
     cf.line,
@@ -1005,7 +1004,40 @@ function projectRow(project) {
     (value) => setStatemapLlm(project.id, value),
     { path: `projects.${project.id}.statemap_llm` },
   );
-  return el("div", { class: "proj-block" }, row, statemap);
+  return el("div", { class: "proj-block" }, row, workersRow(project), statemap);
+}
+
+// The worker count, 0 to 8, with a minus and a plus. Each step is saved at once and takes effect
+// after restart; a step past either end is disabled.
+function workersRow(project) {
+  const n = project.workers ?? 0;
+  const path = `projects.${project.id}.workers`;
+  const step = (delta, label) => {
+    const next = stepWorkers(n, delta);
+    const button = el(
+      "button",
+      { type: "button", "aria-label": label, "data-ctl": `workers:${project.id}:${delta}`, disabled: next === n ? true : null },
+      delta < 0 ? "−" : "+",
+    );
+    return wireTo(button, "click", () => setWorkers(project.id, next));
+  };
+  return el(
+    "div",
+    { class: "row wide", "data-path": path },
+    el("span", { class: "label", text: "Workers" }),
+    el(
+      "span",
+      { class: "stepper", role: "group", "aria-label": `Workers for ${project.id}` },
+      step(-1, `Fewer workers for ${project.id}`),
+      el("span", { class: "count", "aria-live": "polite", text: String(n) }),
+      step(1, `More workers for ${project.id}`),
+    ),
+    fieldNote(path),
+  );
+}
+
+function setWorkers(id, n) {
+  return put("projects", { projects: { workers: { [id]: n } } });
 }
 
 // The flag is saved, not sent on each click; the row shows the server's answer.

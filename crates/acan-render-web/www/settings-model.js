@@ -213,11 +213,25 @@ export function appliedNote(applied) {
   return "";
 }
 
-// A 409 is a model conflict: a role with no key, an environment key that cannot be cleared here,
-// or a routing file that decides. The server's message is shown as it is, with a fallback.
+// The server's 409 names its conflict in `what`. Each code gets a short sentence; an unknown code
+// gets the plain fallback.
+const CONFLICT_TEXT = {
+  routing_file: "A routing file sets this role. Change it there. Nothing changed.",
+  no_key: "That provider has no key yet. Add one first. Nothing changed.",
+  unavailable: "That provider is unavailable right now. Nothing changed.",
+  "this key comes from the environment": "This key comes from the environment. Unset it there.",
+};
+
 export function conflictNote(body) {
-  const message = typeof body?.message === "string" ? body.message.trim() : "";
-  return message !== "" ? message : "Not saved: a model setting conflicts. Nothing changed.";
+  return CONFLICT_TEXT[body?.what] ?? "Not saved: a model setting conflicts. Nothing changed.";
+}
+
+// A worker count runs from 0 to 8 per project, and the stepper moves it by one.
+export const WORKERS = { min: 0, max: 8 };
+
+export function stepWorkers(current, delta) {
+  const n = Number.isInteger(current) ? current : WORKERS.min;
+  return Math.min(WORKERS.max, Math.max(WORKERS.min, n + delta));
 }
 
 // The tokens come from GET /api/settings once the token routes land. Until then `tokens` is {}.
