@@ -418,16 +418,16 @@ test("a change that needs a restart says so, and live or client changes say noth
 });
 
 test("the update view reads up to date when latest is the current version", () => {
-  assert.deepEqual(updateView({ current: "0.9.3-pre.4", latest: "0.9.3-pre.4" }), {
+  assert.deepEqual(updateView({ current: "0.1.0-pre.1", latest: "0.1.0-pre.1" }), {
     state: "current",
-    text: "Up to date · 0.9.3-pre.4",
+    text: "Up to date · 0.1.0-pre.1",
   });
 });
 
 test("the update view offers a newer latest version", () => {
-  assert.deepEqual(updateView({ current: "0.9.3-pre.4", latest: "0.9.4-pre.1" }), {
+  assert.deepEqual(updateView({ current: "0.1.0-pre.1", latest: "0.1.1-pre.1" }), {
     state: "newer",
-    text: "0.9.4-pre.1 available",
+    text: "0.1.1-pre.1 available",
   });
 });
 
@@ -721,8 +721,8 @@ test("the adapter list holds the nine harnesses, and its rows read as the drawer
 test("the update check compares the versions, and an update starts by verifying", async () => {
   const api = createMockApi(fixture);
   const check = await api.request("GET", "/api/update");
-  assert.equal(check.body.current, "0.9.3-pre.4");
-  assert.deepEqual(updateView(check.body), { state: "newer", text: "0.9.4-pre.1 available" });
+  assert.equal(check.body.current, "0.1.0-pre.1");
+  assert.deepEqual(updateView(check.body), { state: "newer", text: "0.1.1-pre.1 available" });
   assert.deepEqual(await api.request("POST", "/api/update"), {
     status: 200,
     body: { state: "verifying" },

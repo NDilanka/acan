@@ -36,9 +36,9 @@ const ADAPTERS = [
   makeAdapter("custom", "Custom command", true, null, "unknown"),
 ];
 const UPDATE = {
-  latest: "0.9.4-pre.1",
+  latest: "0.1.1-pre.1",
   notes: "Pre-release notes for the fixture.",
-  asset: "acan-0.9.4-pre.1-linux.tar.gz",
+  asset: "acan-0.1.1-pre.1-linux.tar.gz",
   sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 };
 
