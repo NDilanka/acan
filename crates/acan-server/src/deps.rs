@@ -393,8 +393,12 @@ fn check_node(name: &str, node: &Map<String, Value>) -> Result<(), String> {
     for (key, child) in node {
         if is_spec_map(key, true) {
             check_lock_specs(name, key, child)?;
-        } else if is_redirect_map(key) {
-            check_redirects(name, child)?;
+        }
+    }
+    let declared = declared_names(node, true);
+    for (key, child) in node {
+        if is_redirect_map(key) {
+            check_redirects(name, child, &declared)?;
         }
     }
     Ok(())
@@ -439,8 +443,12 @@ fn check_manifest(path: &str, bytes: &[u8]) -> Result<(), String> {
     for (key, child) in object {
         if is_spec_map(key, false) {
             check_manifest_specs(path, key, child)?;
-        } else if is_redirect_map(key) {
-            check_redirects(path, child)?;
+        }
+    }
+    let declared = declared_names(object, false);
+    for (key, child) in object {
+        if is_redirect_map(key) {
+            check_redirects(path, child, &declared)?;
         }
     }
     Ok(())
@@ -478,15 +486,24 @@ fn check_dep_name(owner: &str, dep: &str) -> Result<(), String> {
 
 /// Checks overrides or resolutions. A string redirects the package it is keyed by, and an object
 /// nests more redirects. A key is a selector, and a refusal names it only when it is a package
-/// name.
-fn check_redirects(owner: &str, value: &Value) -> Result<(), String> {
+/// name. A string `$name` redirects to the spec `name` has in the same object's dependency maps,
+/// which were checked already, so `declared` holds those names.
+fn check_redirects(owner: &str, value: &Value, declared: &[&str]) -> Result<(), String> {
     let map = value
         .as_object()
         .ok_or_else(|| format!("{owner} has redirects that are not an object"))?;
     for (key, redirect) in map {
         check_selector(owner, key)?;
         match redirect {
-            Value::Object(_) => check_redirects(owner, redirect)?,
+            Value::Object(_) => check_redirects(owner, redirect, declared)?,
+            Value::String(spec) if spec.starts_with('$') => {
+                if !declared.contains(&&spec[1..]) {
+                    return Err(format!(
+                        "{owner} overrides a package with a reference to a dependency it does \
+                         not declare"
+                    ));
+                }
+            }
             spec => {
                 if let Some(refusal) = refused_spec(owner, key, spec) {
                     return Err(refusal);
@@ -540,6 +557,17 @@ fn is_spec_map(key: &str, lock: bool) -> bool {
         key,
         "dependencies" | "devDependencies" | "optionalDependencies" | "peerDependencies"
     ) || (lock && key == "requires")
+}
+
+/// The names a manifest or a lockfile node declares in its dependency maps. An override may refer
+/// to one as `$name`. Every such map is checked before a reference to it is.
+fn declared_names(object: &Map<String, Value>, lock: bool) -> Vec<&str> {
+    object
+        .iter()
+        .filter(|(key, _)| is_spec_map(key, lock))
+        .filter_map(|(_, child)| child.as_object())
+        .flat_map(|map| map.keys().map(String::as_str))
+        .collect()
 }
 
 /// Whether `key` names a map of redirects, which npm reads as dependencies to fetch instead.
@@ -1287,6 +1315,35 @@ mod tests {
             }
         }"#;
         assert_eq!(refusal(lock), None);
+    }
+
+    #[test]
+    fn an_override_that_refers_to_a_declared_dependency_is_admitted() {
+        let manifest = r#"{"name": "app", "dependencies": {"left-pad": "^1.3.0"}, "overrides": {"left-pad": "$left-pad", "right-pad": {"left-pad": "$left-pad"}}}"#;
+        assert_eq!(manifest_refusal(manifest), None);
+        let lock = r#"{"lockfileVersion": 3, "packages": {"": {"dependencies": {"left-pad": "1.3.0"}, "overrides": {"left-pad": "$left-pad"}}}}"#;
+        assert_eq!(refusal(lock), None);
+    }
+
+    #[test]
+    fn an_override_that_refers_to_an_undeclared_dependency_or_a_bad_one_is_refused() {
+        for manifest in [
+            r#"{"name": "app", "overrides": {"left-pad": "$left-pad"}}"#,
+            r#"{"name": "app", "dependencies": {"right-pad": "1.0.0"}, "overrides": {"left-pad": "$left-pad"}}"#,
+            r#"{"name": "app", "dependencies": {"left-pad": "https://evil.example.test/left-pad.tgz"}, "overrides": {"left-pad": "$left-pad"}}"#,
+            r#"{"name": "app", "dependencies": {"left-pad": "1.3.0"}, "overrides": {"left-pad": "$"}}"#,
+        ] {
+            assert!(
+                manifest_refusal(manifest).is_some(),
+                "{manifest} is refused"
+            );
+        }
+        let lock =
+            r#"{"lockfileVersion": 3, "packages": {"": {"overrides": {"left-pad": "$left-pad"}}}}"#;
+        assert!(
+            refusal(lock).is_some(),
+            "an undeclared lockfile reference is refused"
+        );
     }
 
     #[test]
