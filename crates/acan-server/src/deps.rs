@@ -283,7 +283,6 @@ impl Installer<'_> {
             .map(ToString::to_string)
             .unwrap_or_default();
         let key = key(&image, argv, &lock, &manifests);
-        let entry = self.cache.join(key.to_string().replace(':', "-"));
         let record = |cache: Cache| InstallRecord {
             role,
             commit: preparation.merged_commit().to_string(),
@@ -296,10 +295,15 @@ impl Installer<'_> {
             network: NETWORK,
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         };
-        check_platform(self.cache)?;
         prepare_root(self.cache)?;
-        check_root(self.cache, me)?;
-        check_ancestors(self.cache, me)?;
+        // Every check and every later step uses the root as it resolves. Each link on the way is
+        // followed once, here, so a link swapped later cannot move where the install reads or
+        // writes, and the mount source is the directory that was checked.
+        let cache = resolve(self.cache)?;
+        check_platform(&cache)?;
+        check_root(&cache, me)?;
+        check_ancestors(&cache, me)?;
+        let entry = cache.join(key.to_string().replace(':', "-"));
         if read_entry(&entry, me)? == Entry::Complete {
             return Ok(Some(Installed {
                 modules: entry.join(MODULES),
@@ -310,8 +314,8 @@ impl Installer<'_> {
         // The partial directory is removed when it drops, unless the entry was stored from it.
         let partial = tempfile::Builder::new()
             .prefix("partial-")
-            .tempdir_in(self.cache)
-            .map_err(|source| io_error(self.cache, source))?;
+            .tempdir_in(&cache)
+            .map_err(|source| io_error(&cache, source))?;
         let work = partial.path().join("work");
         fs::create_dir(&work).map_err(|source| io_error(&work, source))?;
         open_to_install(&work).map_err(|source| io_error(&work, source))?;
@@ -821,15 +825,33 @@ fn check_root(cache: &Path, me: Identity) -> Result<(), DepsError> {
     Ok(())
 }
 
+/// The cache root as it resolves, with every link followed. An install uses this path for every
+/// step, so the directory that was checked is the one that is used. On Windows a verbatim prefix
+/// is removed from a local path, because the container runtime does not take one.
+fn resolve(cache: &Path) -> Result<PathBuf, DepsError> {
+    let real = fs::canonicalize(cache).map_err(|source| io_error(cache, source))?;
+    if cfg!(windows)
+        && let Some(local) = real.to_str().and_then(|text| text.strip_prefix(r"\\?\"))
+    {
+        if local.starts_with("UNC\\") {
+            return Err(tampered(
+                cache,
+                "a network path cannot hold the cache; use a local directory",
+            ));
+        }
+        return Ok(PathBuf::from(local));
+    }
+    Ok(real)
+}
+
 /// Checks every directory above the cache root, on unix. Each belongs to this user or to root, and
 /// the group or others may write it only when it is sticky, so no other user can rename or replace
-/// a directory on the way to the cache. The walk starts from the cache as it resolves, so a link
-/// above the root is checked where it points.
+/// a directory on the way to the cache. `cache` is the root as [`resolve`] returns it, so the walk
+/// covers the real directories above it.
 #[cfg(unix)]
 fn check_ancestors(cache: &Path, me: Identity) -> Result<(), DepsError> {
     use std::os::unix::fs::PermissionsExt;
-    let real = fs::canonicalize(cache).map_err(|source| io_error(cache, source))?;
-    for dir in real.ancestors().skip(1) {
+    for dir in cache.ancestors().skip(1) {
         let meta = fs::symlink_metadata(dir).map_err(|source| io_error(dir, source))?;
         if ![me.uid, 0].contains(&owner(&meta)) {
             return Err(tampered(
@@ -859,7 +881,10 @@ fn check_ancestors(_cache: &Path, _me: Identity) -> Result<(), DepsError> {
 /// cache reaches. Other platforms have no owner or mode to read here, so only a cache under the
 /// user's profile, which holds this user's files, is trusted.
 fn check_platform(cache: &Path) -> Result<(), DepsError> {
-    let profile = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    // The profile is compared as it resolves too, so a short name such as `MYNAME~1` matches.
+    let profile = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .map(|profile| fs::canonicalize(&profile).unwrap_or(profile));
     if platform_trusts(cfg!(unix), cache, profile.as_deref()) {
         return Ok(());
     }
@@ -1975,6 +2000,58 @@ mod tests {
         assert!(
             matches!(&refused, DepsError::Tampered { path, .. } if path == &parent),
             "{refused}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hit_through_a_link_in_the_cache_path_mounts_the_resolved_entry() {
+        let (clone, head) = clone_with(&[("package.json", PACKAGE), ("package-lock.json", LOCK)]);
+        let repo = Repo::open(clone.path()).await.expect("the clone opens");
+        let PrepareOutcome::Prepared(prepared) = repo
+            .prepare(&head, &ProtectedPaths::default())
+            .await
+            .expect("the commit prepares")
+        else {
+            panic!("the commit merges without conflict");
+        };
+        let app: AppContract = serde_json::from_str(NODE_APP).expect("the app contract decodes");
+        let real_parent = tempfile::tempdir().expect("a cache parent");
+        let real_parent = fs::canonicalize(real_parent.path()).expect("a real path");
+        let cache = real_parent.join("deps");
+        prepare_root(&cache).expect("the cache root");
+        complete_entry(&cache.join(fixture_key(&app).replace(':', "-")));
+        // A link in the cache's path points at the real parent. Every step must use the resolved
+        // root, so the mount names the real entry and not the link.
+        let link_parent = tempfile::tempdir().expect("a directory for the link");
+        let link = fs::canonicalize(link_parent.path())
+            .expect("a real path")
+            .join("link");
+        std::os::unix::fs::symlink(&real_parent, &link).expect("a link to the real parent");
+        let through_link = link.join("deps");
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let config = RunnerConfig::new("acan-no-such-docker", 3000);
+        let slots = Semaphore::new(1);
+        let installer = Installer {
+            repo: &repo,
+            config: &config,
+            slots: &slots,
+            cache: &through_link,
+            scratch: scratch.path(),
+        };
+        let me = process_identity().expect("this process's identity");
+
+        let hit = installer
+            .install_as(&prepared, Role::Base, &app, me)
+            .await
+            .expect("a hit through the link")
+            .expect("the app has an install");
+
+        assert_eq!(hit.record.cache, Cache::Hit);
+        assert!(
+            hit.modules.starts_with(&cache),
+            "the mount is the resolved entry: {}",
+            hit.modules.display()
         );
     }
 
