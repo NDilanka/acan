@@ -5,6 +5,7 @@
 import { shownOrder } from "./panels.js";
 import { requestRender } from "./main.js";
 import { paintMarks } from "./marks.js";
+import { REPLAY_PLATE_LINE } from "./plant.js";
 import {
   DIRECTED,
   PLAIN,
@@ -27,7 +28,7 @@ const plateEl = $("receipt");
 // The plate's entry: the order whose play or error the page holds, preferring the order the order
 // island shows. Null when no receipt has a view yet.
 function plateEntry() {
-  const held = [...state.plantViews.entries()].filter(([, entry]) => entry.play || entry.error || entry.playError);
+  const held = [...state.plantViews.entries()].filter(([, entry]) => entry.play || entry.error || entry.playError || entry.replay);
   if (held.length === 0) return null;
   const shown = state.view ? shownOrder(state.view)?.id : undefined;
   const [order, entry] = held.find(([id]) => id === shown) ?? held.at(-1);
@@ -163,7 +164,7 @@ export function paintPlate() {
   $("receipt-fixture").hidden = !entry.fixture;
   $("receipt-meta").textContent = play
     ? `${play.order} · gate ${play.gate_state}`
-    : `${entry.order} · ${entry.error ? "the plant view was not kept" : "no tour plays"}`;
+    : `${entry.order} · ${entry.error ? "the plant view was not kept" : entry.replay ? "not in this replay" : "no tour plays"}`;
   $("receipt-shas").textContent = play ? `base ${shortSha(play.base_sha)} → merged ${shortSha(play.merged_sha)}` : "";
 
   // The counts open under one summary line, so the item list keeps the height the plate has.
@@ -193,11 +194,11 @@ export function paintPlate() {
   $("tour-stage").replaceChildren(...(step ? step.stage.map((stage) => element("li", stage.label)) : []));
 
   // A note says why the order plays; only a plant view that was not kept, or a tour that could
-  // not be played at all, is an error.
-  const note = play?.note || entry.playError || "";
+  // not be played at all, is an error. A replay's receipt says the view is not in the replay.
+  const note = play?.note || entry.playError || (entry.replay ? REPLAY_PLATE_LINE : "");
   $("receipt-note").textContent = note;
   $("receipt-note").hidden = note === "";
-  $("receipt-note").classList.toggle("error", !play && note !== "");
+  $("receipt-note").classList.toggle("error", !play && note !== "" && !entry.replay);
 
   const items = $("receipt-items");
   const rows = play ? play.items : (entry.items ?? []);
