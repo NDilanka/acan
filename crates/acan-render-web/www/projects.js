@@ -62,8 +62,9 @@ export function pack(entries, gap = PACK_GAP, saved = {}) {
   return places;
 }
 
+// wasm hands bounds over as a Float32Array, which Array.isArray rejects.
 function validBox(box) {
-  return Array.isArray(box) && box.length === 4 && box.every(Number.isFinite) && box[2] >= box[0] && box[3] >= box[1];
+  return (Array.isArray(box) || ArrayBuffer.isView(box)) && box.length === 4 && box.every(Number.isFinite) && box[2] >= box[0] && box[3] >= box[1];
 }
 
 // A box from the origin moved to `place`.

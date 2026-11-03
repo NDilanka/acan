@@ -109,7 +109,7 @@ export async function startMulti(list) {
       return;
     }
     try {
-      multi.origin.set(project.id, state.app.plant_bounds(result.value));
+      multi.origin.set(project.id, Array.from(state.app.plant_bounds(result.value)));
       texts.set(project.id, result.value);
     } catch (err) {
       console.error(`the plant of ${project.id} cannot be read`, err);

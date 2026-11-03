@@ -82,6 +82,17 @@ test("plants pack left to right in list order, one gap apart, tops in line", () 
   assert.deepEqual([...pack([{ id: "x", bounds: [0, 0, 50, 50] }], 10).values()], [[0, 0]]);
 });
 
+test("bounds from wasm arrive as a Float32Array and pack as the plant's own box", () => {
+  const places = pack([
+    { id: "a", bounds: Float32Array.from([-20, -10, 700, 380]) },
+    { id: "b", bounds: Float32Array.from([0, 0, 200, 120]) },
+  ]);
+  assert.deepEqual(places.get("a"), [20, 10]);
+  assert.deepEqual(places.get("b"), [720 + PACK_GAP, 0]);
+  const a = worldBounds(Float32Array.from([-20, -10, 700, 380]), places.get("a"));
+  assert.deepEqual(a, [0, 0, 720, 390]);
+});
+
 test("a dragged place is kept and does not shift the others; a missing plant takes a placeholder", () => {
   const entries = [
     { id: "a", bounds: [0, 0, 400, 300] },

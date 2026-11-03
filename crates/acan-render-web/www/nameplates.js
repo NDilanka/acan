@@ -95,11 +95,12 @@ export function paintPlates(counts = shown) {
     plate.name.textContent = project.name;
     plate.badge.textContent = String(count);
     plate.badge.hidden = count === 0;
-    plate.status.textContent = project.status;
-    plate.status.hidden = project.status !== "degraded";
+    const degraded = project.status === "degraded";
+    plate.status.textContent = degraded ? "degraded" : "";
+    plate.status.hidden = !degraded;
     plate.el.classList.toggle("here", project.id === canvasState.active);
     const waits = count === 0 ? "" : `, ${count} ${count === 1 ? "thing waits" : "things wait"} on you`;
-    plate.el.setAttribute("aria-label", `${project.name}${waits}${project.status === "degraded" ? ", degraded" : ""}`);
+    plate.el.setAttribute("aria-label", `${project.name}${waits}${degraded ? ", degraded" : ""}`);
   }
 }
 

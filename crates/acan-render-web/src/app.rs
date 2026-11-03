@@ -102,8 +102,8 @@ pub struct App {
     /// The other projects on the canvas. Each draws as plain plant at its place, without marks:
     /// the marks share one tint table and key agents by name, so only one project carries them.
     parked: Vec<Parked>,
-    /// Each plant's layout from the origin, by the scan's revision.
-    layouts: HashMap<String, Layout>,
+    /// Each plant's layout from the origin, by `canvas::layout_key`.
+    layouts: HashMap<u64, Layout>,
 }
 
 /// A project on the canvas that is not on screen: its plant at its place and its log folded, so
@@ -1477,20 +1477,16 @@ impl App {
         (probe.pivot(), probe.zoom())
     }
 
-    /// The plant's layout from the origin, from the cache when the scan's revision was laid out
-    /// before. The key holds the machine and edge counts too, so a scan of uncommitted changes at
-    /// the same revision never takes a layout of another size.
-    fn laid_out(&mut self, plant: &Plant, revision: Option<String>) -> Layout {
-        let key =
-            revision.map(|rev| format!("{rev}/{}/{}", plant.machines.len(), plant.edges.len()));
-        if let Some(laid) = key.as_ref().and_then(|key| self.layouts.get(key)) {
+    /// The plant's layout from the origin, from the cache when the same kinds and belts were laid
+    /// out before.
+    fn laid_out(&mut self, plant: &Plant) -> Layout {
+        let key = canvas::layout_key(plant);
+        if let Some(laid) = self.layouts.get(&key) {
             return laid.clone();
         }
         let (kinds, edges) = plant.layout_input();
         let laid = layout(&kinds, &edges);
-        if let Some(key) = key {
-            self.layouts.insert(key, laid.clone());
-        }
+        self.layouts.insert(key, laid.clone());
         laid
     }
 
@@ -1510,17 +1506,16 @@ impl App {
 #[wasm_bindgen]
 impl App {
     /// The bounds `[min x, min y, max x, max y]` of a plant from `GET /api/p/{id}/plant`, as its
-    /// layout places it from the origin. The page packs the plants with them.
+    /// layout places it from the origin: everything it draws, models and belts included. The page
+    /// packs the plants with them. They reach the page as a `Float32Array`.
     ///
     /// # Errors
     ///
     /// Returns an error when the JSON is not the plant's shape.
     pub fn plant_bounds(&mut self, json: &str) -> Result<Vec<f32>, JsError> {
         let plant = from_scan_json(json).map_err(js_err)?;
-        Ok(self
-            .laid_out(&plant, canvas::revision(json))
-            .bounds
-            .to_vec())
+        let laid = self.laid_out(&plant);
+        Ok(canvas::drawn_bounds(&laid, &self.models).to_vec())
     }
 
     /// Puts project `id`'s plant on the canvas with its layout's origin at `(x, y)`. The first
@@ -1531,10 +1526,9 @@ impl App {
     ///
     /// Returns an error when the JSON is not the plant's shape.
     pub fn add_project(&mut self, id: &str, json: &str, x: f32, y: f32) -> Result<u32, JsError> {
-        let revision = canvas::revision(json);
         let plant = from_scan_json(json).map_err(js_err)?;
         let count = plant.machines.len() as u32;
-        let at_origin = self.laid_out(&plant, revision);
+        let at_origin = self.laid_out(&plant);
         if self.plant.is_none() || self.project == id {
             self.project = id.to_owned();
             self.show(plant, at_origin, [x, y]);

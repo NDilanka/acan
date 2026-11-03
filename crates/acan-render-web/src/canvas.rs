@@ -2,15 +2,35 @@
 //! its place, so the camera, the scene and the marks work in one world. The page packs the places
 //! and keeps them; this module only answers questions about the placed bounds.
 
-use serde::Deserialize;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
-/// The scan's revision, which a laid-out plant is cached by, or `None` when the plant has none.
-pub fn revision(json: &str) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Head {
-        revision: Option<String>,
-    }
-    serde_json::from_str::<Head>(json).ok()?.revision
+use acan_render::Model;
+
+use crate::layout::Layout;
+use crate::plant::Plant;
+use crate::scene;
+
+/// The key a plant's layout is cached by: a digest of exactly what the layout reads, so two
+/// projects share a layout only when their kinds and belts are the same.
+pub fn layout_key(plant: &Plant) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    format!("{:?}", plant.layout_input()).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The plan box `[min x, min y, max x, max y]` the plant draws in: every footprint, every model
+/// past its footprint and every belt. A model can reach past its footprint, so the gap between
+/// two packed plants is measured from what is drawn, not from the footprints alone.
+pub fn drawn_bounds(laid: &Layout, models: &[Model]) -> [f32; 4] {
+    let drawn = scene::plant_scene(laid, models).bounds;
+    let b = laid.bounds;
+    [
+        b[0].min(drawn.min[0]),
+        b[1].min(drawn.min[1]),
+        b[2].max(drawn.max[0]),
+        b[3].max(drawn.max[1]),
+    ]
 }
 
 /// The box round every `[min x, min y, max x, max y]` box, or `None` for no box.
@@ -125,13 +145,105 @@ mod tests {
         assert_eq!(nearest(&[], [0.0, 0.0]), None);
     }
 
+    /// The live shop project's plant: two TypeScript folders, the tests importing the source.
+    const SHOP: &str = r#"{
+        "root": "shop",
+        "revision": "9eb2346761e5d754",
+        "machines": [
+            {"id": 0, "name": "src", "dir": "src", "files": [0, 1, 2, 3]},
+            {"id": 1, "name": "test", "dir": "test", "files": [4]}
+        ],
+        "belts": [{"from": 1, "to": 0, "imports": 1}],
+        "files": [
+            {"id": 0, "path": "src/api.ts"},
+            {"id": 1, "path": "src/cart.ts"},
+            {"id": 2, "path": "src/checkout.ts"},
+            {"id": 3, "path": "src/pricing.ts"},
+            {"id": 4, "path": "test/checkout.test.ts"}
+        ]
+    }"#;
+
+    /// The page's `pack` in projects.js: each layout's origin, left to right, one gap apart.
+    fn pack(boxes: &[[f32; 4]], gap: f32) -> Vec<[f32; 2]> {
+        let mut cursor = 0.0;
+        boxes
+            .iter()
+            .map(|b| {
+                let place = [cursor - b[0], -b[1]];
+                cursor += b[2] - b[0] + gap;
+                place
+            })
+            .collect()
+    }
+
+    /// Every drawn box of a placed plant on the plan: each machine's model box and each belt.
+    fn drawn_boxes(laid: &Layout, models: &[Model]) -> Vec<[f32; 4]> {
+        let mut out: Vec<[f32; 4]> = scene::machine_model_boxes(laid, models)
+            .iter()
+            .map(|b| [b.min[0], b.min[1], b.max[0], b.max[1]])
+            .collect();
+        for belt in &laid.belts {
+            for pair in belt.path.windows(2) {
+                let [a, b] = [pair[0], pair[1]];
+                out.push([
+                    a[0].min(b[0]),
+                    a[1].min(b[1]),
+                    a[0].max(b[0]),
+                    a[1].max(b[1]),
+                ]);
+            }
+        }
+        out
+    }
+
     #[test]
-    fn the_revision_is_read_when_the_plant_has_one() {
-        assert_eq!(
-            revision(r#"{"revision": "abc", "root": "x"}"#).as_deref(),
-            Some("abc")
+    fn the_demo_and_shop_plants_packed_by_their_drawn_bounds_never_overlap() {
+        let models = scene::models();
+        let lay = |json: &str| {
+            let plant = from_scan_json(json).expect("fixture parses");
+            let (kinds, edges) = plant.layout_input();
+            layout(&kinds, &edges)
+        };
+        let (demo, shop) = (lay(FIXTURE), lay(SHOP));
+        let boxes = [drawn_bounds(&demo, &models), drawn_bounds(&shop, &models)];
+        for (laid, drawn) in [(&demo, boxes[0]), (&shop, boxes[1])] {
+            let b = laid.bounds;
+            assert!(drawn[0] <= b[0] && drawn[1] <= b[1] && drawn[2] >= b[2] && drawn[3] >= b[3]);
+        }
+        let places = pack(&boxes, GAP);
+        let demo_at = demo.translated(places[0]);
+        let shop_at = shop.translated(places[1]);
+        let demo_drawn = drawn_bounds(&demo_at, &models);
+        let shop_drawn = drawn_bounds(&shop_at, &models);
+        assert!(
+            (shop_drawn[0] - (demo_drawn[2] + GAP)).abs() < 1e-3,
+            "shop starts at {} but demo ends at {}",
+            shop_drawn[0],
+            demo_drawn[2]
         );
-        assert_eq!(revision(r#"{"root": "x"}"#), None);
-        assert_eq!(revision("not json"), None);
+        for a in drawn_boxes(&demo_at, &models) {
+            for b in drawn_boxes(&shop_at, &models) {
+                let apart = a[2] < b[0] || b[2] < a[0] || a[3] < b[1] || b[3] < a[1];
+                assert!(apart, "demo's {a:?} meets shop's {b:?}");
+                assert!(b[0] - a[2] >= GAP - 1e-3, "{b:?} is within a gap of {a:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn plants_share_a_cached_layout_only_when_what_the_layout_reads_is_the_same() {
+        let demo = from_scan_json(FIXTURE).expect("fixture parses");
+        let shop = from_scan_json(SHOP).expect("shop parses");
+        let renamed = from_scan_json(&SHOP.replace("\"root\": \"shop\"", "\"root\": \"notes\""))
+            .expect("renamed parses");
+        assert_eq!(layout_key(&shop), layout_key(&renamed));
+        assert_ne!(layout_key(&shop), layout_key(&demo));
+        let lone =
+            from_scan_json(&SHOP.replace("\"imports\": 1", "\"imports\": 2")).expect("parses");
+        assert_ne!(
+            layout_key(&shop),
+            layout_key(&lone),
+            "a belt's weight is read too"
+        );
     }
 }
