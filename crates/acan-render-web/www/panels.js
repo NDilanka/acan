@@ -1,6 +1,5 @@
-// The HTML panels: the order island, the point-of-view chip and reticle, the usage table, and
-// the note that an older page passes events over.
-import { label } from "./marks.js";
+// The HTML panels: the point-of-view chip and reticle, the usage table, and the note that an
+// older page passes events over.
 import { shownOrderOf } from "./order.js";
 import {
   hintEl,
@@ -11,8 +10,6 @@ import {
   metaLegend,
   metaNote,
   metaSection,
-  orderEl,
-  orderLine,
   povAgent,
   povAlt,
   povBracket,
@@ -59,9 +56,6 @@ function rideToggled(riding) {
     if (riding) showPov(el);
     else hidePov(el);
   }
-  // The order island fades out with the point of view, and comes back when the ride ends.
-  if (riding && !orderEl.hidden) hidePov(orderEl);
-  if (!riding && state.hasOrder) showPov(orderEl);
   // The slip has no fade of its own, so it is hidden and shown with the ride directly.
   slipEl.hidden = riding || !state.hasSlip;
   hintEl.innerHTML = riding ? RIDE_HINT : hintRest;
@@ -138,25 +132,9 @@ export function paintStale() {
     : `this page is older than the server: ${passed} ${passed === 1 ? "event" : "events"} not shown, rebuild the UI`;
 }
 
-// The order the order island shows, and the slip shows its scope. See `shownOrderOf`.
+// The order the slip shows the scope of. See `shownOrderOf`.
 export function shownOrder(view) {
   return shownOrderOf(view, state.postedOrder);
-}
-
-export function paintOrderLine() {
-  const order = shownOrder(state.view);
-  state.hasOrder = order !== undefined;
-  orderLine.textContent = state.hasOrder
-    ? `${label("order", order.id)} · ${order.machine} · ${order.phase.replace("_", " ")} · ${order.sentence}`
-    : "";
-  paintOrderShown();
-}
-
-// A ride holds the island: it fades with the point of view, so rideToggled shows and hides it.
-function paintOrderShown() {
-  if (state.ridden !== "") return;
-  orderEl.hidden = !state.hasOrder;
-  orderEl.classList.toggle("on", state.hasOrder);
 }
 
 // The usage panel has two sections. The first is the origin's count since its start, one row per

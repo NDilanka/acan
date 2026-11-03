@@ -1,4 +1,4 @@
-// The slip: the scope of the order the order island shows. It lists the plots, the must-keep rules
+// The slip: the scope of the shown order (see `shownOrderOf`). It lists the plots, the must-keep rules
 // and the open choices, and the Seal and the Strike that act on them. The Seal sends ConfirmScope
 // and the Strike sends ReviseScope, both to `/api/commands` as the clash card's settle does. The
 // Seal paints solid only once the view carries the origin's confirmation, never on the click.

@@ -80,7 +80,6 @@
   #shell { top: 12px; left: 12px; display: flex; gap: 10px; align-items: baseline; }
   .brand { font-weight: 600; letter-spacing: 0.02em; }
   .repo, .muted { color: var(--muted); }
-  #order { top: 52px; left: 12px; max-width: 56vw; font: 12px/1.4 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #link { font: 11px var(--mono); }
   .stale { font: 11px var(--mono); color: var(--red); }
   .version { font: 11px var(--mono); color: var(--muted); }
@@ -232,9 +231,8 @@
   #question button.option kbd { min-width: 16px; text-align: center; background: var(--card); border-color: var(--rule); border-radius: 3px; }
   #question button.close { flex: none; font: 11px var(--mono); color: var(--muted); border: none; background: none; padding: 0; cursor: pointer; }
   .flag.question { pointer-events: auto; cursor: pointer; }
-  /* The command bar on "/": a field and its results, under the key bar and the order island, and
-     over the map's names. */
-  #command { top: 92px; z-index: 3; left: 50%; transform: translateX(-50%); width: min(540px, calc(100vw - 32px)); box-sizing: border-box; padding: 8px; }
+  /* The command bar on "/": a field and its results, under the shell, and over the map's names. */
+  #command { top: 52px; z-index: 3; left: 50%; transform: translateX(-50%); width: min(540px, calc(100vw - 32px)); box-sizing: border-box; padding: 8px; }
   #command input { display: block; width: 100%; box-sizing: border-box; padding: 7px 10px; font: 14px/1.3 var(--mono); color: var(--ink);
     background: var(--face); border: 1px solid var(--ink); border-radius: 6px; outline: none; text-overflow: ellipsis; }
   #command ul { list-style: none; margin: 6px 0 0; padding: 0; max-height: 50vh; overflow-y: auto; }
@@ -268,7 +266,7 @@
   td { color: var(--soft); }
   th.num, td.num { text-align: right; padding-right: 0; padding-left: 16px; font-variant-numeric: tabular-nums; }
   #notice { top: 50%; left: 50%; transform: translate(-50%, -50%); color: var(--soft); }
-  /* The slip: the scope of the order the order island shows. Its plots, keeps and open choices
+  /* The slip: the scope of the shown order. Its plots, keeps and open choices
      say what the order may change and must keep. The Seal and the Strike act on them. */
   #slip { box-sizing: border-box; color: var(--ink); font: 12px/1.4 var(--sans); }
   #slip h2 { margin: 0; font: 600 13px/1.3 var(--mono); }
@@ -300,10 +298,9 @@
   #slip .warn { border-left: 2px solid var(--red); padding: 4px 0 4px 8px; margin-top: 6px; }
   #slip .mismatch, #slip .note { font-family: var(--mono); font-size: 11px; color: var(--red); }
   #slip .foot { color: var(--muted); font-size: 11px; border-top: 1px solid var(--rule); margin-top: 10px; padding-top: 6px; }
-  /* The point of view. Riding shows these, and the order island fades out with them; each fades
-     over --pov-fade. */
-  #order, #pov-vignette, #pov-frame, #pov-reticle, #pov-chip { opacity: 0; transition: opacity var(--pov-fade) var(--pov-ease); }
-  #order.on, #pov-vignette.on, #pov-frame.on, #pov-reticle.on, #pov-chip.on { opacity: 1; }
+  /* The point of view. Riding shows these; each fades over --pov-fade. */
+  #pov-vignette, #pov-frame, #pov-reticle, #pov-chip { opacity: 0; transition: opacity var(--pov-fade) var(--pov-ease); }
+  #pov-vignette.on, #pov-frame.on, #pov-reticle.on, #pov-chip.on { opacity: 1; }
   #pov-vignette { position: fixed; inset: 0; pointer-events: none;
     background: radial-gradient(ellipse 75% 75% at 50% 50%, rgba(31, 31, 29, 0) 60%, rgba(31, 31, 29, 0.07) 100%); }
   #pov-frame { position: fixed; inset: 8px; box-sizing: border-box; border: 2px solid var(--pov); border-radius: 14px; pointer-events: none; }
@@ -319,10 +316,10 @@
   #pov-chip kbd { margin-left: 4px; }
   #pov-chip .alt { flex-basis: 100%; max-width: 56vw; overflow: hidden; text-overflow: ellipsis;
     font: 11px var(--mono); color: var(--muted); }
-  /* The receipt plate: the view's facts for the receipt the order island shows, and the admitted
+  /* The receipt plate: the view's facts for the receipt of the shown order, and the admitted
      tour over them. Every item is listed whatever the tour does. Only the item list scrolls: the
      head, with the step's caption, never moves out of the plate. */
-  #receipt { top: 92px; left: 12px; width: 330px; max-height: calc(100vh - 112px); overflow: hidden;
+  #receipt { top: 52px; left: 12px; width: 330px; max-height: calc(100vh - 72px); overflow: hidden;
     box-sizing: border-box; padding: 10px 14px; color: var(--ink); font: 12px/1.4 var(--sans);
     display: flex; flex-direction: column; }
   #receipt[hidden] { display: none; }
@@ -530,7 +527,6 @@
   </form>
   <p id="setup-blocked" class="muted" hidden></p>
 </dialog>
-<div class="island" id="order" hidden><span id="order-line" class="muted"></span></div>
 <div class="island" id="hint"><span class="opt"><kbd>Alt</kbd> words</span><span class="opt"><kbd>0</kbd> fit</span><span><kbd>C</kbd> card</span><span><kbd>A</kbd> answer</span><span><kbd>O</kbd> order</span><span><kbd>/</kbd> command</span></div>
 <div id="watch">
   <aside id="firstrun" class="island" hidden aria-label="first run checklist"></aside>

@@ -23,7 +23,10 @@ test("the names and flags avoid every new panel", () => {
     assert.ok(selectors.includes(wanted), `HUD_SELECTORS has ${wanted}`);
   }
   const html = www("index.html");
-  for (const selector of selectors.filter((s) => /^#[\w-]+$/.test(s))) {
+  // The order strip under the shell is gone; the map's list may still name it until its owner
+  // drops it, and a selector with no element blocks nothing.
+  const retired = new Set(["#order"]);
+  for (const selector of selectors.filter((s) => /^#[\w-]+$/.test(s) && !retired.has(s))) {
     assert.match(html, new RegExp(`id="${selector.slice(1)}"`), `${selector} is on the page`);
   }
 });
@@ -33,6 +36,11 @@ test("the first-run checklist, the clash card and the slip sit in the right rail
   const ids = [...rail.matchAll(/id="([\w-]+)"/g)].map((m) => m[1]);
   assert.deepEqual(ids, ["firstrun", "card", "slip", "inbox", "lanes", "history", "scrub"]);
   assert.equal((www("index.html").match(/id="card"/g) ?? []).length, 1, "the card is on the page once");
+});
+
+test("the page has no order strip under the shell", () => {
+  assert.doesNotMatch(www("index.html"), /id="order"|id="order-line"/);
+  assert.doesNotMatch(www("panels.js"), /paintOrderLine|orderLine/);
 });
 
 test("a panel beside a machine stays in the free band, left of the rail and right of the receipt", () => {
