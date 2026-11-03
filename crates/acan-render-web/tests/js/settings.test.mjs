@@ -26,6 +26,7 @@ import {
   roleRows,
   sectionsFor,
   setAt,
+  stepWorkers,
   testText,
   themeLabel,
   tokenFromRotate,
@@ -564,7 +565,7 @@ test("a role may take a provider with a key, and off gives the reason off", asyn
   const api = createMockApi(fixture);
   const refused = await api.request("PUT", "/api/settings", { models: { roles: { foreman: "baseten" } } });
   assert.equal(refused.status, 409);
-  assert.equal(refused.body.message, "foreman needs a baseten key. Add one first.");
+  assert.equal(refused.body.what, "no_key");
   const picked = await api.request("PUT", "/api/settings", {
     models: { keys: { baseten: { key: "k" } }, roles: { foreman: "baseten" } },
   });
@@ -788,9 +789,12 @@ test("a member cannot export or clear", async () => {
   assert.equal((await api.request("POST", "/api/settings/data/clear", { what: "local", confirm: true })).status, 403);
 });
 
-test("a 409 shows the server's message, or a plain line when it sends none", () => {
-  assert.equal(conflictNote({ error: "conflict", message: "meta comes from the environment. Unset it there." }), "meta comes from the environment. Unset it there.");
-  assert.equal(conflictNote({ message: "  " }), "Not saved: a model setting conflicts. Nothing changed.");
+test("each 409 code has its sentence, and an unknown or missing code gets the plain fallback", () => {
+  assert.equal(conflictNote({ error: "conflict", what: "this key comes from the environment" }), "This key comes from the environment. Unset it there.");
+  assert.equal(conflictNote({ error: "conflict", what: "no_key" }), "That provider has no key yet. Add one first. Nothing changed.");
+  assert.equal(conflictNote({ error: "conflict", what: "routing_file" }), "A routing file sets this role. Change it there. Nothing changed.");
+  assert.equal(conflictNote({ error: "conflict", what: "unavailable" }), "That provider is unavailable right now. Nothing changed.");
+  assert.equal(conflictNote({ error: "conflict", what: "something new" }), "Not saved: a model setting conflicts. Nothing changed.");
   assert.equal(conflictNote(null), "Not saved: a model setting conflicts. Nothing changed.");
 });
 
@@ -817,11 +821,11 @@ test("a statemap call limit is saved as a budget and reported stored", async () 
   assert.equal(getAt(put.body.settings.budgets, "call_limits.statemap"), 40);
 });
 
-test("a project's statemap flag is saved on or off, and reported as a restart", async () => {
+test("a project's statemap flag is saved on or off, and applies live", async () => {
   const api = createMockApi(fixture);
   const on = await api.request("PUT", "/api/settings", { projects: { statemap_llm: { acan: true } } });
   assert.equal(on.status, 200);
-  assert.deepEqual(on.body.applied, { projects: "restart" });
+  assert.deepEqual(on.body.applied, { projects: "live" });
   assert.equal(on.body.settings.projects.find((project) => project.id === "acan").statemap_llm, true);
   assert.equal(on.body.settings.projects.find((project) => project.id === "acan-web").statemap_llm, false);
 });
@@ -846,7 +850,32 @@ test("clearing an environment key is a 409 with the reason, and changes nothing"
   const api = createMockApi(fromEnv);
   const refused = await api.request("PUT", "/api/settings", { models: { keys: { meta: { clear: true } } } });
   assert.equal(refused.status, 409);
-  assert.equal(refused.body.message, "meta comes from the environment. Unset it there.");
+  assert.equal(refused.body.what, "this key comes from the environment");
   const read = (await api.request("GET", "/api/settings")).body;
   assert.equal(read.models.keys.find((key) => key.provider === "meta").set, true);
+});
+
+test("a worker count moves by one from 0 to 8, and stops at either end", () => {
+  assert.equal(stepWorkers(2, 1), 3);
+  assert.equal(stepWorkers(2, -1), 1);
+  assert.equal(stepWorkers(0, -1), 0);
+  assert.equal(stepWorkers(8, 1), 8);
+  assert.equal(stepWorkers(undefined, 1), 1);
+});
+
+test("a worker count is saved per project, and applies at restart", async () => {
+  const put = await createMockApi(fixture).request("PUT", "/api/settings", { projects: { workers: { acan: 4 } } });
+  assert.equal(put.status, 200);
+  assert.deepEqual(put.body.applied, { projects: "restart" });
+  assert.equal(put.body.settings.projects.find((project) => project.id === "acan").workers, 4);
+  assert.equal(put.body.settings.projects.find((project) => project.id === "acan-web").workers, 1);
+});
+
+test("a worker count outside 0 to 8, or not a whole number, is a 422 on that project", async () => {
+  const api = createMockApi(fixture);
+  const high = await api.request("PUT", "/api/settings", { projects: { workers: { acan: 9 } } });
+  assert.equal(high.status, 422);
+  assert.deepEqual(high.body.fields, [{ path: "projects.acan.workers", why: "must be 0 to 8" }]);
+  const half = await api.request("PUT", "/api/settings", { projects: { workers: { acan: 2.5 } } });
+  assert.deepEqual(half.body.fields, [{ path: "projects.acan.workers", why: "must be 0 to 8" }]);
 });

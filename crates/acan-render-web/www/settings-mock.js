@@ -119,31 +119,36 @@ function invalidSettings(body) {
   return fields;
 }
 
-// A project's statemap flag must name a project on the list and be on or off.
-function invalidProjects(projects, flags = {}) {
+// A project's statemap flag must be on or off, and its worker count a whole number from 0 to 8. Each
+// must name a project on the list.
+function invalidProjects(projects, body = {}) {
   const fields = [];
-  for (const [id, on] of Object.entries(flags)) {
-    if (!projects.some((project) => project.id === id)) fields.push({ path: `projects.${id}`, why: "unknown project" });
+  const known = (id) => projects.some((project) => project.id === id);
+  for (const [id, on] of Object.entries(body.statemap_llm ?? {})) {
+    if (!known(id)) fields.push({ path: `projects.${id}`, why: "unknown project" });
     else if (typeof on !== "boolean") fields.push({ path: `projects.${id}.statemap_llm`, why: "must be on or off" });
+  }
+  for (const [id, n] of Object.entries(body.workers ?? {})) {
+    if (!known(id)) fields.push({ path: `projects.${id}`, why: "unknown project" });
+    else if (!Number.isInteger(n) || n < 0 || n > 8) fields.push({ path: `projects.${id}.workers`, why: "must be 0 to 8" });
   }
   return fields;
 }
 
-// A model conflict, checked against the settings before the write: clearing an environment key, or
-// a role on a provider with no key (unless this write adds that key).
+// The model conflicts, checked against the settings before the write, as the codes the server
+// sends in `what`: clearing an environment key, or a role on a provider with no key (unless this
+// write adds that key).
 function modelConflicts(current, models) {
   const conflicts = [];
   for (const [provider, change] of Object.entries(models.keys ?? {})) {
     const row = current.models.keys.find((key) => key.provider === provider);
-    if (change?.clear === true && row?.source === "environment") {
-      conflicts.push(`${provider} comes from the environment. Unset it there.`);
-    }
+    if (change?.clear === true && row?.source === "environment") conflicts.push("this key comes from the environment");
   }
-  for (const [role, provider] of Object.entries(models.roles ?? {})) {
+  for (const [, provider] of Object.entries(models.roles ?? {})) {
     if (provider === null) continue;
     const row = current.models.keys.find((key) => key.provider === provider);
     const addedHere = typeof models.keys?.[provider]?.key === "string";
-    if (!addedHere && !row?.set) conflicts.push(`${role} needs a ${provider} key. Add one first.`);
+    if (!addedHere && !row?.set) conflicts.push("no_key");
   }
   return conflicts;
 }
@@ -182,10 +187,10 @@ export function createMockApi(initial) {
     const next = clone(state);
     const fields = [];
     const keys = applyModels(next, body.models ?? {}, fields);
-    fields.push(...invalidSettings(body), ...invalidProjects(state.projects, body.projects?.statemap_llm));
+    fields.push(...invalidSettings(body), ...invalidProjects(state.projects, body.projects));
     if (fields.length) return { status: 422, body: { error: "invalid", fields } };
     const conflicts = modelConflicts(state, body.models ?? {});
-    if (conflicts.length) return { status: 409, body: { error: "conflict", message: conflicts.join(" ") } };
+    if (conflicts.length) return { status: 409, body: { error: "conflict", what: conflicts[0] } };
 
     if (body.harness) merge(next.harness, body.harness);
     if (body.budgets) merge(next.budgets, body.budgets);
@@ -195,11 +200,19 @@ export function createMockApi(initial) {
     for (const [id, on] of Object.entries(body.projects?.statemap_llm ?? {})) {
       next.projects = next.projects.map((project) => (project.id === id ? { ...project, statemap_llm: on } : project));
     }
+    for (const [id, n] of Object.entries(body.projects?.workers ?? {})) {
+      next.projects = next.projects.map((project) => (project.id === id ? { ...project, workers: n } : project));
+    }
     state = next;
 
     const applied = {};
     for (const section of Object.keys(APPLY)) {
       if (body[section] !== undefined) applied[section] = APPLY[section];
+    }
+    // A project's flag applies live; a project added, removed or resized applies at restart.
+    if (body.projects !== undefined) {
+      const restarts = body.projects.add || body.projects.remove || body.projects.workers;
+      applied.projects = restarts ? "restart" : "live";
     }
     return { status: 200, body: { settings: view(next), applied, keys } };
   }
