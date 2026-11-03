@@ -524,9 +524,7 @@ async fn write_protected(
                 ShadowError::Observe(format!("cannot create {}: {err}", parent.display()))
             })?;
         }
-        fs::write(&target, bytes).map_err(|err| {
-            ShadowError::Observe(format!("cannot write {}: {err}", target.display()))
-        })?;
+        write_new(&target, &bytes)?;
     }
     Ok(())
 }
@@ -569,6 +567,19 @@ fn listed_blob(entry: &[u8]) -> Result<(RepoPath, String), ShadowError> {
              colon, a reserved device name, or a segment that ends in a dot or a space"
         ))
     })?;
+    // Windows gives a long name a short alias such as `LONGFI~1.TXT`, and a `~` before a digit can
+    // be that alias. A name outside ASCII folds to another name there. Neither is a contract name.
+    if !name.is_ascii()
+        || name
+            .as_bytes()
+            .windows(2)
+            .any(|pair| pair[0] == b'~' && pair[1].is_ascii_digit())
+    {
+        return Err(ShadowError::Contract(format!(
+            "{name:?} is refused: a contract's names are ASCII, and no `~` is followed by a digit, \
+             because Windows would read such a name as the short alias of another"
+        )));
+    }
     Ok((path, oid.to_owned()))
 }
 
@@ -578,7 +589,7 @@ fn listed_blob(entry: &[u8]) -> Result<(RepoPath, String), ShadowError> {
 fn check_no_collisions(files: &BTreeMap<RepoPath, String>) -> Result<(), ShadowError> {
     let mut folded: BTreeMap<String, &str> = BTreeMap::new();
     for path in files.keys() {
-        if let Some(other) = folded.insert(path.as_str().to_lowercase(), path.as_str()) {
+        if let Some(other) = folded.insert(path.as_str().to_ascii_lowercase(), path.as_str()) {
             return Err(ShadowError::Contract(format!(
                 "{other:?} and {:?} name one file on a case-insensitive file system, so a \
                  contract cannot hold both",
@@ -597,6 +608,27 @@ fn check_no_collisions(files: &BTreeMap<RepoPath, String>) -> Result<(), ShadowE
         }
     }
     Ok(())
+}
+
+/// Writes `bytes` to `target`, which must not exist yet. A second name that reaches a file already
+/// written is refused, so no name can replace another one in the snapshot.
+fn write_new(target: &Path, bytes: &[u8]) -> Result<(), ShadowError> {
+    use std::io::Write;
+    let failed = |err: std::io::Error| {
+        ShadowError::Observe(format!("cannot write {}: {err}", target.display()))
+    };
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .map_err(|err| match err.kind() {
+            std::io::ErrorKind::AlreadyExists => ShadowError::Contract(format!(
+                "{} is already written, so two names of the contract name one file",
+                target.display()
+            )),
+            _ => failed(err),
+        })?;
+    file.write_all(bytes).map_err(failed)
 }
 
 /// Runs git in `root` and returns its standard output. A failure carries git's message, and a
@@ -1367,6 +1399,119 @@ mod tests {
                 "{name}: nothing was written outside the snapshot"
             );
         }
+    }
+
+    /// Runs git in `dir` with `input` on standard input, and `index` as its index when one is
+    /// given. Returns its standard output, trimmed.
+    fn git_in(dir: &Path, args: &[&str], input: &[u8], index: Option<&Path>) -> String {
+        use std::io::Write;
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(index) = index {
+            command.env("GIT_INDEX_FILE", index);
+        }
+        let mut child = command.spawn().expect("git runs");
+        child
+            .stdin
+            .take()
+            .expect("git's input")
+            .write_all(input)
+            .expect("the input is written");
+        let output = child.wait_with_output().expect("git finishes");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// A repository whose `main` is one commit of `files`, built with git's plumbing and not the
+    /// file system. A name that Windows would store differently, such as one with a backslash or a
+    /// trailing dot, reaches the commit exactly as written, so the test is the same on every
+    /// platform.
+    fn commit_files(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temporary repository");
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        let index = dir.path().join(".git").join("fixture-index");
+        for (path, text) in files {
+            let blob = git_in(
+                dir.path(),
+                &["hash-object", "-w", "--stdin"],
+                text.as_bytes(),
+                None,
+            );
+            let entry = format!("100644,{blob},{path}");
+            git_in(
+                dir.path(),
+                &["update-index", "--add", "--cacheinfo", &entry],
+                &[],
+                Some(index.as_path()),
+            );
+        }
+        let tree = git_in(dir.path(), &["write-tree"], &[], Some(index.as_path()));
+        let commit = git_in(dir.path(), &["commit-tree", &tree, "-m", "base"], &[], None);
+        git(dir.path(), &["update-ref", "refs/heads/main", &commit]);
+        dir
+    }
+
+    #[tokio::test]
+    async fn names_windows_would_read_as_another_name_are_refused_before_any_file_is_written() {
+        // `LONGFI~1.TXT` is the short alias Windows gives a long name, and a name outside ASCII
+        // folds to another name there, so neither is a contract name.
+        let names = [
+            ".acan/zzlongfi~1.txt",
+            ".acan/zz~1.json",
+            ".acan/\u{3c2}zz.json",
+            ".acan/\u{3a3}zz.json",
+        ];
+        for name in names {
+            let mut files = contract_files();
+            files.push((name, "not a contract"));
+            let repo = commit_files(&files);
+
+            let (written, snapshot, _scratch) = write_protected_at_head(repo.path()).await;
+
+            let error = written.expect_err(name);
+            assert!(
+                matches!(error, ShadowError::Contract(_)),
+                "{name}: {error:?}"
+            );
+            assert!(
+                !snapshot.join(".acan").exists(),
+                "{name}: nothing under .acan was written"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tilde_that_no_digit_follows_is_an_ordinary_contract_name() {
+        let mut files = contract_files();
+        files.push((".acan/zz~a.json", "a name with a tilde"));
+        let repo = commit_files(&files);
+
+        let (written, snapshot, _scratch) = write_protected_at_head(repo.path()).await;
+
+        written.expect("the name is written");
+        assert!(snapshot.join(".acan/zz~a.json").is_file());
+    }
+
+    #[test]
+    fn a_name_that_would_overwrite_a_written_file_is_refused() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let target = dir.path().join("app.json");
+        write_new(&target, b"first").expect("a new file is written");
+
+        let error = write_new(&target, b"second").expect_err("an existing file is not overwritten");
+
+        assert!(matches!(error, ShadowError::Contract(_)), "{error:?}");
+        assert_eq!(fs::read(&target).expect("the file"), b"first");
     }
 
     #[tokio::test]
