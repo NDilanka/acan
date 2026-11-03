@@ -28,6 +28,7 @@ import {
   roleRows,
   sectionsFor,
   setAt,
+  statemapHint,
   stepWorkers,
   testText,
   themeLabel,
@@ -855,6 +856,20 @@ test("a statemap call limit is saved as a budget and reported stored", async () 
   assert.equal(put.status, 200);
   assert.deepEqual(put.body.applied, { "budgets.call_limits.statemap": "stored" });
   assert.equal(getAt(put.body.settings.budgets, "call_limits.statemap"), 40);
+});
+
+test("the statemap hint names the most a scan can spend, from the call limit", () => {
+  assert.equal(statemapHint(fixture.budgets), "Uses up to 30 calls × 3k tokens per scan");
+  assert.equal(statemapHint({ call_limits: { statemap: 0 } }), "Uses up to 0 calls × 3k tokens per scan");
+  assert.equal(statemapHint({ call_limits: {} }), "");
+  assert.equal(statemapHint(undefined), "");
+});
+
+test("a saved statemap call limit moves the hint with it", async () => {
+  const put = await createMockApi(fixture).request("PUT", "/api/settings", {
+    budgets: { call_limits: { statemap: 40 } },
+  });
+  assert.equal(statemapHint(put.body.settings.budgets), "Uses up to 40 calls × 3k tokens per scan");
 });
 
 test("a project's statemap flag is saved on or off, and applies live", async () => {

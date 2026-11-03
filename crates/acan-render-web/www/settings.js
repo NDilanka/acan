@@ -25,6 +25,7 @@ import {
   conflictNote,
   hasTokens,
   stepWorkers,
+  statemapHint,
   providerLabel,
 } from "./settings-model.js";
 import { THEMES, applyTheme } from "./themes.js";
@@ -1000,12 +1001,20 @@ function projectRow(project) {
     fieldNote(`projects.${project.id}`),
   );
   const statemap = toggleRow(
-    "Refine state charts with an LLM (uses tokens)",
+    "Refine state charts with an LLM (experimental, uses tokens)",
     project.statemap_llm === true,
     (value) => setStatemapLlm(project.id, value),
     { path: `projects.${project.id}.statemap_llm` },
   );
-  return el("div", { class: "proj-block" }, row, workersRow(project), statemap);
+  const hint = statemapHint(settings.budgets);
+  return el(
+    "div",
+    { class: "proj-block" },
+    row,
+    workersRow(project),
+    statemap,
+    hint ? el("p", { class: "note", text: hint }) : null,
+  );
 }
 
 // The worker count, 0 to 8, with a minus and a plus. Each step is saved at once and takes effect
