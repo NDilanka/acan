@@ -126,6 +126,7 @@ function Get-FullStates($model, [string]$cfgName) {
 }
 
 $allOk = $true
+New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 foreach ($model in $models) {
     $rows = @()
