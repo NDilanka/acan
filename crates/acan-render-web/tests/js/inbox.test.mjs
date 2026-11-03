@@ -82,6 +82,23 @@ test("a new scope revision is a new thing to seal", () => {
   assert.deepEqual(freshItems(before, inboxItems(next)).map((item) => item.key), ["seal:2:4"]);
 });
 
+test("a_drifting_agent_is_one_inbox_row_after_clashes", () => {
+  const drifting = {
+    ...view(),
+    agents: [
+      { id: "ada", task: 1, activity: "building", machine: "src/api", drift: { kind: "stuck", quiet_ms: 360_000 } },
+      { id: "bo", task: 2, activity: "gating", machine: "src/web", drift: { kind: "beyond_scope" } },
+      { id: "cy", task: null, activity: "idle", machine: null, drift: { kind: "none" } },
+    ],
+  };
+  const items = inboxItems(drifting).filter((item) => item.kind === "clash" || item.kind === "drift");
+  assert.deepEqual(items.map((item) => item.key), ["clash:2", "clash:3", "drift:ada", "drift:bo"]);
+  const byKey = Object.fromEntries(items.map((item) => [item.key, item]));
+  assert.equal(byKey["drift:ada"].text, "t-1 drift: ada quiet 6m, no next step");
+  assert.equal(byKey["drift:ada"].machine, "src/api");
+  assert.equal(byKey["drift:bo"].text, "t-2 drift: bo edits beyond its scope");
+});
+
 test("residue items in a plant view wait for a ruling, one line per order", () => {
   const plantViews = new Map([
     ["o-1", { recorded: 1, play: { items: [

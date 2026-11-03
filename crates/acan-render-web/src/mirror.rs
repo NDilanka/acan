@@ -6,15 +6,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use acan_core::{
-    Actor, AgentId, Clash, ClashId, ClashState, Declaration, DeclarationInput, Event, FilePath,
-    GateRunId, GateVerdict, Locus, OrderId, OrderPhase, OverlapKind, Question, QuestionId,
-    ReplayError, Replica, Seq, Settlement, Stage, Stamped, Step, Task, TaskId, TaskState, Witness,
-    WitnessOutcome, World,
+    Actor, AgentId, Clash, ClashId, ClashState, Declaration, DeclarationInput, Episode,
+    EpisodeState, Event, FilePath, GateRunId, GateVerdict, ItemClass, Locus, OrderId, OrderPhase,
+    OverlapKind, Question, QuestionId, ReplayError, Replica, Seq, Settlement, Stage, Stamped, Step,
+    Task, TaskId, TaskState, Witness, WitnessOutcome, World,
 };
 use serde::Serialize;
 
 use crate::feed::Entry;
 use crate::lanes::{LaneView, ReceiptCount, lane_views, receipt_counts};
+use crate::marks::{STALE_MS, STUCK_BUILD_MS, STUCK_DECLARE_MS};
 use crate::plan::Plan;
 use crate::slices::clash_scope;
 
@@ -54,6 +55,20 @@ pub struct Mirror {
     heard: BTreeMap<AgentId, u64>,
     /// When each task landed, in log milliseconds.
     landed_at: BTreeMap<TaskId, u64>,
+    /// The time of the latest event folded, in log milliseconds. Drift is judged against it, so
+    /// a replayed page and a live one read the same.
+    clock: u64,
+    /// When each task was claimed, from its lease grant, in log milliseconds. A new grant starts
+    /// the task's steps again.
+    claimed_at: BTreeMap<TaskId, u64>,
+    /// When each task was last declared, in log milliseconds.
+    declared_at: BTreeMap<TaskId, u64>,
+    /// When each task was last cleared to build, in log milliseconds.
+    cleared_at: BTreeMap<TaskId, u64>,
+    /// When each task last reported a build, in log milliseconds.
+    built_at: BTreeMap<TaskId, u64>,
+    /// The tasks whose latest receipt holds an episode out of scope or against a ruling.
+    beyond_scope: BTreeSet<TaskId>,
 }
 
 impl Mirror {
@@ -89,6 +104,12 @@ impl Mirror {
             leases: BTreeMap::new(),
             heard: BTreeMap::new(),
             landed_at: BTreeMap::new(),
+            clock: 0,
+            claimed_at: BTreeMap::new(),
+            declared_at: BTreeMap::new(),
+            cleared_at: BTreeMap::new(),
+            built_at: BTreeMap::new(),
+            beyond_scope: BTreeSet::new(),
         };
         mirror.note(&first);
         for entry in entries {
@@ -163,17 +184,41 @@ impl Mirror {
     /// Records what the world does not keep: which agents are registered and who holds each
     /// lease. A released lease keeps its holder; the task's state says whether it still counts.
     fn note(&mut self, stamped: &Stamped) {
+        let at = stamped.at.as_millis();
+        self.clock = at;
         match &stamped.event {
             Event::AgentRegistered { agent } => self.agents.push(agent.id.clone()),
             Event::LeaseGranted { task, lease, .. } => {
                 self.holders.insert(*task, lease.holder.clone());
+                self.claimed_at.insert(*task, at);
+                self.declared_at.remove(task);
+                self.cleared_at.remove(task);
+                self.built_at.remove(task);
+            }
+            Event::BuildCleared { task } => {
+                self.cleared_at.insert(*task, at);
+                self.built_at.remove(task);
             }
             Event::BuildReported { task, run, .. } => {
                 self.runs.insert(*task, *run);
+                self.built_at.insert(*task, at);
             }
             Event::Declared { decl } => {
+                self.declared_at.insert(decl.task, at);
+                self.cleared_at.remove(&decl.task);
+                self.built_at.remove(&decl.task);
                 if let Some(word) = change_word(&decl.footprint) {
                     self.changes.insert(decl.task, word);
+                }
+            }
+            Event::ReceiptRecorded { run, record } => {
+                let task = self.world().gate(*run).map(|gate| gate.task);
+                if let Some(task) = task {
+                    if record.episodes.iter().any(beyond_scope_episode) {
+                        self.beyond_scope.insert(task);
+                    } else {
+                        self.beyond_scope.remove(&task);
+                    }
                 }
             }
             Event::ModelUsed { model, step, .. } => {
@@ -217,6 +262,13 @@ impl Mirror {
     /// Reads the folded state into the view the page draws, laid out on `plan`.
     #[must_use]
     pub fn view(&self, plan: &Plan) -> View {
+        self.view_still(plan, false)
+    }
+
+    /// The view [`Mirror::view`] reads, on a page that holds still when `still` is set. Drift is
+    /// judged against the clock, so a still page shows none.
+    #[must_use]
+    pub fn view_still(&self, plan: &Plan, still: bool) -> View {
         let world = self.world();
         let tasks: Vec<&Task> = world
             .orders()
@@ -290,7 +342,7 @@ impl Mirror {
             })
             .collect();
 
-        let agents = self.agent_views(plan, world, &tasks);
+        let agents = self.agent_views(plan, world, &tasks, still);
 
         let questions = world
             .orders()
@@ -377,12 +429,21 @@ impl Mirror {
         })
     }
 
-    fn agent_views(&self, plan: &Plan, world: &World, tasks: &[&Task]) -> Vec<AgentView> {
+    fn agent_views(
+        &self,
+        plan: &Plan,
+        world: &World,
+        tasks: &[&Task],
+        still: bool,
+    ) -> Vec<AgentView> {
         let mut seats: BTreeMap<usize, usize> = BTreeMap::new();
         self.agents
             .iter()
             .map(|agent| {
                 let focus = self.focus(world, tasks, agent);
+                let held = focus
+                    .filter(|(_, activity)| *activity != "readback")
+                    .map(|(task, _)| task.id);
                 let machine = focus.and_then(|(task, _)| task_machine(world, plan, task));
                 let body = machine.map(|m| {
                     let seat = seats.entry(m).or_insert(0);
@@ -400,9 +461,44 @@ impl Mirror {
                     machine: machine.map(|m| plan.machines[m].name.clone()),
                     body,
                     heard_at: self.heard.get(agent).copied(),
+                    drift: self.drift(agent, held, still),
                 }
             })
             .collect()
+    }
+
+    /// The drift of `agent` on the task it holds. A task whose latest receipt is out of scope
+    /// drifts whoever holds it. A claimed or cleared task drifts once its next step is overdue
+    /// (no declaration after [`STUCK_DECLARE_MS`], no build report after [`STUCK_BUILD_MS`]), but
+    /// only while its agent is heard within [`STALE_MS`]: a quiet agent is stale, not drifting.
+    /// A still page shows none.
+    fn drift(&self, agent: &AgentId, held: Option<TaskId>, still: bool) -> Drift {
+        let Some(task) = held.filter(|_| !still) else {
+            return Drift::None;
+        };
+        if self.beyond_scope.contains(&task) {
+            return Drift::BeyondScope;
+        }
+        let live = self
+            .heard
+            .get(agent)
+            .is_some_and(|heard| self.clock.saturating_sub(*heard) < STALE_MS);
+        if !live {
+            return Drift::None;
+        }
+        let waiting_since = if !self.declared_at.contains_key(&task) {
+            self.claimed_at.get(&task).map(|&at| (at, STUCK_DECLARE_MS))
+        } else if !self.built_at.contains_key(&task) {
+            self.cleared_at.get(&task).map(|&at| (at, STUCK_BUILD_MS))
+        } else {
+            None
+        };
+        match waiting_since {
+            Some((since, limit)) if self.clock.saturating_sub(since) >= limit => Drift::Stuck {
+                quiet_ms: self.clock.saturating_sub(since),
+            },
+            _ => Drift::None,
+        }
     }
 
     /// What `agent` is doing now: the task it holds, else the open task it read back.
@@ -560,6 +656,22 @@ pub struct AgentView {
     pub body: Option<[f32; 4]>,
     /// When the agent was last heard of, in log milliseconds.
     pub heard_at: Option<u64>,
+    /// Whether the task the agent holds has drifted from its plan.
+    pub drift: Drift,
+}
+
+/// Whether an agent's task has drifted from its plan. Judged against the log clock, so a replayed
+/// page shows what a live one showed. A still page shows [`Drift::None`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Drift {
+    /// On course, or holding no task.
+    None,
+    /// Its next step is overdue and its agent is still heard: no declaration for a claimed task,
+    /// or no build report for a cleared one. `quiet_ms` is how long the step has waited.
+    Stuck { quiet_ms: u64 },
+    /// Its latest receipt holds an episode out of scope or against a ruling.
+    BeyondScope,
 }
 
 /// An open question with its two answers.
@@ -627,6 +739,15 @@ fn event_task(event: &Event) -> Option<TaskId> {
 
 fn unsettled(clash: &Clash) -> bool {
     matches!(clash.state, ClashState::Open | ClashState::Proposed { .. })
+}
+
+/// Whether a receipt's episode still leaves its task out of scope or against a ruling. A fixed or
+/// ruled episode does not, though the core keeps its class after it is fixed, so its state decides.
+fn beyond_scope_episode(episode: &Episode) -> bool {
+    matches!(
+        episode.class,
+        ItemClass::OutOfScope | ItemClass::ViolatesRuling
+    ) && !matches!(episode.state, EpisodeState::Fixed | EpisodeState::Ruled)
 }
 
 fn clash_view(plan: &Plan, clash: &Clash) -> ClashView {
@@ -861,10 +982,10 @@ mod tests {
     use std::str::FromStr;
 
     use acan_core::{
-        AgentCmd, Belt, Check, CodeIndex, CodeRev, Command, CommitId, Ctx, FilePath, HumanCmd,
-        IndexedFile, IndexedSymbol, MachineKey, MemberId, Origin, Scope, ScopeBinding,
-        ScopeConfirmation, Seq, Step, SystemCmd, TaskSpec, Timestamp, WitnessSpec, WorldId,
-        WorldRef,
+        AgentCmd, Belt, Check, CodeIndex, CodeRev, Command, CommitId, Ctx, DeclarationInput, Fence,
+        FilePath, HumanCmd, IndexedFile, IndexedSymbol, MachineKey, MemberId, Origin, Scope,
+        ScopeBinding, ScopeConfirmation, Seq, Step, SystemCmd, TaskSpec, Timestamp, WitnessSpec,
+        WorldId, WorldRef,
     };
     use serde_json::json;
 
@@ -2238,6 +2359,252 @@ mod tests {
                     {"key": "address", "label": "Per address"}
                 ]
             })
+        );
+    }
+
+    /// One minute, in log milliseconds.
+    const MINUTE: u64 = 60_000;
+
+    /// The events of `events`, each stamped at `millis`.
+    fn stamped_at(mut events: Vec<Stamped>, millis: u64) -> Vec<Stamped> {
+        for stamped in &mut events {
+            stamped.at = Timestamp::from_millis(millis);
+        }
+        events
+    }
+
+    /// The log time of the first event that `pick` matches.
+    fn at_of(log: &[Stamped], pick: fn(&Event) -> bool) -> u64 {
+        log.iter()
+            .find(|stamped| pick(&stamped.event))
+            .expect("the event is in the log")
+            .at
+            .as_millis()
+    }
+
+    /// The fence the claim on `task` holds, as its agent sends it back.
+    fn fence_of(origin: &Origin, task: TaskId) -> Fence {
+        match &origin.world().task(task).expect("the task").state {
+            TaskState::Claimed { claim, .. } => claim.fence(task),
+            other => panic!("the task is claimed, not {other:?}"),
+        }
+    }
+
+    /// The agent view of whichever agent holds `task`.
+    fn holder_of(view: &View, task: TaskId) -> &AgentView {
+        view.agents
+            .iter()
+            .find(|agent| agent.task == Some(task))
+            .expect("an agent holds the task")
+    }
+
+    /// The claimed lane six minutes on: its agent renews the lease and has declared nothing.
+    fn stuck_claim() -> (LaneFixture, TaskId) {
+        let (mut fx, task, _scope) = claimed_lane();
+        let claimed = at_of(&fx.log, |event| matches!(event, Event::LeaseGranted { .. }));
+        let agent = AgentId::from_str(scenario::AGENTS[0]).expect("an agent id");
+        let fence = fence_of(&fx.origin, task);
+        let renewed = accepted(
+            &mut fx.origin,
+            &fx.index,
+            Command::Agent {
+                agent,
+                cmd: AgentCmd::Renew { fence },
+            },
+        );
+        fx.log.extend(stamped_at(renewed, claimed + 6 * MINUTE));
+        (fx, task)
+    }
+
+    #[test]
+    fn a_claimed_task_with_no_declaration_after_five_minutes_is_stuck() {
+        let (fx, task) = stuck_claim();
+        let view = Mirror::from_log(fx.log)
+            .expect("the log replays")
+            .view(&plan());
+        assert_eq!(
+            holder_of(&view, task).drift,
+            Drift::Stuck {
+                quiet_ms: 6 * MINUTE
+            }
+        );
+    }
+
+    #[test]
+    fn a_declared_task_building_within_fifteen_minutes_is_not_stuck() {
+        let (mut fx, task, _scope) = claimed_lane();
+        let claimed = at_of(&fx.log, |event| matches!(event, Event::LeaseGranted { .. }));
+        let agent = AgentId::from_str(scenario::AGENTS[0]).expect("an agent id");
+        let fence = fence_of(&fx.origin, task);
+        let footprint = DeclarationInput {
+            files: vec![FilePath::from_str("src/api/auth.ts").expect("a file path")],
+            ..DeclarationInput::default()
+        };
+        let declared = accepted(
+            &mut fx.origin,
+            &fx.index,
+            Command::Agent {
+                agent: agent.clone(),
+                cmd: AgentCmd::Declare { fence, footprint },
+            },
+        );
+        fx.log.extend(stamped_at(declared, claimed + MINUTE));
+        let mut mirror = Mirror::from_log(fx.log).expect("the log replays");
+
+        // The second task of the order stays open, so its barrier holds and no tick clears the
+        // build. The clear is folded in directly, as the receipts are, and each renewal after it
+        // keeps the agent heard.
+        mirror.note(&Stamped {
+            seq: mirror.next_seq(),
+            at: Timestamp::from_millis(claimed + 2 * MINUTE),
+            actor: Actor::System,
+            event: Event::BuildCleared { task },
+        });
+        let fence = fence_of(&fx.origin, task);
+        let renewed = accepted(
+            &mut fx.origin,
+            &fx.index,
+            Command::Agent {
+                agent: agent.clone(),
+                cmd: AgentCmd::Renew { fence },
+            },
+        );
+        for stamped in stamped_at(renewed, claimed + 10 * MINUTE) {
+            mirror.note(&stamped);
+        }
+        assert_eq!(
+            holder_of(&mirror.view(&plan()), task).drift,
+            Drift::None,
+            "eight minutes into a fifteen-minute build"
+        );
+
+        // Past fifteen minutes with no build report, the same build is stuck.
+        let fence = fence_of(&fx.origin, task);
+        let renewed = accepted(
+            &mut fx.origin,
+            &fx.index,
+            Command::Agent {
+                agent,
+                cmd: AgentCmd::Renew { fence },
+            },
+        );
+        for stamped in stamped_at(renewed, claimed + 18 * MINUTE) {
+            mirror.note(&stamped);
+        }
+        assert_eq!(
+            holder_of(&mirror.view(&plan()), task).drift,
+            Drift::Stuck {
+                quiet_ms: 16 * MINUTE
+            },
+            "sixteen minutes past the clear, with no build report"
+        );
+    }
+
+    /// The core's record of a receipt of `run` that holds one episode, in `class` and `state`.
+    /// The receipt is the contract fixture's, so the record decodes the way the core writes it.
+    fn receipt_recorded(run: GateRunId, class: &str, state: &str) -> Event {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../acan-intent/fixtures/mcp-get-receipt-response.json"
+        ))
+        .expect("the receipt fixture is JSON");
+        let item = &fixture["receipt"]["items"][0];
+        let record = json!({
+            "receipt_hash": fixture["receipt_hash"],
+            "receipt": fixture["receipt"],
+            "scores": [],
+            "episodes": [{
+                "id": item["episode_id"],
+                "item_id": item["item_id"],
+                "selector": login_selector(false),
+                "step_id": "s6",
+                "failing": ["obl-retry-after"],
+                "class": class,
+                "probe_hash": item["probe_hash"],
+                "evidence": [],
+                "bounce_count": 1,
+                "state": state,
+                "contested_from": null,
+            }],
+            "answered": null,
+            "opened": null,
+            "verdict": {"verdict": "blocked", "blockers": []},
+        });
+        Event::ReceiptRecorded {
+            run,
+            record: Box::new(serde_json::from_value(record).expect("the record decodes")),
+        }
+    }
+
+    #[test]
+    fn an_out_of_scope_receipt_marks_the_holder_beyond_scope_until_a_clean_receipt() {
+        let plan = plan();
+        let (origin, log, _index, task) = first_build_reported();
+        let run = match &origin.world().task(task).expect("the task").state {
+            TaskState::Claimed {
+                stage: Stage::Gating { run, .. },
+                ..
+            } => *run,
+            other => panic!("the first build is gating, not {other:?}"),
+        };
+        let mut mirror = Mirror::from_log(log).expect("the log replays");
+        assert_eq!(holder_of(&mirror.view(&plan), task).drift, Drift::None);
+
+        // The replica takes receipts only on scope-first lanes, and this log has none, so the
+        // receipts are folded in directly.
+        let next = mirror.next_seq();
+        let receipt = |class: &str, state: &str| Stamped {
+            seq: next,
+            at: Timestamp::from_millis(9_000),
+            actor: Actor::System,
+            event: receipt_recorded(run, class, state),
+        };
+        mirror.note(&receipt("out_of_scope", "open"));
+        assert_eq!(
+            holder_of(&mirror.view(&plan), task).drift,
+            Drift::BeyondScope
+        );
+
+        mirror.note(&receipt("out_of_scope", "fixed"));
+        assert_eq!(
+            holder_of(&mirror.view(&plan), task).drift,
+            Drift::None,
+            "a clean receipt clears it"
+        );
+    }
+
+    #[test]
+    fn a_stale_agent_is_stale_not_drifting() {
+        let (mut fx, task, _scope) = claimed_lane();
+        let claimed = at_of(&fx.log, |event| matches!(event, Event::LeaseGranted { .. }));
+        // The agent goes quiet, and six minutes pass on the log while the founder posts an order.
+        let (_order, posted) = post_order(&mut fx.origin, &fx.index, "Limit the admin logins");
+        fx.log.extend(stamped_at(posted, claimed + 6 * MINUTE));
+        let view = Mirror::from_log(fx.log)
+            .expect("the log replays")
+            .view(&plan());
+        assert_eq!(
+            holder_of(&view, task).drift,
+            Drift::None,
+            "quiet past the stale mark is stale, not drifting"
+        );
+    }
+
+    #[test]
+    fn freeze_shows_no_drift() {
+        let plan = plan();
+        let (fx, task) = stuck_claim();
+        let mirror = Mirror::from_log(fx.log).expect("the log replays");
+        assert_eq!(
+            holder_of(&mirror.view_still(&plan, false), task).drift,
+            Drift::Stuck {
+                quiet_ms: 6 * MINUTE
+            },
+            "the live page shows the drift"
+        );
+        assert_eq!(
+            holder_of(&mirror.view_still(&plan, true), task).drift,
+            Drift::None,
+            "a frozen page reads no clock"
         );
     }
 }

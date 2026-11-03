@@ -24,6 +24,22 @@ import {
 } from "../../www/lanes.js";
 import { steps, workerCommand } from "../../www/firstrun.js";
 
+test("a drifting agent's lane row carries the drift word, and an agent without drift none", () => {
+  const view = {
+    tasks: [{ id: 1, order: 1, title: "Limit the login", machine: "src/api", check: null }],
+    lanes: [],
+    clashes: [],
+    questions: [],
+    agents: [
+      { id: "ada", task: 1, activity: "building", machine: "src/api", body: null, drift: { kind: "stuck", quiet_ms: 360_000 } },
+      { id: "bo", task: null, activity: "idle", machine: null, body: null, drift: { kind: "none" } },
+    ],
+  };
+  const rows = laneRows(view, new Map([["ada", { at: 1_000, seq: 1 }]]), 1_000, { live: true });
+  assert.equal(rows[0].drift, "drift");
+  assert.equal(rows[1].drift, null);
+});
+
 const T0 = 1_760_000_000_000;
 
 function stamped(seq, at, actor, event) {

@@ -49,6 +49,16 @@ test("an idle drone's flag shows only on hover or with Alt", () => {
   assert.equal(agentFlagShown("idle", false, true), true, "hover");
 });
 
+test("a_drift_flag_reads_the_short_word", () => {
+  assert.equal(agentFlagShown("drift", false, false), true, "a drifting drone's flag shows");
+  const items = [
+    { id: "a", state: "working" },
+    { id: "b", state: "drift" },
+    { id: "c", state: "stale" },
+  ];
+  assert.deepEqual(foldColumn(items, 2).shown.map((item) => item.id), ["c", "b"]);
+});
+
 test("a column shows two flags, most urgent first, and folds the rest into +N", () => {
   assert.equal(FLAGS_PER_COLUMN, 2);
   const items = [
