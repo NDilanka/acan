@@ -128,9 +128,10 @@ export function agentFlagShown(stateWord, alt, hovered) {
 }
 
 // The flags a machine's column shows, ranked, and how many fold into its `+N`. Each item carries
-// its drone's `state` word. Items of one rank keep their order.
+// its drone's `state` word, and `hovered` when the pointer is over its drone, which brings it to
+// the front of the column. Items of one rank keep their order.
 export function foldColumn(items, max = FLAGS_PER_COLUMN) {
-  const rank = (item) => FLAG_RANK[item.state] ?? Object.keys(FLAG_RANK).length;
+  const rank = (item) => (item.hovered ? -1 : FLAG_RANK[item.state] ?? Object.keys(FLAG_RANK).length);
   const ranked = items.map((item, i) => ({ item, i }))
     .sort((a, b) => rank(a.item) - rank(b.item) || a.i - b.i)
     .map(({ item }) => item);

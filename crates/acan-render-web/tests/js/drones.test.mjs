@@ -66,3 +66,14 @@ test("a column shows two flags, most urgent first, and folds the rest into +N", 
   assert.equal(calm.folded, 0);
   assert.deepEqual(foldColumn([]), { shown: [], folded: 0 });
 });
+
+test("the hovered drone's flag comes to the front of its column, even from the fold", () => {
+  const items = [
+    { id: "a", state: "waiting" },
+    { id: "b", state: "working" },
+    { id: "c", state: "idle", hovered: true },
+  ];
+  const { shown, folded } = foldColumn(items);
+  assert.deepEqual(shown.map((item) => item.id), ["c", "a"]);
+  assert.equal(folded, 1);
+});

@@ -266,22 +266,85 @@ function watchSeen() {
   });
 }
 
-// The canvas the ghost listeners are on. The page swaps in a fresh canvas when a backend fails,
+// The canvas the pointer listeners are on. The page swaps in a fresh canvas when a backend fails,
 // so they move to the new one.
-let ghostCanvas = null;
+let watchedCanvas = null;
 
-// A pointer passing over a ghost, or a click on it, clears it. A drag does not.
-function watchGhosts() {
-  if (ghostCanvas === canvas) return;
-  ghostCanvas = canvas;
+// A pointer passing over a ghost, or a click on it, clears it; a drag does not. A pointer that
+// leaves the canvas, or presses to drag, hovers no drone.
+function watchCanvas() {
+  if (watchedCanvas === canvas) return;
+  watchedCanvas = canvas;
   const clear = (event) => {
     if (state.app === null || event.currentTarget !== canvas) return;
     if (event.type === "pointermove" && event.buttons !== 0) return;
     const rect = canvas.getBoundingClientRect();
     if (state.app.clear_ghost_at(event.clientX - rect.left, event.clientY - rect.top)) requestRender();
   };
+  const unhover = (event) => {
+    if (event.currentTarget === canvas) setHover(null);
+  };
   canvas.addEventListener("pointermove", clear);
   canvas.addEventListener("pointerup", clear);
+  canvas.addEventListener("pointerleave", unhover);
+  canvas.addEventListener("pointerdown", unhover);
+}
+
+// The agent whose drone the pointer is over, or null.
+let hovered = null;
+
+// Hovers `agent`'s drone, or none for null. Only a change tells the page, as an
+// `acan:drone-hover` event on `document` whose detail names the agent as `view.agents[].id` does.
+function setHover(agent) {
+  if (agent === hovered || state.app === null) return;
+  hovered = agent;
+  state.app.set_hovered(agent ?? "");
+  // An inline cursor wins over the canvas's grab cursor, and clearing it gives that back.
+  canvas.style.cursor = agent === null ? "" : "pointer";
+  document.dispatchEvent(new CustomEvent("acan:drone-hover", { detail: { agent } }));
+  requestRender();
+}
+
+// The pointer is at the canvas point (x, y) with no drag: a drone within its radius and a few px
+// is hovered. Its tether inks in, its flag comes to the front with its detail, and a paper halo
+// rings it.
+export function droneHover(x, y) {
+  if (state.app === null) return;
+  const agent = state.app.drone_at(x, y);
+  setHover(agent === "" ? null : agent);
+}
+
+// The paper halo round the hovered drone, 2 px wide.
+const HALO_PX = 2;
+let haloEl = null;
+
+function placeHalo() {
+  const disc = hovered === null ? [] : state.app.drone_disc_of(hovered);
+  if (disc.length === 0) {
+    if (haloEl !== null) haloEl.hidden = true;
+    return;
+  }
+  if (haloEl === null) {
+    haloEl = document.createElement("div");
+    haloEl.className = "halo";
+    haloEl.setAttribute("aria-hidden", "true");
+    Object.assign(haloEl.style, {
+      position: "absolute",
+      left: "0",
+      top: "0",
+      borderRadius: "50%",
+      border: `${HALO_PX}px solid var(--page)`,
+      boxSizing: "border-box",
+      pointerEvents: "none",
+    });
+  }
+  if (haloEl.parentNode !== flagsEl) flagsEl.prepend(haloEl);
+  const [x, y, r] = disc;
+  const size = 2 * (r + HALO_PX);
+  haloEl.hidden = false;
+  haloEl.style.width = `${size}px`;
+  haloEl.style.height = `${size}px`;
+  haloEl.style.transform = `translate(${x - size / 2}px, ${y - size / 2}px)`;
 }
 
 // The ghosts' Alt chips, made on first use. paintMarks empties the flags, and these with them.
@@ -396,7 +459,7 @@ function placeGhostFlags(placedBoxes) {
 export function paintMarks() {
   startClock();
   watchSeen();
-  watchGhosts();
+  watchCanvas();
   state.markState = JSON.parse(state.app.marks_json());
   flagsEl.replaceChildren();
   ghostEls = [];
@@ -489,6 +552,14 @@ function flagElement(flag) {
   return el;
 }
 
+// Opens or closes a pill's detail, measuring it again when that changes its size.
+function openDetail(el, open) {
+  if (el.detail === undefined || el.detailOpen === open) return;
+  el.detailOpen = open;
+  el.detail.style.display = open ? "" : "none";
+  el.size = undefined;
+}
+
 // The pill: white 11 px text on the agent's hue, a stale agent's quiet time in softer white, and
 // with Alt its activity and task title. A pointer at its bottom left points at the crown, unless
 // the flag stands in a column or moved, where a leader in its hue takes over.
@@ -513,7 +584,13 @@ function pillStyle(el, flag) {
     return span;
   };
   if (flag.drone.quiet !== null) el.append(soft(flag.drone.quiet));
-  if (state.altDown && flag.detail.length > 0) el.append(soft(flag.detail.join(" \u00B7 ")));
+  if (flag.detail.length > 0) {
+    // The detail shows with Alt or while the drone is hovered; placeFlags opens and closes it.
+    el.detail = soft(flag.detail.join(" \u00B7 "));
+    el.detailOpen = state.altDown;
+    el.detail.style.display = el.detailOpen ? "" : "none";
+    el.append(el.detail);
+  }
   const pointer = document.createElement("span");
   pointer.className = "pointer";
   Object.assign(pointer.style, {
@@ -594,6 +671,8 @@ function placeFlags(placedBoxes) {
     const machine = quads[k + 1];
     const x = quads[k + 2];
     const y = quads[k + 3];
+    const agent = state.markState.flags[quads[k]].drone?.agent;
+    if (agent !== undefined) openDetail(el, state.altDown || agent === hovered);
     if (el.size === undefined) el.size = [el.offsetWidth, el.offsetHeight];
     if (machine < 0 && el.classList.contains("plot")) {
       const [w, h] = el.size;
@@ -603,7 +682,9 @@ function placeFlags(placedBoxes) {
     if (machine >= 0) {
       const flag = state.markState.flags[quads[k]];
       if (!columns.has(machine)) columns.set(machine, []);
-      columns.get(machine).push({ el, x, y, flag, state: flag.drone?.state ?? "working" });
+      const isHovered = agent !== undefined && agent === hovered;
+      el.style.zIndex = isHovered ? "1" : "";
+      columns.get(machine).push({ el, x, y, flag, state: flag.drone?.state ?? "working", hovered: isHovered });
       continue;
     }
     const [w, h] = el.size;
@@ -622,7 +703,7 @@ function placeFlags(placedBoxes) {
   let leaders = 0;
   let more = 0;
   for (const column of columns.values()) {
-    const wanted = column.filter((item) => agentFlagShown(item.state, state.altDown, false));
+    const wanted = column.filter((item) => agentFlagShown(item.state, state.altDown, item.hovered));
     for (const item of column) item.el.style.visibility = "hidden";
     const { shown, folded } = foldColumn(wanted);
     if (shown.length === 0) continue;
@@ -654,6 +735,7 @@ function placeFlags(placedBoxes) {
   }
   for (let i = more; i < moreEls.length; i += 1) moreEls[i].hidden = true;
   placeGhostFlags(placedBoxes);
+  placeHalo();
   return { plots, leaders };
 }
 

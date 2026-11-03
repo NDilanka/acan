@@ -1773,9 +1773,16 @@ fn bobbed(motion: &Motion, body: &Body, at: [f32; 3]) -> [f32; 3] {
 
 /// The beams now run from each drone's eye to its target. The eye is on the nose, in the drone's
 /// own frame, so the beam turns and grows with the drone and starts on the eye at any size. A drone
-/// that is leaving has none, and neither has the riding agent's drone.
+/// that is leaving has none, and neither has the riding agent's drone. The hovered drone's tether
+/// inks in fully.
 #[must_use]
-pub fn beams(motion: &Motion, marks: &Marks, dpr: f32, riding: Option<&str>) -> Vec<Beam> {
+pub fn beams(
+    motion: &Motion,
+    marks: &Marks,
+    dpr: f32,
+    riding: Option<&str>,
+    hovered: Option<&str>,
+) -> Vec<Beam> {
     marks
         .bodies
         .iter()
@@ -1790,7 +1797,11 @@ pub fn beams(motion: &Motion, marks: &Marks, dpr: f32, riding: Option<&str>) -> 
                 grow: drone_grow(dpr),
                 turn: facing,
                 tint: body_tint(body.slot),
-                alpha: body.state.tether_alpha(),
+                alpha: if hovered == Some(body.agent.as_str()) {
+                    1.0
+                } else {
+                    body.state.tether_alpha()
+                },
                 width_px: TETHER_PX * dpr,
             })
         })
@@ -1867,6 +1878,22 @@ pub fn flag_anchor(flag: &Flag, at: [f32; 3], project: impl Fn([f32; 3]) -> [f32
         FlagKind::Away => project(at),
         FlagKind::Order | FlagKind::Question | FlagKind::Plot | FlagKind::Stage => project(at),
     }
+}
+
+/// How far past a drone's disc the pointer still hovers it, in CSS px.
+pub const HOVER_PAD_PX: f32 = 6.0;
+
+/// The index of the disc the CSS point `p` hovers: within its radius and [`HOVER_PAD_PX`], and
+/// the nearest centre when two reach. Each disc is its centre and radius, as [`drone_disc`] gives.
+#[must_use]
+pub fn disc_under(discs: &[([f32; 2], f32)], p: [f32; 2]) -> Option<usize> {
+    discs
+        .iter()
+        .enumerate()
+        .map(|(i, (centre, radius))| (i, distance(*centre, p), *radius))
+        .filter(|&(_, gap, radius)| gap <= radius + HOVER_PAD_PX)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _, _)| i)
 }
 
 /// A drone's centre on screen, in CSS px, and its radius there. The radius is half the drone's
@@ -3224,6 +3251,71 @@ mod tests {
     }
 
     #[test]
+    fn the_pointer_hovers_the_nearest_drone_within_its_radius_and_six_px() {
+        let discs = [([100.0, 100.0], 12.0), ([130.0, 100.0], 12.0)];
+        assert_eq!(disc_under(&discs, [100.0, 100.0]), Some(0));
+        assert_eq!(
+            disc_under(&discs, [100.0, 100.0 + 12.0 + HOVER_PAD_PX]),
+            Some(0)
+        );
+        assert_eq!(
+            disc_under(&discs, [100.0, 100.0 + 12.0 + HOVER_PAD_PX + 0.5]),
+            None
+        );
+        assert_eq!(
+            disc_under(&discs, [114.0, 100.0]),
+            Some(0),
+            "nearer the first"
+        );
+        assert_eq!(
+            disc_under(&discs, [116.0, 100.0]),
+            Some(1),
+            "nearer the second"
+        );
+        assert_eq!(disc_under(&[], [0.0, 0.0]), None);
+    }
+
+    #[test]
+    fn a_hovered_drone_is_named_as_the_page_names_its_agent_in_the_view() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let marks = Marks::build(&view, &plan, &stands(&plan), &slots_for(&view));
+        let json = serde_json::to_value(&view).expect("the view serializes");
+        let ids: Vec<&str> = json["agents"]
+            .as_array()
+            .expect("the view lists its agents")
+            .iter()
+            .map(|agent| agent["id"].as_str().expect("an agent id is a string"))
+            .collect();
+        assert!(!marks.bodies.is_empty());
+        for body in &marks.bodies {
+            assert!(
+                ids.contains(&body.agent.as_str()),
+                "acan:drone-hover names {} as view.agents[].id does",
+                body.agent
+            );
+        }
+    }
+
+    #[test]
+    fn a_hovered_drone_inks_its_tether_in_fully() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let marks = Marks::build(&view, &plan, &stands(&plan), &slots_for(&view));
+        let mut motion = Motion::new(true);
+        motion.sync(&marks);
+        let agent = marks.bodies[0].agent.clone();
+        let rest = beams(&motion, &marks, 1.0, None, None);
+        let hovered = beams(&motion, &marks, 1.0, None, Some(&agent));
+        assert_eq!(rest.len(), hovered.len());
+        assert_eq!(hovered[0].alpha, 1.0);
+        assert_eq!(rest[0].alpha, marks.bodies[0].state.tether_alpha());
+        assert_eq!(&hovered[1..], &rest[1..], "the other tethers keep theirs");
+    }
+
+    #[test]
     fn an_away_stamp_counts_minutes_then_hours() {
         assert_eq!(away_stamp(AWAY_MS), "10m");
         assert_eq!(away_stamp(59 * 60_000 + 59_999), "59m");
@@ -3774,7 +3866,7 @@ mod tests {
         let marks = marks_of(vec![drone("a", at, target, "building")]);
         let mut motion = Motion::new(true);
         motion.sync(&marks);
-        let beams = beams(&motion, &marks, 2.0, None);
+        let beams = beams(&motion, &marks, 2.0, None, None);
         assert_eq!(beams.len(), 1, "one beam per drone");
         let beam = &beams[0];
         assert_eq!(beam.to, target, "the beam ends on the target");
@@ -3836,13 +3928,13 @@ mod tests {
         ]);
         let mut motion = Motion::new(true);
         motion.sync(&marks);
-        let alphas: Vec<f32> = beams(&motion, &marks, 2.0, None)
+        let alphas: Vec<f32> = beams(&motion, &marks, 2.0, None, None)
             .iter()
             .map(|beam| beam.alpha)
             .collect();
         assert_eq!(alphas, [0.9, 0.3, 0.9, 0.2]);
         assert!(
-            beams(&motion, &marks, 2.0, None)
+            beams(&motion, &marks, 2.0, None, None)
                 .iter()
                 .all(|beam| beam.width_px == TETHER_PX * 2.0),
             "the tether is 1.5 CSS px"
@@ -3877,10 +3969,10 @@ mod tests {
         let mut motion = Motion::new(true);
         motion.sync(&marks);
         let before = mark_instances(&motion, &marks, KINDS, 1.0, None);
-        let beams_before = beams(&motion, &marks, 1.0, None);
+        let beams_before = beams(&motion, &marks, 1.0, None, None);
         assert!(!motion.advance(PULSE_MS / 3.0), "nothing moves while still");
         assert_eq!(mark_instances(&motion, &marks, KINDS, 1.0, None), before);
-        assert_eq!(beams(&motion, &marks, 1.0, None), beams_before);
+        assert_eq!(beams(&motion, &marks, 1.0, None, None), beams_before);
     }
 
     #[test]
@@ -3903,7 +3995,7 @@ mod tests {
             1,
             "the riding drone keeps its beacon, and the idle one has none"
         );
-        let ridden = beams(&motion, &marks, 1.0, Some("a"));
+        let ridden = beams(&motion, &marks, 1.0, Some("a"), None);
         assert_eq!(ridden.len(), 1, "the riding drone has no beam");
         assert_eq!(ridden[0].origin, [9.0, 3.0, 40.0]);
     }

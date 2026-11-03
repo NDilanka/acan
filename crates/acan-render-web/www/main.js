@@ -17,7 +17,7 @@ import {
 import { closeCommand, commandOpen, openCommand } from "./commandbar.js";
 import { clickMachine, closeCompose, composeOpen, orderHere } from "./compose.js";
 import { keyAction } from "./keys.js";
-import { paintMarks, pinAt, placeLabels } from "./marks.js";
+import { droneHover, paintMarks, pinAt, placeLabels } from "./marks.js";
 import { paintOrderLine, paintRide, paintStale, paintUsage } from "./panels.js";
 import { syncSeals } from "./seal.js";
 import { paintSlip } from "./slip.js";
@@ -229,7 +229,7 @@ function bindCanvas() {
   });
 
   canvas.addEventListener("pointermove", (event) => {
-    if (state.drag === null) return;
+    if (state.drag === null) return void droneHover(event.clientX - canvas.getBoundingClientRect().left, event.clientY - canvas.getBoundingClientRect().top);
     if (state.drag.orbit) {
       state.app.orbit(event.clientX - state.drag.x, event.clientY - state.drag.y);
     } else {

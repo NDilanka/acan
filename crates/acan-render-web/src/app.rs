@@ -94,6 +94,8 @@ pub struct App {
     /// The page's clock for the marks: the time now on a live page, and when the reader last saw
     /// it. A still page keeps no time, so nothing on it reads stale.
     clock: marks::Clock,
+    /// The agent whose drone the pointer is over, if any.
+    hovered: Option<String>,
 }
 
 /// An ease from one azimuth to another, in degrees. `to` is not wrapped, so repeated turns add up.
@@ -197,6 +199,7 @@ impl App {
             bob_enabled: true,
             bob_ms: 0.0,
             clock: marks::Clock::default(),
+            hovered: None,
             view_json: String::new(),
             view_version: 0,
             dirty: false,
@@ -1015,6 +1018,52 @@ impl App {
             .collect()
     }
 
+    /// The agent whose drone the CSS point `(x, y)` is over, within its radius and a few px, or
+    /// the empty string. The riding agent's drone has no body on screen, so it is never hovered.
+    pub fn drone_at(&self, x: f32, y: f32) -> String {
+        let riding = self.riding_agent();
+        let bodies: Vec<&marks::Body> = self
+            .marks
+            .bodies
+            .iter()
+            .filter(|body| riding != Some(body.agent.as_str()))
+            .collect();
+        let discs: Vec<([f32; 2], f32)> = bodies
+            .iter()
+            .map(|body| {
+                let at = self.motion.body_at(&body.agent).unwrap_or(body.at);
+                marks::drone_disc(at, |p| self.screen(p))
+            })
+            .collect();
+        marks::disc_under(&discs, [x, y]).map_or_else(String::new, |i| bodies[i].agent.clone())
+    }
+
+    /// The disc of `agent`'s drone on screen, as `[css x, css y, css radius]`, or empty when it
+    /// has no drone. The page rings the hovered drone with it.
+    pub fn drone_disc_of(&self, agent: &str) -> Vec<f32> {
+        self.marks
+            .bodies
+            .iter()
+            .find(|body| body.agent == agent)
+            .map_or_else(Vec::new, |body| {
+                let at = self.motion.body_at(&body.agent).unwrap_or(body.at);
+                let ([x, y], radius) = marks::drone_disc(at, |p| self.screen(p));
+                vec![x, y, radius]
+            })
+    }
+
+    /// Marks the drone of `agent` as hovered, or none for the empty string, so its tether inks in
+    /// fully. Returns whether that changed.
+    pub fn set_hovered(&mut self, agent: &str) -> bool {
+        let hovered = (!agent.is_empty()).then(|| agent.to_owned());
+        if hovered == self.hovered {
+            return false;
+        }
+        self.hovered = hovered;
+        self.sync_scene();
+        true
+    }
+
     /// Each clash's badge centres on screen, as flat `[clash index, left css x, right css x, css
     /// y]` quads, following the diamonds as they rise and sink.
     pub fn badge_layout(&self) -> Vec<f32> {
@@ -1270,7 +1319,8 @@ impl App {
         }
         self.motion.set_px_units(self.dpr / self.camera.zoom());
         let riding = self.riding_agent();
-        scene.beams = marks::beams(&self.motion, &self.marks, self.dpr, riding);
+        let hovered = self.hovered.as_deref();
+        scene.beams = marks::beams(&self.motion, &self.marks, self.dpr, riding, hovered);
         scene
             .beams
             .extend(marks::trail_beams(&self.motion, self.dpr, riding));

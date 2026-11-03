@@ -40,9 +40,23 @@ pub struct Info {
     pub hue: String,
     pub waiting: bool,
     pub machine: String,
+    /// The activity, with the drone's state word after it when the two differ.
     pub activity: String,
+    /// The drone's state, as [`marks::DroneState::word`] gives it.
+    pub state: &'static str,
     pub task: Option<String>,
     pub file: Option<String>,
+}
+
+/// The chip's activity words: the activity, then the state word when it says something more,
+/// such as `building · working` or `building · stale`, but `idle` once.
+#[must_use]
+pub fn chip_activity(activity: &str, state: &str) -> String {
+    if activity == state {
+        activity.to_owned()
+    } else {
+        format!("{activity} · {state}")
+    }
 }
 
 /// A drone's goal and chip words, as the marks give them now.
@@ -221,7 +235,8 @@ pub fn info(view: &View, plan: &Plan, body: &Body) -> Info {
         hue: marks::hue_css(body.slot),
         waiting: body.waiting(),
         machine: plan.machines[body.machine].name.clone(),
-        activity: body.activity.to_owned(),
+        activity: chip_activity(body.activity, body.state.word()),
+        state: body.state.word(),
         task: sentence,
         file,
     }
@@ -508,6 +523,7 @@ mod tests {
             waiting: false,
             machine: "auth".to_owned(),
             activity: "reading_back".to_owned(),
+            state: "idle",
             task: Some("sign in".to_owned()),
             file: None,
         }
@@ -640,6 +656,14 @@ mod tests {
             "target x {}",
             on_screen[0]
         );
+    }
+
+    #[test]
+    fn the_chip_adds_the_state_word_to_the_activity() {
+        assert_eq!(chip_activity("building", "working"), "building · working");
+        assert_eq!(chip_activity("building", "stale"), "building · stale");
+        assert_eq!(chip_activity("gating", "waiting"), "gating · waiting");
+        assert_eq!(chip_activity("idle", "idle"), "idle");
     }
 
     #[test]
