@@ -63,7 +63,7 @@ import { installScrub } from "./scrub.js";
 import { installFirstRun, paintFirstRun } from "./firstrun-panel.js";
 import { onWorkers, refreshWorkers, workersAnswer } from "./workers.js";
 import { nextFrame } from "./frames.js";
-import { closeViewer, installVision, placeVisionPins, syncVision, viewerOpen, viewerTakesEscape } from "./vision-pins.js";
+import { closeViewer, installVision, paintViewer, placeVisionPins, syncVision, viewerOpen, viewerTakesEscape } from "./vision-pins.js";
 import { installMulti, nameOf, zoomAround } from "./multi.js";
 import { placePlates } from "./nameplates.js";
 import { placeParked } from "./parked.js";
@@ -311,6 +311,8 @@ function setAlt(down) {
   state.altDown = down;
   labelsEl.classList.toggle("alt", down);
   paintUsage();
+  paintSlip();
+  paintViewer();
   // The chips and the landed dots change their words with Alt, so the flags are redrawn.
   if (state.view !== null) paintMarks();
   requestRender();

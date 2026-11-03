@@ -12,6 +12,7 @@ import {
   answeredLine,
   freshQuestions,
   openQuestion,
+  questionCardText,
   questionTitle,
 } from "./question.js";
 import { $, canvas, card, freeBand, freeze, replay, state } from "./state.js";
@@ -346,7 +347,12 @@ function paintQuestion() {
   head.append(title, close);
   const ask = document.createElement("p");
   ask.className = "ask";
-  ask.textContent = question.text;
+  const shown = questionCardText(question);
+  ask.textContent = state.altDown ? question.text : shown;
+  if (shown !== question.text) {
+    ask.title = question.text;
+    ask.setAttribute("aria-label", question.text);
+  }
   const children = [head, ask];
   if (asked.answered === null) {
     cancelAskFade();

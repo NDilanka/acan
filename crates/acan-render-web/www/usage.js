@@ -6,11 +6,33 @@ import { apiPath, target } from "./projects.js";
 
 export const OFFLINE_PROVIDER = "offline";
 
-// The name a role has on the panel. `vision` is the advisory vision witness.
-const ROLE_LABELS = { vision: "vision witness" };
+// The name a role has on the panel. `vision` is the advisory vision witness, `director` shows as
+// `tour`, and `scope` shows as `scope`.
+const ROLE_LABELS = { vision: "vision witness", director: "tour", scope: "scope" };
 
 export function roleLabel(role) {
   return ROLE_LABELS[role] ?? role;
+}
+
+// The foreman plate shows this many history rows. The view carries the same count.
+export const HISTORY_ROWS = 3;
+
+// A tour's detail names its receipt, then the director's verdict.
+const TOUR_DETAIL = /^(tour for receipt [0-9a-fA-F]{8}):(.*)$/;
+
+// A history row as the foreman plate shows it: the model, the step (the role's label), and the
+// title, which is the row's full detail on hover, or null when the row has none. A tour whose
+// detail matches TOUR_DETAIL adds its verdict to the step: `directed` when the director admitted
+// it, `deterministic` otherwise.
+export function foremanLine(row) {
+  const model = row.model;
+  const title = row.detail || null;
+  const tour = TOUR_DETAIL.exec(row.detail ?? "");
+  let step = roleLabel(row.role);
+  if (row.role === "director" && tour !== null) {
+    step += tour[2].trim() === "admitted" ? " · directed" : " · deterministic";
+  }
+  return { model, step, title };
 }
 
 // Splits the origin's rows into live provider calls and offline stand-in calls. The live total

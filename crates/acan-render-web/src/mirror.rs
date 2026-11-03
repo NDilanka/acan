@@ -41,9 +41,9 @@ pub struct Mirror {
     runs: BTreeMap<TaskId, GateRunId>,
     /// The word a task's change shows: the first symbol its last declaration named.
     changes: BTreeMap<TaskId, String>,
-    /// The seq of the last model call for each model and step, so the usage history reads newest
-    /// first.
-    last_used: BTreeMap<(String, Step), Seq>,
+    /// The seq and the detail of the last answered model call for each model and step, so the
+    /// usage history reads newest first and each row shows its newest answered call's detail.
+    last_used: BTreeMap<(String, Step), (Seq, Option<String>)>,
     /// Events passed over because this build cannot read them, or because the world refused one
     /// after such an event. Above zero, the page is older than the origin.
     not_shown: u32,
@@ -227,9 +227,11 @@ impl Mirror {
                 model,
                 step,
                 failure: None,
+                detail,
                 ..
             } => {
-                self.last_used.insert((model.clone(), *step), stamped.seq);
+                self.last_used
+                    .insert((model.clone(), *step), (stamped.seq, detail.clone()));
             }
             _ => {}
         }
@@ -580,6 +582,9 @@ pub struct UsageRow {
     pub input: u64,
     /// Completion tokens, summed over the calls.
     pub output: u64,
+    /// The detail of the newest answered call for this model and step, or none. A tour's detail
+    /// names its receipt and its verdict.
+    pub detail: Option<String>,
 }
 
 /// The check a task answers to, and where it stands.
@@ -954,15 +959,16 @@ impl Mirror {
             .iter()
             .flat_map(|(model, steps)| {
                 steps.iter().map(move |(step, count)| {
-                    let last = self.last_used.get(&(model.clone(), *step)).copied();
+                    let last = self.last_used.get(&(model.clone(), *step));
                     let row = UsageRow {
                         role: step_key(*step),
                         model: model.clone(),
                         calls: count.calls,
                         input: count.input,
                         output: count.output,
+                        detail: last.and_then(|(_, detail)| detail.clone()),
                     };
-                    (last, row)
+                    (last.map(|(seq, _)| *seq), row)
                 })
             })
             .collect();
@@ -1711,6 +1717,76 @@ mod tests {
             "the timed-out call to A is not counted"
         );
         assert_eq!(view.usage_earlier, 0);
+    }
+
+    #[test]
+    fn a_usage_row_carries_the_detail_of_its_newest_answered_call() {
+        let plan = plan();
+        let (mut origin, mut log, index) = scripted();
+        log.extend(
+            scenario::land_script(
+                &mut origin,
+                &index,
+                &founder(),
+                Timestamp::from_millis(2_000),
+            )
+            .expect("the story runs"),
+        );
+        let mut send = |log: &mut Vec<Stamped>, cmd: SystemCmd| {
+            log.extend(accepted(&mut origin, &index, Command::System(cmd)));
+        };
+        let answered = |detail: Option<&str>| SystemCmd::ModelUsed {
+            model: "test-model-director".to_owned(),
+            provider: Some("meta".to_owned()),
+            step: Step::Director,
+            input_tokens: Some(10),
+            output_tokens: Some(1),
+            failure: None,
+            detail: detail.map(str::to_owned),
+        };
+        let row_detail = |log: &[Stamped]| {
+            let view = Mirror::from_log(log.to_vec())
+                .expect("the log replays")
+                .view(&plan);
+            let [row] = view.usage.as_slice() else {
+                panic!("one model and step is one row");
+            };
+            row.detail.clone()
+        };
+
+        send(
+            &mut log,
+            answered(Some("tour for receipt 1a2b3c4d: admitted")),
+        );
+        assert_eq!(
+            row_detail(&log),
+            Some("tour for receipt 1a2b3c4d: admitted".to_owned())
+        );
+
+        send(
+            &mut log,
+            SystemCmd::ModelUsed {
+                model: "test-model-director".to_owned(),
+                provider: Some("meta".to_owned()),
+                step: Step::Director,
+                input_tokens: None,
+                output_tokens: None,
+                failure: Some(CallFailure::Error),
+                detail: Some("tour for receipt 1a2b3c4d: error".to_owned()),
+            },
+        );
+        assert_eq!(
+            row_detail(&log),
+            Some("tour for receipt 1a2b3c4d: admitted".to_owned()),
+            "a failed call after it leaves the row's detail as it was"
+        );
+
+        send(&mut log, answered(None));
+        assert_eq!(
+            row_detail(&log),
+            None,
+            "a newer answered call with no detail clears it"
+        );
     }
 
     /// The commit the lane fixtures' scopes sit on.

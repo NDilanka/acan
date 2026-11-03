@@ -25,6 +25,7 @@ import { freeze, replay, slipEl, state } from "./state.js";
 import { historyBlock } from "./guard.js";
 import { forgetToken, get, hold } from "./stream.js";
 import { apiPath, target } from "./projects.js";
+import { capWords } from "./words.js";
 
 // A failed draft is retried by the server's job loop, so the slip asks again, but seldom.
 const FAILED_RETRY_MS = 30000;
@@ -309,8 +310,13 @@ function choicesBlock(lane, picks) {
   box.append(el("h3", null, `open choices · ${lane.open.length}`));
   for (const choice of lane.open) {
     const row = el("div", "choice");
-    row.append(el("div", null, choice.question));
-    row.append(el("div", "sub", choice.machine));
+    const shown = capWords(choice.question);
+    const question = el("div", null, state.altDown ? choice.question : shown);
+    if (shown !== choice.question) {
+      question.title = choice.question;
+      question.setAttribute("aria-label", choice.question);
+    }
+    row.append(question, el("div", "sub", choice.machine));
     const options = el("div");
     for (const option of choice.options) {
       const button = el("button", null, `${option.key} · ${option.label}`);

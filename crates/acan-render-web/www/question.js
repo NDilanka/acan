@@ -1,6 +1,7 @@
 // The open questions an order asks, and the answers the question card sends: the command, the
-// line an answer leaves, and the sentence a refusal reads as. This module has no imports and
-// touches no DOM, so Node can test it.
+// line an answer leaves, and the sentence a refusal reads as. This module imports only words.js
+// and touches no DOM, so Node can test it.
+import { capWords } from "./words.js";
 
 // The question with this id among the view's open ones, or undefined.
 export function openQuestion(view, id) {
@@ -20,6 +21,11 @@ export function freshQuestions(view, seen) {
 
 export function questionTitle(question) {
   return `q-${question.id} · o-${question.order} asks`;
+}
+
+// The question card's text: the question's words, cut to CARD_WORDS words.
+export function questionCardText(question) {
+  return capWords(question.text);
 }
 
 // What an answer does, in one line, before it is sent.
