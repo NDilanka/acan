@@ -1,67 +1,80 @@
-//! The agents' drone is a small construction drone that hovers over the machine it works on, drawn as
-//! line art. Its shell and its two ducted-fan nacelles carry a light tint of the agent's hue under dark
-//! painted lines. Its glass eye and the lamp on its crown carry the full hue. Two struts hold the
-//! nacelles to the body, a swept fin sits behind, and a grille sits on the back.
+//! The agents' drone is a small white sphere that hovers over the machine it works on, with no
+//! rotors. One big round lens on its nose looks at the machine, with a ring and an iris in the
+//! agent's hue. Two small disc ears stand off its sides, and a short antenna rises from its crown.
+//! A soft glow in the agent's hue lies under the body, and the renderer draws it, so the drone
+//! reads as floating.
 //!
-//! The fine line art is held back until the drone is large on screen, so a far drone reads as a
-//! dot with ears: the blades, the grille and the vents draw at `Close` only, and the seams, the
-//! struts and the hubs at `Near` and closer.
+//! A far drone is a circle with two discs and its eye: the seams and the lens glint draw at `Near`
+//! and closer, and the rivets at `Close` only.
 //!
-//! The drone is three models. The shell and the accent share one centre at the origin, so the renderer
-//! places the centre over the machine, turns the drone to face its target, and grows it about the
-//! centre. The shadow is a third model, one dot the renderer sets on the plinth top under the centre.
-//! Every model is built at heading zero, nose toward +x.
+//! The drone is two models. The body is white paper and takes no tint, so it stays white in every
+//! state. The accent is the iris, the lens ring, the ear hubs and the antenna tip, and it takes the
+//! agent's hue, which the renderer brightens or dims for the drone's state. Both share one centre at
+//! the origin, so the renderer places the centre over the machine, turns the drone to face its
+//! target, and grows it about the centre. Every model is built at heading zero, nose toward +x.
 
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::TAU;
 
 use crate::model::{Aabb, Detail, Dot3, Ink, Line3, Mesh, Model, Surface};
 
 /// The drone's radius in plan units. Its body is 0.4 of a footprint 60 units wide, near the middle of
 /// the kit's footprints, which run from 18 to 96 units across.
 pub const BODY_RADIUS: f32 = 12.0;
-/// The design draws the body at radius 9, and every other measure is its design value times this.
-const SCALE: f32 = BODY_RADIUS / 9.0;
 /// The drone's full height, which is its body's diameter. The renderer's screen floor measures it.
 pub const BOT_HEIGHT: f32 = 2.0 * BODY_RADIUS;
 /// The eye sits this far from the centre, on the nose. A beam starts here, so it turns with the drone.
 pub const EYE_DISTANCE: f32 = BODY_RADIUS;
-/// The shadow's radius on the plinth top. It is a soft halo, so it reads as light on the ground.
+/// The shadow's radius on the plinth top when the drone is low. It is a soft halo, so it reads as
+/// light on the ground.
 pub const SHADOW_RADIUS: f32 = 0.9 * BODY_RADIUS;
 /// The beacon's radius at its target. The renderer sets its on-screen size each frame.
 pub const BEACON_RADIUS: f32 = 0.07;
-const NACELLE_SIDE: f32 = (9.0 + 3.4) * SCALE;
-const NACELLE_DROP: f32 = -1.5 * SCALE;
-const NACELLE_RADIUS: f32 = 4.4 * SCALE;
-const NACELLE_HALF: f32 = 3.2 * SCALE;
-const NACELLE_SEGMENTS: usize = 32;
-const BLADES: usize = 14;
-/// The glass cap and the bezel ring of the eye, and the inner ring, as angles from the nose.
-const GLASS_DEG: f32 = 31.0;
-const BEZEL_DEG: f32 = 40.0;
-const INNER_DEG: f32 = 20.0;
-/// The eye dot's radius, which the pupil draws at.
-const EYE_DOT: f32 = 1.6 * SCALE;
-/// The lamp on the crown is a small sphere whose centre sits on the body's top. It is half the
-/// eye dot's size, so the saturated lamp reads as a dot rather than a blob.
-const LAMP_RADIUS: f32 = 0.5 * EYE_DOT;
-/// A grille dot's radius: a third of the grille's first size, so the grille reads as fine dots.
-const GRILLE_DOT: f32 = 0.13 * SCALE;
-/// A seam or a band that would cross the eye is cut where it passes this cosine from the nose.
-const NOSE_CLEAR: f32 = 0.72;
-/// Half the thickness of the fin, each side of its plane.
-const FIN_HALF: f32 = 0.03;
-/// The fin's outline, counter-clockwise in its plane, as (nose, up) in units of the body radius.
-const FIN: [(f32, f32); 4] = [(-0.7, 0.2), (-1.4, 0.5), (-1.5, 0.2), (-0.5, -0.2)];
+/// The lens, as angles from the nose: the hue iris, the dark glass round it, and the hue ring that
+/// edges the glass.
+const IRIS_DEG: f32 = 14.0;
+const LENS_DEG: f32 = 30.0;
+const RING_DEG: f32 = 38.0;
+/// The pupil at the middle of the iris, and the glint on the glass, as radii in plan units.
+const PUPIL: f32 = 0.09 * BODY_RADIUS;
+const GLINT: f32 = 0.06 * BODY_RADIUS;
+/// An ear is a short drum on the side axis: its inner face is sunk in the body, its outer face stands
+/// off the side, and a hue hub sits on the outer face.
+const EAR_INNER: f32 = 0.78 * BODY_RADIUS;
+const EAR_OUTER: f32 = 1.1 * BODY_RADIUS;
+const EAR_RADIUS: f32 = 0.36 * BODY_RADIUS;
+const EAR_HUB: f32 = 0.2 * BODY_RADIUS;
+const EAR_SEGMENTS: usize = 20;
+/// The antenna: a thin stem from inside the crown, set back from the nose, and a hue tip.
+const ANTENNA_BACK: f32 = -0.2 * BODY_RADIUS;
+const ANTENNA_FOOT: f32 = 0.9 * BODY_RADIUS;
+const ANTENNA_TOP: f32 = 1.42 * BODY_RADIUS;
+const ANTENNA_STEM: f32 = 0.05 * BODY_RADIUS;
+const ANTENNA_TIP: f32 = 0.11 * BODY_RADIUS;
+const ANTENNA_SEGMENTS: usize = 6;
+/// The rivets along the lower seam, and the arc of it they leave clear round the nose, in degrees.
+const RIVETS: usize = 9;
+const RIVET: f32 = 0.035 * BODY_RADIUS;
+const RIVET_CLEAR_DEG: f32 = 60.0;
+/// A seam that would cross the lens is cut where it passes this cosine from the nose, a little
+/// outside the ring.
+const NOSE_CLEAR: f32 = 0.74;
 const BODY_SEGMENTS: usize = 24;
-/// The shell's bands from the bezel to the tail, as (from, to, surface, steps) in degrees from the nose.
-const SHELL_BANDS: [(f32, f32, Surface, usize); 2] = [
-    (GLASS_DEG, BEZEL_DEG, Surface::Ink(Ink::Mid), 1),
-    (BEZEL_DEG, 180.0, Surface::Paper, 14),
+/// The body's bands from the lens to the tail, as (from, to, surface, steps) in degrees from the nose.
+/// The iris and the ring are the accent's, so the body leaves them open. A latitude falls at 90
+/// degrees, so the belly and the crown reach the full radius.
+const BODY_BANDS: [(f32, f32, Surface, usize); 3] = [
+    (IRIS_DEG, LENS_DEG, Surface::Ink(Ink::Hi), 2),
+    (RING_DEG, 90.0, Surface::Paper, 6),
+    (90.0, 180.0, Surface::Paper, 9),
 ];
-/// The glass cap. Its edge falls on the bezel's edge, so the two models meet without a gap.
-const GLASS_BANDS: [(f32, f32, Surface, usize); 1] = [(0.0, GLASS_DEG, Surface::Paper, 3)];
-const LAMP_BANDS: [(f32, f32, Surface, usize); 1] = [(0.0, 180.0, Surface::Paper, 4)];
-/// A dot or a line sits this far proud of the surface under it, so it never z-fights the surface.
+/// The accent's bands on the body sphere. Their edges fall on the body's, so the two models meet
+/// without a gap.
+const ACCENT_BANDS: [(f32, f32, Surface, usize); 2] = [
+    (0.0, IRIS_DEG, Surface::Paper, 2),
+    (LENS_DEG, RING_DEG, Surface::Paper, 1),
+];
+const TIP_BANDS: [(f32, f32, Surface, usize); 1] = [(0.0, 180.0, Surface::Paper, 4)];
+/// A dot or a disc sits this far proud of the surface under it, so it never z-fights the surface.
 const PROUD: f32 = 0.004;
 /// The stroke weight of a painted line, in the kit's weight.
 const WEIGHT: f32 = 0.6;
@@ -72,27 +85,26 @@ const ORIGIN: V = [0.0, 0.0, 0.0];
 
 type V = [f32; 3];
 
-/// What the drone's shell is made of, counted as it is built. The tests check these counts.
+/// What the drone is made of, counted as it is built. The tests check these counts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DroneParts {
-    pub nacelles: usize,
-    pub blades: usize,
-    pub hubs: usize,
-    pub fins: usize,
+    pub ears: usize,
+    pub antennas: usize,
     pub eyes: usize,
-    pub vents: usize,
-    pub grille: usize,
+    pub glints: usize,
     pub seams: usize,
+    pub rivets: usize,
 }
 
-/// A drone's shell: its body, nacelles, fin, grille and painted lines. It takes the agent's light
-/// tint, and its line art stays dark.
+/// A drone's body: its white sphere, the dark glass of its lens, its ears, its antenna stem and its
+/// painted seams and rivets. It takes no tint, so it is white in every state.
 #[must_use]
 pub fn agent_body() -> Model {
-    shell().0
+    body().0
 }
 
-/// A drone's accent: the glass of its eye and the lamp on its crown. It takes the agent's full hue.
+/// A drone's accent: the iris and the ring of its lens, the hubs of its ears and the tip of its
+/// antenna. It takes the agent's hue at the strength of the drone's state.
 #[must_use]
 pub fn agent_accent() -> Model {
     accent()
@@ -107,10 +119,10 @@ pub fn agent_shadow() -> Model {
     finish(build).0
 }
 
-/// The drone's shell parts, counted as its model is built.
+/// The drone's body parts, counted as its model is built.
 #[must_use]
 pub fn drone_parts() -> DroneParts {
-    shell().1
+    body().1
 }
 
 /// The marker at a drone's target on a machine is a small sphere, centred on its origin, which the
@@ -127,26 +139,31 @@ pub fn beacon() -> Model {
     finish(build).0
 }
 
-fn shell() -> (Model, DroneParts) {
+fn body() -> (Model, DroneParts) {
     let mut build = Build::default();
-    sphere(&mut build, ORIGIN, BODY_RADIUS, &SHELL_BANDS);
-    nacelle(&mut build, 1.0);
-    nacelle(&mut build, -1.0);
-    fin(&mut build);
+    sphere(&mut build, ORIGIN, BODY_RADIUS, &BODY_BANDS);
+    for side in [1.0, -1.0] {
+        ear(&mut build, side);
+    }
+    antenna(&mut build);
     eye(&mut build);
-    grille(&mut build);
     seams(&mut build);
+    rivets(&mut build);
     finish(build)
 }
 
 fn accent() -> Model {
     let mut build = Build::default();
-    sphere(&mut build, ORIGIN, BODY_RADIUS, &GLASS_BANDS);
+    sphere(&mut build, ORIGIN, BODY_RADIUS, &ACCENT_BANDS);
+    for side in [1.0_f32, -1.0] {
+        let face = scale3(SIDE, side * (EAR_OUTER + PROUD));
+        disc(&mut build, face, scale3(SIDE, side), EAR_HUB, EAR_SEGMENTS);
+    }
     sphere(
         &mut build,
-        [0.0, 0.0, BODY_RADIUS],
-        LAMP_RADIUS,
-        &LAMP_BANDS,
+        [ANTENNA_BACK, 0.0, ANTENNA_TOP],
+        ANTENNA_TIP,
+        &TIP_BANDS,
     );
     finish(build).0
 }
@@ -225,11 +242,6 @@ fn finish(build: Build) -> (Model, DroneParts) {
     (model, build.parts)
 }
 
-/// A point `nose`, `side` and `up` from the drone's centre, in the frame of heading zero.
-fn at(nose: f32, side: f32, up: f32) -> V {
-    [nose, side, up]
-}
-
 /// A unit direction from the body's centre, `degrees` from the nose and `phi` round the nose axis.
 fn sphere_dir(degrees: f32, phi: f32) -> V {
     let theta = degrees.to_radians();
@@ -246,6 +258,13 @@ fn circle(centre: V, radius: f32, u: V, v: V, count: usize) -> Vec<V> {
             add3(centre, scale3(offset, radius))
         })
         .collect()
+}
+
+/// Two unit directions square to `axis` and to each other.
+fn across(axis: V) -> (V, V) {
+    let helper = if axis[2].abs() < 0.9 { UP } else { NOSE };
+    let u = unit3(cross3(helper, axis));
+    (u, cross3(axis, u))
 }
 
 /// A latitude of a sphere, or one of its poles.
@@ -309,186 +328,96 @@ fn sphere(build: &mut Build, centre: V, radius: f32, bands: &[(f32, f32, Surface
     }
 }
 
-/// A round tube along the nose axis, from `a` to `b`, with flat ends.
-fn tube(build: &mut Build, a: V, b: V, radius: f32) {
+/// A flat round disc facing `normal`, centred on `centre`.
+fn disc(build: &mut Build, centre: V, normal: V, radius: f32, count: usize) {
+    let (u, v) = across(normal);
+    let inside = sub3(centre, normal);
+    let middle = build.vertex(centre, normal, Surface::Paper);
+    let rim: Vec<u32> = circle(centre, radius, u, v, count)
+        .into_iter()
+        .map(|p| build.vertex(p, normal, Surface::Paper))
+        .collect();
+    for j in 0..count {
+        build.triangle(middle, rim[j], rim[(j + 1) % count], inside);
+    }
+}
+
+/// A round drum from `a` to `b`, with a flat face at each end.
+fn drum(build: &mut Build, a: V, b: V, radius: f32, count: usize) {
+    let axis = unit3(sub3(b, a));
+    let (u, v) = across(axis);
     let inside = scale3(add3(a, b), 0.5);
-    let dirs = circle([0.0; 3], 1.0, SIDE, UP, NACELLE_SEGMENTS);
+    let dirs = circle(ORIGIN, 1.0, u, v, count);
     let wall = |build: &mut Build, end: V| -> Vec<u32> {
         dirs.iter()
             .map(|&d| build.vertex(add3(end, scale3(d, radius)), d, Surface::Paper))
             .collect()
     };
-    let cap = |build: &mut Build, end: V, normal: V| -> Vec<u32> {
-        dirs.iter()
-            .map(|&d| build.vertex(add3(end, scale3(d, radius)), normal, Surface::Paper))
-            .collect()
-    };
     let low = wall(build, a);
     let high = wall(build, b);
-    let steps = (0..NACELLE_SEGMENTS).map(|j| (j, (j + 1) % NACELLE_SEGMENTS));
-    for (j, k) in steps.clone() {
+    for j in 0..count {
+        let k = (j + 1) % count;
         build.triangle(low[j], low[k], high[k], inside);
         build.triangle(low[j], high[k], high[j], inside);
     }
-    let rim_low = cap(build, a, scale3(NOSE, -1.0));
-    let rim_high = cap(build, b, NOSE);
-    let centre_low = build.vertex(a, scale3(NOSE, -1.0), Surface::Paper);
-    let centre_high = build.vertex(b, NOSE, Surface::Paper);
-    for (j, k) in steps {
-        build.triangle(centre_low, rim_low[j], rim_low[k], inside);
-        build.triangle(centre_high, rim_high[k], rim_high[j], inside);
-    }
+    disc(build, a, scale3(axis, -1.0), radius, count);
+    disc(build, b, axis, radius, count);
 }
 
-/// A ducted fan at the side, built from its tube, the duct rings on both faces, the blades and hub on the
-/// front face, and the strut to the body.
-fn nacelle(build: &mut Build, side: f32) {
-    let centre = at(0.0, side * NACELLE_SIDE, NACELLE_DROP);
-    let front = add3(centre, scale3(NOSE, NACELLE_HALF));
-    let back = add3(centre, scale3(NOSE, -NACELLE_HALF));
-    tube(build, back, front, NACELLE_RADIUS);
-    build.line(
-        circle(front, NACELLE_RADIUS, SIDE, UP, 24),
-        true,
-        Ink::Hi,
-        Detail::Always,
+/// An ear on the side `side` (1 or -1): a short drum whose inner face is sunk in the body.
+fn ear(build: &mut Build, side: f32) {
+    drum(
+        build,
+        scale3(SIDE, side * EAR_INNER),
+        scale3(SIDE, side * EAR_OUTER),
+        EAR_RADIUS,
+        EAR_SEGMENTS,
     );
-    build.line(
-        circle(back, 3.0 * SCALE, SIDE, UP, 24),
-        true,
-        Ink::Lo,
-        Detail::Always,
-    );
-    build.line(
-        circle(back, 1.6 * SCALE, SIDE, UP, 20),
-        true,
-        Ink::Lo,
-        Detail::Always,
-    );
-    for i in 0..BLADES {
-        let a = TAU * i as f32 / BLADES as f32;
-        let inner = add3(front, scale3(sweep(a), 1.3 * SCALE));
-        let outer = add3(front, scale3(sweep(a + 0.5), 3.9 * SCALE));
-        build.line(vec![inner, outer], false, Ink::Mid, Detail::Close);
-    }
-    build.parts.blades += BLADES;
-    build.dot(
-        add3(front, scale3(NOSE, 0.4 * SCALE)),
-        NOSE,
-        1.3 * SCALE,
-        Ink::Mid,
-        Detail::Near,
-    );
-    build.parts.hubs += 1;
-    let strut_root = at(0.0, side * 0.8 * BODY_RADIUS, 0.0);
-    let strut_end = add3(centre, scale3(SIDE, -side * NACELLE_RADIUS * 0.6));
-    build.line(vec![strut_root, strut_end], false, Ink::Mid, Detail::Near);
-    build.parts.nacelles += 1;
+    build.parts.ears += 1;
 }
 
-/// A unit direction in the plane of the front face of a nacelle, `a` radians round from the side.
-fn sweep(a: f32) -> V {
-    add3(scale3(SIDE, a.cos()), scale3(UP, a.sin()))
-}
-
-/// The swept fin behind the body is a thin prism whose outline lies in the plane of the nose and up.
-fn fin(build: &mut Build) {
-    let lo: Vec<V> = FIN
-        .iter()
-        .map(|&(f, u)| at(f * BODY_RADIUS, -FIN_HALF, u * BODY_RADIUS))
-        .collect();
-    let hi: Vec<V> = FIN
-        .iter()
-        .map(|&(f, u)| at(f * BODY_RADIUS, FIN_HALF, u * BODY_RADIUS))
-        .collect();
-    let inside = scale3(
-        lo.iter().chain(&hi).fold([0.0; 3], |sum, &p| add3(sum, p)),
-        1.0 / (2 * FIN.len()) as f32,
+/// The antenna's stem, from inside the crown to its tip, which is the accent's.
+fn antenna(build: &mut Build) {
+    drum(
+        build,
+        [ANTENNA_BACK, 0.0, ANTENNA_FOOT],
+        [ANTENNA_BACK, 0.0, ANTENNA_TOP],
+        ANTENNA_STEM,
+        ANTENNA_SEGMENTS,
     );
-    let lo_ids: Vec<u32> = lo
-        .iter()
-        .map(|&p| build.vertex(p, scale3(SIDE, -1.0), Surface::Paper))
-        .collect();
-    let hi_ids: Vec<u32> = hi
-        .iter()
-        .map(|&p| build.vertex(p, SIDE, Surface::Paper))
-        .collect();
-    for pair in lo_ids[1..].windows(2) {
-        build.triangle(lo_ids[0], pair[0], pair[1], inside);
-    }
-    for pair in hi_ids[1..].windows(2) {
-        build.triangle(hi_ids[0], pair[0], pair[1], inside);
-    }
-    let sides = (0..FIN.len()).map(|i| (i, (i + 1) % FIN.len()));
-    for (i, j) in sides {
-        let edge = sub3(lo[j], lo[i]);
-        let normal = unit3(add3(scale3(NOSE, edge[2]), scale3(UP, -edge[0])));
-        let corners = [lo[i], lo[j], hi[j], hi[i]].map(|p| build.vertex(p, normal, Surface::Paper));
-        build.triangle(corners[0], corners[1], corners[2], inside);
-        build.triangle(corners[0], corners[2], corners[3], inside);
-    }
-    build.parts.fins += 1;
+    build.parts.antennas += 1;
 }
 
-/// The eye on the nose. The glass is the accent model's cap, so here are the rings round it, the two
-/// vents above and below, and the eye dot at the nose's pole.
+/// The pupil at the middle of the iris, and the glint on the glass above and left of it.
 fn eye(build: &mut Build) {
-    let centre = at(0.0, 0.0, 0.0);
-    for (degrees, tone) in [(INNER_DEG, Ink::Lo), (BEZEL_DEG, Ink::Hi)] {
-        let ring = (0..BODY_SEGMENTS)
-            .map(|j| {
-                let dir = sphere_dir(degrees, TAU * j as f32 / BODY_SEGMENTS as f32);
-                add3(centre, scale3(dir, BODY_RADIUS))
-            })
-            .collect();
-        build.line(ring, true, tone, Detail::Always);
-    }
-    for lift in [0.52_f32, -0.52] {
-        let vent: Vec<V> = (0..5)
-            .map(|i| {
-                let u = -0.22 + 0.44 * i as f32 / 4.0;
-                let dir = unit3(add3(
-                    add3(scale3(NOSE, 0.8), scale3(SIDE, u)),
-                    scale3(UP, lift),
-                ));
-                add3(centre, scale3(dir, BODY_RADIUS))
-            })
-            .collect();
-        build.line(vent, false, Ink::Mid, Detail::Close);
-        build.parts.vents += 1;
-    }
     build.dot(
-        add3(centre, scale3(NOSE, BODY_RADIUS + PROUD)),
+        scale3(NOSE, BODY_RADIUS + PROUD),
         NOSE,
-        EYE_DOT,
+        PUPIL,
         Ink::Hi,
         Detail::Always,
     );
     build.parts.eyes += 1;
+    let glint = sphere_dir(0.5 * (IRIS_DEG + LENS_DEG), 0.75 * TAU / 2.0);
+    build.dot(
+        scale3(glint, BODY_RADIUS + PROUD),
+        glint,
+        GLINT,
+        Ink::Faint,
+        Detail::Near,
+    );
+    build.parts.glints += 1;
 }
 
-/// A small dotted grille on the back of the upper shell.
-fn grille(build: &mut Build) {
-    for i in -3..=3 {
-        for lat in [0.62_f32, 0.7] {
-            let ring = (1.0 - lat * lat).sqrt();
-            let az = PI + i as f32 * 0.13;
-            let dir = add3(
-                add3(scale3(NOSE, az.cos() * ring), scale3(SIDE, az.sin() * ring)),
-                scale3(UP, lat),
-            );
-            let centre = add3(at(0.0, 0.0, 0.0), scale3(dir, BODY_RADIUS + PROUD));
-            build.dot(centre, dir, GRILLE_DOT, Ink::Lo, Detail::Close);
-            build.parts.grille += 1;
-        }
-    }
-}
+/// The seam heights over the body, as the height of a unit direction. Rivets follow the lower one.
+const UPPER_SEAM: f32 = 0.42;
+const LOWER_SEAM: f32 = -0.5;
 
-/// Two latitude seams and two meridians, cut where they cross the eye.
+/// Two latitude seams, cut where they cross the lens, and one band over the crown behind the
+/// antenna, from ear to ear.
 fn seams(build: &mut Build) {
     const SAMPLES: usize = 56;
-    let centre = at(0.0, 0.0, 0.0);
-    for height in [0.38_f32, -0.42] {
+    for height in [UPPER_SEAM, LOWER_SEAM] {
         let r = (1.0 - height * height).sqrt();
         let dirs: Vec<V> = (0..SAMPLES)
             .map(|j| {
@@ -496,27 +425,25 @@ fn seams(build: &mut Build) {
                 [r * a.cos(), r * a.sin(), height]
             })
             .collect();
-        seam(build, centre, &dirs);
+        seam(build, &dirs);
     }
-    for sign in [1.0_f32, -1.0] {
-        let normal = unit3(add3(NOSE, scale3(SIDE, 0.9 * sign)));
-        let u1 = unit3(cross3(UP, normal));
-        let u2 = cross3(normal, u1);
-        let dirs: Vec<V> = (0..SAMPLES)
-            .map(|j| {
-                let a = TAU * j as f32 / SAMPLES as f32;
-                add3(scale3(u1, a.cos()), scale3(u2, a.sin()))
-            })
-            .collect();
-        seam(build, centre, &dirs);
-    }
+    let back = -0.35_f32;
+    let r = (1.0 - back * back).sqrt();
+    let crown: Vec<V> = (0..=SAMPLES / 2)
+        .map(|j| {
+            let a = (0.2 + 0.6 * j as f32 / (SAMPLES / 2) as f32) * TAU / 2.0;
+            scale3([back, r * a.cos(), r * a.sin()], BODY_RADIUS)
+        })
+        .collect();
+    build.line(crown, false, Ink::Mid, Detail::Near);
+    build.parts.seams += 1;
 }
 
 /// One seam over the body, as unit directions from its centre. Where a sample lies within
 /// `NOSE_CLEAR` of the nose it is dropped, and the rest draw as open runs or one closed loop.
-fn seam(build: &mut Build, centre: V, dirs: &[V]) {
+fn seam(build: &mut Build, dirs: &[V]) {
     let kept: Vec<bool> = dirs.iter().map(|&d| dot3(d, NOSE) <= NOSE_CLEAR).collect();
-    let point = |d: V| add3(centre, scale3(d, BODY_RADIUS));
+    let point = |d: V| scale3(d, BODY_RADIUS);
     if kept.iter().all(|&k| k) {
         build.line(
             dirs.iter().map(|&d| point(d)).collect(),
@@ -542,6 +469,25 @@ fn seam(build: &mut Build, centre: V, dirs: &[V]) {
             build.line(finished, false, Ink::Mid, Detail::Near);
             build.parts.seams += 1;
         }
+    }
+}
+
+/// Rivets along the lower seam, round the sides and the back, clear of the lens.
+fn rivets(build: &mut Build) {
+    let r = (1.0 - LOWER_SEAM * LOWER_SEAM).sqrt();
+    for i in 0..RIVETS {
+        let span = 360.0 - 2.0 * RIVET_CLEAR_DEG;
+        let degrees = RIVET_CLEAR_DEG + span * (i as f32 + 0.5) / RIVETS as f32;
+        let a = degrees.to_radians();
+        let dir = [r * a.cos(), r * a.sin(), LOWER_SEAM];
+        build.dot(
+            scale3(dir, BODY_RADIUS + PROUD),
+            dir,
+            RIVET,
+            Ink::Mid,
+            Detail::Close,
+        );
+        build.parts.rivets += 1;
     }
 }
 
@@ -589,80 +535,118 @@ mod tests {
     }
 
     #[test]
-    fn the_shell_is_centred_on_the_origin_with_its_radius_above_and_below() {
-        let shell = agent_body();
-        let (lowest, highest) = mesh_heights(&shell);
-        assert!(
-            (highest - BODY_RADIUS).abs() < 1e-4,
-            "the crown is one radius above the centre: {highest}"
-        );
+    fn the_body_is_centred_on_the_origin_with_its_radius_below_and_its_antenna_above() {
+        let body = agent_body();
+        let (lowest, highest) = mesh_heights(&body);
         assert!(
             (lowest + BODY_RADIUS).abs() < 1e-4,
             "the belly is one radius below the centre: {lowest}"
         );
-        assert!(winds_outward(&shell), "the solids face outward");
-    }
-
-    #[test]
-    fn the_nacelles_hang_inside_the_body_height() {
-        let (lowest, _) = mesh_heights(&agent_body());
         assert!(
-            lowest >= -BODY_RADIUS - 1e-4,
-            "nothing hangs below the body"
+            (highest - ANTENNA_TOP).abs() < 1e-4,
+            "only the antenna rises past the crown: {highest}"
         );
+        assert!(winds_outward(&body), "the solids face outward");
         assert!((BOT_HEIGHT - 2.0 * BODY_RADIUS).abs() < 1e-6);
     }
 
     #[test]
-    fn the_drone_has_two_nacelles_fourteen_blades_each_and_an_eye_on_the_nose() {
-        let parts = drone_parts();
-        assert_eq!(parts.nacelles, 2);
-        assert_eq!(parts.blades, 2 * BLADES);
-        assert_eq!(parts.hubs, 2);
-        assert_eq!(parts.fins, 1);
-        assert_eq!(parts.eyes, 1);
-        assert_eq!(parts.vents, 2);
-        assert_eq!(parts.grille, 14);
-        assert!(parts.seams >= 2, "the latitude seams draw: {parts:?}");
-    }
-
-    #[test]
-    fn a_far_drone_draws_only_its_rings_and_eye_and_the_fine_art_waits_for_close() {
-        let shell = agent_body();
-        let strokes = |level: Detail| {
-            shell.lines.iter().filter(|l| l.detail == level).count()
-                + shell.dots.iter().filter(|d| d.detail == level).count()
-        };
+    fn the_ears_stand_off_the_sides_and_nothing_hangs_below_the_body() {
+        let body = agent_body();
         assert!(
-            strokes(Detail::Always) <= 10,
-            "a far drone keeps about eight strokes: {}",
-            strokes(Detail::Always)
+            (body.bounds.max[1] - EAR_OUTER).abs() < 1e-4
+                && (body.bounds.min[1] + EAR_OUTER).abs() < 1e-4,
+            "an ear's face stands off each side: {:?}",
+            body.bounds
         );
+        assert!(
+            (body.bounds.max[0] - BODY_RADIUS - PROUD).abs() < 1e-4,
+            "nothing stands out past the lens: {:?}",
+            body.bounds
+        );
+        let (lowest, _) = mesh_heights(&body);
+        assert!(lowest >= -BODY_RADIUS - 1e-4, "no rotor or claw hangs below");
+    }
+
+    #[test]
+    fn the_drone_has_two_ears_an_antenna_one_eye_and_a_few_seams() {
         let parts = drone_parts();
-        assert_eq!(
-            strokes(Detail::Close),
-            parts.blades + parts.vents + parts.grille,
-            "the blades, vents and grille draw at Close"
-        );
-        assert_eq!(
-            strokes(Detail::Near),
-            parts.seams + parts.hubs + parts.nacelles,
-            "the seams, hubs and struts draw at Near"
+        assert_eq!(parts.ears, 2);
+        assert_eq!(parts.antennas, 1);
+        assert_eq!(parts.eyes, 1);
+        assert_eq!(parts.glints, 1);
+        assert_eq!(parts.rivets, RIVETS);
+        assert!(
+            (3..=6).contains(&parts.seams),
+            "a few seams, cut round the lens: {parts:?}"
         );
     }
 
     #[test]
-    fn the_accent_is_the_glass_on_the_nose_and_the_lamp_on_the_crown() {
+    fn a_far_drone_draws_only_its_pupil_and_the_fine_art_waits_for_near_and_close() {
+        let body = agent_body();
+        let strokes = |model: &Model, level: Detail| {
+            model.lines.iter().filter(|l| l.detail == level).count()
+                + model.dots.iter().filter(|d| d.detail == level).count()
+        };
+        let parts = drone_parts();
+        assert_eq!(strokes(&body, Detail::Always), parts.eyes, "the pupil only");
+        assert_eq!(
+            strokes(&body, Detail::Near),
+            parts.seams + parts.glints,
+            "the seams and the glint draw at Near"
+        );
+        assert_eq!(
+            strokes(&body, Detail::Close),
+            parts.rivets,
+            "the rivets draw at Close"
+        );
         let accent = agent_accent();
         assert!(
+            accent.lines.is_empty() && accent.dots.is_empty(),
+            "the accent is solid"
+        );
+    }
+
+    #[test]
+    fn the_body_takes_no_hue_and_its_lens_glass_is_dark() {
+        let body = agent_body();
+        let surfaces = &body.meshes[0].surfaces;
+        assert!(
+            surfaces
+                .iter()
+                .all(|s| matches!(s, Surface::Paper | Surface::Ink(Ink::Hi))),
+            "the body is white paper and dark glass"
+        );
+        assert!(surfaces.contains(&Surface::Ink(Ink::Hi)), "the lens glass");
+    }
+
+    #[test]
+    fn the_accent_is_the_iris_the_ring_the_ear_hubs_and_the_antenna_tip() {
+        let accent = agent_accent();
+        let positions = &accent.meshes[0].positions;
+        assert!(
             (accent.bounds.max[0] - BODY_RADIUS).abs() < 1e-4,
-            "the glass reaches the nose radius: {:?}",
+            "the iris reaches the nose radius: {:?}",
             accent.bounds
         );
         assert!(
-            (accent.bounds.max[2] - (BODY_RADIUS + LAMP_RADIUS)).abs() < 1e-4,
-            "the lamp stands on the crown: {:?}",
+            (accent.bounds.max[2] - (ANTENNA_TOP + ANTENNA_TIP)).abs() < 1e-4,
+            "the tip stands on the antenna: {:?}",
             accent.bounds
+        );
+        for side in [1.0_f32, -1.0] {
+            assert!(
+                positions
+                    .iter()
+                    .any(|p| (p[1] - side * (EAR_OUTER + PROUD)).abs() < 1e-4),
+                "a hub on the ear at side {side}"
+            );
+        }
+        let ring_edge = (RING_DEG.to_radians().cos() * BODY_RADIUS, 1e-3);
+        assert!(
+            positions.iter().any(|p| (p[0] - ring_edge.0).abs() < ring_edge.1),
+            "the ring edges the lens"
         );
         assert!(winds_outward(&accent), "the accent faces outward");
     }
