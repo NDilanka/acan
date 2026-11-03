@@ -421,6 +421,8 @@
     color: var(--ink); text-align: left; cursor: pointer; font: 12px/1.35 var(--sans); }
   #inbox button.item:hover .text, #inbox button.item:focus-visible .text { text-decoration: underline; }
   #inbox .item .text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* A question's six words do not fit one rail line beside its kind label, so only this kind wraps. */
+  #inbox .item.question .text { min-width: 0; white-space: normal; overflow: visible; }
   #inbox button.item:disabled { cursor: default; }
   #inbox .kind { flex: none; width: 56px; font: 10px/1.6 var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
   #inbox .item.stopped .kind { color: var(--red); }
