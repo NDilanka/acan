@@ -50,27 +50,28 @@ export function inboxItems(view, plantViews = new Map(), doubts = new Map()) {
   const machineOf = (orderId) => orders.get(orderId)?.machine ?? null;
   const items = new Map();
   const add = (item) => items.set(item.key, item);
+  // Each item's `line` is what its row shows; `detail` goes on hover. `text` joins the two for
+  // the screen reader and a notification.
+  const words = (line, detail, join = ": ") => ({ line, detail, text: `${line}${join}${detail}` });
 
   for (const clash of view.clashes) {
     if (clash.state !== "open" && clash.state !== "proposed") continue;
     const machine = tasks.get(clash.a)?.machine ?? tasks.get(clash.b)?.machine ?? null;
-    const text = clash.state === "proposed"
-      ? `${clash.label}: settle proposed, waits for yours`
-      : `${clash.label}: tasks overlap, choose a settle`;
-    add({ key: `clash:${clash.id}`, kind: "clash", id: clash.id, text, machine });
+    const detail = clash.state === "proposed" ? "settle proposed, waits for yours" : "tasks overlap, choose a settle";
+    add({ key: `clash:${clash.id}`, kind: "clash", id: clash.id, ...words(clash.label, detail), machine });
   }
   for (const question of view.questions) {
     add({ key: `question:${question.id}`, kind: "question", id: question.id,
-      text: `q-${question.id} asks: ${question.text}`, machine: machineOf(question.order) });
+      ...words(`q-${question.id} asks`, question.text), machine: machineOf(question.order) });
   }
   for (const lane of view.lanes) {
     if (!live(lane.order)) continue;
     if (lane.stopped) {
       add({ key: `stopped:${lane.order}`, kind: "stopped", id: lane.order,
-        text: `o-${lane.order} stopped: repair budget spent`, machine: machineOf(lane.order) });
+        ...words(`o-${lane.order} stopped`, "repair budget spent"), machine: machineOf(lane.order) });
     } else if (lane.state !== "confirmed") {
       add({ key: `seal:${lane.order}:${lane.rev}`, kind: "seal", id: lane.order,
-        text: `o-${lane.order} rev ${lane.rev} waits for your seal`, machine: machineOf(lane.order) });
+        ...words(`o-${lane.order} rev ${lane.rev}`, "waits for your seal", " "), machine: machineOf(lane.order) });
     }
   }
   for (const [order, entry] of plantViews) {
@@ -78,7 +79,7 @@ export function inboxItems(view, plantViews = new Map(), doubts = new Map()) {
     const id = Number(String(order).replace(/^o-/, ""));
     if (residue.length === 0 || !live(id)) continue;
     add({ key: `residue:${order}`, kind: "residue", id,
-      text: `${order}: ${plural(residue.length, "residue item")} to rule on`, machine: residue[0].machine_id ?? machineOf(id) });
+      ...words(order, `${plural(residue.length, "residue item")} to rule on`), machine: residue[0].machine_id ?? machineOf(id) });
   }
   for (const doubt of doubts.values()) {
     const task = tasks.get(doubt.task);
@@ -86,7 +87,7 @@ export function inboxItems(view, plantViews = new Map(), doubts = new Map()) {
     const found = [doubt.inconsistent && `${doubt.inconsistent} inconsistent`, doubt.unclear && `${doubt.unclear} unclear`]
       .filter((part) => part).join(", ");
     add({ key: `vision:${doubt.task}:${doubt.run}`, kind: "vision", id: doubt.task,
-      text: `t-${doubt.task} vision: ${found} (advisory)`, machine: task.machine ?? null });
+      ...words(`t-${doubt.task} vision`, `${found} (advisory)`), machine: task.machine ?? null });
   }
   return [...items.values()].sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.id - b.id);
 }
@@ -199,7 +200,8 @@ export function installInbox(kit) {
       const button = element("button", `item ${item.kind}`);
       button.type = "button";
       button.dataset.key = item.key;
-      button.append(element("span", "kind", KIND_WORDS[item.kind]), element("span", "text", item.text));
+      button.append(element("span", "kind", KIND_WORDS[item.kind]), element("span", "text", item.line));
+      button.title = item.detail;
       button.setAttribute("aria-label", item.machine ? `${item.text}. Go to ${item.machine}.` : item.text);
       if (item.machine === null) button.disabled = true;
       button.addEventListener("click", () => flyTo(kit, item.machine));

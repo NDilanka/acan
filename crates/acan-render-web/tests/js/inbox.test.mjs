@@ -3,6 +3,7 @@
 // notification rule. Run with:
 //   node --test crates/acan-render-web/tests/js/inbox.test.mjs
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -139,4 +140,28 @@ test("a notification goes out only while hidden, opted in, allowed and live", ()
   assert.equal(shouldNotify({ ...yes, optedIn: false }), false);
   assert.equal(shouldNotify({ ...yes, permission: "default" }), false);
   assert.equal(shouldNotify({ ...yes, live: false }), false, "a replay or a rewound map notifies nobody");
+});
+
+test("each needs-you row is one short line, its detail on hover", () => {
+  const byKey = Object.fromEntries(inboxItems(view()).map((item) => [item.key, item]));
+  assert.deepEqual([byKey["clash:2"].line, byKey["clash:2"].detail], ["c-2 · breaks w-3", "tasks overlap, choose a settle"]);
+  assert.deepEqual([byKey["question:7"].line, byKey["question:7"].detail], ["q-7 asks", "keep the old header?"]);
+  assert.deepEqual([byKey["stopped:3"].line, byKey["stopped:3"].detail], ["o-3 stopped", "repair budget spent"]);
+  assert.deepEqual([byKey["seal:2:3"].line, byKey["seal:2:3"].detail], ["o-2 rev 3", "waits for your seal"]);
+  assert.equal(byKey["seal:2:3"].text, "o-2 rev 3 waits for your seal", "the spoken text is the whole sentence");
+  for (const item of Object.values(byKey)) {
+    assert.ok(!item.line.includes(":"), `${item.key} shows no reason on its line`);
+    assert.ok(item.text.startsWith(item.line) && item.text.endsWith(item.detail), item.key);
+  }
+});
+
+test("a needs-you row paints its line, holds its detail as the title, and still flies on click", () => {
+  const js = readFileSync(new URL("../../www/inbox.js", import.meta.url), "utf8");
+  assert.match(js, /element\("span", "text", item\.line\)/);
+  assert.match(js, /button\.title = item\.detail;/);
+  assert.match(js, /button\.dataset\.key = item\.key;/);
+  assert.match(js, /button\.addEventListener\("click", \(\) => flyTo\(kit, item\.machine\)\);/);
+  assert.match(js, /goKeys\.set\("i", /);
+  const html = readFileSync(new URL("../../www/index.html", import.meta.url), "utf8");
+  assert.match(html, /#inbox \.item \.text \{[^}]*white-space: nowrap;/);
 });
