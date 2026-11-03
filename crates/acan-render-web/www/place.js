@@ -166,7 +166,7 @@ export function standsBeside(kind) {
 
 // The flag kinds whose words wait for a hover: a clash's detail, an order's tag and a plot's
 // scope line. Everything else on the map keeps its words.
-export const HOVER_KINDS = new Set(["clash", "order"]);
+export const HOVER_KINDS = new Set(["clash", "order", "plot"]);
 
 // What a flag shows now: "open" for its words, "mark" for a plot's small mark, or "hidden".
 // `hover` is `{ clash }` while a clash diamond or its badges are under the pointer, `{ machine }`
@@ -180,6 +180,29 @@ export function markWords(flag, hover, alt, lead = false) {
     : hover?.machine !== undefined && hover.machine === flag.on;
   if (hit) return "open";
   return flag.kind === "plot" && lead ? "mark" : "hidden";
+}
+
+// Whether a plot flag is a draft: its line says `draft rev N` until a human confirms the scope.
+export function isDraftPlot(flag) {
+  return flag.kind === "plot" && !flag.text.includes(" confirmed ");
+}
+
+// The plot flag that leads each machine, the first one on it, as a Map from its index in `flags`
+// to `{ draft }`, where `draft` says whether any plot on that machine is still a draft, so the
+// one mark keeps the draft's ring until every lane there is confirmed.
+export function plotLeads(flags) {
+  const first = new Map();
+  const leads = new Map();
+  flags.forEach((flag, index) => {
+    if (flag.kind !== "plot") return;
+    const key = flag.on ?? `#${index}`;
+    if (!first.has(key)) {
+      first.set(key, index);
+      leads.set(index, { draft: false });
+    }
+    if (isDraftPlot(flag)) leads.get(first.get(key)).draft = true;
+  });
+  return leads;
 }
 
 // A clash badge's diameter in CSS px, as the wasm side sizes it (`marks::BADGE_PX`).

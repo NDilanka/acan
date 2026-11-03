@@ -8,7 +8,7 @@ import { canvas, flagsEl, labelsEl, leadersEl, state } from "./state.js";
 import { requestRender } from "./main.js";
 import {
   BADGE_PX, GHOST_HOLD_MS, LAST_SEEN_KEY, agentFlagShown, badgeBoxes, boxAt, clearOf, flagSpot, foldColumn, inView,
-  markWords, placeOverlays, seenOnReturn, standsBeside, unnamedSpots,
+  isDraftPlot, markWords, placeOverlays, plotLeads, seenOnReturn, standsBeside, unnamedSpots,
 } from "./place.js";
 import { questionOfFlag } from "./question.js";
 import { isLive } from "./stream.js";
@@ -90,6 +90,7 @@ export function placeLabels() {
   let next = leaders;
   plots.forEach((plot, i) => {
     const visible = showFlag(plot.el, plot.left, plotTops[i]);
+    plot.el.placed = visible ? { left: plot.left, top: plotTops[i], w: plot.w, h: plot.h } : null;
     const leader = plotLeaders[i];
     if (visible && leader !== null) {
       // The leader takes the flag's own tint, so it reads as that flag's.
@@ -322,6 +323,8 @@ export function droneHover(x, y) {
 function markAt(x, y) {
   const clash = pinAt(x, y);
   if (clash !== null) return { clash };
+  const mark = plotMarkAt(x, y);
+  if (mark !== null) return { machine: mark };
   if (state.view === null || !state.markState.flags.some((flag) => flag.on && flag.kind !== "clash")) return null;
   const project = (wx, wy) => state.app.world_to_screen(wx, wy);
   const topOf = (machine) => {
@@ -335,6 +338,22 @@ function markAt(x, y) {
     .every(([px, py]) => px >= -w && px <= 2 * w && py >= -h && py <= 2 * h));
   const machine = machineAt(near, project, x, y, [], topOf);
   return machine === null ? null : { machine };
+}
+
+// How far past a plot mark's box the pointer still hovers it, in CSS px.
+const MARK_PICK_PX = 4;
+
+// The machine whose plot mark, or open plot flag, is under the CSS point, or null.
+function plotMarkAt(x, y) {
+  for (let i = 0; i < state.flagEls.length; i += 1) {
+    const box = state.flagEls[i].placed;
+    if (!box || state.flagEls[i].style.visibility !== "visible") continue;
+    if (x >= box.left - MARK_PICK_PX && x <= box.left + box.w + MARK_PICK_PX
+      && y >= box.top - MARK_PICK_PX && y <= box.top + box.h + MARK_PICK_PX) {
+      return state.markState.flags[i].on ?? null;
+    }
+  }
+  return null;
 }
 
 // The map mark under the pointer, besides a drone, as `markAt` gives it.
@@ -532,6 +551,44 @@ function placeGhostFlags(placedBoxes) {
   for (let i = shown; i < ghostEls.length; i += 1) ghostEls[i].hidden = true;
 }
 
+// The plot flag that leads each machine, by flag index, as `plotLeads` gives it.
+let plotLeadOf = new Map();
+
+// A plot rests as one small amber mark on its machine: a ring while any scope there is a draft,
+// a dot once every one is confirmed. Its line and Alt detail open on hover.
+const PLOT_MARK_PX = 10;
+const AMBER = "#d9a441";
+
+function plotMark(el, draft) {
+  const mark = document.createElement("span");
+  mark.className = "mark";
+  mark.title = draft ? "draft scope" : "confirmed scope";
+  Object.assign(mark.style, {
+    display: "none",
+    width: `${PLOT_MARK_PX}px`,
+    height: `${PLOT_MARK_PX}px`,
+    borderRadius: "50%",
+    boxSizing: "border-box",
+    background: draft ? "var(--page)" : AMBER,
+    border: draft ? `2px solid ${AMBER}` : "none",
+    boxShadow: "0 0 0 1.5px var(--page)",
+  });
+  el.prepend(mark);
+  el.mark = mark;
+}
+
+// Shows a plot flag as its mark or its words, as `markWords` says, measuring it again on a change.
+function setPlotMode(el, mode) {
+  if (el.mode === mode || el.mark === undefined) return;
+  el.mode = mode;
+  const rest = mode === "mark";
+  for (const child of el.children) child.style.display = (child === el.mark) === rest ? "" : "none";
+  Object.assign(el.style, rest
+    ? { border: "none", background: "none", padding: "0", boxShadow: "none" }
+    : { border: "", background: "", padding: "", boxShadow: "" });
+  el.size = undefined;
+}
+
 // The marks come from the wasm side: each agent with its activity, the active order, each open
 // clash and each question. They are rebuilt when the view changes, and placed every frame.
 export function paintMarks() {
@@ -548,8 +605,10 @@ export function paintMarks() {
     flagsEl.append(...pair);
     badgeEls.set(badges.clash, pair);
   }
-  state.flagEls = state.markState.flags.map((flag) => {
+  plotLeadOf = plotLeads(state.markState.flags);
+  state.flagEls = state.markState.flags.map((flag, index) => {
     const el = flagElement(flag);
+    if (flag.kind === "plot") plotMark(el, plotLeadOf.get(index)?.draft ?? isDraftPlot(flag));
     flagsEl.append(el);
     return el;
   });
@@ -762,6 +821,15 @@ function placeFlags(placedBoxes) {
     const y = quads[k + 3];
     const agent = state.markState.flags[quads[k]].drone?.agent;
     if (agent !== undefined) openDetail(el, state.altDown || agent === hovered);
+    if (el.classList.contains("plot")) {
+      const mode = markWords(state.markState.flags[quads[k]], mapHover, state.altDown, plotLeadOf.has(quads[k]));
+      if (mode === "hidden") {
+        el.style.visibility = "hidden";
+        el.placed = null;
+        continue;
+      }
+      setPlotMode(el, mode);
+    }
     if (el.size === undefined) el.size = [el.offsetWidth, el.offsetHeight];
     if (machine < 0 && el.classList.contains("plot")) {
       const [w, h] = el.size;
