@@ -114,6 +114,29 @@ export function placeOverlays({ placed, labels, plots, width, height, pad }) {
   return { labelShown, plotTops, plotLeaders };
 }
 
+// The most agent flags one machine's column shows. The rest fold into one `+N` flag.
+export const FLAGS_PER_COLUMN = 2;
+
+// How a column ranks its agents' flags, nearest the drones first: one that waits on the user,
+// then a stale one, then a working one, then an idle one.
+const FLAG_RANK = { waiting: 0, stale: 1, working: 2, idle: 3 };
+
+// Whether an agent's flag shows: always for a working, waiting or stale drone, and for an idle one
+// only while it is hovered or Alt is down.
+export function agentFlagShown(stateWord, alt, hovered) {
+  return stateWord !== "idle" || alt || hovered;
+}
+
+// The flags a machine's column shows, ranked, and how many fold into its `+N`. Each item carries
+// its drone's `state` word. Items of one rank keep their order.
+export function foldColumn(items, max = FLAGS_PER_COLUMN) {
+  const rank = (item) => FLAG_RANK[item.state] ?? Object.keys(FLAG_RANK).length;
+  const ranked = items.map((item, i) => ({ item, i }))
+    .sort((a, b) => rank(a.item) - rank(b.item) || a.i - b.i)
+    .map(({ item }) => item);
+  return { shown: ranked.slice(0, max), folded: Math.max(0, ranked.length - max) };
+}
+
 // Whether a flag of `kind` starts beside its anchor, centred on its y, rather than centred above
 // it: a clash label right of its diamond, a landed dot right of its machine's point, and an away
 // dot with its ring on the plinth's corner.

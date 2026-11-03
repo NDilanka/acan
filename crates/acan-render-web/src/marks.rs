@@ -443,6 +443,20 @@ pub enum FlagKind {
     Stage,
 }
 
+/// What an agent's flag says of its drone, beyond its short text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DroneFlag {
+    /// The agent id in full, as `acan:drone-hover` and the ride name it.
+    pub agent: String,
+    /// The drone's state, as [`DroneState::word`] gives it.
+    pub state: &'static str,
+    /// How long a stale agent has been quiet, such as `3m`.
+    pub quiet: Option<String>,
+}
+
+/// The most characters of an agent id its flag shows.
+const FLAG_ID_CHARS: usize = 12;
+
 /// A label the page draws over the plant, with its anchor in world units.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Flag {
@@ -463,6 +477,8 @@ pub struct Flag {
     pub detail: Vec<String>,
     /// On a clash flag, the confirmed scope the clash sits inside, in words.
     pub scope: Option<String>,
+    /// On an agent's flag, the drone it names.
+    pub drone: Option<DroneFlag>,
     /// The plan index of the machine an agent's flag stacks on, so the page groups them.
     #[serde(skip)]
     pub machine: Option<usize>,
@@ -613,7 +629,7 @@ impl Marks {
             .map(|i| view.machines.get(i).is_some_and(|machine| machine.abnormal))
             .collect();
         let scope = slice_layout(&view.lanes, plan);
-        let mut flags = flags(view, plan, stands, &bodies, &pins);
+        let mut flags = flags(view, plan, stands, &bodies, &pins, clock);
         flags.extend(away_flags(view, plan, slots, &waiting, clock));
         flags.extend(
             scope
@@ -700,6 +716,7 @@ pub fn stage_flags(spots: &[Spot], plan: &Plan, stands: &[Stand]) -> Vec<Flag> {
                 scope: None,
                 machine: Some(machine),
                 at: [centre[0], centre[1], top + ORDER_LIFT],
+                drone: None,
                 follow: Follow::Still,
             });
         }
@@ -2123,6 +2140,7 @@ fn away_flags(
                     footprint.min[1] + footprint.size[1] - LANDED_INSET,
                     PLINTH_TOP,
                 ],
+                drone: None,
                 follow: Follow::Still,
             })
         })
@@ -2184,23 +2202,17 @@ fn pins(view: &View, plan: &Plan, stands: &[Stand]) -> Vec<Pin> {
         .collect()
 }
 
-fn flags(view: &View, plan: &Plan, stands: &[Stand], bodies: &[Body], pins: &[Pin]) -> Vec<Flag> {
+fn flags(
+    view: &View,
+    plan: &Plan,
+    stands: &[Stand],
+    bodies: &[Body],
+    pins: &[Pin],
+    clock: Clock,
+) -> Vec<Flag> {
     let mut out = Vec::new();
     for body in bodies {
-        out.push(Flag {
-            kind: FlagKind::Agent,
-            text: format!("{} · {}", body.agent, body.activity),
-            hue: Some(hue_css(body.slot)),
-            waiting: body.waiting(),
-            clash: None,
-            check: body.check.clone(),
-            leaving: false,
-            detail: Vec::new(),
-            scope: None,
-            machine: Some(body.machine),
-            at: body.at,
-            follow: Follow::Body(body.agent.clone()),
-        });
+        out.push(agent_flag(view, body, clock));
     }
     out.extend(landed_flags(view, plan));
     // One flag for the order in progress, the same one the page's order strip names.
@@ -2230,6 +2242,7 @@ fn flags(view: &View, plan: &Plan, stands: &[Stand], bodies: &[Body], pins: &[Pi
             scope: None,
             machine: None,
             at: [centre[0], centre[1], top + ORDER_LIFT],
+            drone: None,
             follow: Follow::Still,
         });
     }
@@ -2246,6 +2259,7 @@ fn flags(view: &View, plan: &Plan, stands: &[Stand], bodies: &[Body], pins: &[Pi
             scope: view.clashes[pin.clash].scope.clone(),
             machine: None,
             at: [pin.at[0], pin.at[1], pin.at[2] + STALK_HEIGHT],
+            drone: None,
             follow: Follow::Pin(pin.id.clone()),
         });
     }
@@ -2265,6 +2279,7 @@ fn flags(view: &View, plan: &Plan, stands: &[Stand], bodies: &[Body], pins: &[Pi
             scope: None,
             machine: None,
             at: [at[0], at[1], PLINTH_TOP + ORDER_LIFT],
+            drone: None,
             follow: Follow::Still,
         });
     }
@@ -2289,7 +2304,45 @@ fn plot_flag(slice: &Slice, plan: &Plan, stands: &[Stand]) -> Flag {
         scope: None,
         machine: None,
         at: [centre[0], centre[1], top + ORDER_LIFT],
+        drone: None,
         follow: Follow::Still,
+    }
+}
+
+/// An agent's flag: its id cut to [`FLAG_ID_CHARS`], with its activity and task title as the
+/// detail that hover or Alt adds. A stale agent's flag says how long it has been quiet.
+fn agent_flag(view: &View, body: &Body, clock: Clock) -> Flag {
+    let agent = view
+        .agents
+        .iter()
+        .find(|agent| agent.id.to_string() == body.agent);
+    let title = agent
+        .and_then(|agent| agent.task)
+        .and_then(|task| view.tasks.iter().find(|candidate| candidate.id == task))
+        .map(|task| task.title.clone());
+    let quiet = (body.state == DroneState::Stale)
+        .then(|| agent.and_then(|agent| clock.quiet(agent)).map(away_stamp))
+        .flatten();
+    Flag {
+        kind: FlagKind::Agent,
+        text: body.agent.chars().take(FLAG_ID_CHARS).collect(),
+        hue: Some(hue_css(body.slot)),
+        waiting: body.waiting(),
+        clash: None,
+        check: body.check.clone(),
+        leaving: false,
+        detail: std::iter::once(body.activity.to_owned())
+            .chain(title)
+            .collect(),
+        scope: None,
+        drone: Some(DroneFlag {
+            agent: body.agent.clone(),
+            state: body.state.word(),
+            quiet,
+        }),
+        machine: Some(body.machine),
+        at: body.at,
+        follow: Follow::Body(body.agent.clone()),
     }
 }
 
@@ -2323,6 +2376,7 @@ fn landed_flags(view: &View, plan: &Plan) -> Vec<Flag> {
                 scope: None,
                 machine: None,
                 at: [x + LANDED_INSET, y + LANDED_INSET, PLINTH_TOP],
+                drone: None,
                 follow: Follow::Landed { machine, count },
             }
         })
@@ -2516,6 +2570,7 @@ mod tests {
             scope: None,
             machine: None,
             at: [0.0; 3],
+            drone: None,
             follow: Follow::Still,
         }
     }
@@ -3111,6 +3166,60 @@ mod tests {
             body.map(|body| body.state),
             Some(DroneState::Waiting),
             "an agent that waits on the user is never away"
+        );
+    }
+
+    #[test]
+    fn an_agent_flag_names_its_drone_short_and_says_how_long_a_stale_one_is_quiet() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let mut view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        view.clashes.clear();
+        let heard = view.agents[0].heard_at.expect("the agent was heard");
+        let agent = view.agents[0].id.to_string();
+        let slots = slots_for(&view);
+        let stands = stands(&plan);
+        let flag_at = |now: Option<u64>| {
+            let clock = Clock { now, away: None };
+            Marks::build_at(&view, &plan, &stands, &slots, clock)
+                .flags
+                .into_iter()
+                .find(|flag| flag.follow == Follow::Body(agent.clone()))
+                .expect("the agent has a flag")
+        };
+        let fresh = flag_at(None);
+        assert_eq!(
+            fresh.text,
+            agent.chars().take(FLAG_ID_CHARS).collect::<String>()
+        );
+        let drone = fresh.drone.clone().expect("an agent flag names its drone");
+        assert_eq!(drone.agent, agent);
+        assert_eq!(drone.state, "working");
+        assert_eq!(drone.quiet, None);
+        let title = view.agents[0]
+            .task
+            .and_then(|task| view.tasks.iter().find(|candidate| candidate.id == task))
+            .map(|task| task.title.clone())
+            .expect("the agent holds a task");
+        assert_eq!(
+            fresh.detail,
+            vec![view.agents[0].activity.to_owned(), title],
+            "hover or Alt adds the activity and the task title"
+        );
+        let stale = flag_at(Some(heard + 3 * 60_000));
+        let drone = stale.drone.expect("an agent flag names its drone");
+        assert_eq!(drone.state, "stale");
+        assert_eq!(drone.quiet.as_deref(), Some("3m"));
+
+        let long = Body {
+            agent: "a-very-long-agent-name".to_owned(),
+            ..Marks::build(&view, &plan, &stands, &slots).bodies[0].clone()
+        };
+        let flag = agent_flag(&view, &long, Clock::default());
+        assert_eq!(flag.text, "a-very-long-", "cut to twelve characters");
+        assert_eq!(
+            flag.drone.map(|drone| drone.agent).as_deref(),
+            Some("a-very-long-agent-name")
         );
     }
 

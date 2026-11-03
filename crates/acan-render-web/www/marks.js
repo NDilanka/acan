@@ -7,8 +7,8 @@ import { machineQuad } from "./order.js";
 import { canvas, flagsEl, labelsEl, leadersEl, state } from "./state.js";
 import { requestRender } from "./main.js";
 import {
-  BADGE_PX, GHOST_HOLD_MS, LAST_SEEN_KEY, badgeBoxes, boxAt, clearOf, inView, placeOverlays, seenOnReturn,
-  standsBeside, unnamedSpots,
+  BADGE_PX, GHOST_HOLD_MS, LAST_SEEN_KEY, agentFlagShown, badgeBoxes, boxAt, clearOf, foldColumn, inView,
+  placeOverlays, seenOnReturn, standsBeside, unnamedSpots,
 } from "./place.js";
 import { questionOfFlag } from "./question.js";
 import { isLive } from "./stream.js";
@@ -38,9 +38,14 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 
 // The riding agent's own flag is hidden: the chip replaces it.
 function isRiderFlag(flag) {
-  return state.ridden !== "" && flag !== undefined && flag.kind === "agent"
-    && flag.text.startsWith(`${state.ridden} \u00B7 `);
+  return state.ridden !== "" && flag?.drone?.agent === state.ridden;
 }
+
+// An agent's name flag is a pill in its hue: PILL_PX high, with a POINTER_PX pointer at its
+// bottom left, POINTER_INSET_PX in from its edge, that points at the drone's crown.
+const PILL_PX = 18;
+const POINTER_PX = 5;
+const POINTER_INSET_PX = 6;
 
 // Labels come in priority order, larger and nearer first. A label that would overlap one
 // already placed stays hidden, so the plant never shows a pile of names. The page's fixed panels,
@@ -282,6 +287,36 @@ function watchGhosts() {
 // The ghosts' Alt chips, made on first use. paintMarks empties the flags, and these with them.
 let ghostEls = [];
 
+// The `+N` flags of the columns that fold, made on first use and emptied with the flags.
+let moreEls = [];
+
+// The `index`th `+N` flag, saying `folded` more agents are on the machine, measured.
+function moreElement(index, folded) {
+  let el = moreEls[index];
+  if (el === undefined) {
+    el = document.createElement("div");
+    el.className = "flag more";
+    Object.assign(el.style, {
+      height: `${PILL_PX}px`,
+      borderRadius: `${PILL_PX / 2}px`,
+      padding: "0 7px",
+      boxSizing: "border-box",
+      font: `600 11px/${PILL_PX}px var(--sans)`,
+      color: "var(--muted)",
+    });
+    flagsEl.append(el);
+    moreEls[index] = el;
+  }
+  const words = `+${folded}`;
+  if (el.textContent !== words) {
+    el.textContent = words;
+    el.size = undefined;
+  }
+  el.hidden = false;
+  if (el.size === undefined) el.size = [el.offsetWidth, el.offsetHeight];
+  return el;
+}
+
 // Each clash's two badge elements, by clash index, as paintMarks last made them.
 let badgeEls = new Map();
 
@@ -365,6 +400,7 @@ export function paintMarks() {
   state.markState = JSON.parse(state.app.marks_json());
   flagsEl.replaceChildren();
   ghostEls = [];
+  moreEls = [];
   badgeEls = new Map();
   for (const badges of state.markState.badges) {
     const pair = [badgeElement(badges.a, badges.clash), badgeElement(badges.b, badges.clash)];
@@ -395,7 +431,8 @@ function flagElement(flag) {
   // A tour step's chips say what the plate's stage list says in words, so a screen reader hears
   // them once, from the list.
   if (flag.kind === "stage") el.setAttribute("aria-hidden", "true");
-  if (flag.hue) {
+  // The pill itself carries an agent's hue, so it needs no hue dot.
+  if (flag.hue && flag.kind !== "agent") {
     const dot = document.createElement("span");
     dot.className = "dot";
     dot.style.background = flag.hue;
@@ -413,7 +450,8 @@ function flagElement(flag) {
     text.textContent = flag.text;
     el.append(text);
   }
-  if (flag.check) el.append(checkChip(flag.check));
+  if (flag.kind === "agent") pillStyle(el, flag);
+  if (flag.check) el.append(checkChip(flag.check, flag.kind === "agent"));
   if (flag.kind === "plot") el.classList.add(flag.text.includes(" confirmed ") ? "confirmed" : "draft");
   if (flag.scope) {
     const scope = document.createElement("span");
@@ -422,7 +460,7 @@ function flagElement(flag) {
     el.title = flag.scope;
     el.append(scope);
   }
-  if (state.altDown && flag.detail.length > 0) {
+  if (state.altDown && flag.detail.length > 0 && flag.kind !== "agent") {
     const lines = document.createElement("span");
     lines.className = "detail";
     for (const line of flag.detail) {
@@ -435,6 +473,8 @@ function flagElement(flag) {
   if (flag.waiting) {
     const amber = document.createElement("span");
     amber.className = "dot wait";
+    // A paper ring keeps the amber clear of the hue under it.
+    if (flag.kind === "agent") amber.style.boxShadow = "0 0 0 1px #ffffff";
     el.append(amber);
   }
   if (flag.clash !== null) {
@@ -447,6 +487,46 @@ function flagElement(flag) {
     });
   }
   return el;
+}
+
+// The pill: white 11 px text on the agent's hue, a stale agent's quiet time in softer white, and
+// with Alt its activity and task title. A pointer at its bottom left points at the crown, unless
+// the flag stands in a column or moved, where a leader in its hue takes over.
+function pillStyle(el, flag) {
+  Object.assign(el.style, {
+    background: flag.hue,
+    color: "#ffffff",
+    border: "none",
+    borderRadius: `${PILL_PX / 2}px`,
+    height: `${PILL_PX}px`,
+    padding: "0 8px",
+    boxSizing: "border-box",
+    font: `600 11px/${PILL_PX}px var(--sans)`,
+    gap: "5px",
+  });
+  el.title = flag.drone.agent;
+  const soft = (words) => {
+    const span = document.createElement("span");
+    span.textContent = words;
+    span.style.color = "rgba(255, 255, 255, 0.78)";
+    span.style.fontWeight = "400";
+    return span;
+  };
+  if (flag.drone.quiet !== null) el.append(soft(flag.drone.quiet));
+  if (state.altDown && flag.detail.length > 0) el.append(soft(flag.detail.join(" \u00B7 ")));
+  const pointer = document.createElement("span");
+  pointer.className = "pointer";
+  Object.assign(pointer.style, {
+    position: "absolute",
+    left: `${POINTER_INSET_PX}px`,
+    top: "100%",
+    width: "0",
+    height: "0",
+    borderTop: `${POINTER_PX}px solid ${flag.hue}`,
+    borderRight: `${POINTER_PX}px solid transparent`,
+  });
+  el.append(pointer);
+  el.pointer = pointer;
 }
 
 // An away dot is a bare hollow ring in the agent's hue with its quiet time in muted mono, so it
@@ -469,9 +549,13 @@ function awayStyle(el, ring, hue) {
 
 // A witness chip: a grey ring while the check is pending, a dark tick when it passed, a red dot
 // when it failed. Alt adds its words, such as `w3 · passed`.
-function checkChip(check) {
+function checkChip(check, onPill = false) {
   const chip = document.createElement("span");
   chip.className = `chip ${check.state}`;
+  // On a hue pill the chip keeps a paper ground, so its grey ring and dark tick still read.
+  if (onPill) {
+    Object.assign(chip.style, { background: "#ffffff", borderRadius: "6px", padding: "0 3px", lineHeight: "12px" });
+  }
   chip.title = `${check.name} · ${check.state}`;
   chip.append(document.createElement("i"));
   if (state.altDown) {
@@ -483,9 +567,10 @@ function checkChip(check) {
 }
 
 // Flags are placed before the names and are never hidden for overlap; a flag is hidden only when
-// it is off the canvas. An agent's flags stack in a column above their machine's drones, each with
-// a leader line to its drone's crown, and a flag never sits on a drone because the column starts
-// above the crowns. A clash label starts to the right of its diamond, and the order flag sits
+// it is off the canvas. An agent's flags stack in a column above their machine's drones, at most
+// FLAGS_PER_COLUMN with the rest folded into `+N`, and a flag never sits on a drone because the
+// column starts above the crowns. A lone flag that keeps its place points at its drone; any other
+// draws a leader in its hue. An idle drone's flag shows only with Alt. A clash label starts to the right of its diamond, and the order flag sits
 // above its machine. A flag that would cover a flag or a panel placed before it moves up clear of
 // it. Each flag keeps its place as the drones and diamonds move. The plot flags are the exception:
 // they are returned, not placed here, and placed after the names, so they move clear of a name.
@@ -516,8 +601,9 @@ function placeFlags(placedBoxes) {
       continue;
     }
     if (machine >= 0) {
+      const flag = state.markState.flags[quads[k]];
       if (!columns.has(machine)) columns.set(machine, []);
-      columns.get(machine).push({ el, x, y });
+      columns.get(machine).push({ el, x, y, flag, state: flag.drone?.state ?? "working" });
       continue;
     }
     const [w, h] = el.size;
@@ -534,18 +620,39 @@ function placeFlags(placedBoxes) {
     placeFlag(el, left, top, placedBoxes);
   }
   let leaders = 0;
+  let more = 0;
   for (const column of columns.values()) {
-    const centre = column.reduce((sum, item) => sum + item.x, 0) / column.length;
-    let bottom = Math.min(...column.map((item) => item.y)) - LABEL_OFFSET_PX;
-    for (const item of column) {
+    const wanted = column.filter((item) => agentFlagShown(item.state, state.altDown, false));
+    for (const item of column) item.el.style.visibility = "hidden";
+    const { shown, folded } = foldColumn(wanted);
+    if (shown.length === 0) continue;
+    const single = shown.length === 1;
+    const centre = shown.reduce((sum, item) => sum + item.x, 0) / shown.length;
+    let bottom = Math.min(...shown.map((item) => item.y)) - (single ? POINTER_PX : LABEL_OFFSET_PX);
+    let lastLeft = centre;
+    for (const item of shown) {
       const [w, h] = item.el.size;
-      const top = clearOf(centre - w / 2, bottom - h, w, h, placedBoxes, LABEL_PAD_PX);
-      placeFlag(item.el, centre - w / 2, top, placedBoxes);
-      drawLeader(leaders, centre, top + h, item.x, item.y);
-      leaders += 1;
+      const left = single ? item.x - POINTER_INSET_PX : centre - w / 2;
+      const top = clearOf(left, bottom - h, w, h, placedBoxes, LABEL_PAD_PX);
+      placeFlag(item.el, left, top, placedBoxes);
+      const pointed = single && top === bottom - h;
+      if (item.el.pointer !== undefined) item.el.pointer.style.display = pointed ? "" : "none";
+      if (!pointed) {
+        drawLeader(leaders, left + (single ? POINTER_INSET_PX : w / 2), top + h, item.x, item.y, item.flag.hue ?? "", "1px");
+        leaders += 1;
+      }
+      lastLeft = left;
       bottom = top - FLAG_ROW_GAP_PX;
     }
+    if (folded > 0) {
+      const el = moreElement(more, folded);
+      more += 1;
+      const [w, h] = el.size;
+      const left = single ? lastLeft : centre - w / 2;
+      placeFlag(el, left, clearOf(left, bottom - h, w, h, placedBoxes, LABEL_PAD_PX), placedBoxes);
+    }
   }
+  for (let i = more; i < moreEls.length; i += 1) moreEls[i].hidden = true;
   placeGhostFlags(placedBoxes);
   return { plots, leaders };
 }
@@ -575,8 +682,9 @@ function showFlag(el, left, top) {
 
 // A thin line from a flag's bottom edge to its bot's crown. The leaders sit under the flags, so
 // a flag hides the start of its own line. A tint, when given, colours the line and makes it a
-// little heavier, so a moved plot or keep flag's line reads at a glance; else it is grey.
-function drawLeader(index, x1, y1, x2, y2, tint = "") {
+// little heavier, so a moved plot or keep flag's line reads at a glance; else it is grey. An agent's
+// leader passes its own 1 px width, the weight of the pointer it stands in for.
+function drawLeader(index, x1, y1, x2, y2, tint = "", width = "1.5px") {
   let line = state.leaderEls[index];
   if (line === undefined) {
     line = document.createElementNS(SVG_NS, "line");
@@ -588,7 +696,7 @@ function drawLeader(index, x1, y1, x2, y2, tint = "") {
   line.setAttribute("x2", String(x2));
   line.setAttribute("y2", String(y2));
   line.style.stroke = tint;
-  line.style.strokeWidth = tint === "" ? "" : "1.5px";
+  line.style.strokeWidth = tint === "" ? "" : width;
   line.style.display = "";
 }
 

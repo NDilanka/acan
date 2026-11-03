@@ -3,7 +3,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { AWAY_MS, seenOnReturn, standsBeside } from "../../www/place.js";
+import {
+  AWAY_MS, FLAGS_PER_COLUMN, agentFlagShown, foldColumn, seenOnReturn, standsBeside,
+} from "../../www/place.js";
 
 const NOW = 1_700_000_000_000;
 
@@ -38,4 +40,29 @@ test("an away dot starts on its plinth corner, beside its anchor, as a landed do
   for (const kind of ["agent", "order", "question", "plot", "stage"]) {
     assert.equal(standsBeside(kind), false, kind);
   }
+});
+
+test("an idle drone's flag shows only on hover or with Alt", () => {
+  for (const word of ["working", "waiting", "stale"]) assert.equal(agentFlagShown(word, false, false), true, word);
+  assert.equal(agentFlagShown("idle", false, false), false);
+  assert.equal(agentFlagShown("idle", true, false), true, "Alt");
+  assert.equal(agentFlagShown("idle", false, true), true, "hover");
+});
+
+test("a column shows two flags, most urgent first, and folds the rest into +N", () => {
+  assert.equal(FLAGS_PER_COLUMN, 2);
+  const items = [
+    { id: "a", state: "working" },
+    { id: "b", state: "idle" },
+    { id: "c", state: "waiting" },
+    { id: "d", state: "working" },
+    { id: "e", state: "stale" },
+  ];
+  const { shown, folded } = foldColumn(items);
+  assert.deepEqual(shown.map((item) => item.id), ["c", "e"]);
+  assert.equal(folded, 3);
+  const calm = foldColumn([{ id: "a", state: "working" }, { id: "d", state: "working" }]);
+  assert.deepEqual(calm.shown.map((item) => item.id), ["a", "d"], "one rank keeps its order");
+  assert.equal(calm.folded, 0);
+  assert.deepEqual(foldColumn([]), { shown: [], folded: 0 });
 });
