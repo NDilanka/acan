@@ -37,7 +37,8 @@ const _: () = assert!(
 
 /// How long a plant view waits for the director before it serves the deterministic tour. No view
 /// waits: a call keeps running after the view is served, and its answer is cached for the receipt,
-/// so a view opened after the answer gets the director's tour.
+/// so a view opened after the answer gets the director's tour. The call starts when the receipt is
+/// recorded ([`prefetch`]), which leaves it time to answer before the view is opened.
 pub(crate) const DIRECTOR_WAIT: Duration = Duration::ZERO;
 
 /// How long one director call may take, counted from when it is accepted, so the wait for a slot
@@ -396,6 +397,17 @@ pub(crate) async fn fill<C: ModelClient + 'static>(host: &Host<C>, view: PlantVi
     fill_within(host, view, DIRECTOR_WAIT).await
 }
 
+/// Starts the director's call for `view` without waiting for it, so its answer is cached before a
+/// view of the receipt is opened. A receipt with an answer or a running call starts nothing, and
+/// a call that finds every ticket taken is not started here, so a view asks again when it is shown.
+pub(crate) fn prefetch<C: ModelClient + 'static>(host: &Host<C>, view: &PlantView) {
+    if *host.shutdown_signal().borrow() {
+        return;
+    }
+    if let Claim::Accepted(job, ticket) = host.tours().claim(&view.receipt_hash, Instant::now()) {
+        spawn(host, view.clone(), job, ticket);
+    }
+}
 
 /// [`fill`] with the wait given. The director's call runs in its own task, so a wait that ends
 /// first leaves the call running and its answer cached. The cached proposal is admitted against
@@ -969,6 +981,33 @@ mod tests {
             host.tours().calls_accepted(),
             1,
             "the call keeps running, for the cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prefetched_answer_fills_the_view_without_a_second_call() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let view = untoured(VIEW);
+        let tour = directed_tour(&fixture(VIEW));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let host = host_with(
+            dir.path(),
+            Counting {
+                inner: director(Reply::json(&tour)),
+                calls: Arc::clone(&calls),
+            },
+        )
+        .await;
+
+        prefetch(&host, &view);
+        prefetch(&host, &view);
+        let filled = fill_within(&host, view, Duration::from_secs(5)).await;
+
+        assert!(matches!(filled.tour, Some(TourView::Directed { .. })));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the prefetched call is the only call"
         );
     }
 

@@ -68,6 +68,8 @@ use crate::host::{self, Host, SubmitError};
 use crate::land::{self, Delivery, LandError};
 use crate::model::{self, ReplyError};
 use crate::observe::{self, ObserveError, Order, Plan};
+use crate::plant_view;
+use crate::tour;
 use crate::vision;
 
 /// Total attempts one job key gets before the loop stops retrying it. Chosen so a broken model
@@ -1031,7 +1033,10 @@ fn judged_episodes<C: ModelClient>(
 /// fails rather than judging a different commit. Then the candidate is observed and judged, and
 /// the receipt is recorded. The context must still match the recorded one, or the origin would
 /// refuse the receipt.
-async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), JobError> {
+async fn contrast<C: ModelClient + 'static>(
+    host: &Host<C>,
+    run: GateRunId,
+) -> Result<(), JobError> {
     let Some(workspace) = host.workspace() else {
         return Err(JobError::Unavailable(
             "this server has no git repository to gate candidates in".to_owned(),
@@ -1167,6 +1172,7 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
         receipt: Box::new(judged.receipt),
     }))
     .await?;
+    prefetch_tour(host, contrast.order);
     // The receipt is recorded, so the gate's outcome is fixed before the advisory witness runs,
     // and the witness reports its own failures instead of returning them.
     if let Some(vision) = host.vision() {
@@ -1183,6 +1189,23 @@ async fn contrast<C: ModelClient>(host: &Host<C>, run: GateRunId) -> Result<(), 
         .await;
     }
     Ok(())
+}
+
+/// Starts the director's call for the receipt `order` has just recorded, in the background, so its
+/// answer is cached before the plant view is opened. The contrast does not wait for it. A view that
+/// cannot be built starts no call, and the view is built again when it is opened.
+fn prefetch_tour<C: ModelClient + 'static>(host: &Host<C>, order: OrderId) {
+    let host = host.clone();
+    tokio::spawn(async move {
+        match plant_view::untoured_view(&host, order).await {
+            Ok(view) => tour::prefetch(&host, &view),
+            Err(err) => tracing::warn!(
+                %order,
+                error = ?err,
+                "the director's tour is not started: the plant view cannot be built"
+            ),
+        }
+    });
 }
 
 /// The command that records the protected inputs of the scope `order` was just confirmed under, at
