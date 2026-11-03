@@ -276,6 +276,19 @@ async fn pump<C: ModelClient>(
                 }
                 Err(RecvError::Closed) => watching = false,
             },
+            touch = touches.recv(), if touches_open => match touch {
+                Ok(touch) => {
+                    if !send_touch(&mut socket, &touch).await {
+                        return;
+                    }
+                }
+                // A touch is live only, so a stream that lags skips the ones it missed and goes on.
+                Err(RecvError::Lagged(missed)) => {
+                    tracing::debug!(missed, "a stream skipped live transition touches");
+                }
+                // No sender is left, so no more touches come. The events still stream.
+                Err(RecvError::Closed) => touches_open = false,
+            },
         }
     }
 }

@@ -14,7 +14,7 @@ use tree_sitter::Node;
 
 use crate::extract::{line_number, text};
 use crate::lang::Lang;
-use crate::model::{Confidence, State, StateMachine, Transition};
+use crate::model::{Confidence, Source, State, StateCandidate, StateMachine, Transition};
 
 /// Name suffixes that make a declared type status-like.
 const STATUS_SUFFIXES: [&str; 6] = ["State", "Status", "Phase", "Stage", "Mode", "Verdict"];
@@ -109,7 +109,14 @@ pub(crate) fn extract(lang: Lang, file: &str, root: Node, source: &[u8]) -> File
 /// A declaration is dropped when another declaration in its file has the same name, because the two
 /// share the id `{file}#{name}` and cannot be told apart. Both are dropped, so no site attaches to
 /// either.
+#[cfg(test)]
 pub(crate) fn resolve(files: Vec<FileStates>) -> Vec<StateMachine> {
+    resolve_all(files).0
+}
+
+/// [`resolve`], and also the declarations with two or more states that no site moves between. Those
+/// are candidates for the statemap refinement; the scanner does not report them as machines.
+pub(crate) fn resolve_all(files: Vec<FileStates>) -> (Vec<StateMachine>, Vec<StateCandidate>) {
     let mut declarations = Vec::new();
     let mut sites = Vec::new();
     for file in files {
@@ -154,44 +161,58 @@ pub(crate) fn resolve(files: Vec<FileStates>) -> Vec<StateMachine> {
             line: site.line,
             end_line: site.end_line,
             via: site.via.clone(),
+            source: Source::Scan,
+            label: None,
         });
     }
 
-    let mut machines: Vec<StateMachine> = declarations
-        .into_iter()
-        .zip(found)
-        .filter_map(|(declaration, mut transitions)| {
-            if transitions.is_empty() {
-                return None;
-            }
-            transitions.sort_by(|a, b| {
-                (&a.file, a.line, a.end_line, &a.from, &a.to, &a.via)
-                    .cmp(&(&b.file, b.line, b.end_line, &b.from, &b.to, &b.via))
-            });
-            transitions.dedup();
-            let confidence = if transitions.iter().all(|t| t.from != UNKNOWN_FROM) {
-                Confidence::High
-            } else {
-                Confidence::Low
-            };
-            Some(StateMachine {
+    let mut machines: Vec<StateMachine> = Vec::new();
+    let mut candidates: Vec<StateCandidate> = Vec::new();
+    for (declaration, mut transitions) in declarations.into_iter().zip(found) {
+        let states: Vec<State> = declaration
+            .states
+            .into_iter()
+            .map(|(name, line)| State {
+                name,
+                line,
+                label: None,
+            })
+            .collect();
+        if transitions.is_empty() {
+            candidates.push(StateCandidate {
                 id: format!("{}#{}", declaration.file, declaration.name),
                 name: declaration.name,
                 file: declaration.file,
                 line: declaration.line,
-                module: String::new(),
-                states: declaration
-                    .states
-                    .into_iter()
-                    .map(|(name, line)| State { name, line })
-                    .collect(),
-                transitions,
-                confidence,
-            })
-        })
-        .collect();
+                states,
+            });
+            continue;
+        }
+        transitions.sort_by(|a, b| {
+            (&a.file, a.line, a.end_line, &a.from, &a.to, &a.via)
+                .cmp(&(&b.file, b.line, b.end_line, &b.from, &b.to, &b.via))
+        });
+        transitions.dedup();
+        let confidence = if transitions.iter().all(|t| t.from != UNKNOWN_FROM) {
+            Confidence::High
+        } else {
+            Confidence::Low
+        };
+        machines.push(StateMachine {
+            id: format!("{}#{}", declaration.file, declaration.name),
+            name: declaration.name,
+            file: declaration.file,
+            line: declaration.line,
+            module: String::new(),
+            states,
+            transitions,
+            confidence,
+            derived: false,
+        });
+    }
     machines.sort_by(|a, b| (&a.file, a.line, &a.name).cmp(&(&b.file, b.line, &b.name)));
-    machines
+    candidates.sort_by(|a, b| (&a.file, a.line, &a.name).cmp(&(&b.file, b.line, &b.name)));
+    (machines, candidates)
 }
 
 /// Drops every declaration whose file and name another declaration of the same file shares.
@@ -1059,6 +1080,34 @@ mod tests {
 
     fn state_names(machine: &StateMachine) -> Vec<&str> {
         machine.states.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    #[test]
+    fn an_enum_that_no_site_moves_between_is_a_candidate_not_a_machine() {
+        let source = "\
+pub enum LaneVerdict {
+    Pass,
+    Fail,
+}
+
+pub fn check(ok: bool) -> LaneVerdict {
+    if ok { LaneVerdict::Pass } else { LaneVerdict::Fail }
+}
+";
+        let (machines, candidates) = resolve_all(vec![facts(Lang::Rust, "lane.rs", source)]);
+        assert!(machines.is_empty());
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert_eq!(candidate.id, "lane.rs#LaneVerdict");
+        assert_eq!(candidate.line, 1);
+        assert_eq!(
+            candidate
+                .states
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Pass", "Fail"]
+        );
     }
 
     #[test]

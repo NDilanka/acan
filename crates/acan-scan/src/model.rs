@@ -26,6 +26,10 @@ pub struct Plant {
     /// State machines found in the files, sorted by file and line.
     #[serde(default)]
     pub state_machines: Vec<StateMachine>,
+    /// Status-like enums with two or more states and no transition the scanner found. The scan
+    /// does not report them as machines; the optional statemap refinement may. Not serialized.
+    #[serde(skip)]
+    pub state_candidates: Vec<StateCandidate>,
 }
 
 /// A state machine the scanner found: a status-like type with its states and the transitions between them.
@@ -44,6 +48,22 @@ pub struct StateMachine {
     pub states: Vec<State>,
     pub transitions: Vec<Transition>,
     pub confidence: Confidence,
+    /// True when the state is computed from other fields by a function, not moved by assignments.
+    /// Only the statemap refinement sets it. Left out of the JSON when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub derived: bool,
+}
+
+/// A status-like enum the scanner found without a transition. See [`Plant::state_candidates`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateCandidate {
+    /// `{file}#{name}`, the same id a [`StateMachine`] for it would get.
+    pub id: String,
+    pub name: String,
+    pub file: String,
+    /// 1-based line of the declaration.
+    pub line: u32,
+    pub states: Vec<State>,
 }
 
 /// One state of a [`StateMachine`].
@@ -52,6 +72,9 @@ pub struct State {
     pub name: String,
     /// 1-based line where the state is declared.
     pub line: u32,
+    /// A one-line description from the statemap refinement. Left out of the JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// A move from one state to another that the code performs.
@@ -68,6 +91,27 @@ pub struct Transition {
     pub end_line: u32,
     /// Enclosing function name, or None outside a function.
     pub via: Option<String>,
+    /// Who found the transition: the scanner, or the statemap refinement.
+    #[serde(default)]
+    pub source: Source,
+    /// A one-line description from the statemap refinement. Left out of the JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// Who found a [`Transition`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    /// The deterministic scanner.
+    #[default]
+    Scan,
+    /// The statemap refinement, after its citation was checked against the source.
+    Llm,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// How much of a [`StateMachine`] the scanner could read. `High` when every transition has a known source state.

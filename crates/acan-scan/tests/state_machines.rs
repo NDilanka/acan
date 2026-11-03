@@ -41,7 +41,10 @@ fn state_machines_round_trip_through_plant_json() {
     let json = serde_json::to_string(&plant).expect("serialize plant");
     let back: Plant = serde_json::from_str(&json).expect("deserialize plant");
 
-    assert_eq!(back, plant);
+    // Candidates are not serialized, so the round trip leaves them empty.
+    let mut expected = plant.clone();
+    expected.state_candidates.clear();
+    assert_eq!(back, expected);
 }
 
 /// The golden lists the moves the scanner reads today: direct assignments, match arms, and the

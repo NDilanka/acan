@@ -284,7 +284,7 @@ mod tests {
     use super::*;
     use crate::hash::ContentHash;
     use crate::lang::Lang;
-    use crate::model::{Confidence, FileId, Symbol, SymbolKind};
+    use crate::model::{Confidence, FileId, Source, Symbol, SymbolKind};
 
     fn transition(file: &str, line: u32, end_line: u32) -> Transition {
         Transition {
@@ -294,6 +294,8 @@ mod tests {
             line,
             end_line,
             via: None,
+            source: Source::Scan,
+            label: None,
         }
     }
 
@@ -307,6 +309,7 @@ mod tests {
             states: Vec::new(),
             transitions,
             confidence: Confidence::High,
+            derived: false,
         }
     }
 

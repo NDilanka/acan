@@ -17,7 +17,8 @@
         "file": "rust/fulfil.rs",
         "line": 5,
         "end_line": 5,
-        "via": "ship"
+        "via": "ship",
+        "source": "scan"
       },
       {
         "from": "Open",
@@ -25,7 +26,8 @@
         "file": "rust/order.rs",
         "line": 16,
         "end_line": 16,
-        "via": "pay"
+        "via": "pay",
+        "source": "scan"
       },
       {
         "from": "Shipped",
@@ -33,7 +35,8 @@
         "file": "rust/order.rs",
         "line": 23,
         "end_line": 23,
-        "via": "reopen"
+        "via": "reopen",
+        "source": "scan"
       }
     ],
     "confidence": "high"
@@ -56,7 +59,8 @@
         "file": "js/legacy.js",
         "line": 3,
         "end_line": 3,
-        "via": "markShipped"
+        "via": "markShipped",
+        "source": "scan"
       },
       {
         "from": "open",
@@ -64,7 +68,8 @@
         "file": "ts/order.ts",
         "line": 6,
         "end_line": 6,
-        "via": "settle"
+        "via": "settle",
+        "source": "scan"
       },
       {
         "from": "paid",
@@ -72,7 +77,8 @@
         "file": "ts/order.ts",
         "line": 9,
         "end_line": 9,
-        "via": "settle"
+        "via": "settle",
+        "source": "scan"
       }
     ],
     "confidence": "low"
@@ -95,7 +101,8 @@
         "file": "ts/ticket.ts",
         "line": 9,
         "end_line": 9,
-        "via": "reopen"
+        "via": "reopen",
+        "source": "scan"
       },
       {
         "from": "*",
@@ -103,7 +110,8 @@
         "file": "ts/ticket.ts",
         "line": 14,
         "end_line": 14,
-        "via": "close"
+        "via": "close",
+        "source": "scan"
       }
     ],
     "confidence": "low"
