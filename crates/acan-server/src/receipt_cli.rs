@@ -1381,7 +1381,7 @@ mod tests {
         for name in names {
             let mut files = contract_files();
             files.push((name, "not a contract"));
-            let repo = clone_with(&files);
+            let repo = commit_files(&files);
 
             let (written, snapshot, scratch) = write_protected_at_head(repo.path()).await;
 
@@ -1518,7 +1518,7 @@ mod tests {
     async fn names_that_differ_only_by_case_are_refused_before_any_file_is_written() {
         let mut files = contract_files();
         files.push((".acan/APP.json", "a second app"));
-        let repo = clone_with(&files);
+        let repo = commit_files(&files);
 
         let (written, snapshot, _scratch) = write_protected_at_head(repo.path()).await;
 
@@ -1533,7 +1533,7 @@ mod tests {
         // file system, so the two cannot both be written.
         let mut files = contract_files();
         files.push((".acan/Probes", "a file, not a directory"));
-        let repo = clone_with(&files);
+        let repo = commit_files(&files);
 
         let (written, snapshot, _scratch) = write_protected_at_head(repo.path()).await;
 
