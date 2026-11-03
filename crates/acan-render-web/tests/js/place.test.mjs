@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  BADGE_PX, badgeBoxes, boxAt, clearOf, overlaps, placeOverlays, unnamedSpots,
+  BADGE_PX, badgeBoxes, boxAt, clearOf, flagSpot, overlaps, placeOverlays, unnamedSpots,
 } from "../../www/place.js";
 
 const PAD = 4;
@@ -253,4 +253,19 @@ test("a flag placed after the badges moves clear of them", () => {
   const badges = badgeBoxes(100, 140, 50);
   const top = clearOf(110, 45, 40, 14, badges, PAD);
   assert.ok(badges.every((box) => !overlaps(boxAt(110, top, 40, 14, PAD), box)));
+});
+
+test("flagSpot slides a flag sideways when moving up would run it off the top", () => {
+  const side = panel(600, 0, 800, 300);
+  const free = flagSpot(100, 200, 120, 20, [side], PAD, VIEW.width);
+  assert.deepEqual(free, { left: 100, top: 200 }, "a clear flag stays put");
+  const spot = flagSpot(550, 200, 120, 20, [side], PAD, VIEW.width);
+  assert.equal(spot.left, 600 - PAD - 120, "it stops just left of the panel");
+  assert.equal(spot.top, 200, "and keeps its height");
+  assert.ok(!overlaps(boxAt(spot.left, spot.top, 120, 20, PAD), side));
+  const wall = panel(0, 0, 800, 300);
+  assert.deepEqual(flagSpot(100, 200, 120, 20, [wall], PAD, VIEW.width), {
+    left: 100,
+    top: clearOf(100, 200, 120, 20, [wall], PAD),
+  }, "with no better left it moves up as clearOf does");
 });

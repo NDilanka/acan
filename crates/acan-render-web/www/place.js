@@ -33,6 +33,25 @@ export function clearOf(left, top, w, h, placed, pad) {
   return y;
 }
 
+// Where a flag of size w by h, wanted at (left, top), shows clear of every box in `placed`. It
+// moves up as `clearOf` does. When that runs it off the top of the view, as a wide pill does under
+// a panel that reaches the top edge, it slides sideways instead, to the nearest left at which
+// moving up keeps it in view. Returns `{ left, top }`, the upward spot when no left does better.
+export function flagSpot(left, top, w, h, placed, pad, width) {
+  const up = clearOf(left, top, w, h, placed, pad);
+  if (up >= pad) return { left, top: up };
+  const lefts = [pad, width - w - pad];
+  for (const box of placed) lefts.push(box.left - pad - w, box.right + pad);
+  let found = null;
+  for (const x of lefts) {
+    if (x < pad || x + w > width - pad) continue;
+    const y = clearOf(x, top, w, h, placed, pad);
+    if (y < pad) continue;
+    const cost = Math.abs(x - left) + (top - y);
+    if (found === null || cost < found.cost) found = { left: x, top: y, cost };
+  }
+  return found === null ? { left, top: up } : { left: found.left, top: found.top };
+}
 // The top nearest `top` at which a box of size w by h, at `left`, lies wholly in the view and
 // clears every box in `placed`. It may move up or down, but not below `maxTop`. The free tops end
 // at the edges of the boxes, so the nearest one is `top` itself or just above or below a box. A

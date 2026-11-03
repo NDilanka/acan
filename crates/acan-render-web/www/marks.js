@@ -7,7 +7,7 @@ import { machineQuad } from "./order.js";
 import { canvas, flagsEl, labelsEl, leadersEl, state } from "./state.js";
 import { requestRender } from "./main.js";
 import {
-  BADGE_PX, GHOST_HOLD_MS, LAST_SEEN_KEY, agentFlagShown, badgeBoxes, boxAt, clearOf, foldColumn, inView,
+  BADGE_PX, GHOST_HOLD_MS, LAST_SEEN_KEY, agentFlagShown, badgeBoxes, boxAt, clearOf, flagSpot, foldColumn, inView,
   placeOverlays, seenOnReturn, standsBeside, unnamedSpots,
 } from "./place.js";
 import { questionOfFlag } from "./question.js";
@@ -713,10 +713,11 @@ function placeFlags(placedBoxes) {
     let lastLeft = centre;
     for (const item of shown) {
       const [w, h] = item.el.size;
-      const left = single ? item.x - POINTER_INSET_PX : centre - w / 2;
-      const top = clearOf(left, bottom - h, w, h, placedBoxes, LABEL_PAD_PX);
+      const wantLeft = single ? item.x - POINTER_INSET_PX : centre - w / 2;
+      const spot = flagSpot(wantLeft, bottom - h, w, h, placedBoxes, LABEL_PAD_PX, canvas.clientWidth);
+      const { left, top } = spot;
       placeFlag(item.el, left, top, placedBoxes);
-      const pointed = single && top === bottom - h;
+      const pointed = single && left === wantLeft && top === bottom - h;
       if (item.el.pointer !== undefined) item.el.pointer.style.display = pointed ? "" : "none";
       if (!pointed) {
         drawLeader(leaders, left + (single ? POINTER_INSET_PX : w / 2), top + h, item.x, item.y, item.flag.hue ?? "", "1px");
