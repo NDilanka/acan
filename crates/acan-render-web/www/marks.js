@@ -8,7 +8,7 @@ import { canvas, flagsEl, labelsEl, leadersEl, state } from "./state.js";
 import { requestRender } from "./main.js";
 import {
   BADGE_PX, GHOST_HOLD_MS, LAST_SEEN_KEY, badgeBoxes, boxAt, clearOf, inView, placeOverlays, seenOnReturn,
-  unnamedSpots,
+  standsBeside, unnamedSpots,
 } from "./place.js";
 import { questionOfFlag } from "./question.js";
 import { isLive } from "./stream.js";
@@ -400,6 +400,7 @@ function flagElement(flag) {
     dot.className = "dot";
     dot.style.background = flag.hue;
     el.append(dot);
+    if (flag.kind === "away") awayStyle(el, dot, flag.hue);
   }
   if (flag.kind === "landed") {
     const dot = document.createElement("span");
@@ -446,6 +447,24 @@ function flagElement(flag) {
     });
   }
   return el;
+}
+
+// An away dot is a bare hollow ring in the agent's hue with its quiet time in muted mono, so it
+// reads as where the drone was and not as a flag.
+function awayStyle(el, ring, hue) {
+  Object.assign(el.style, {
+    background: "none",
+    border: "none",
+    padding: "0",
+    gap: "4px",
+    font: "11px var(--mono)",
+    color: "var(--muted)",
+  });
+  Object.assign(ring.style, {
+    background: "none",
+    border: `1.5px solid ${hue}`,
+    boxSizing: "border-box",
+  });
 }
 
 // A witness chip: a grey ring while the check is pending, a dark tick when it passed, a red dot
@@ -502,7 +521,7 @@ function placeFlags(placedBoxes) {
       continue;
     }
     const [w, h] = el.size;
-    const beside = el.classList.contains("clash") || el.classList.contains("landed");
+    const beside = standsBeside(state.markState.flags[quads[k]].kind);
     const left = beside ? x : x - w / 2;
     const top = clearOf(
       left,

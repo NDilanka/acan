@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { AWAY_MS, seenOnReturn } from "../../www/place.js";
+import { AWAY_MS, seenOnReturn, standsBeside } from "../../www/place.js";
 
 const NOW = 1_700_000_000_000;
 
@@ -29,4 +29,13 @@ test("nothing kept, or nothing usable, shows nothing", () => {
   assert.equal(seenOnReturn("soon", NOW, true), 0);
   assert.equal(seenOnReturn("-5", NOW, true), 0);
   assert.equal(seenOnReturn(String(NOW + 1), NOW, true), 0, "a time from the future");
+});
+
+test("an away dot starts on its plinth corner, beside its anchor, as a landed dot does", () => {
+  assert.equal(standsBeside("away"), true);
+  assert.equal(standsBeside("landed"), true);
+  assert.equal(standsBeside("clash"), true);
+  for (const kind of ["agent", "order", "question", "plot", "stage"]) {
+    assert.equal(standsBeside(kind), false, kind);
+  }
 });

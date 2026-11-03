@@ -114,6 +114,13 @@ export function placeOverlays({ placed, labels, plots, width, height, pad }) {
   return { labelShown, plotTops, plotLeaders };
 }
 
+// Whether a flag of `kind` starts beside its anchor, centred on its y, rather than centred above
+// it: a clash label right of its diamond, a landed dot right of its machine's point, and an away
+// dot with its ring on the plinth's corner.
+export function standsBeside(kind) {
+  return kind === "clash" || kind === "landed" || kind === "away";
+}
+
 // A clash badge's diameter in CSS px, as the wasm side sizes it (`marks::BADGE_PX`).
 export const BADGE_PX = 16;
 

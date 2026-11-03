@@ -123,6 +123,9 @@ const BOB_PERIOD_MS: f32 = 2_400.0;
 pub const PIN_MS: f32 = 250.0;
 /// Milliseconds an agent that holds a task may be quiet before its drone reads stale.
 pub const STALE_MS: u64 = 2 * 60 * 1_000;
+/// Milliseconds an agent that holds a task may be quiet before its drone goes and an away dot
+/// takes its place.
+pub const AWAY_MS: u64 = 10 * 60 * 1_000;
 /// The most ghosts the plant shows at once. The latest landings keep theirs.
 pub const GHOST_MAX: usize = 12;
 /// How far a ghost's outline stands out from its machine's footprint, in plan units.
@@ -431,6 +434,9 @@ pub enum FlagKind {
     Clash,
     Question,
     Landed,
+    /// An agent quiet for [`AWAY_MS`] or more: a hollow ring in its hue and how long it has been
+    /// quiet, on the back corner of its machine's plinth, where its drone was.
+    Away,
     /// One scope lane's plots and keeps on one machine.
     Plot,
     /// A mark a tour step stages, as a chip on the machine the mark sits on.
@@ -608,6 +614,7 @@ impl Marks {
             .collect();
         let scope = slice_layout(&view.lanes, plan);
         let mut flags = flags(view, plan, stands, &bodies, &pins);
+        flags.extend(away_flags(view, plan, slots, &waiting, clock));
         flags.extend(
             scope
                 .slices
@@ -1840,6 +1847,7 @@ pub fn flag_anchor(flag: &Flag, at: [f32; 3], project: impl Fn([f32; 3]) -> [f32
             let [x, y] = project(at);
             [x + FLAG_GAP_PX, y]
         }
+        FlagKind::Away => project(at),
         FlagKind::Order | FlagKind::Question | FlagKind::Plot | FlagKind::Stage => project(at),
     }
 }
@@ -1961,6 +1969,9 @@ fn place(
         let Some(machine) = home else {
             continue;
         };
+        if away_for(agent, waiting, clock).is_some() {
+            continue;
+        }
         let centre = plan.machines[machine].center();
         let top = stands.get(machine).map_or(PLINTH_TOP, |stand| stand.top);
         let spots: &[[f32; 2]] = stands
@@ -2047,10 +2058,75 @@ pub fn inside_quad(quad: &[[f32; 2]], p: [f32; 2]) -> bool {
     inside
 }
 
-/// Whether an agent's drone reads stale: it holds a task and has been quiet for [`STALE_MS`].
+/// Whether an agent's drone reads stale: it holds a task and has been quiet for [`STALE_MS`],
+/// but not yet for [`AWAY_MS`].
 fn stale(agent: &AgentView, clock: Clock) -> bool {
-    let holds = agent.task.is_some() && agent.activity != "readback";
-    holds && clock.quiet(agent).is_some_and(|quiet| quiet >= STALE_MS)
+    holds_task(agent)
+        && clock
+            .quiet(agent)
+            .is_some_and(|quiet| (STALE_MS..AWAY_MS).contains(&quiet))
+}
+
+/// How long an agent that holds a task has been quiet, once that is [`AWAY_MS`] or more. An
+/// agent that waits on the user is quiet because of the user, so it keeps its drone and ring.
+fn away_for(agent: &AgentView, waiting: &BTreeSet<String>, clock: Clock) -> Option<u64> {
+    let quiet = clock.quiet(agent)?;
+    let away = holds_task(agent) && quiet >= AWAY_MS && !waiting.contains(&agent.id.to_string());
+    away.then_some(quiet)
+}
+
+fn holds_task(agent: &AgentView) -> bool {
+    agent.task.is_some() && agent.activity != "readback"
+}
+
+/// How long an away dot says its agent has been quiet: whole minutes, then whole hours from an
+/// hour on, such as `12m` or `2h`.
+#[must_use]
+pub fn away_stamp(quiet_ms: u64) -> String {
+    let minutes = quiet_ms / 60_000;
+    if minutes < 60 {
+        format!("{minutes}m")
+    } else {
+        format!("{}h", minutes / 60)
+    }
+}
+
+/// One away dot for each agent on a machine that has been quiet for [`AWAY_MS`] or more. It
+/// stands on the plinth's back corner, opposite the landed dot.
+fn away_flags(
+    view: &View,
+    plan: &Plan,
+    slots: &AgentSlots,
+    waiting: &BTreeSet<String>,
+    clock: Clock,
+) -> Vec<Flag> {
+    view.agents
+        .iter()
+        .filter_map(|agent| {
+            let quiet = away_for(agent, waiting, clock)?;
+            let machine = plan.index_of(agent.machine.as_deref()?)?;
+            let footprint = &plan.machines[machine];
+            let id = agent.id.to_string();
+            Some(Flag {
+                kind: FlagKind::Away,
+                text: away_stamp(quiet),
+                hue: Some(hue_css(slots.slot(&id))),
+                waiting: false,
+                clash: None,
+                check: None,
+                leaving: false,
+                detail: Vec::new(),
+                scope: None,
+                machine: None,
+                at: [
+                    footprint.min[0] + footprint.size[0] - LANDED_INSET,
+                    footprint.min[1] + footprint.size[1] - LANDED_INSET,
+                    PLINTH_TOP,
+                ],
+                follow: Follow::Still,
+            })
+        })
+        .collect()
 }
 
 /// The height a drone's centre takes over its seat: a stale drone sags below it.
@@ -2950,6 +3026,100 @@ mod tests {
             [right[0] + BADGE_PX * 0.5 + FLAG_GAP_PX, right[1]],
             "the label starts right of the right badge"
         );
+    }
+
+    #[test]
+    fn a_long_quiet_agent_is_away_its_drone_gone_and_a_dot_on_its_plinth() {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let mut view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let waiting_view = view.clone();
+        view.clashes.clear();
+        let heard = view.agents[0].heard_at.expect("the agent was heard");
+        let agent = view.agents[0].id.to_string();
+        let slots = slots_for(&view);
+        let stands = stands(&plan);
+        let at = |now: Option<u64>| {
+            let clock = Clock { now, away: None };
+            Marks::build_at(&view, &plan, &stands, &slots, clock)
+        };
+        let aways = |marks: &Marks| -> Vec<Flag> {
+            marks
+                .flags
+                .iter()
+                .filter(|flag| flag.kind == FlagKind::Away)
+                .cloned()
+                .collect()
+        };
+        let has_drone = |marks: &Marks| marks.bodies.iter().any(|body| body.agent == agent);
+
+        let frozen = at(None);
+        assert!(
+            has_drone(&frozen) && aways(&frozen).is_empty(),
+            "no clock, no away"
+        );
+        let stale = at(Some(heard + AWAY_MS - 1));
+        assert!(has_drone(&stale) && aways(&stale).is_empty());
+        let body = stale.bodies.iter().find(|body| body.agent == agent);
+        assert_eq!(body.map(|body| body.state), Some(DroneState::Stale));
+
+        let away = at(Some(heard + 12 * 60_000));
+        assert!(!has_drone(&away), "the drone is gone");
+        assert!(
+            away.flags
+                .iter()
+                .all(|flag| flag.follow != Follow::Body(agent.clone())),
+            "and its flag with it"
+        );
+        let dots = aways(&away);
+        let hue = Some(hue_css(slots.slot(&agent)));
+        let dot = dots
+            .iter()
+            .find(|dot| dot.hue == hue)
+            .expect("the agent has an away dot in its hue");
+        assert_eq!(dots.len(), away.bodies.len().abs_diff(view.agents.len()));
+        assert_eq!(dot.text, "12m");
+        let name = view.agents[0]
+            .machine
+            .as_deref()
+            .expect("the agent has a machine");
+        let footprint = &plan.machines[machine(&plan, name)];
+        assert_eq!(
+            dot.at,
+            [
+                footprint.min[0] + footprint.size[0] - LANDED_INSET,
+                footprint.min[1] + footprint.size[1] - LANDED_INSET,
+                PLINTH_TOP,
+            ],
+            "the back corner, opposite the landed dot"
+        );
+        let project = |p: [f32; 3]| [p[0], -p[2]];
+        assert_eq!(flag_anchor(dot, dot.at, project), project(dot.at));
+
+        let waiting = Marks::build_at(
+            &waiting_view,
+            &plan,
+            &stands,
+            &slots,
+            Clock {
+                now: Some(heard + 12 * 60_000),
+                away: None,
+            },
+        );
+        let body = waiting.bodies.iter().find(|body| body.agent == agent);
+        assert_eq!(
+            body.map(|body| body.state),
+            Some(DroneState::Waiting),
+            "an agent that waits on the user is never away"
+        );
+    }
+
+    #[test]
+    fn an_away_stamp_counts_minutes_then_hours() {
+        assert_eq!(away_stamp(AWAY_MS), "10m");
+        assert_eq!(away_stamp(59 * 60_000 + 59_999), "59m");
+        assert_eq!(away_stamp(60 * 60_000), "1h");
+        assert_eq!(away_stamp(150 * 60_000), "2h");
     }
 
     #[test]
