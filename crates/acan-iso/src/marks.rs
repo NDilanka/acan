@@ -1,6 +1,7 @@
 //! The marks drawn on the plant: the ring round a waiting agent, the clash pin's diamond, and the
 //! stalk that holds the diamond above the machines. They are models like the machines, so the
-//! renderer outlines them with the same line art. Each model's origin is on the ground under it.
+//! renderer outlines them with the same line art. The pin's and the stalk's origin is on the ground
+//! under them, and the ring's is the drone's centre.
 //! The renderer picks the colour, from its tint slots and palette, so no model names a hue. The
 //! agents' drones are in [`crate::drone`].
 
@@ -10,17 +11,19 @@ use crate::drone::{BODY_RADIUS, SHADOW_RADIUS};
 use crate::model::{Aabb, Ink, Mesh, Model, Surface};
 use crate::parts::PLINTH;
 
-/// The height of the plinth top. A drone's shadow lies on it, and the ring lies on it.
+/// The height of the plinth top. A drone's shadow lies on it.
 pub const PLINTH_TOP: f32 = PLINTH;
-/// The amber ring on the plinth top round a waiting agent's drone's shadow, with its inner and outer
-/// radius in plan units. The renderer grows it with the drone, so the two keep their proportions.
+/// The amber ring round a waiting agent's drone, with its inner and outer radius in plan units.
+/// The renderer grows it with the drone, so the two keep their proportions.
 const RING_INNER: f32 = 1.15 * BODY_RADIUS;
 const RING_OUTER: f32 = 1.3 * BODY_RADIUS;
-// The ring clears the shadow it surrounds.
+// The ring clears the drone's shadow when seen from above.
 const _: () = assert!(RING_INNER > SHADOW_RADIUS);
 const RING_SEGMENTS: usize = 32;
-/// The ring sits this far above the plinth top, so it never z-fights the plinth.
-const RING_LIFT: f32 = 0.05;
+/// How far the ring hangs below the drone's centre, by its glow. The lens looks down, so a ring
+/// round the equator crosses it; this low, the ring's near side passes under the body and its far
+/// side behind it, from the lowest camera tilt up.
+pub(crate) const RING_DROP: f32 = 0.85 * BODY_RADIUS;
 /// The clash pin: its half width at the equator and its height, in plan units.
 const PIN_RADIUS: f32 = 1.1;
 pub const PIN_HEIGHT: f32 = 2.6;
@@ -30,7 +33,8 @@ pub const STALK_HEIGHT: f32 = 20.0;
 /// Half the width of the stalk's square section.
 const STALK_HALF: f32 = 0.3;
 
-/// A flat amber ring lying on the plinth top round an agent's drone.
+/// A flat amber ring round an agent's drone, hung [`RING_DROP`] below its centre. Its origin is
+/// the drone's centre.
 #[must_use]
 pub fn waiting_ring() -> Model {
     let mut mesh = Mesh::default();
@@ -38,7 +42,7 @@ pub fn waiting_ring() -> Model {
         push_ring(
             &mut mesh,
             radius,
-            RING_LIFT,
+            -RING_DROP,
             |_| [0.0, 0.0, 1.0],
             RING_SEGMENTS,
         );
@@ -226,9 +230,9 @@ mod tests {
     }
 
     #[test]
-    fn the_ring_lies_flat_on_the_plinth_top_round_the_drone() {
+    fn the_ring_lies_flat_below_the_drone() {
         let ring = waiting_ring();
-        assert!(ring.meshes[0].positions.iter().all(|p| p[2] == RING_LIFT));
+        assert!(ring.meshes[0].positions.iter().all(|p| p[2] == -RING_DROP));
         assert!(ring.bounds.max[0] <= RING_OUTER + 1e-4);
         assert!(ring.meshes[0].surfaces.iter().all(|s| *s == Surface::Lit));
     }
