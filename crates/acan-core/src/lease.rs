@@ -11,6 +11,7 @@
 //! Claimed{Gating} --gate passed--> Queued                    [LeaseEnded Delivered]
 //! Claimed{Gating} --candidate conflicts with protected head--> Open
 //!                                                            [LeaseEnded Refused, LandFailed]
+//! Claimed --a receipt spends the repair budget--> Open       [LeaseEnded BudgetSpent]
 //! Claimed --CancelOrder--> Dropped                           [LeaseEnded Cancelled]
 //! Any fenced write whose generation is not current: Rejection::StaleGeneration, no event.
 //! ```
@@ -87,6 +88,8 @@ pub enum LeaseEnd {
     Cancelled,
     /// The candidate could not be merged onto the protected head, so the gate refused it.
     Refused,
+    /// The order's repair budget ran out, so the lane stopped.
+    BudgetSpent,
 }
 
 impl Claim {

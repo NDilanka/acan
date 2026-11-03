@@ -819,8 +819,8 @@ pub(crate) fn expire_barriers(world: &World, ctx: &Ctx<'_>) -> Vec<Event> {
 }
 
 /// `BuildCleared` for every `Declared` task whose order's barrier does not hold, with no
-/// blocking clash and no `Serialize` predecessor that is still to land. The origin runs this
-/// after every accepted command.
+/// blocking clash and no `Serialize` predecessor that is still to land, in a lane that is not
+/// stopped: a stopped lane clears no build. The origin runs this after every accepted command.
 pub(crate) fn build_clear(world: &World) -> Vec<Event> {
     let waiting_on = |first: TaskId| {
         world
@@ -846,6 +846,7 @@ pub(crate) fn build_clear(world: &World) -> Vec<Event> {
                 }
             ) && !blocked(t.id)
                 && world.barrier(t.order).is_none()
+                && !world.lane(t.order).is_some_and(|lane| lane.stopped)
         })
         .map(|t| Event::BuildCleared { task: t.id })
         .collect()
