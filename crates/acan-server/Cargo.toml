@@ -31,6 +31,7 @@ serde.workspace = true
 serde_json.workspace = true
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 thiserror.workspace = true
+tempfile = "3"
 tokio.workspace = true
 tower-http = { version = "0.6", features = ["fs"] }
 tracing.workspace = true
@@ -39,6 +40,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 futures-util = "0.3"
-tempfile = "3"
 tokio-tungstenite = "0.29"
 wiremock = "0.6"

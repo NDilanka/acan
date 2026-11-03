@@ -62,6 +62,7 @@ use tokio::sync::Semaphore;
 use tokio::task::{self, JoinHandle, JoinSet};
 
 use crate::STATE_DIR;
+use crate::deps::{self, Installer};
 use crate::examples;
 use crate::git::{LandFailure, Workspace};
 use crate::host::{self, Host, SubmitError};
@@ -81,16 +82,18 @@ const MAX_JOB_ATTEMPTS: u32 = 5;
 const RETRY_BACKOFF: Duration = Duration::from_millis(20);
 
 /// The program the containers run under.
-const RUNNER_PROGRAM: &str = "docker";
+pub(crate) const RUNNER_PROGRAM: &str = "docker";
 
 /// The port the app listens on inside its container.
-const APP_PORT: u16 = 3000;
+pub(crate) const APP_PORT: u16 = 3000;
 
 /// The state directory's folder that holds one directory per observe pass.
 const CONTRAST_DIR: &str = "contrasts";
 
 /// The state directory's folder that holds the stored observations, by hash.
 pub(crate) const OBSERVATIONS_DIR: &str = "observations";
+/// The directory, under the state directory, that installed dependency entries are cached in.
+const DEPS_DIR: &str = "deps";
 
 /// The state directory's folder that holds one protected-head snapshot per commit.
 const SNAPSHOT_DIR: &str = "snapshots";
@@ -966,6 +969,12 @@ struct Pass {
     slots: Arc<Semaphore>,
     /// How many probes of the contrast run at once.
     probes_at_once: usize,
+    /// The directory installed dependencies are cached in, and where each install's tree is
+    /// written before it is cached.
+    cache: PathBuf,
+    installs: PathBuf,
+    /// The base's install `node_modules`, which the base runs mount, when the app has an install.
+    base_dependencies: Option<PathBuf>,
 }
 
 impl Pass {
@@ -976,8 +985,7 @@ impl Pass {
         repo: &Repo,
         label: impl std::fmt::Display,
     ) -> Result<Self, JobError> {
-        let policy = observe::runner_policy();
-        let base = protected_base(repo, &policy).await?;
+        let base = protected_base(repo, &observe::runner_policy()).await?;
         let state = host.repo().join(STATE_DIR);
         let dir = state
             .join(CONTRAST_DIR)
@@ -985,26 +993,69 @@ impl Pass {
         let snapshot = dir.join("snapshot");
         observe::snapshot(repo, &base, &snapshot).await?;
         let (app, corpus) = observe::read_protected(&snapshot)?;
+        // The run policy depends on the runtime the contract names, so it is chosen only now.
+        let policy = observe::policy_for(&app)?;
+        let runner = RunnerConfig::new(RUNNER_PROGRAM, APP_PORT);
+        let slots = host.witness_slots();
+        let cache = state.join(DEPS_DIR);
+        let installs = dir.join("installs");
+        let base_dependencies = Installer {
+            repo,
+            config: &runner,
+            slots: slots.as_ref(),
+            cache: &cache,
+            scratch: &installs,
+        }
+        .install(&base, deps::Role::Base, &app)
+        .await
+        .map_err(install_refusal)?
+        .map(|installed| installed.modules);
         Ok(Self {
             base,
             snapshot,
             app,
             corpus,
             policy,
-            runner: RunnerConfig::new(RUNNER_PROGRAM, APP_PORT),
+            runner,
             scratch: dir.join("scratch"),
             observations: state.join(OBSERVATIONS_DIR),
-            slots: host.witness_slots(),
+            slots,
             probes_at_once: host.probe_concurrency(),
+            cache,
+            installs,
+            base_dependencies,
         })
     }
 
+    /// Installs the candidate's dependencies when the app has an install, and returns the
+    /// directory the candidate's runs mount.
+    async fn install_candidate(
+        &self,
+        repo: &Repo,
+        candidate: &Preparation,
+    ) -> Result<Option<PathBuf>, JobError> {
+        let installer = Installer {
+            repo,
+            config: &self.runner,
+            slots: self.slots.as_ref(),
+            cache: &self.cache,
+            scratch: &self.installs,
+        };
+        let installed = installer
+            .install(candidate, deps::Role::Candidate, &self.app)
+            .await
+            .map_err(install_refusal)?;
+        Ok(installed.map(|installed| installed.modules))
+    }
+
     /// The plan that observes `candidate` on this pass's base, writing into `scratch`.
+    /// `candidate_dependencies` is the candidate's install, when the app has one.
     fn plan<'a>(
         &'a self,
         repo: &'a Repo,
         candidate: &'a Preparation,
         scratch: &'a Path,
+        candidate_dependencies: Option<&'a Path>,
     ) -> Plan<'a> {
         Plan {
             repo,
@@ -1016,11 +1067,18 @@ impl Pass {
             app: &self.app,
             corpus: &self.corpus,
             policy: &self.policy,
+            base_dependencies: self.base_dependencies.as_deref(),
+            candidate_dependencies,
             runner: &self.runner,
             slots: self.slots.as_ref(),
             probes_at_once: self.probes_at_once,
         }
     }
+}
+
+/// The job error of an install that did not finish. A run cannot be tested without its install.
+fn install_refusal(err: deps::DepsError) -> JobError {
+    JobError::Unavailable(format!("the dependencies cannot be installed: {err}"))
 }
 
 /// The episodes of `order` as the judge reads them. A repeat of a failure is judged with the state
@@ -1089,7 +1147,7 @@ async fn contrast<C: ModelClient + 'static>(
     // a protected input moved, so a human must confirm again.
     if pass.base.protected_head() != &contrast.confirmation.base_commit {
         let scratch = pass.scratch.join("context");
-        let plan = pass.plan(repo, &candidate, &scratch);
+        let plan = pass.plan(repo, &candidate, &scratch, None);
         let context = observe::current(&plan, &order).await?;
         let rebind = SystemCmd::RebindBase {
             order: contrast.order,
@@ -1115,6 +1173,7 @@ async fn contrast<C: ModelClient + 'static>(
         }
         return Ok(());
     }
+    let candidate_dependencies = pass.install_candidate(repo, &candidate).await?;
     let recorded = match contrast.prepared {
         Some(prepared) => {
             if candidate.merged_commit() != &prepared.context.merged_commit
@@ -1128,7 +1187,12 @@ async fn contrast<C: ModelClient + 'static>(
         }
         None => {
             let scratch = pass.scratch.join("context");
-            let plan = pass.plan(repo, &candidate, &scratch);
+            let plan = pass.plan(
+                repo,
+                &candidate,
+                &scratch,
+                candidate_dependencies.as_deref(),
+            );
             let context = observe::current(&plan, &order).await?;
             let prepared = PreparedCommit {
                 base_commit: pass.base.protected_head().clone(),
@@ -1143,7 +1207,12 @@ async fn contrast<C: ModelClient + 'static>(
         }
     };
     let scratch = pass.scratch.join("judge");
-    let plan = pass.plan(repo, &candidate, &scratch);
+    let plan = pass.plan(
+        repo,
+        &candidate,
+        &scratch,
+        candidate_dependencies.as_deref(),
+    );
     tracing::debug!(%run, "the candidate is observed and judged");
     // The judge's future is large, so it is boxed where it is awaited.
     let judged = Box::pin(observe::judge(&plan, &order)).await?;
@@ -1188,7 +1257,12 @@ async fn contrast<C: ModelClient + 'static>(
     // and the witness reports its own failures instead of returning them.
     if let Some(vision) = host.vision() {
         let scratch = pass.scratch.join("vision");
-        let plan = pass.plan(repo, &candidate, &scratch);
+        let plan = pass.plan(
+            repo,
+            &candidate,
+            &scratch,
+            candidate_dependencies.as_deref(),
+        );
         Box::pin(vision::witness(
             host,
             vision,
@@ -1262,7 +1336,12 @@ fn confirmed_inputs<C: ModelClient>(
         return Ok(None);
     };
     let ledger = host.folded_rulings().map_err(JobError::Rulings)?;
-    let plan = pass.plan(repo, &pass.base, &pass.scratch);
+    let plan = pass.plan(
+        repo,
+        &pass.base,
+        &pass.scratch,
+        pass.base_dependencies.as_deref(),
+    );
     let view = Order {
         scope: &scope,
         confirmation,
@@ -1349,8 +1428,9 @@ async fn gated_land<C: ModelClient>(
         ledger: &ledger,
         episodes: &episodes,
     };
+    // The land reads the current context only, which runs no container, so no install is mounted.
     let scratch = pass.scratch.join("land");
-    let plan = pass.plan(repo, &candidate, &scratch);
+    let plan = pass.plan(repo, &candidate, &scratch, None);
     let current = observe::current(&plan, &order).await?;
     // Only the protected head moved since the receipt: the core may re-bind the scope to it, and
     // the candidate is then prepared and receipted again. The receipt here is never installed.

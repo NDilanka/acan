@@ -5,6 +5,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use acan_llm::{KeyFile, ModelClient};
+use acan_server::init_cli::{self, InitArgs};
+use acan_server::receipt_cli::{self, Format, ShadowArgs};
 use acan_server::release::{self, Redaction};
 use acan_server::replay;
 use acan_server::{
@@ -28,6 +30,23 @@ enum Command {
     Serve(ServeArgs),
     /// Exports the recorded run of one repository as static files for the replay page.
     ExportReplay(ExportReplayArgs),
+    /// Runs the contrast between two refs of a clone and prints its shadow receipt.
+    ///
+    /// The contrast writes the objects of the prepared merges into the clone's object store.
+    /// No ref moves, and the clone's working tree is not touched.
+    ///
+    /// Exit status: 0 when a receipt is printed, even one that blocks; 2 when it blocks and
+    /// --fail-on-block is given; 1 when the run is refused, with no receipt.
+    ///
+    /// With --check-contract, no run happens and --head is not needed: the base's protected
+    /// contract is checked, and the command exits 0 only when it passes.
+    Receipt(ReceiptArgs),
+    /// Detects the protected app contract of a clone, shows it, and commits it to a new branch.
+    ///
+    /// It reads the base branch's committed files and runs no code from them. The clone's
+    /// checkout is not touched unless --working-tree is given. Nothing is written until you
+    /// type yes at the prompt.
+    Init(InitArgs),
 }
 
 #[derive(Debug, Args)]
@@ -39,6 +58,24 @@ struct ExportReplayArgs {
     /// is missing, such as `site/replay` beside the web bundle.
     #[arg(long)]
     out: PathBuf,
+}
+
+/// The exit status of a blocked receipt when `--fail-on-block` is given.
+const BLOCKED_EXIT: i32 = 2;
+
+#[derive(Debug, Args)]
+struct ReceiptArgs {
+    #[command(flatten)]
+    shadow: ShadowArgs,
+    /// The format printed to stdout.
+    #[arg(long, value_enum, default_value_t = Format::Json)]
+    format: Format,
+    /// A directory that also receives `shadow-receipt.json` and `shadow-receipt.md`.
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// Exits with status 2 when the receipt blocks a land. Without it, a blocked receipt exits 0.
+    #[arg(long)]
+    fail_on_block: bool,
 }
 
 #[derive(Debug, Args)]
@@ -101,6 +138,11 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Serve(args) => serve(args).await,
         Command::ExportReplay(args) => export_replay(args).await,
+        Command::Receipt(args) => receipt(args).await,
+        Command::Init(args) => {
+            println!("{}", init_cli::run(&args)?);
+            Ok(())
+        }
     }
 }
 
@@ -126,6 +168,28 @@ async fn export_replay(args: ExportReplayArgs) -> Result<()> {
         exported.events,
         exported.dir.display()
     );
+    Ok(())
+}
+
+/// Prints the shadow receipt of one run. A refusal is an error with no receipt.
+async fn receipt(args: ReceiptArgs) -> Result<()> {
+    if args.shadow.check_contract {
+        let check = receipt_cli::check_contract(&args.shadow).await?;
+        println!("{}", receipt_cli::check_text(&check));
+        return Ok(());
+    }
+    let report = receipt_cli::run(&args.shadow).await?;
+    if let Some(dir) = &args.out {
+        receipt_cli::write_out(&report, dir)?;
+    }
+    let text = match args.format {
+        Format::Json => receipt_cli::json_text(&report)?,
+        Format::Markdown => receipt_cli::markdown_text(&report)?,
+    };
+    println!("{text}");
+    if args.fail_on_block && report.blocked() {
+        std::process::exit(BLOCKED_EXIT);
+    }
     Ok(())
 }
 

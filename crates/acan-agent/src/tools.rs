@@ -387,7 +387,7 @@ impl Worktree {
         let snapshot = self.snapshot_root()?;
         let workdir = policy.mounts.workdir.as_str();
         let mut args: Vec<String> = ["run", "--rm", "--name", name].map(str::to_owned).to_vec();
-        args.extend(network_args(policy.network));
+        args.extend(network_args(policy.network)?);
         args.extend(root_args(policy.root));
         args.extend(privilege_args(policy.privileges));
         args.extend([
@@ -805,9 +805,10 @@ impl Container {
 
 /// The `--network` arguments of the policy. The policy can name no other network: a container
 /// that publishes no port has no route to the host or to the rest of the network.
-fn network_args(network: ContainerNetwork) -> Vec<String> {
+fn network_args(network: ContainerNetwork) -> Result<Vec<String>, String> {
     match network {
-        ContainerNetwork::None {} => vec!["--network".to_owned(), "none".to_owned()],
+        ContainerNetwork::None {} => Ok(vec!["--network".to_owned(), "none".to_owned()]),
+        ContainerNetwork::Egress {} => Err("the test command never gets network egress".to_owned()),
     }
 }
 

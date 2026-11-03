@@ -6,6 +6,7 @@
 //! batch. [`Running::stop`] is a barrier: it returns only when no write can still happen.
 
 mod auth;
+pub mod deps;
 #[cfg(test)]
 mod e2e;
 mod examples;
@@ -13,6 +14,8 @@ mod git;
 mod host;
 mod http;
 mod index;
+pub mod init;
+pub mod init_cli;
 mod intent_api;
 mod jobs;
 #[allow(
@@ -41,7 +44,7 @@ mod receipt;
     dead_code,
     reason = "the receipt command line has no caller in the server yet; it renders the receipt renderer, which has none"
 )]
-mod receipt_cli;
+pub mod receipt_cli;
 mod redact;
 pub mod release;
 pub mod replay;
