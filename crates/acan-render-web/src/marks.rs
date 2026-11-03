@@ -328,33 +328,55 @@ pub struct Badges {
     pub b: Badge,
 }
 
-/// An agent's initials: the first letter of its id in upper case, then its trailing digits, at
-/// most [`INITIALS_MAX`] characters. `w2` gives `W2`, and `agent-a` gives `A`.
+/// An agent's initials, from the last segment of its id (split on `-`, `_`, space and `.`): that
+/// segment's first letter in upper case, then the id's trailing digits, at most [`INITIALS_MAX`]
+/// characters. A last segment with no letter falls back to the id's first letter. `w2` gives
+/// `W2`, `agent-a` gives `A`, `agent-b` gives `B` and `worker-12` gives `W12`.
 #[must_use]
 pub fn initials(id: &str) -> String {
     initials_with(id, 0)
 }
 
-/// The initials of the two agents on one clash. When they would read the same, each takes the
-/// next letter of its id too, so `agent` and `anna` give `AG` and `AN`.
+/// The initials of the two agents on one clash, never the same text. When they would read the
+/// same, each takes more letters of its last segment, so `agent` and `anna` give `AG` and `AN`.
+/// Ids that still match, such as two whose last segments are equal, get a digit on the second.
 #[must_use]
 pub fn pair_initials(a: &str, b: &str) -> (String, String) {
-    let (first, second) = (initials(a), initials(b));
-    if first == second {
-        (initials_with(a, 1), initials_with(b, 1))
-    } else {
-        (first, second)
+    for more in 0..INITIALS_MAX {
+        let (first, second) = (initials_with(a, more), initials_with(b, more));
+        if first != second {
+            return (first, second);
+        }
     }
+    let first = initials(a);
+    let stem: String = first.chars().take(INITIALS_MAX - 1).collect();
+    let second = ('2'..='9')
+        .map(|digit| format!("{stem}{digit}"))
+        .find(|text| *text != first)
+        .expect("one of eight digits differs");
+    (first, second)
 }
 
-/// The first letter of `id`, then `more` of the letters after it, then its trailing digits, in
-/// upper case and cut to [`INITIALS_MAX`] characters.
+/// The last segment of `id`, split on `-`, `_`, space and `.`.
+fn last_segment(id: &str) -> &str {
+    id.rsplit(['-', '_', ' ', '.']).next().unwrap_or(id)
+}
+
+/// The first letter of `id`'s last segment (or of `id`, when that segment has no letter), then
+/// `more` of the letters after it, then the id's trailing digits, in upper case and cut to
+/// [`INITIALS_MAX`] characters.
 fn initials_with(id: &str, more: usize) -> String {
     let digits: String = {
         let tail: Vec<char> = id.chars().rev().take_while(char::is_ascii_digit).collect();
         tail.into_iter().rev().collect()
     };
-    let letters = id
+    let segment = last_segment(id);
+    let source = if segment.chars().any(char::is_alphabetic) {
+        segment
+    } else {
+        id
+    };
+    let letters = source
         .chars()
         .filter(|c| c.is_alphabetic())
         .take(1 + more)
@@ -3324,13 +3346,24 @@ mod tests {
     }
 
     #[test]
-    fn initials_are_the_first_letter_and_the_trailing_digits() {
+    fn initials_are_the_first_letter_of_the_last_segment_and_the_trailing_digits() {
         assert_eq!(initials("w2"), "W2");
         assert_eq!(initials("agent-a"), "A");
+        assert_eq!(initials("agent-b"), "B");
         assert_eq!(initials("worker-12"), "W12");
         assert_eq!(initials("worker-1234"), "W12", "at most three characters");
+        assert_eq!(initials("team_blue"), "B");
+        assert_eq!(
+            initials("ci.runner 7"),
+            "C7",
+            "a last segment of digits only"
+        );
         assert_eq!(initials("42"), "42");
         assert_eq!(initials(""), "?");
+        assert_eq!(
+            pair_initials("agent-a", "agent-b"),
+            ("A".to_owned(), "B".to_owned())
+        );
         assert_eq!(
             pair_initials("agent", "anna"),
             ("AG".to_owned(), "AN".to_owned())
@@ -3339,13 +3372,45 @@ mod tests {
             pair_initials("w2", "w3"),
             ("W2".to_owned(), "W3".to_owned())
         );
-        assert_eq!(
-            pair_initials("agent-a", "agent-b"),
-            ("AG".to_owned(), "AG".to_owned()),
-            "the next letter is all a pair gets"
-        );
     }
 
+    #[test]
+    fn two_agents_on_one_clash_never_share_initials() {
+        let ids = [
+            "agent-a",
+            "agent-b",
+            "agent",
+            "anna",
+            "w2",
+            "w3",
+            "worker-12",
+            "worker-1234",
+            "worker-1299",
+            "team1-a",
+            "team2-a",
+            "x-ab",
+            "y-ab",
+            "42",
+            "43",
+            "",
+            "-",
+            "a-12",
+            "b-12",
+            "alpha",
+            "alps",
+        ];
+        for a in ids {
+            for b in ids {
+                if a == b {
+                    continue;
+                }
+                let (first, second) = pair_initials(a, b);
+                assert_ne!(first, second, "{a} and {b}");
+                assert!(first.chars().count() <= INITIALS_MAX, "{a} and {b}");
+                assert!(second.chars().count() <= INITIALS_MAX, "{a} and {b}");
+            }
+        }
+    }
     #[test]
     fn a_clash_has_a_badge_in_each_agents_hue_and_a_grey_query_for_no_agent() {
         let plan = plan();
