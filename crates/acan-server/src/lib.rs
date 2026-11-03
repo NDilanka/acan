@@ -59,6 +59,7 @@ mod setup;
 mod store;
 mod stream;
 mod stream_all;
+mod touches;
 mod tour;
 mod vision;
 mod workers;
