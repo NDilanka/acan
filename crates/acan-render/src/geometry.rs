@@ -266,11 +266,8 @@ pub fn hue_vertices(lines: &[HueLine]) -> Vec<HueVertex> {
     out
 }
 
-/// The device px width of a beam, and its opacity. A beam is as fine as a hue line.
-pub const BEAM_PX: f32 = HUE_PX;
-pub const BEAM_ALPHA: f32 = HUE_ALPHA;
-
-/// Four vertices per beam, one stroke from its `from` to its `to`.
+/// Four vertices per beam, one stroke from its `from` to its `to`, at the beam's own width and
+/// opacity.
 pub fn beam_vertices(beams: &[Beam]) -> Vec<HueVertex> {
     beams
         .iter()
@@ -279,8 +276,8 @@ pub fn beam_vertices(beams: &[Beam]) -> Vec<HueVertex> {
                 a: beam.from,
                 b: beam.to,
                 corner,
-                width: BEAM_PX,
-                alpha: BEAM_ALPHA,
+                width: beam.width_px,
+                alpha: beam.alpha,
                 tint: u32::from(beam.tint),
                 origin: beam.origin,
                 grow: beam.grow,
@@ -658,11 +655,17 @@ mod tests {
             grow: [20.0, 24.0],
             turn: 0.5,
             tint: 2,
+            alpha: 0.3,
+            width_px: 1.5,
         };
         let vertices = beam_vertices(&[beam]);
         assert_eq!(vertices.len(), QUAD_CORNERS as usize);
         assert!(vertices.iter().all(|v| v.a == beam.from && v.b == beam.to));
-        assert!(vertices.iter().all(|v| v.tint == 2 && v.width == BEAM_PX));
+        assert!(vertices.iter().all(|v| v.tint == 2));
+        assert!(
+            vertices.iter().all(|v| v.width == 1.5 && v.alpha == 0.3),
+            "a beam keeps its own width and opacity"
+        );
         assert!(
             vertices
                 .iter()

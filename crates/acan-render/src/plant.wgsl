@@ -620,8 +620,8 @@ fn fs_stroke(v: StrokeOut) -> @location(0) vec4<f32> {
     return vec4<f32>(dark * v.ink.a, 0.0, 0.0, coverage * v.ink.a);
 }
 
-// A belt hue line is one screen-space stroke per piece, in the agent's tint. Each piece carries its
-// own opacity, which the renderer fades toward a belt's ends.
+// A hue stroke is one screen-space stroke per piece, in one tint: a belt's hue line, a drone's
+// tether, a piece of its trail or a side of a ghost. Each piece carries its own width and opacity.
 
 struct HueIn {
     @location(0) a: vec3<f32>,

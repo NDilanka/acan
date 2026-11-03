@@ -60,6 +60,9 @@ pub const PIN_MIN_PX: f32 = 18.0;
 const BEACON_PX: f32 = 6.0;
 /// How much a working agent's beacon swells at the top of its pulse, as a share of its rest size.
 const BEACON_SWING: f32 = 0.5;
+/// The tether from a drone's eye to its beacon: its width in device px and its opacity.
+const TETHER_PX: f32 = 1.0;
+const TETHER_ALPHA: f32 = 0.8;
 /// Milliseconds for one pulse of a working agent's beacon.
 pub const PULSE_MS: f32 = 1_200.0;
 /// Milliseconds a drone takes to turn to face a new machine.
@@ -1190,6 +1193,8 @@ pub fn beams(motion: &Motion, marks: &Marks, dpr: f32, riding: Option<&str>) -> 
                 grow: drone_grow(dpr),
                 turn: facing,
                 tint: body_tint(body.slot),
+                alpha: TETHER_ALPHA,
+                width_px: TETHER_PX,
             })
         })
         .collect()
