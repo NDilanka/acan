@@ -297,8 +297,9 @@
   #slip .ack { display: block; margin: 4px 0; font-size: 12px; }
   #slip .stamp { border: 1.5px dashed var(--muted); border-radius: 4px; padding: 6px 8px; margin: 8px 0 4px; }
   #slip .stamp span { display: block; font-size: 11px; color: var(--muted); }
-  #slip .stamp.sealed { background: var(--ink); color: #ffffff; border: 1.5px solid var(--ink); }
-  #slip .stamp.sealed span { color: var(--rule); }
+  #slip .stamp.sealed { background: var(--face); color: var(--ink); border: 1px solid var(--ink); border-radius: var(--radius); }
+  #slip .stamp.sealed span { color: var(--soft); }
+  #slip .stamp.sealed b { font: 600 11px/1.4 var(--mono); color: var(--ink); text-transform: uppercase; letter-spacing: 0.06em; }
   #slip .stamp b { font: 600 12px var(--mono); letter-spacing: 0.04em; }
   #slip button { font: 12px/1.3 var(--mono); background: var(--face); color: var(--ink); border: 1px solid var(--rule);
     border-radius: 4px; padding: 3px 8px; margin: 2px 0; cursor: pointer; }

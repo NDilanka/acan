@@ -121,3 +121,13 @@ test("the bottom island shows only while one of its parts shows", () => {
   assert.equal(alphaShown(true, [true, false, true, true]), true, "an update notice");
   assert.equal(alphaShown(false, [false, false, false, false]), false, "no token");
 });
+
+test("the sealed card is white with an ink rule, not a dark fill", () => {
+  const css = www("index.html").match(/#slip \.stamp\.sealed \{([^}]*)\}/)[1];
+  assert.match(css, /background: var\(--face\)/);
+  assert.match(css, /color: var\(--ink\)/);
+  assert.match(css, /border: 1px solid var\(--ink\)/);
+  assert.match(css, /border-radius: var\(--radius\)/);
+  assert.doesNotMatch(css, /background: var\(--ink\)|#ffffff;/);
+  assert.match(www("slip.js"), /el\("b", null, `SEALED rev \$\{confirmation\.scope_rev\}`\)/, "the text is unchanged");
+});
