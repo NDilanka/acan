@@ -115,14 +115,16 @@ export function awayStamp(quietMs) {
   return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h`;
 }
 
-// The agents that wait on the user: their task is in an open or proposed clash, or their order
-// asks a question. The map gives their drones a waiting ring, never stale or away.
+// The agents that wait on the user: their task is in an open or proposed clash, their order asks
+// a question, or its lane is stopped on the repair budget or has an open contest. The map gives
+// their drones a waiting ring, never stale or away.
 export function waitingAgents(view) {
   const clashed = new Set((view.clashes ?? []).filter((c) => c.state === "open" || c.state === "proposed").flatMap((c) => [c.a, c.b]));
   const asked = new Set((view.questions ?? []).map((q) => q.order));
+  const held = new Set((view.lanes ?? []).filter((lane) => lane.stopped || (lane.open_contests ?? 0) > 0).map((lane) => lane.order));
   const tasks = new Map(view.tasks.map((task) => [task.id, task]));
   return new Set(view.agents.filter((agent) => agent.task !== null && agent.task !== undefined
-    && (clashed.has(agent.task) || asked.has(tasks.get(agent.task)?.order))).map((agent) => agent.id));
+    && (clashed.has(agent.task) || asked.has(tasks.get(agent.task)?.order) || held.has(tasks.get(agent.task)?.order))).map((agent) => agent.id));
 }
 
 // "stale", "away" or null for one agent, by the map's rule: only an agent that holds a task (not

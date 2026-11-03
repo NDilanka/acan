@@ -275,6 +275,15 @@ test("an agent whose task is in an open clash, or whose order asks, waits and is
   assert.equal(rows.some((row) => row.quiet !== null), false);
 });
 
+test("a_stopped_or_contested_order_holds_its_agents", () => {
+  const stopped = { ...view(), clashes: [], questions: [], lanes: [{ order: 1, stopped: true, open_contests: 0 }] };
+  assert.deepEqual([...waitingAgents(stopped)].sort(), ["agent-a", "agent-b"]);
+  const contested = { ...view(), clashes: [], questions: [], lanes: [{ order: 1, stopped: false, open_contests: 1 }] };
+  assert.deepEqual([...waitingAgents(contested)].sort(), ["agent-a", "agent-b"]);
+  const live = { ...view(), clashes: [], questions: [], lanes: [{ order: 1, stopped: false, open_contests: 0 }] };
+  assert.deepEqual([...waitingAgents(live)], []);
+});
+
 test("stale is muted and away is ink in the strip; neither is red", () => {
   const css = readFileSync(new URL("../../www/index.html", import.meta.url), "utf8");
   assert.match(css, /#lanes \.when\.stale \{ color: var\(--muted\); \}/);
