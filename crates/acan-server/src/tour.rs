@@ -396,6 +396,16 @@ impl TourCache {
         Arc::clone(&self.slots)
     }
 
+    /// Drops every kept answer, so the next view of a receipt asks the director again. A call
+    /// that is running keeps its ticket until it ends, but no view can reach its answer now.
+    pub(crate) fn clear(&self) {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .expect("the tour cache lock is not poisoned");
+        *jobs = Jobs::default();
+    }
+
     /// The director's answer for `hash`, once its call has ended.
     #[cfg(test)]
     pub(crate) fn outcome(&self, hash: &ReceiptHash) -> Option<DirectorAnswer> {
@@ -1197,6 +1207,32 @@ mod tests {
         let mut view = fixture(text);
         view.tour = None;
         view
+    }
+
+    #[test]
+    fn clearing_the_cache_drops_every_kept_answer() {
+        let cache = TourCache::default();
+        let (first, second) = (receipt_hash(1), receipt_hash(2));
+        assert!(matches!(
+            cache.claim(&first, Instant::now()),
+            Claim::Accepted(..)
+        ));
+        assert!(matches!(
+            cache.claim(&second, Instant::now()),
+            Claim::Accepted(..)
+        ));
+        assert!(cache.holds(&first) && cache.holds(&second));
+
+        cache.clear();
+
+        assert!(
+            !cache.holds(&first) && !cache.holds(&second),
+            "nothing is kept"
+        );
+        assert!(matches!(
+            cache.claim(&first, Instant::now()),
+            Claim::Accepted(..)
+        ));
     }
 
     #[tokio::test]

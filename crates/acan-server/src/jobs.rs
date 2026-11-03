@@ -93,7 +93,7 @@ const CONTRAST_DIR: &str = "contrasts";
 /// The state directory's folder that holds the stored observations, by hash.
 pub(crate) const OBSERVATIONS_DIR: &str = "observations";
 /// The directory, under the state directory, that installed dependency entries are cached in.
-const DEPS_DIR: &str = "deps";
+pub(crate) const DEPS_DIR: &str = "deps";
 
 /// The state directory's folder that holds one protected-head snapshot per commit.
 const SNAPSHOT_DIR: &str = "snapshots";
