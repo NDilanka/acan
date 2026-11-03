@@ -15,6 +15,7 @@
 //! is removed when the command ends.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::str::FromStr;
@@ -575,16 +576,49 @@ pub fn write_out(report: &ShadowReceipt, dir: &Path) -> Result<(), ShadowError> 
         .map_err(|err| ShadowError::Output(format!("cannot create {}: {err}", dir.display())))?;
     let json = json_text(report)?;
     let markdown = markdown_text(report)?;
+    // Both files are staged in the directory first, so a write that fails here changes nothing.
+    let mut staged = Vec::with_capacity(2);
     for (name, text) in [
         ("shadow-receipt.json", json),
         ("shadow-receipt.md", markdown),
     ] {
         let path = dir.join(name);
-        fs::write(&path, text).map_err(|err| {
+        let mut file = tempfile::NamedTempFile::new_in(dir).map_err(|err| {
             ShadowError::Output(format!("cannot write {}: {err}", path.display()))
         })?;
+        file.write_all(text.as_bytes()).map_err(|err| {
+            ShadowError::Output(format!("cannot write {}: {err}", path.display()))
+        })?;
+        staged.push((path, file));
+    }
+    // Then each staged file takes its place. When one cannot, the files already placed go back
+    // to what they were, so the pair is either both new or both as they were before.
+    let mut placed: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::with_capacity(2);
+    for (path, file) in staged {
+        let previous = fs::read(&path).ok();
+        if let Err(err) = file.persist(&path) {
+            restore(&placed);
+            return Err(ShadowError::Output(format!(
+                "cannot write {}: {}",
+                path.display(),
+                err.error
+            )));
+        }
+        placed.push((path, previous));
     }
     Ok(())
+}
+
+/// Puts back the files a failed `write_out` had already replaced: their earlier bytes, or nothing
+/// when they did not exist. The error that is reported is the write that failed, so a failure
+/// here is not reported on its own.
+fn restore(placed: &[(PathBuf, Option<Vec<u8>>)]) {
+    for (path, previous) in placed.iter().rev() {
+        let _ = match previous {
+            Some(bytes) => fs::write(path, bytes),
+            None => fs::remove_file(path),
+        };
+    }
 }
 
 /// The JSON envelope: the run's commits, the merged commit, the receipt hash, the command that
@@ -1243,5 +1277,45 @@ mod tests {
         let markdown = fs::read_to_string(out.join("shadow-receipt.md")).expect("markdown file");
         assert!(json.contains(SHADOW_VERSION));
         assert!(markdown.starts_with("# Acan shadow receipt"));
+    }
+
+    #[test]
+    fn a_pair_that_cannot_be_completed_leaves_no_half_pair() {
+        let report = report_for(Path::new("clone"), fixture_receipt());
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let out = dir.path().join("out");
+        // A directory where the Markdown file goes makes its move fail after the JSON moved.
+        fs::create_dir_all(out.join("shadow-receipt.md")).expect("a directory in the way");
+        let error = write_out(&report, &out).expect_err("the markdown cannot be placed");
+        assert!(matches!(error, ShadowError::Output(_)), "output: {error}");
+        assert!(
+            !out.join("shadow-receipt.json").exists(),
+            "the json that moved is taken back"
+        );
+        assert_eq!(
+            fs::read_dir(&out).expect("the directory").count(),
+            1,
+            "no staged file is left behind"
+        );
+    }
+
+    #[test]
+    fn a_failed_pair_write_restores_the_earlier_json() {
+        let report = report_for(Path::new("clone"), fixture_receipt());
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let out = dir.path();
+        fs::write(out.join("shadow-receipt.json"), "earlier json").expect("an earlier json");
+        fs::create_dir(out.join("shadow-receipt.md")).expect("a directory in the way");
+        write_out(&report, out).expect_err("the markdown cannot be placed");
+        assert_eq!(
+            fs::read_to_string(out.join("shadow-receipt.json")).expect("the json still exists"),
+            "earlier json",
+            "the earlier json is put back"
+        );
+        assert_eq!(
+            fs::read_dir(out).expect("the directory").count(),
+            2,
+            "only the earlier json and the directory remain"
+        );
     }
 }
