@@ -57,6 +57,7 @@ mod ruling;
 mod setup;
 mod store;
 mod stream;
+mod stream_all;
 mod tour;
 mod vision;
 mod workers;
@@ -192,6 +193,8 @@ pub struct Running {
     shutdown: watch::Sender<bool>,
     server: Option<JoinHandle<io::Result<()>>>,
     runtimes: Vec<Runtime>,
+    /// The multiplexed streams, which span projects, so shutdown waits for them first.
+    streams: Arc<Mutex<JoinSet<()>>>,
     /// The default project's stream and ruling holds, which the tests park to hold a write.
     #[cfg(test)]
     pub(crate) stream_hold: stream::Hold,
@@ -264,22 +267,28 @@ impl Running {
             }
         }
         let served = self.wait().await;
+        drain_streams(&self.streams, "every project").await;
         let mut written: anyhow::Result<()> = Ok(());
         for runtime in std::mem::take(&mut self.runtimes) {
             runtime.jobs.abort();
             let _ = runtime.jobs.await;
-            let mut streams =
-                std::mem::take(&mut *runtime.streams.lock().expect("stream set lock poisoned"));
-            let drained = tokio::time::timeout(STREAM_DRAIN, async move {
-                while streams.join_next().await.is_some() {}
-            })
-            .await;
-            if drained.is_err() {
-                tracing::warn!(project = %runtime.id, "a stream did not close during shutdown");
-            }
+            drain_streams(&runtime.streams, &runtime.id).await;
             written = written.and(runtime.writer.shutdown().await);
         }
         served.and(written)
+    }
+}
+
+/// Waits, for at most [`STREAM_DRAIN`], for the streams in `streams` to close. The streams were
+/// already told to close, so the wait is only for their last writes to the socket.
+async fn drain_streams(streams: &Mutex<JoinSet<()>>, project: &str) {
+    let mut set = std::mem::take(&mut *streams.lock().expect("stream set lock poisoned"));
+    let drained = tokio::time::timeout(STREAM_DRAIN, async move {
+        while set.join_next().await.is_some() {}
+    })
+    .await;
+    if drained.is_err() {
+        tracing::warn!(project, "a stream did not close during shutdown");
     }
 }
 
@@ -528,7 +537,12 @@ pub async fn start_projects<C: ModelClient + 'static>(
     let stream_hold = entries[0].host.stream_hold().clone();
     #[cfg(test)]
     let ruling_hold = entries[0].host.ruling_hold().clone();
-    let registry = Registry::new(config.projects.default.clone(), entries);
+    let streams = Arc::new(Mutex::new(JoinSet::new()));
+    let registry = Registry::new(
+        config.projects.default.clone(),
+        entries,
+        Arc::clone(&streams),
+    );
     let app = http::router(Arc::new(registry), web);
     let mut shutdown_seen = shutdown.subscribe();
     let server = tokio::spawn(async move {
@@ -544,6 +558,7 @@ pub async fn start_projects<C: ModelClient + 'static>(
         shutdown,
         server: Some(server),
         runtimes,
+        streams,
         #[cfg(test)]
         stream_hold,
         #[cfg(test)]

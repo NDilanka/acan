@@ -42,7 +42,7 @@ use crate::release::{self, BugReport, UpdateStatus, VersionInfo};
 use crate::ruling::{self, RulingBody, RulingDraftView};
 use crate::vision::{self, Side, VisionWitness};
 use crate::workers::{Board, WorkersView};
-use crate::{STATE_DIR, observe, redact, setup, stream};
+use crate::{STATE_DIR, observe, redact, setup, stream, stream_all};
 
 /// Where one project's routes are mounted: the prefix of its API paths, and the path of its MCP
 /// endpoint. The default project is mounted at `/api` and `/mcp`, and every project at
@@ -147,6 +147,7 @@ pub(crate) fn router<C: ModelClient + 'static>(
         .merge(
             Router::new()
                 .route("/api/projects", get(registry::list_projects::<C>))
+                .route("/api/stream/all", get(stream_all::upgrade::<C>))
                 .with_state(Arc::clone(&projects)),
         );
     for entry in projects.entries() {

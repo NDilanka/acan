@@ -3,13 +3,15 @@
 //! The registry holds each project's host and nothing else. Which project a request reaches is
 //! decided by its path, so a request can only use the host of the project it names.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use acan_llm::ModelClient;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use serde::Serialize;
+use tokio::sync::watch;
+use tokio::task::JoinSet;
 
 use crate::host::Host;
 use crate::http::{ApiError, bearer};
@@ -19,6 +21,8 @@ use crate::workers::Board;
 pub(crate) struct Registry<C> {
     default_id: String,
     entries: Vec<Entry<C>>,
+    /// The multiplexed streams, which span projects, so shutdown waits for them here.
+    streams: Arc<Mutex<JoinSet<()>>>,
 }
 
 /// One project as the server runs it.
@@ -34,11 +38,18 @@ pub(crate) struct Entry<C> {
 }
 
 impl<C> Registry<C> {
-    /// A registry of `entries`, whose default is `default_id`.
-    pub(crate) fn new(default_id: String, entries: Vec<Entry<C>>) -> Self {
+    /// A registry of `entries`, whose default is `default_id`. The entries must not be empty:
+    /// the server shuts down through the first project's signal.
+    pub(crate) fn new(
+        default_id: String,
+        entries: Vec<Entry<C>>,
+        streams: Arc<Mutex<JoinSet<()>>>,
+    ) -> Self {
+        assert!(!entries.is_empty(), "a registry holds at least one project");
         Self {
             default_id,
             entries,
+            streams,
         }
     }
 
@@ -50,6 +61,18 @@ impl<C> Registry<C> {
     /// Every project, in the order the server was given them.
     pub(crate) fn entries(&self) -> &[Entry<C>] {
         &self.entries
+    }
+
+    /// The set the multiplexed streams are tracked in.
+    pub(crate) fn streams(&self) -> &Arc<Mutex<JoinSet<()>>> {
+        &self.streams
+    }
+}
+
+impl<C: ModelClient> Registry<C> {
+    /// The server's shutdown signal, which every project's host shares.
+    pub(crate) fn shutdown_signal(&self) -> watch::Receiver<bool> {
+        self.entries[0].host.shutdown_signal()
     }
 }
 
