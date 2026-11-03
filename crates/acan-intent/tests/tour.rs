@@ -419,6 +419,52 @@ fn every_mandatory_class_and_state_has_a_caption() {
 }
 
 #[test]
+fn every_class_and_state_has_a_caption() {
+    // Not only the mandatory pairs: a tour may visit any item. A check that passed and is open
+    // is the usual state of a clean receipt, and no template described it before captions-5.
+    let catalog = trusted();
+    let mut uncaptioned = Vec::new();
+    for class in ItemClass::ALL {
+        for state in ALL_STATES {
+            let fitted = catalog.templates.iter().any(|template| {
+                template.classes.contains(&class) && template.states.contains(&state)
+            });
+            if !fitted {
+                uncaptioned.push((class, state));
+            }
+        }
+    }
+    assert!(uncaptioned.is_empty(), "uncaptioned: {uncaptioned:?}");
+}
+
+#[test]
+fn an_open_preserved_check_is_captioned_and_its_step_is_admitted() {
+    // The director's step on a check that passed and is open. Admission may still refuse the
+    // whole tour for a mandatory item it does not reach, but not for this step.
+    let mut value = raw_view();
+    item_mut(&mut value, "chk-health")["state"] = json!("open");
+    let view: PlantView = serde_json::from_value(value.clone()).expect("decoding the view");
+    let tour: Tour = serde_json::from_value(json!({
+        "receipt_hash": value["receipt_hash"],
+        "steps": [{
+            "item_id": "chk-health",
+            "camera": { "machine_id": "server", "zoom": "machine" },
+            "stage": [],
+            "evidence_refs": [],
+            "caption": { "template_id": "preserved.open", "slots": {} }
+        }]
+    }))
+    .expect("the tour decodes");
+
+    assert_eq!(template_of(&tour, "chk-health"), "preserved.open");
+    assert!(text_of("preserved.open").ends_with("Recorded state: open."));
+    assert!(!matches!(
+        admit::tour(&view, &trusted(), &tour),
+        Err(TourRejection::Step { .. })
+    ));
+}
+
+#[test]
 fn an_unknown_probe_item_with_no_evidence_is_captioned_by_its_class() {
     // The receipt holds an unknown probe with no evidence rows: its caption names the class only.
     let mut value = raw_view();
