@@ -64,6 +64,10 @@ Acan is a Rust workspace. Each crate under `crates/` has one job.
 
 The demo app that the live take runs against is a separate public repository: https://github.com/NDilanka/acan-demo.
 
+## Model checks
+
+The `tla/` folder holds two TLA+ models of the lane rules that the scheduler enforces, and TLC checks them. The properties, constants, results and open items are in `tla/README.md`.
+
 ## Run steps
 
 ### Prerequisites
