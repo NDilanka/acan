@@ -5,6 +5,7 @@ import { shownOrderOf } from "./order.js";
 import {
   helpToggle,
   hintEl,
+  metaBadge,
   hintRest,
   historyBody,
   historyEl,
@@ -25,6 +26,7 @@ import {
   state,
   usagePanel,
 } from "./state.js";
+import { metaBadgeText } from "./chrome.js";
 import { OFFLINE_PROVIDER, roleLabel, splitUsage } from "./usage.js";
 
 // The usage panel shows this many rows at rest. Alt shows every row.
@@ -152,25 +154,40 @@ export function shownOrder(view) {
   return shownOrderOf(view, state.postedOrder);
 }
 
-// The usage panel has two sections. The first is the origin's count since its start, one row per
-// role, provider and model, with the legend that says what each provider name is. Alt also shows
-// the history of this log, which the page folds from the model calls in the log. The panel is
-// hidden until there is something to show. At rest the first section shows its first few rows;
-// Alt shows every origin row, the provider legend and the newest history rows the view carries.
-// A page with no origin rows (a replay, a fixture) shows the history at rest instead of an empty
-// table, so the attribution is still on screen.
+// The Meta attribution rests as one badge, "Meta · 6 calls", with the server's count since its
+// start, or the log's own count where the server has none (a replay, a fixture). A click opens
+// the panel: the origin's rows, one per role, provider and model, and Alt adds the provider
+// legend and the history of this log. With no origin rows the open panel shows the log's history
+// instead of an empty table, so the attribution is still there.
+let metaOpen = false;
+
+metaBadge.addEventListener("click", () => {
+  metaOpen = !metaOpen;
+  paintUsage();
+  requestRender();
+});
+
 export function paintUsage() {
   const served = state.serverUsage;
   const history = state.view === null ? [] : state.view.usage;
   const { live, offline, total } = splitUsage(served?.rows ?? []);
   const rows = [...live, ...offline];
-  usagePanel.hidden = rows.length === 0 && history.length === 0 && !served?.error;
+  const logCalls = history.reduce((sum, row) => sum + row.calls, 0);
+  const badge = rows.length > 0 || served?.error || logCalls > 0
+    ? metaBadgeText({ serverCalls: rows.length > 0 ? total.calls : null, logCalls, error: served?.error ?? null })
+    : "";
+  usagePanel.hidden = badge === "";
+  if (badge === "") return;
+  metaBadge.textContent = badge;
+  metaBadge.setAttribute("aria-expanded", String(metaOpen));
+  usagePanel.classList.toggle("open", metaOpen);
+  metaSection.hidden = !metaOpen || (rows.length === 0 && !served?.error && history.length > 0);
+  historyEl.hidden = !metaOpen || history.length === 0 || (!state.altDown && !metaSection.hidden);
+  if (!metaOpen) return;
   const shown = state.altDown ? rows : rows.slice(0, USAGE_REST_ROWS);
   metaBody.replaceChildren(...shown.map(metaRow));
   metaNote.textContent = metaNoteText(served, live.length, offline.length, total);
-  metaSection.hidden = rows.length === 0 && !served?.error && history.length > 0;
   metaLegend.hidden = !state.altDown || rows.length === 0;
-  historyEl.hidden = history.length === 0 || (!state.altDown && !metaSection.hidden);
   const earlier = state.view === null ? 0 : state.view.usage_earlier;
   historyBody.replaceChildren(...history.map(historyRow), ...(earlier > 0 ? [earlierRow(earlier)] : []));
 }

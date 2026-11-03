@@ -67,6 +67,8 @@ export const metaBody = $("meta-body");
 
 export const metaNote = $("meta-note");
 
+export const metaBadge = $("meta-badge");
+
 export const metaSection = $("usage-meta");
 
 export const metaLegend = $("meta-legend");

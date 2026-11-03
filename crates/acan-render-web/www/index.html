@@ -261,7 +261,12 @@
   #gate form { background: var(--card); border: 1px solid var(--rule); border-radius: 6px; padding: 16px; display: flex; gap: 8px; align-items: center; }
   #gate input { font: 12px var(--mono); padding: 4px 6px; width: 280px; }
   #gate button { font: 12px var(--mono); padding: 4px 10px; }
-  #usage { left: 12px; bottom: 12px; color: var(--soft); }
+  #usage { left: 12px; bottom: 12px; color: var(--soft); padding: 4px 10px; }
+  #usage #meta-badge { display: block; margin: 0; padding: 0; font: 11px var(--mono); color: var(--ink);
+    background: none; border: none; cursor: pointer; }
+  #usage #meta-badge::after { content: " ›"; color: var(--muted); }
+  #usage #meta-badge[aria-expanded="true"]::after { content: " ⌄"; }
+  #usage.open { padding: 10px 12px; }
   #usage h3 { margin: 0 0 4px; font: 600 11px/1.2 var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
   #usage section + section { margin-top: 8px; }
   #usage section[hidden], #usage .legend[hidden] { display: none; }
@@ -607,6 +612,7 @@
   </form>
 </div>
 <div class="island" id="usage" hidden>
+  <button type="button" id="meta-badge" aria-expanded="false" aria-controls="usage-meta"></button>
   <section id="usage-meta">
     <h3 title="provider = config name: meta = Meta Model API, baseten = Baseten-hosted Muse Spark Open, fireworks = Fireworks-hosted Muse Spark Open">Meta attribution · since server start</h3>
     <table>

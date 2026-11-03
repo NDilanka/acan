@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { linkQuiet } from "../../www/chrome.js";
+import { linkQuiet, metaBadgeText } from "../../www/chrome.js";
 import { keyAction } from "../../www/keys.js";
 
 const www = (name) => readFileSync(new URL(`../../www/${name}`, import.meta.url), "utf8");
@@ -58,4 +58,15 @@ test("the checklist rests folded as one line and expands on click", () => {
   assert.match(panel, /collapsedByUser \?\? true/);
   assert.match(panel, /element\("b", undefined, "Setup"\)/);
   assert.match(panel, /hide.hidden = folded/);
+});
+
+test("the Meta badge names the count, from the server or the log", () => {
+  assert.equal(metaBadgeText({ serverCalls: 6 }), "Meta · 6 calls");
+  assert.equal(metaBadgeText({ serverCalls: 1 }), "Meta · 1 call");
+  assert.equal(metaBadgeText({ logCalls: 3 }), "Meta · 3 calls", "no server rows: the log's count");
+  assert.equal(metaBadgeText({ error: "404" }), "Meta · not read");
+  assert.equal(metaBadgeText({}), "Meta · 0 calls");
+  const html = www("index.html");
+  assert.match(html, /<button type="button" id="meta-badge"[^>]*aria-controls="usage-meta"><\/button>/);
+  assert.match(www("panels.js"), /metaBadge.addEventListener\("click"/);
 });
