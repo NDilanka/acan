@@ -77,7 +77,7 @@ const WORKING: [&str; 4] = ["claimed", "declared", "building", "gating"];
 const FACE_EPSILON: f32 = 1e-3;
 /// Milliseconds a landed machine's dot shows its change word before it goes quiet.
 pub const LANDED_HOLD_MS: f32 = 4_000.0;
-/// Milliseconds a bot takes to ease off its machine and fade, and an order flag to fade out.
+/// Milliseconds a bot takes to rise off its machine, and an order flag to fade out.
 pub const LEAVE_MS: f32 = 400.0;
 /// How far a landed dot sits inside its plinth's corner, in plan units, so it stands on the plinth
 /// and off its edge.
@@ -86,12 +86,26 @@ const LANDED_INSET: f32 = 2.0;
 const DIAMOND_HALF_WIDTH: f32 = 0.42;
 /// Gap between a bot's crown or a diamond and its flag, in CSS px.
 const FLAG_GAP_PX: f32 = 8.0;
-/// How far below its place a body starts its ease-in, and a pin its rise, in plan units.
+/// How far above its place a body starts its drop in, how far a leaving body rises, and how far
+/// below its place a pin starts its rise, in plan units.
 const RISE: f32 = 6.0;
-/// Milliseconds a body takes to ease in on arrival.
-pub const ARRIVE_MS: f32 = 200.0;
-/// Milliseconds a body takes to move between machines.
+/// Milliseconds a body takes to drop in on arrival.
+pub const ARRIVE_MS: f32 = 240.0;
+/// Milliseconds the ride's camera takes to follow its drone to a new spot.
 pub const MOVE_MS: f32 = 400.0;
+/// A move between machines takes `MOVE_BASE_MS` plus `MOVE_PER_UNIT_MS` for each plan unit it
+/// covers, held between the two bounds.
+const MOVE_BASE_MS: f32 = 350.0;
+const MOVE_PER_UNIT_MS: f32 = 0.6;
+const MOVE_BOUNDS_MS: (f32, f32) = (450.0, 900.0);
+/// How far a moving drone's centre clears the taller of its two machines at the top of its arc.
+const ARC_CLEAR: f32 = 1.5 * BODY_RADIUS;
+/// Milliseconds a moving drone takes to turn to its way of travel at the start of a move, and to
+/// its target at the end.
+const FACE_MS: f32 = 150.0;
+/// A working drone's bob: its height on screen in CSS px, and its period.
+const BOB_PX: f32 = 1.0;
+const BOB_PERIOD_MS: f32 = 2_400.0;
 /// Milliseconds a pin takes to rise in, or to sink out.
 pub const PIN_MS: f32 = 250.0;
 /// The dot of a declaration whose task has no agent.
@@ -625,6 +639,16 @@ pub fn card(view: &View, world: &World, index: usize, slots: &AgentSlots) -> Opt
     })
 }
 
+/// How a body's glide eases.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Path {
+    /// A drop straight down onto its place, easing out.
+    Arrive,
+    /// An arc between machines whose top is at `apex`, easing in and out. The drone faces
+    /// `travel` on the way, turning from `start` at the outset and to its target at the end.
+    Move { apex: f32, travel: f32, start: f32 },
+}
+
 /// A body's glide, from where it was to where the view puts it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Glide {
@@ -632,29 +656,56 @@ struct Glide {
     to: [f32; 3],
     elapsed: f32,
     duration: f32,
+    path: Path,
     /// The agent's palette slot, kept so the body can still draw once it has left.
     slot: usize,
+    /// The top of the machine the body glides to, in world units. The next move arcs over it.
+    top: f32,
 }
 
 impl Glide {
-    fn new(from: [f32; 3], to: [f32; 3], duration: f32, slot: usize) -> Self {
+    /// A drop onto `to` from [`RISE`] above it.
+    fn arrive(to: [f32; 3], slot: usize, top: f32) -> Self {
+        Self {
+            from: [to[0], to[1], to[2] + RISE],
+            to,
+            elapsed: 0.0,
+            duration: ARRIVE_MS,
+            path: Path::Arrive,
+            slot,
+            top,
+        }
+    }
+
+    /// An arc from `from` to `to` over the taller of the two machine tops, facing the way it
+    /// travels. `start` is the heading the drone faces as it sets off.
+    fn moving(from: [f32; 3], to: [f32; 3], tops: (f32, f32), start: f32, slot: usize) -> Self {
+        let travel = heading(from, to).unwrap_or(start);
         Self {
             from,
             to,
             elapsed: 0.0,
-            duration,
+            duration: move_ms(distance([from[0], from[1]], [to[0], to[1]])),
+            path: Path::Move {
+                apex: tops.0.max(tops.1) + ARC_CLEAR,
+                travel,
+                start,
+            },
             slot,
+            top: tops.1,
         }
     }
 
     /// The glide already at its end, for a mark that must not move.
-    fn settled(to: [f32; 3], slot: usize) -> Self {
+    fn settled(to: [f32; 3], slot: usize, top: f32) -> Self {
         Self {
             from: to,
             to,
             elapsed: 0.0,
             duration: 0.0,
+            path: Path::Arrive,
             slot,
+            top,
         }
     }
 
@@ -662,13 +713,49 @@ impl Glide {
         if !self.running() {
             return self.to;
         }
-        let t = ease(self.elapsed / self.duration);
-        std::array::from_fn(|axis| self.from[axis] + (self.to[axis] - self.from[axis]) * t)
+        let share = self.elapsed / self.duration;
+        let lerp = |axis: usize, t: f32| self.from[axis] + (self.to[axis] - self.from[axis]) * t;
+        match self.path {
+            Path::Arrive => {
+                let t = cubic_out(share);
+                std::array::from_fn(|axis| lerp(axis, t))
+            }
+            Path::Move { apex, .. } => {
+                let t = cubic_in_out(share);
+                let middle = 0.5 * (self.from[2] + self.to[2]);
+                let lift = (apex - middle).max(0.0) * 4.0 * t * (1.0 - t);
+                [lerp(0, t), lerp(1, t), lerp(2, t) + lift]
+            }
+        }
+    }
+
+    /// The heading a moving drone faces now, toward `face` at the end, or `None` when the glide
+    /// is not a move under way.
+    fn heading(&self, face: f32) -> Option<f32> {
+        let Path::Move { travel, start, .. } = self.path else {
+            return None;
+        };
+        if !self.running() {
+            return None;
+        }
+        let left = self.duration - self.elapsed;
+        Some(if self.elapsed < FACE_MS {
+            start + wrap(travel - start) * ease(self.elapsed / FACE_MS)
+        } else if left > FACE_MS {
+            travel
+        } else {
+            travel + wrap(face - travel) * ease(1.0 - left / FACE_MS)
+        })
     }
 
     fn running(&self) -> bool {
         self.elapsed < self.duration
     }
+}
+
+/// Milliseconds a move of `units` plan units takes.
+fn move_ms(units: f32) -> f32 {
+    (MOVE_BASE_MS + MOVE_PER_UNIT_MS * units).clamp(MOVE_BOUNDS_MS.0, MOVE_BOUNDS_MS.1)
 }
 
 /// A drone's turn toward its machine, from the heading it starts from along the shorter arc to the
@@ -725,8 +812,7 @@ fn wrap(a: f32) -> f32 {
     (a + PI).rem_euclid(TAU) - PI
 }
 
-/// A body that has left its machine: it eases down into the plinth and shrinks away over
-/// [`LEAVE_MS`].
+/// A body that has left its machine: it rises [`RISE`] off it over [`LEAVE_MS`] and is gone.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Leave {
     at: [f32; 3],
@@ -736,11 +822,11 @@ struct Leave {
 }
 
 impl Leave {
-    /// Where the body stands now: it has sunk part way into its plinth.
+    /// Where the body stands now: it has risen part way off its machine.
     fn now(&self) -> Leaving {
-        let t = ease(self.elapsed / LEAVE_MS);
+        let t = cubic_out(self.elapsed / LEAVE_MS);
         Leaving {
-            at: [self.at[0], self.at[1], self.at[2] - RISE * t],
+            at: [self.at[0], self.at[1], self.at[2] + RISE * t],
             slot: self.slot,
             heading: self.heading,
         }
@@ -798,10 +884,12 @@ impl Rise {
 /// The eases the marks run between the view's positions. Nothing here is read back into the view.
 ///
 /// A still motion, from `?freeze=1`, lands every ease at once: a bot does not glide, a bot that
-/// left is gone, no flag fades, and a landed dot keeps its word because its hold never runs.
+/// left is gone, no flag fades, and a landed dot keeps its word because its hold never runs. Under
+/// reduced motion the drones jump to their places and do not bob, while flags still fade.
 #[derive(Debug, Default)]
 pub struct Motion {
     still: bool,
+    reduced: bool,
     bodies: BTreeMap<String, Glide>,
     turns: BTreeMap<String, Turn>,
     leaving: BTreeMap<String, Leave>,
@@ -814,6 +902,11 @@ pub struct Motion {
     pulsing: bool,
     /// Where the pulse is, in milliseconds through its cycle. It stays at zero while still.
     pulse_ms: f32,
+    /// Where the working drones' bob is, in milliseconds through its period.
+    bob_ms: f32,
+    /// World units per CSS px at the drones, so the bob is [`BOB_PX`] on screen. Zero until the
+    /// page sets it, which keeps every drone level.
+    px_units: f32,
 }
 
 impl Motion {
@@ -825,27 +918,48 @@ impl Motion {
         }
     }
 
-    /// Points each ease at the marks the view now gives. A body that moves glides from where it
-    /// is, a body that leaves eases off its machine, and a pin that leaves sinks out.
+    /// Holds the drones' glides and bob still under reduced motion. Flags still fade.
+    pub fn set_reduced(&mut self, reduced: bool) {
+        self.reduced = reduced;
+    }
+
+    /// Sets how many world units a CSS px covers at the drones, which sizes the bob.
+    pub fn set_px_units(&mut self, units: f32) {
+        self.px_units = if units.is_finite() {
+            units.max(0.0)
+        } else {
+            0.0
+        };
+    }
+
+    /// Points each ease at the marks the view now gives. A body that arrives drops in, a body that
+    /// moves arcs from where it is, a body that leaves rises off its machine, and a pin that leaves
+    /// sinks out.
     pub fn sync(&mut self, marks: &Marks) {
         for body in &marks.bodies {
-            self.sync_turn(body);
+            let top = body.target[2] - BEACON_RADIUS;
+            let jump = self.still || self.reduced;
             let glide = match self.bodies.get(&body.agent) {
-                Some(glide) if glide.to == body.at => continue,
-                Some(glide) => Glide::new(glide.at(), body.at, MOVE_MS, body.slot),
-                None => Glide::new(
-                    [body.at[0], body.at[1], body.at[2] - RISE],
-                    body.at,
-                    ARRIVE_MS,
-                    body.slot,
-                ),
+                Some(glide) if glide.to == body.at => {
+                    self.sync_turn(body);
+                    continue;
+                }
+                _ if jump => Glide::settled(body.at, body.slot, top),
+                Some(glide) => {
+                    let start = self.heading_of(&body.agent).unwrap_or(0.0);
+                    Glide::moving(glide.at(), body.at, (glide.top, top), start, body.slot)
+                }
+                None => Glide::arrive(body.at, body.slot, top),
             };
-            let glide = if self.still {
-                Glide::settled(glide.to, glide.slot)
-            } else {
-                glide
-            };
+            let moves = matches!(glide.path, Path::Move { .. });
             self.bodies.insert(body.agent.clone(), glide);
+            if moves {
+                // The move's own heading carries the turn, so the drone ends facing its target.
+                let face = heading(body.at, body.target).unwrap_or(0.0);
+                self.turns.insert(body.agent.clone(), Turn::settled(face));
+            } else {
+                self.sync_turn(body);
+            }
             self.leaving.remove(&body.agent);
         }
         let live: BTreeSet<&str> = marks
@@ -865,7 +979,7 @@ impl Motion {
         self.bodies.retain(|agent, _| live.contains(agent.as_str()));
         self.turns.retain(|agent, _| live.contains(agent.as_str()));
         for (agent, glide, heading) in gone {
-            if !self.still {
+            if !self.still && !self.reduced {
                 self.leaving.insert(
                     agent,
                     Leave {
@@ -918,7 +1032,7 @@ impl Motion {
         };
         let turn = match self.turns.get(&body.agent) {
             Some(turn) if turn.face == face => return,
-            Some(turn) if !self.still => Turn::between(turn.at(), face),
+            Some(turn) if !self.still && !self.reduced => Turn::between(turn.at(), face),
             _ => Turn::settled(face),
         };
         self.turns.insert(body.agent.clone(), turn);
@@ -1005,6 +1119,9 @@ impl Motion {
         }
         if self.pulsing {
             self.pulse_ms = (self.pulse_ms + dt) % PULSE_MS;
+            if !self.reduced {
+                self.bob_ms = (self.bob_ms + dt) % BOB_PERIOD_MS;
+            }
         }
         let bodies = self.bodies.values().any(Glide::running);
         let turning = self.turns.values().any(Turn::running);
@@ -1024,10 +1141,26 @@ impl Motion {
         0.5 - 0.5 * (TAU * self.pulse_ms / PULSE_MS).cos()
     }
 
-    /// The heading a drone faces now, in radians from +x.
+    /// How far a working drone in palette slot `slot` has bobbed now, in world units. Each slot
+    /// starts at its own phase, so the drones on one machine do not bob together.
+    #[must_use]
+    pub fn bob(&self, slot: usize) -> f32 {
+        if self.still || self.reduced {
+            return 0.0;
+        }
+        let phase = self.bob_ms / BOB_PERIOD_MS + slot as f32 / AGENT_SLOTS as f32;
+        0.5 * BOB_PX * self.px_units * (TAU * phase).sin()
+    }
+
+    /// The heading a drone faces now, in radians from +x. A drone on the move faces the way it
+    /// travels and turns to its target in the move's last [`FACE_MS`].
     #[must_use]
     pub fn heading_of(&self, agent: &str) -> Option<f32> {
-        self.turns.get(agent).map(Turn::at)
+        let turn = self.turns.get(agent).map(Turn::at);
+        self.bodies
+            .get(agent)
+            .and_then(|glide| glide.heading(turn.unwrap_or(0.0)))
+            .or(turn)
     }
 
     /// Whether a flag listing changed while time passed, such as a landed dot going quiet. Reading
@@ -1195,6 +1328,7 @@ pub fn mark_instances(
             continue;
         };
         let turn = motion.heading_of(&body.agent).unwrap_or(0.0);
+        let at = bobbed(motion, body, at);
         if riding != Some(body.agent.as_str()) {
             let shell = if body.state == DroneState::Stale {
                 u8::try_from(TINT_STALE).expect("tint slots fit in a byte")
@@ -1250,6 +1384,15 @@ pub fn mark_instances(
     out
 }
 
+/// A working drone's centre lifted by its bob. Any other drone keeps its place.
+fn bobbed(motion: &Motion, body: &Body, at: [f32; 3]) -> [f32; 3] {
+    if body.working() {
+        [at[0], at[1], at[2] + motion.bob(body.slot)]
+    } else {
+        at
+    }
+}
+
 /// The beams now run from each drone's eye to its target. The eye is on the nose, in the drone's
 /// own frame, so the beam turns and grows with the drone and starts on the eye at any size. A drone
 /// that is leaving has none, and neither has the riding agent's drone.
@@ -1260,7 +1403,7 @@ pub fn beams(motion: &Motion, marks: &Marks, dpr: f32, riding: Option<&str>) -> 
         .iter()
         .filter(|body| riding != Some(body.agent.as_str()))
         .filter_map(|body| {
-            let at = motion.body_at(&body.agent)?;
+            let at = bobbed(motion, body, motion.body_at(&body.agent)?);
             let facing = motion.heading_of(&body.agent)?;
             Some(Beam {
                 from: [EYE_DISTANCE, 0.0, 0.0],
@@ -1335,6 +1478,21 @@ fn visual_extent(
 fn ease(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+fn cubic_out(t: f32) -> f32 {
+    let u = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - u * u * u
+}
+
+fn cubic_in_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        let u = -2.0 * t + 2.0;
+        1.0 - u * u * u / 2.0
+    }
 }
 
 fn is_open(clash: &ClashView) -> bool {
@@ -1912,7 +2070,7 @@ mod tests {
     }
 
     #[test]
-    fn a_landed_bot_sinks_into_its_plinth_then_leaves_and_the_order_flag_fades() {
+    fn a_landed_bot_rises_off_its_machine_then_leaves_and_the_order_flag_fades() {
         let plan = plan();
         let stands = stands(&plan);
         let before = mirror_before_land().view(&plan);
@@ -1940,10 +2098,10 @@ mod tests {
             .bodies
             .iter()
             .map(|body| body.at[2])
-            .fold(f32::INFINITY, f32::min);
+            .fold(f32::NEG_INFINITY, f32::max);
         assert!(
-            motion.leaving_now().iter().all(|bot| bot.at[2] < hover),
-            "a leaving bot sinks from its hover"
+            motion.leaving_now().iter().all(|bot| bot.at[2] > hover),
+            "a leaving bot rises from its hover"
         );
         let fading = |flags: &[Flag]| {
             flags
@@ -2515,6 +2673,110 @@ mod tests {
         motion.advance(TURN_MS / 2.0);
         let mid = motion.heading_of("b").expect("the drone turns");
         assert!(mid.cos() < -0.999, "the short arc crosses pi: {mid}");
+    }
+
+    #[test]
+    fn an_arriving_drone_drops_onto_its_place_easing_out() {
+        let at = [0.0, 0.0, 40.0];
+        let mut motion = Motion::default();
+        motion.sync(&marks_of(vec![drone("a", at, [9.0, 0.0, 9.0], "idle")]));
+        let start = motion.body_at("a").expect("the drone arrives");
+        assert_eq!(start[2], at[2] + RISE, "it starts above its place");
+        motion.advance(ARRIVE_MS / 2.0);
+        let half = motion.body_at("a").expect("it drops")[2];
+        assert!(
+            half - at[2] < RISE * 0.5,
+            "an ease out covers most of the drop by half time: {half}"
+        );
+        motion.advance(ARRIVE_MS / 2.0);
+        assert_eq!(motion.body_at("a"), Some(at));
+    }
+
+    #[test]
+    fn a_move_arcs_over_the_taller_machine_and_faces_the_way_it_travels() {
+        let low = |x: f32, top: f32| {
+            drone(
+                "a",
+                [x, 0.0, top + HOVER_LIFT],
+                [x, 30.0, top + BEACON_RADIUS],
+                "idle",
+            )
+        };
+        let mut motion = Motion::default();
+        motion.sync(&marks_of(vec![low(0.0, 10.0)]));
+        motion.advance(ARRIVE_MS + TURN_MS);
+        motion.sync(&marks_of(vec![low(200.0, 30.0)]));
+        let duration = move_ms(200.0);
+        assert_eq!(duration, 470.0, "350 ms and 0.6 ms a unit");
+        motion.advance(duration / 2.0);
+        let mid = motion.body_at("a").expect("it moves");
+        assert!(
+            (mid[2] - (30.0 + ARC_CLEAR)).abs() < 1e-3,
+            "the top of the arc clears the taller machine: {mid:?}"
+        );
+        let facing = motion.heading_of("a").expect("it faces");
+        assert!(
+            facing.abs() < 1e-4,
+            "it faces east, the way it goes: {facing}"
+        );
+        motion.advance(duration / 2.0);
+        let face = motion.heading_of("a").expect("it faces");
+        assert!(
+            (face - PI / 2.0).abs() < 1e-4,
+            "it ends facing its target: {face}"
+        );
+        assert_eq!(motion.body_at("a").map(|at| at[0]), Some(200.0));
+        assert_eq!(move_ms(0.0), 450.0, "a short move takes at least 450 ms");
+        assert_eq!(move_ms(5_000.0), 900.0, "a long one at most 900 ms");
+    }
+
+    #[test]
+    fn a_still_or_reduced_motion_lands_a_move_at_once_and_holds_the_bob() {
+        for (still, reduced) in [(true, false), (false, true)] {
+            let mut motion = Motion::new(still);
+            motion.set_reduced(reduced);
+            motion.set_px_units(2.0);
+            let first = drone("a", [0.0, 0.0, 40.0], [0.0, 9.0, 9.0], "building");
+            let second = drone("a", [90.0, 0.0, 40.0], [90.0, 9.0, 9.0], "building");
+            motion.sync(&marks_of(vec![first]));
+            assert_eq!(motion.body_at("a"), Some([0.0, 0.0, 40.0]));
+            motion.sync(&marks_of(vec![second]));
+            assert_eq!(motion.body_at("a"), Some([90.0, 0.0, 40.0]), "it jumps");
+            motion.advance(BOB_PERIOD_MS / 4.0);
+            assert_eq!(motion.bob(0), 0.0, "and does not bob");
+        }
+    }
+
+    #[test]
+    fn a_working_drone_bobs_one_px_and_each_slot_has_its_own_phase() {
+        let mut motion = Motion::default();
+        motion.set_px_units(2.0);
+        let marks = marks_of(vec![drone(
+            "a",
+            [0.0, 0.0, 40.0],
+            [9.0, 0.0, 9.0],
+            "building",
+        )]);
+        motion.sync(&marks);
+        motion.advance(ARRIVE_MS);
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for _ in 0..48 {
+            motion.advance(BOB_PERIOD_MS / 48.0);
+            lo = lo.min(motion.bob(0));
+            hi = hi.max(motion.bob(0));
+        }
+        assert!(
+            ((hi - lo) - BOB_PX * 2.0).abs() < 0.05,
+            "the bob spans 1 CSS px: {lo} to {hi}"
+        );
+        assert_ne!(motion.bob(0), motion.bob(1), "slots bob apart");
+        let idle = marks_of(vec![drone("a", [0.0, 0.0, 40.0], [9.0, 0.0, 9.0], "idle")]);
+        let shell = mark_instances(&motion, &idle, KINDS, 1.0, None)
+            .into_iter()
+            .find(|i| i.kind == KINDS.body)
+            .expect("the drone draws");
+        assert_eq!(shell.offset[2], 40.0, "an idle drone does not bob");
     }
 
     #[test]

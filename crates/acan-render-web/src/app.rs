@@ -353,7 +353,7 @@ impl App {
     /// lands at once, a leaving bot is gone, no flag fades, and a landed dot keeps its word.
     pub fn set_still(&mut self, still: bool) {
         self.still = still;
-        self.motion = Motion::new(still);
+        self.motion = self.new_motion();
         self.dirty = true;
     }
 
@@ -739,9 +739,18 @@ impl App {
         }
     }
 
-    /// Turns the hover bob on or off. The page turns it off under reduced motion.
+    /// Turns the hover bob on or off. The page turns it off under reduced motion, which also
+    /// lands the drones' moves at once and holds their bob.
     pub fn set_bob(&mut self, enabled: bool) {
         self.bob_enabled = enabled;
+        self.motion.set_reduced(!enabled);
+    }
+
+    /// A fresh motion for the page's freeze and reduced-motion settings.
+    fn new_motion(&self) -> Motion {
+        let mut motion = Motion::new(self.still);
+        motion.set_reduced(!self.bob_enabled);
+        motion
     }
 
     /// Returns to the default angles and fits the plant.
@@ -1093,7 +1102,7 @@ impl App {
         self.plan = Some(plan);
         self.view = None;
         self.marks = Marks::default();
-        self.motion = Motion::new(self.still);
+        self.motion = self.new_motion();
         self.card_clash = None;
         self.tour_move = None;
         self.ride = None;
@@ -1162,6 +1171,7 @@ impl App {
             scene.instances[instance].tint =
                 marks::machine_tint(&self.marks, plan_index, staged.as_deref());
         }
+        self.motion.set_px_units(self.dpr / self.camera.zoom());
         let riding = self.riding_agent();
         scene.beams = marks::beams(&self.motion, &self.marks, self.dpr, riding);
         scene.instances.extend(marks::mark_instances(
