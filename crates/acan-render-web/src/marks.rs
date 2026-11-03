@@ -1095,8 +1095,8 @@ pub struct MarkKinds {
     pub beacon: u16,
 }
 
-/// A drone's instances: its shell and its accent at its centre, and its shadow on the ground
-/// under the centre. The shadow keeps its plan size, since it lies on the ground.
+/// A drone's instances: its shell and its accent at its centre, and its shadow on the plinth top
+/// under the centre. The shadow keeps its plan size, since it lies on the plinth.
 fn drone(kinds: MarkKinds, at: [f32; 3], slot: usize, turn: f32, bot: [f32; 2]) -> [Instance; 3] {
     [
         Instance {
@@ -1114,7 +1114,7 @@ fn drone(kinds: MarkKinds, at: [f32; 3], slot: usize, turn: f32, bot: [f32; 2]) 
             turn,
         },
         Instance {
-            offset: [at[0], at[1], 0.0],
+            offset: [at[0], at[1], PLINTH_TOP],
             kind: kinds.shadow,
             tint: 0,
             grow: [0.0; 2],
@@ -2219,6 +2219,13 @@ mod tests {
         assert_eq!(count(kinds.body), 2, "each drone has a shell");
         assert_eq!(count(kinds.accent), 2, "each drone has an accent");
         assert_eq!(count(kinds.shadow), 2, "each drone has a shadow");
+        assert!(
+            instances
+                .iter()
+                .filter(|i| i.kind == kinds.shadow)
+                .all(|i| i.offset[2] == PLINTH_TOP),
+            "a shadow lies on the plinth top"
+        );
         assert_eq!(count(kinds.ring), 2, "each waiting agent has a ring");
         assert_eq!(count(kinds.pin), 1);
         assert_eq!(count(kinds.stalk), 1, "each diamond has its stalk");

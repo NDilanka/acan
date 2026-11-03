@@ -3,6 +3,10 @@
 //! painted lines. Its glass eye and the lamp on its crown carry the full hue. Two struts hold the
 //! nacelles to the body, a swept fin sits behind, and a grille sits on the back.
 //!
+//! The fine line art is held back until the drone is large on screen, so a far drone reads as a
+//! dot with ears: the blades, the grille and the vents draw at `Close` only, and the seams, the
+//! struts and the hubs at `Near` and closer.
+//!
 //! The drone is three models. The shell and the accent share one centre at the origin, so the renderer
 //! places the centre over the machine, turns the drone to face its target, and grows it about the
 //! centre. The shadow is a third model, one dot the renderer sets on the plinth top under the centre.
@@ -99,7 +103,7 @@ pub fn agent_accent() -> Model {
 #[must_use]
 pub fn agent_shadow() -> Model {
     let mut build = Build::default();
-    build.dot(ORIGIN, UP, SHADOW_RADIUS, Ink::Shadow);
+    build.dot(ORIGIN, UP, SHADOW_RADIUS, Ink::Shadow, Detail::Always);
     finish(build).0
 }
 
@@ -178,23 +182,23 @@ impl Build {
         }
     }
 
-    fn line(&mut self, points: Vec<V>, closed: bool, tone: Ink) {
+    fn line(&mut self, points: Vec<V>, closed: bool, tone: Ink, detail: Detail) {
         self.lines.push(Line3 {
             points,
             closed,
             tone,
             width: WEIGHT,
-            detail: Detail::Always,
+            detail,
         });
     }
 
-    fn dot(&mut self, center: V, normal: V, radius: f32, tone: Ink) {
+    fn dot(&mut self, center: V, normal: V, radius: f32, tone: Ink, detail: Detail) {
         self.dots.push(Dot3 {
             center,
             normal,
             radius,
             tone,
-            detail: Detail::Always,
+            detail,
         });
     }
 }
@@ -343,14 +347,29 @@ fn nacelle(build: &mut Build, side: f32) {
     let front = add3(centre, scale3(NOSE, NACELLE_HALF));
     let back = add3(centre, scale3(NOSE, -NACELLE_HALF));
     tube(build, back, front, NACELLE_RADIUS);
-    build.line(circle(front, NACELLE_RADIUS, SIDE, UP, 24), true, Ink::Hi);
-    build.line(circle(back, 3.0 * SCALE, SIDE, UP, 24), true, Ink::Lo);
-    build.line(circle(back, 1.6 * SCALE, SIDE, UP, 20), true, Ink::Lo);
+    build.line(
+        circle(front, NACELLE_RADIUS, SIDE, UP, 24),
+        true,
+        Ink::Hi,
+        Detail::Always,
+    );
+    build.line(
+        circle(back, 3.0 * SCALE, SIDE, UP, 24),
+        true,
+        Ink::Lo,
+        Detail::Always,
+    );
+    build.line(
+        circle(back, 1.6 * SCALE, SIDE, UP, 20),
+        true,
+        Ink::Lo,
+        Detail::Always,
+    );
     for i in 0..BLADES {
         let a = TAU * i as f32 / BLADES as f32;
         let inner = add3(front, scale3(sweep(a), 1.3 * SCALE));
         let outer = add3(front, scale3(sweep(a + 0.5), 3.9 * SCALE));
-        build.line(vec![inner, outer], false, Ink::Mid);
+        build.line(vec![inner, outer], false, Ink::Mid, Detail::Close);
     }
     build.parts.blades += BLADES;
     build.dot(
@@ -358,11 +377,12 @@ fn nacelle(build: &mut Build, side: f32) {
         NOSE,
         1.3 * SCALE,
         Ink::Mid,
+        Detail::Near,
     );
     build.parts.hubs += 1;
     let strut_root = at(0.0, side * 0.8 * BODY_RADIUS, 0.0);
     let strut_end = add3(centre, scale3(SIDE, -side * NACELLE_RADIUS * 0.6));
-    build.line(vec![strut_root, strut_end], false, Ink::Mid);
+    build.line(vec![strut_root, strut_end], false, Ink::Mid, Detail::Near);
     build.parts.nacelles += 1;
 }
 
@@ -421,7 +441,7 @@ fn eye(build: &mut Build) {
                 add3(centre, scale3(dir, BODY_RADIUS))
             })
             .collect();
-        build.line(ring, true, tone);
+        build.line(ring, true, tone, Detail::Always);
     }
     for lift in [0.52_f32, -0.52] {
         let vent: Vec<V> = (0..5)
@@ -434,7 +454,7 @@ fn eye(build: &mut Build) {
                 add3(centre, scale3(dir, BODY_RADIUS))
             })
             .collect();
-        build.line(vent, false, Ink::Mid);
+        build.line(vent, false, Ink::Mid, Detail::Close);
         build.parts.vents += 1;
     }
     build.dot(
@@ -442,6 +462,7 @@ fn eye(build: &mut Build) {
         NOSE,
         EYE_DOT,
         Ink::Hi,
+        Detail::Always,
     );
     build.parts.eyes += 1;
 }
@@ -457,7 +478,7 @@ fn grille(build: &mut Build) {
                 scale3(UP, lat),
             );
             let centre = add3(at(0.0, 0.0, 0.0), scale3(dir, BODY_RADIUS + PROUD));
-            build.dot(centre, dir, GRILLE_DOT, Ink::Lo);
+            build.dot(centre, dir, GRILLE_DOT, Ink::Lo, Detail::Close);
             build.parts.grille += 1;
         }
     }
@@ -497,7 +518,12 @@ fn seam(build: &mut Build, centre: V, dirs: &[V]) {
     let kept: Vec<bool> = dirs.iter().map(|&d| dot3(d, NOSE) <= NOSE_CLEAR).collect();
     let point = |d: V| add3(centre, scale3(d, BODY_RADIUS));
     if kept.iter().all(|&k| k) {
-        build.line(dirs.iter().map(|&d| point(d)).collect(), true, Ink::Mid);
+        build.line(
+            dirs.iter().map(|&d| point(d)).collect(),
+            true,
+            Ink::Mid,
+            Detail::Near,
+        );
         build.parts.seams += 1;
         return;
     }
@@ -513,7 +539,7 @@ fn seam(build: &mut Build, centre: V, dirs: &[V]) {
         }
         let finished = std::mem::take(&mut run);
         if finished.len() > 1 {
-            build.line(finished, false, Ink::Mid);
+            build.line(finished, false, Ink::Mid, Detail::Near);
             build.parts.seams += 1;
         }
     }
@@ -598,6 +624,31 @@ mod tests {
         assert_eq!(parts.vents, 2);
         assert_eq!(parts.grille, 14);
         assert!(parts.seams >= 2, "the latitude seams draw: {parts:?}");
+    }
+
+    #[test]
+    fn a_far_drone_draws_only_its_rings_and_eye_and_the_fine_art_waits_for_close() {
+        let shell = agent_body();
+        let strokes = |level: Detail| {
+            shell.lines.iter().filter(|l| l.detail == level).count()
+                + shell.dots.iter().filter(|d| d.detail == level).count()
+        };
+        assert!(
+            strokes(Detail::Always) <= 10,
+            "a far drone keeps about eight strokes: {}",
+            strokes(Detail::Always)
+        );
+        let parts = drone_parts();
+        assert_eq!(
+            strokes(Detail::Close),
+            parts.blades + parts.vents + parts.grille,
+            "the blades, vents and grille draw at Close"
+        );
+        assert_eq!(
+            strokes(Detail::Near),
+            parts.seams + parts.hubs + parts.nacelles,
+            "the seams, hubs and struts draw at Near"
+        );
     }
 
     #[test]
