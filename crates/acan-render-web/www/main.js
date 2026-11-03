@@ -25,6 +25,7 @@ import {
   $,
   TOKEN_KEY,
   canvas,
+  freeBand,
   freeze,
   gate,
   labelsEl,
@@ -594,9 +595,11 @@ async function boot() {
   }
   // `?focus=agent-a&zoom=8` closes up on one agent's drone, at 8 times the fit zoom. The zoom is
   // the scale at the drone, so 8 draws it about 375 px tall. It applies once the log places the
-  // drone, so the page can ask before the log arrives.
+  // drone, so the page can ask before the log arrives. The view slides left when a drone would sit
+  // under the right rail's panels.
   if (params.has("focus")) {
-    state.app.focus_agent(params.get("focus"), Number(params.get("zoom") || 8));
+    const band = freeBand();
+    state.app.focus_agent(params.get("focus"), Number(params.get("zoom") || 8), new Float32Array([band.left, band.right]));
   }
   requestRender();
   if (params.get("bench") === "1") {

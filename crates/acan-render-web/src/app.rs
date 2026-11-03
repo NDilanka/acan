@@ -50,6 +50,9 @@ const TURN_MS: f32 = 180.0;
 /// The gap between frames, in ms, while only the idle bob runs: about 20 frames a second. The bob
 /// moves a few hundredths of a pixel in that time, so the lower rate does not show.
 const CALM_FRAME_MS: f32 = 50.0;
+/// How far a drone reaches from its centre, its waiting ring included, in world units. A close-up
+/// keeps this much of each drone clear of the page's side panels.
+const FOCUS_REACH: f32 = 1.4 * acan_iso::BODY_RADIUS;
 
 #[wasm_bindgen]
 pub struct App {
@@ -82,9 +85,9 @@ pub struct App {
     still: bool,
     /// The index of the clash whose card is open, if any.
     card_clash: Option<usize>,
-    /// An agent to close up on, and the zoom as a share of the fit zoom. It applies once the view
-    /// places the agent's drone, then clears.
-    focus: Option<(String, f32)>,
+    /// An agent to close up on, the zoom as a share of the fit zoom, and the CSS band the page's
+    /// panels leave free. It applies once the view places the agent's drone, then clears.
+    focus: Option<(String, f32, Option<[f32; 2]>)>,
     /// The ride, while the page shows one agent's drone from inside.
     ride: Option<Ride>,
     /// Whether the fit runs once the ride has eased back, as the `0` key asks.
@@ -871,16 +874,23 @@ impl App {
     }
 
     /// Closes up on agent `name`'s drone: the drone sits at the screen centre, and the zoom is
-    /// `ratio` times the fit zoom. The page asks for it with `?focus=`. It waits until the view
-    /// places the drone, so it may be called before the log loads.
-    pub fn focus_agent(&mut self, name: &str, ratio: f32) {
-        self.focus = Some((name.to_owned(), ratio));
+    /// `ratio` times the fit zoom. `band` is the CSS x range `[left, right]` the page's panels
+    /// leave free: when a drone on screen would sit under a panel past it, the view slides left
+    /// just enough to clear it, as long as that does not push a drone off the band's left edge.
+    /// The page asks for it with `?focus=`. It waits until the view places the drone, so it may
+    /// be called before the log loads.
+    pub fn focus_agent(&mut self, name: &str, ratio: f32, band: &[f32]) {
+        let band = match band {
+            [left, right] if left < right => Some([*left, *right]),
+            _ => None,
+        };
+        self.focus = Some((name.to_owned(), ratio, band));
         self.apply_focus();
     }
 
     /// Applies a pending focus once the agent's drone is placed, then clears it.
     fn apply_focus(&mut self) {
-        let Some((name, ratio)) = self.focus.as_ref() else {
+        let Some((name, ratio, band)) = self.focus.as_ref() else {
             return;
         };
         let Some(body) = self.marks.bodies.iter().find(|body| &body.agent == name) else {
@@ -888,9 +898,42 @@ impl App {
         };
         let at = self.motion.body_at(&body.agent).unwrap_or(body.at);
         let zoom = ratio * self.fit_zoom();
+        let band = *band;
         self.camera.centre_on(at);
         self.camera.set_zoom(zoom);
         self.focus = None;
+        if let Some(band) = band {
+            let slide = self.slide_clear(band);
+            if slide != 0.0 {
+                self.pan(slide, 0.0);
+            }
+        }
+    }
+
+    /// How far, in CSS px, to slide the view sideways so every drone on screen keeps out past
+    /// `band[1]` without one leaving past `band[0]`. Zero when none sits past the right edge.
+    fn slide_clear(&self, band: [f32; 2]) -> f32 {
+        // A drone's reach from its centre, ring and ears included, in CSS px.
+        let reach = FOCUS_REACH * self.camera.zoom() / self.dpr;
+        let xs: Vec<f32> = self
+            .marks
+            .bodies
+            .iter()
+            .filter_map(|body| self.motion.body_at(&body.agent))
+            .filter_map(|at| pov::target_on_screen(&self.camera, at, self.dpr))
+            .map(|[x, _]| x)
+            .collect();
+        let (lo, hi) = xs
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &x| {
+                (lo.min(x), hi.max(x))
+            });
+        let over = hi + reach - band[1];
+        if xs.is_empty() || over <= 0.0 {
+            return 0.0;
+        }
+        let room = (lo - reach - band[0]).max(0.0);
+        -over.min(room)
     }
 
     /// Level of detail now: 0 far, 1 near, 2 close.
