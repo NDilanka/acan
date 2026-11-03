@@ -865,6 +865,13 @@ test("the statemap hint names the most a scan can spend, from the call limit", (
   assert.equal(statemapHint(undefined), "");
 });
 
+test("a saved statemap call limit moves the hint with it", async () => {
+  const put = await createMockApi(fixture).request("PUT", "/api/settings", {
+    budgets: { call_limits: { statemap: 40 } },
+  });
+  assert.equal(statemapHint(put.body.settings.budgets), "Uses up to 40 calls × 3k tokens per scan");
+});
+
 test("a project's statemap flag is saved on or off, and applies live", async () => {
   const api = createMockApi(fixture);
   const on = await api.request("PUT", "/api/settings", { projects: { statemap_llm: { acan: true } } });
