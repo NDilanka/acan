@@ -12,6 +12,7 @@ import {
   emptyLines,
   goStep,
   highlightLane,
+  listenForDroneHover,
   laneRows,
   lastActivity,
   workerLines,
@@ -217,4 +218,17 @@ test("highlightLane marks one agent's row, moves the mark, and clears it on null
   assert.equal(highlightLane("agent-9", strip), false, "an agent with no row marks nothing");
   assert.equal(highlightLane(null, strip), false);
   assert.deepEqual(strip.rows.map((row) => row.classList.contains("hl")), [false, false]);
+});
+
+test("a drone-hover event marks that agent's lane, and a null agent clears it", () => {
+  const strip = fakeStrip(["agent-1", "agent-2"]);
+  const map = new EventTarget();
+  listenForDroneHover(map, strip);
+  map.dispatchEvent(new CustomEvent("acan:drone-hover", { detail: { agent: "agent-1" } }));
+  assert.equal(strip.rows[0].classList.contains("hl"), true);
+  assert.equal(strip.rows[0].dataset.highlighted, "true");
+  assert.equal(strip.rows[1].classList.contains("hl"), false);
+  map.dispatchEvent(new CustomEvent("acan:drone-hover", { detail: { agent: null } }));
+  assert.deepEqual(strip.rows.map((row) => row.classList.contains("hl")), [false, false]);
+  assert.equal(strip.rows[0].dataset.highlighted, undefined);
 });

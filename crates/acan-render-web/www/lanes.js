@@ -5,8 +5,10 @@
 // Hover hook for the map: each row is `<li data-lane="<index>" data-agent="<agent id>">`, stable
 // across repaints. `highlightLane(agentId)` marks that agent's row (class `hl`, and
 // `data-highlighted="true"`), and `highlightLane(null)` clears it. The mark survives a repaint, so
-// a caller such as a drone hover sets it once on enter and clears it once on leave. Nothing on the
-// map calls it yet.
+// a caller sets it once on enter and clears it once on leave. The map's caller is the drone
+// hover: main.js dispatches `acan:drone-hover` on document, a CustomEvent whose detail is
+// `{ agent: <id> | null }`, with null when the pointer leaves the drone. This module listens for
+// it once, at load, through `listenForDroneHover`.
 
 import { workerCommand, workerSummary } from "./firstrun.js";
 
@@ -75,6 +77,14 @@ export function highlightLane(agentId, root = typeof document === "undefined" ? 
   highlighted = agentId ?? null;
   return markRows(root);
 }
+
+// Makes `target` mark the lane of the drone under the pointer on each `acan:drone-hover`. `root`
+// is passed to highlightLane, so undefined means the page's strip; tests pass stand-ins for both.
+export function listenForDroneHover(target, root) {
+  target.addEventListener("acan:drone-hover", (event) => highlightLane(event.detail?.agent ?? null, root));
+}
+
+if (typeof document !== "undefined") listenForDroneHover(document);
 
 function markRows(root) {
   let found = false;
