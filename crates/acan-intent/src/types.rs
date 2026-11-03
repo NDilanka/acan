@@ -433,7 +433,8 @@ pub enum Channel {
     Cookie,
     /// The JSON response body.
     Body,
-    /// A trusted side-effect sink.
+    /// A trusted side-effect sink. Its selector's `field_path` is required and starts with
+    /// `store` or `outbound_http`.
     SideEffect,
 }
 

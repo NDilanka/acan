@@ -34,10 +34,10 @@ use acan_intent::{
     ContentHash, ContrastExample, ContrastExampleHash, ContrastExampleV1, CoreDerived, CorpusProbe,
     DiscrepancyEpisode, EnvHash, EnvManifest, EpisodeKey, EpisodeState, EpisodeV1,
     EvaluatorVersion, Fixture, FixtureId, FixtureSetHash, FixtureSetManifest, FoldedLedger,
-    GateContext, GateState, InvalidValue, Mask, ObservationHash, ObservedRun, PreparedCommit,
-    ProbeCorpus, ProbeHash, ProbeSetHash, ProbeSetManifest, Receipt, RepoPath, RunManifest,
-    RunOutcome, RunRole, RunnerBuild, RunnerHash, RunnerManifest, RuntimeId, SandboxPolicyHash,
-    Scope, ScopeConfirmation, ScopeRevision, StepId, UnixMillis,
+    GateContext, GateState, InvalidValue, Mask, ObligationCheck, ObligationId, ObservationHash,
+    ObservedRun, PreparedCommit, ProbeCorpus, ProbeHash, ProbeSetHash, ProbeSetManifest, Receipt,
+    RepoPath, RunManifest, RunOutcome, RunRole, RunnerBuild, RunnerHash, RunnerManifest, RuntimeId,
+    SandboxPolicyHash, Scope, ScopeConfirmation, ScopeRevision, StepId, UnixMillis,
 };
 use acan_witness::{KeptBody, RunnerConfig, SequenceInput, run_sequence, run_sequence_keeping};
 use serde::de::DeserializeOwned;
@@ -807,9 +807,9 @@ fn manifest(run: &RecordedRun) -> RunManifest {
 /// The open episodes the failing scope items of `receipt` need. The receipt builder attaches an
 /// episode only when the order already holds one for the item's selector, so a first failure
 /// names none. Each failing item with a selector and no episode gets one, keyed by that selector
-/// and its first failing obligation. The key is the episode's identity, so the same failure gets
-/// the same episode on every pass. An item with no selector cannot be keyed, so it gets none and
-/// stays unnamed.
+/// and its first failing obligation, or by the selector alone when no obligation fails. The key is
+/// the episode's identity, so the same failure gets the same episode on every pass. An item with
+/// no selector cannot be keyed, so it gets none and stays unnamed.
 ///
 /// # Errors
 ///
@@ -823,12 +823,7 @@ fn open_episodes(receipt: &Receipt) -> Result<Vec<DiscrepancyEpisode>, ObserveEr
         let (Some(selector), Some(step)) = (item.selector.clone(), item.sequence.first()) else {
             continue;
         };
-        let obligation_id = item
-            .evaluation
-            .obligations
-            .iter()
-            .find(|check| !matches!(check.result, CheckResult::Pass {}))
-            .map(|check| check.obligation_id.clone());
+        let obligation_id = opening_obligation(&item.evaluation.obligations);
         let id = EpisodeKey {
             order: receipt.order.clone(),
             selector: selector.clone(),
@@ -857,6 +852,17 @@ fn open_episodes(receipt: &Receipt) -> Result<Vec<DiscrepancyEpisode>, ObserveEr
         });
     }
     Ok(opened)
+}
+
+/// The obligation an episode for an item with `checks` is keyed by: its first failed obligation,
+/// or none when no obligation fails, as for an incomparable or unstable item. The receipt builder
+/// finds an item's episode by the same rule, so an unknown obligation must not key the episode:
+/// the item would never name it, and the origin would refuse the receipt.
+fn opening_obligation(checks: &[ObligationCheck]) -> Option<ObligationId> {
+    checks
+        .iter()
+        .find(|check| matches!(check.result, CheckResult::Fail { .. }))
+        .map(|check| check.obligation_id.clone())
 }
 
 /// The context the candidate would be tested under right now, from the current ruling log and the
@@ -1040,9 +1046,39 @@ fn io_error(path: &Path, source: io::Error) -> ObserveError {
 
 #[cfg(test)]
 mod tests {
-    use acan_intent::ContainerNetwork;
+    use acan_intent::{ContainerNetwork, UnknownReason};
 
     use super::*;
+
+    #[test]
+    fn an_episode_is_keyed_by_a_failed_obligation_or_by_none() {
+        let check = |id: &str, result: CheckResult| ObligationCheck {
+            obligation_id: serde_json::from_value(serde_json::json!(id))
+                .expect("the obligation id decodes"),
+            result,
+        };
+        let unknown = || CheckResult::Unknown {
+            reason: UnknownReason::Incomparable {
+                detail: "the candidate has no observation at no-such-step".to_owned(),
+            },
+        };
+        let failed = || CheckResult::Fail {
+            detail: "the status differs from base".to_owned(),
+        };
+        assert_eq!(
+            opening_obligation(&[check("obl-unknown", unknown())]),
+            None,
+            "an unknown obligation keys no episode, so the receipt can name it under none"
+        );
+        assert_eq!(
+            opening_obligation(&[
+                check("obl-unknown", unknown()),
+                check("obl-failed", failed()),
+            ]),
+            Some(serde_json::from_value(serde_json::json!("obl-failed")).expect("the id decodes")),
+            "the first failed obligation keys the episode"
+        );
+    }
 
     #[test]
     fn the_runner_policy_is_offline_and_pinned_by_digest() {

@@ -134,10 +134,11 @@ impl From<SubmitError> for JobError {
     }
 }
 
-/// How often a job key failed, and when it may run again.
+/// How often a job key failed, why the last attempt failed, and when it may run again.
 struct Retry {
     attempts: u32,
     not_before: Instant,
+    last_error: String,
 }
 
 /// What a task worktree step does.
@@ -360,6 +361,7 @@ fn record_failure<K: Eq + std::hash::Hash + std::fmt::Debug>(
             Retry {
                 attempts: MAX_JOB_ATTEMPTS,
                 not_before: Instant::now(),
+                last_error: err.to_string(),
             },
         );
         return;
@@ -375,6 +377,7 @@ fn record_failure<K: Eq + std::hash::Hash + std::fmt::Debug>(
         Retry {
             attempts,
             not_before: Instant::now() + RETRY_BACKOFF * 2u32.pow(attempts.saturating_sub(1)),
+            last_error: err.to_string(),
         },
     );
 }
@@ -399,8 +402,9 @@ fn start_derived<C: ModelClient + 'static>(
             Some(retry) => retry.attempts + 1,
             None => 1,
         };
+        let previous = retries.get(&job).map(|retry| retry.last_error.clone());
         let id = tasks
-            .spawn(run_one(host.clone(), job.clone(), attempt))
+            .spawn(run_one(host.clone(), job.clone(), attempt, previous))
             .id();
         in_flight.insert(id, job);
     }
@@ -493,8 +497,9 @@ async fn run_one<C: ModelClient>(
     host: Host<C>,
     job: Job,
     attempt: u32,
+    previous: Option<String>,
 ) -> (Job, Result<(), JobError>) {
-    let result = match execute(&host, &job).await {
+    let result = match execute(&host, &job, previous.as_deref()).await {
         Ok(Some(command)) => host
             .submit(Command::System(command))
             .await
@@ -551,10 +556,14 @@ async fn report_exhausted<C: ModelClient>(host: &Host<C>, job: &Job, err: &JobEr
     }
 }
 
-async fn execute<C: ModelClient>(host: &Host<C>, job: &Job) -> Result<Option<SystemCmd>, JobError> {
+async fn execute<C: ModelClient>(
+    host: &Host<C>,
+    job: &Job,
+    previous: Option<&str>,
+) -> Result<Option<SystemCmd>, JobError> {
     match job {
         Job::Split { order, rev } => split(host, job, *order, *rev).await,
-        Job::DraftScope { order, rev } => draft_scope(host, job, *order, *rev).await,
+        Job::DraftScope { order, rev } => draft_scope(host, job, *order, *rev, previous).await,
         Job::Explain { clash } => explain(host, job, *clash).await,
         Job::Barrier { deadline, .. } => {
             sleep_until(*deadline).await;
@@ -604,12 +613,13 @@ async fn split<C: ModelClient>(
 /// plant's machines, the protected route table and the protected limits, then reported as
 /// `ScopeDrafted`. The draft confirms nothing: a human revises and confirms the scope. No offline
 /// draft stands in for a failed call; a failure is retried and then reported as
-/// `ScopeDraftFailed`.
+/// `ScopeDraftFailed`. A retry is told why the last attempt failed, through `previous`.
 async fn draft_scope<C: ModelClient>(
     host: &Host<C>,
     job: &Job,
     order: OrderId,
     rev: OrderRev,
+    previous: Option<&str>,
 ) -> Result<Option<SystemCmd>, JobError> {
     let Some(workspace) = host.workspace() else {
         return Err(JobError::Unavailable(
@@ -634,11 +644,12 @@ async fn draft_scope<C: ModelClient>(
         machines: &machines,
         routes: &corpus.routes,
         fixtures: &corpus.fixtures,
+        probes: &corpus.probes,
         limits: app.limits,
     };
     // The foreman drafts from the order's sentence, what the human asked for. The order ref is
     // only the draft's key, so it never stands in for the request.
-    let request = model::scope_request(&sentence, &bounds);
+    let request = model::scope_request(&sentence, &bounds, previous);
     let reply = host
         .client()
         .chat_json::<model::DraftReply>(Role::Foreman, request)

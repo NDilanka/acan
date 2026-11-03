@@ -853,6 +853,20 @@ fn selectors_refuse_inconsistent_field_paths() {
 }
 
 #[test]
+fn the_selector_schema_states_the_side_effect_path_rule() {
+    let schema =
+        serde_json::to_value(schemars::schema_for!(Selector)).expect("encoding the schema");
+    let description = schema["properties"]["field_path"]["description"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        description.contains("`side_effect` path is required")
+            && description.contains("`store` or `outbound_http`"),
+        "the field_path description states the rule: {description:?}"
+    );
+}
+
+#[test]
 fn a_scope_item_without_acceptance_is_refused() {
     let scope: Scope = load("scope.json");
     let mut item = serde_json::to_value(&scope.body.may[0]).expect("encoding an item");
