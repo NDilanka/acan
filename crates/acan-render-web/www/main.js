@@ -138,6 +138,7 @@ function drawFrame(now = performance.now()) {
     if (!state.app.render()) requestRender();
     if (timing.firstFrame === undefined) timing.firstFrame = performance.now();
     syncView();
+    syncTopDownButton();
     paintRide();
     placeLabels();
     placeVisionPins();
@@ -217,6 +218,25 @@ function zoomAtCentre(factor) {
 function turn(degrees) {
   state.app.turn(degrees);
   requestRender();
+}
+
+// Reduced motion, from the system or the Look setting, makes the top-down turn a jump.
+function reducedNow() {
+  return reducedMotion.matches || document.documentElement.classList.contains("reduce-motion");
+}
+
+// Turns the map to top-down, or back, as `V` and the top-down button ask.
+function toggleTopDown() {
+  state.app.toggle_top_down(reducedNow());
+  requestRender();
+}
+
+// The top-down button shows the state the wasm view reports. The view can leave top-down by a tilt
+// or a fit, so the button follows the view rather than its own clicks.
+function syncTopDownButton() {
+  const button = $("topdown-toggle");
+  const on = String(state.app.top_down());
+  if (button.getAttribute("aria-pressed") !== on) button.setAttribute("aria-pressed", on);
 }
 
 // Whether a drone's disc lies under the CSS point, within its radius plus DRONE_PICK_PX.
@@ -370,6 +390,9 @@ function runKey(action, event) {
     case "projection":
       state.app.toggle_projection();
       requestRender();
+      break;
+    case "top-down":
+      toggleTopDown();
       break;
     case "zoom":
       zoomAtCentre(action.dir > 0 ? ZOOM_KEY : 1 / ZOOM_KEY);
@@ -591,6 +614,7 @@ async function boot() {
   sizeCanvas();
   bindCanvas();
   bindKeys();
+  $("topdown-toggle").addEventListener("click", toggleTopDown);
   installRailTabs(kit);
   installLanes(kit);
   installInbox(kit);

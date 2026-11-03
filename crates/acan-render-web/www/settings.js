@@ -237,6 +237,12 @@ export async function installSettings({
   api = fixture ? await mockApi() : fetchApi();
   cog.hidden = false;
   await load();
+  // The map opens top-down when the Map setting says so. It is read once, here, so a later change of
+  // the setting does not move a view the reader has already turned.
+  if (settings?.look && !loadFailed) {
+    deps.app?.set_top_down?.(settings.look.top_down_default === true, true);
+    deps.requestRender();
+  }
   deepLink();
 }
 
