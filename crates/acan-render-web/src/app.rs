@@ -91,6 +91,11 @@ pub struct App {
     view_json: String,
     view_version: u32,
     dirty: bool,
+    /// The page's clock for the marks: the time now on a live page, and when the reader last saw
+    /// it. A still page keeps no time, so nothing on it reads stale.
+    clock: marks::Clock,
+    /// The agent whose drone the pointer is over, if any.
+    hovered: Option<String>,
 }
 
 /// An ease from one azimuth to another, in degrees. `to` is not wrapped, so repeated turns add up.
@@ -124,8 +129,6 @@ struct Loaded {
     rest: Vec<bool>,
     /// The machines and belts as the layout places them, before any mark is added.
     base: Scene,
-    /// The belts that draw, with the instance index of the machines they join.
-    belts: Vec<scene::BeltLine>,
     /// For each plan machine, its instance in `base`.
     plan_instance: Vec<usize>,
     /// For each plan machine, its model's top and the free spots on its plinth top.
@@ -195,6 +198,8 @@ impl App {
             fit_after_leave: false,
             bob_enabled: true,
             bob_ms: 0.0,
+            clock: marks::Clock::default(),
+            hovered: None,
             view_json: String::new(),
             view_version: 0,
             dirty: false,
@@ -355,8 +360,36 @@ impl App {
     /// lands at once, a leaving bot is gone, no flag fades, and a landed dot keeps its word.
     pub fn set_still(&mut self, still: bool) {
         self.still = still;
-        self.motion = Motion::new(still);
+        if still {
+            self.clock = marks::Clock::default();
+        }
+        self.motion = self.new_motion();
         self.dirty = true;
+    }
+
+    /// Tells the marks the time now, in epoch milliseconds, so a quiet agent's drone can read
+    /// stale. Zero or less clears the clock, as a page that stops being live does. A still page
+    /// ignores it.
+    pub fn set_now(&mut self, ms: f64) {
+        let now = (ms > 0.0 && !self.still).then_some(ms as u64);
+        if now != self.clock.now {
+            self.clock.now = now;
+            self.dirty = true;
+        }
+    }
+
+    /// Tells the marks when the reader last saw the page and when they came back to it, in epoch
+    /// milliseconds, once they were away a while. What landed between the two shows as ghosts.
+    /// A time of zero or less clears it. A still page ignores it.
+    pub fn set_seen(&mut self, seen_ms: f64, back_ms: f64) {
+        let away = (seen_ms > 0.0 && back_ms >= seen_ms && !self.still).then_some(marks::Away {
+            seen: seen_ms as u64,
+            back: back_ms as u64,
+        });
+        if away != self.clock.away {
+            self.clock.away = away;
+            self.dirty = true;
+        }
     }
 
     /// Whether a flag listing changed while time passed, such as a landed dot going quiet or a
@@ -380,6 +413,8 @@ impl App {
     pub fn load_log(&mut self, json: &str) -> Result<(), JsError> {
         let entries = feed::entries(json).map_err(js_err)?;
         self.mirror = Some(Mirror::from_entries(entries).map_err(js_err)?);
+        // A replaced log is a seek: the drones land where the new log puts them.
+        self.motion.cut();
         self.dirty = true;
         Ok(())
     }
@@ -741,9 +776,18 @@ impl App {
         }
     }
 
-    /// Turns the hover bob on or off. The page turns it off under reduced motion.
+    /// Turns the hover bob on or off. The page turns it off under reduced motion, which also
+    /// lands the drones' moves at once and holds their bob.
     pub fn set_bob(&mut self, enabled: bool) {
         self.bob_enabled = enabled;
+        self.motion.set_reduced(!enabled);
+    }
+
+    /// A fresh motion for the page's freeze and reduced-motion settings.
+    fn new_motion(&self) -> Motion {
+        let mut motion = Motion::new(self.still);
+        motion.set_reduced(!self.bob_enabled);
+        motion
     }
 
     /// Returns to the default angles and fits the plant.
@@ -914,17 +958,21 @@ impl App {
             .collect()
     }
 
-    /// The flags, the open clash card and the scope machine names the plant lacks, as JSON:
-    /// `{"flags": [...], "card": {...} | null, "unplaced": [...]}`. The
-    /// page reads it when the view changes or a card opens. Flag `i` anchors where `flag_layout`
-    /// puts index `i`.
+    /// The flags, the open clash card, the scope machine names the plant lacks and each clash's
+    /// badges, as JSON: `{"flags": [...], "card": {...} | null, "unplaced": [...], "badges":
+    /// [...]}`. The page reads it when the view changes or a card opens. Flag `i` anchors where
+    /// `flag_layout` puts index `i`, and a clash's badges where `badge_layout` puts its clash.
     pub fn marks_json(&self) -> String {
         #[derive(serde::Serialize)]
         struct Out<'a> {
             flags: Vec<marks::Flag>,
             card: Option<marks::Card>,
             unplaced: &'a [String],
+            badges: Vec<marks::Badges>,
         }
+        let badges = self.view.as_ref().map_or_else(Vec::new, |view| {
+            marks::clash_badges(view, &self.marks.pins, &self.slots)
+        });
         let card = self.card_clash.and_then(|index| {
             let view = self.view.as_ref()?;
             let mirror = self.mirror.as_ref()?;
@@ -934,6 +982,7 @@ impl App {
             flags: self.all_flags(),
             card,
             unplaced: &self.marks.unplaced,
+            badges,
         })
         .expect("marks serialize as JSON")
     }
@@ -969,6 +1018,118 @@ impl App {
             .collect()
     }
 
+    /// The agent whose drone the CSS point `(x, y)` is over, within its radius and a few px, or
+    /// the empty string. The riding agent's drone has no body on screen, so it is never hovered.
+    pub fn drone_at(&self, x: f32, y: f32) -> String {
+        let riding = self.riding_agent();
+        let bodies: Vec<&marks::Body> = self
+            .marks
+            .bodies
+            .iter()
+            .filter(|body| riding != Some(body.agent.as_str()))
+            .collect();
+        let discs: Vec<([f32; 2], f32)> = bodies
+            .iter()
+            .map(|body| {
+                let at = self.motion.body_at(&body.agent).unwrap_or(body.at);
+                marks::drone_disc(at, |p| self.screen(p))
+            })
+            .collect();
+        marks::disc_under(&discs, [x, y]).map_or_else(String::new, |i| bodies[i].agent.clone())
+    }
+
+    /// The disc of `agent`'s drone on screen, as `[css x, css y, css radius]`, or empty when it
+    /// has no drone. The page rings the hovered drone with it.
+    pub fn drone_disc_of(&self, agent: &str) -> Vec<f32> {
+        self.marks
+            .bodies
+            .iter()
+            .find(|body| body.agent == agent)
+            .map_or_else(Vec::new, |body| {
+                let at = self.motion.body_at(&body.agent).unwrap_or(body.at);
+                let ([x, y], radius) = marks::drone_disc(at, |p| self.screen(p));
+                vec![x, y, radius]
+            })
+    }
+
+    /// Marks the drone of `agent` as hovered, or none for the empty string, so its tether inks in
+    /// fully. Returns whether that changed.
+    pub fn set_hovered(&mut self, agent: &str) -> bool {
+        let hovered = (!agent.is_empty()).then(|| agent.to_owned());
+        if hovered == self.hovered {
+            return false;
+        }
+        self.hovered = hovered;
+        self.sync_scene();
+        true
+    }
+
+    /// Each clash's badge centres on screen, as flat `[clash index, left css x, right css x, css
+    /// y]` quads, following the diamonds as they rise and sink.
+    pub fn badge_layout(&self) -> Vec<f32> {
+        self.marks
+            .pins
+            .iter()
+            .flat_map(|pin| {
+                let foot = self.motion.pin_at(&pin.id).unwrap_or(pin.at);
+                let [left, right] = marks::badge_centres(foot, |p| self.screen(p));
+                [pin.clash as f32, left[0], right[0], left[1]]
+            })
+            .collect()
+    }
+
+    /// Each ghost on show, as flat `[css x, css y, landed count]` triples, at the corner of its
+    /// outline lowest on screen. Alt labels each with how many tasks landed there.
+    pub fn ghost_layout(&self) -> Vec<f32> {
+        self.marks
+            .ghosts
+            .iter()
+            .filter(|ghost| self.motion.ghost_alpha(ghost.machine).is_some())
+            .flat_map(|ghost| {
+                let [x, y] = ghost
+                    .corners()
+                    .map(|corner| self.screen(corner))
+                    .into_iter()
+                    .fold([0.0, f32::NEG_INFINITY], |low, p| {
+                        if p[1] > low[1] { p } else { low }
+                    });
+                [x, y, ghost.count as f32]
+            })
+            .collect()
+    }
+
+    /// Clears the ghost whose outline holds the CSS point `(x, y)`, as the reader's pointer
+    /// passing over it or a click on it does. Returns whether one began to fade.
+    pub fn clear_ghost_at(&mut self, x: f32, y: f32) -> bool {
+        let shown = self
+            .marks
+            .ghosts
+            .iter()
+            .filter(|ghost| self.motion.ghost_alpha(ghost.machine).is_some());
+        let hit = shown.into_iter().find(|ghost| {
+            let quad = ghost.corners().map(|corner| self.screen(corner));
+            marks::inside_quad(&quad, [x, y])
+        });
+        let Some(machine) = hit.map(|ghost| ghost.machine) else {
+            return false;
+        };
+        self.motion.clear_ghost(machine)
+    }
+
+    /// Clears every ghost, as the page does a while after the reader comes back. Returns whether
+    /// any began to fade.
+    pub fn clear_ghosts(&mut self) -> bool {
+        self.motion.clear_ghosts()
+    }
+
+    /// Each working drone's beacon on screen, as flat `[css x, css y, css radius]` triples, at its
+    /// pulse now. The page rings each in paper.
+    pub fn beacon_layout(&self) -> Vec<f32> {
+        marks::beacon_discs(&self.motion, &self.marks, |p| self.screen(p))
+            .into_iter()
+            .flat_map(|([x, y], radius)| [x, y, radius])
+            .collect()
+    }
     /// Each drone's disc on screen, as flat `[css x, css y, css radius]` triples, in the order the
     /// marks list the drones. The page keeps flags and names clear of them.
     pub fn drone_layout(&self) -> Vec<f32> {
@@ -1028,6 +1189,17 @@ impl App {
             .as_ref()
             .and_then(|loaded| loaded.machines.get(index as usize))
             .map_or(0, |machine| machine.files as u32)
+    }
+
+    /// The height of machine `name`'s model top, in world units, or -1 when the plant has no such
+    /// machine. The page picks the machine under the pointer by its true outline with it.
+    pub fn machine_top(&self, name: &str) -> f32 {
+        let (Some(plan), Some(loaded)) = (self.plan.as_ref(), self.plant.as_ref()) else {
+            return -1.0;
+        };
+        plan.index_of(name)
+            .and_then(|index| loaded.stands.get(index))
+            .map_or(-1.0, |stand| stand.top)
     }
 
     pub fn machine_count(&self) -> u32 {
@@ -1095,13 +1267,12 @@ impl App {
         self.plan = Some(plan);
         self.view = None;
         self.marks = Marks::default();
-        self.motion = Motion::new(self.still);
+        self.motion = self.new_motion();
         self.card_clash = None;
         self.tour_move = None;
         self.ride = None;
         self.fit_after_leave = false;
         self.dirty = true;
-        let belts = scene::belt_lines(&laid.belts);
         let drone_reach = stand::reach(&self.models[usize::from(scene::mark_kinds().body)]);
         let framing = scene::fit_boxes(&laid, &self.models, &self.kind_spots, drone_reach);
         let machine_bounds = scene::machine_model_boxes(&laid, &self.models);
@@ -1125,7 +1296,6 @@ impl App {
             framing,
             occluders,
             base: scene,
-            belts,
             plan_instance,
             stands,
         });
@@ -1143,7 +1313,7 @@ impl App {
         };
         let view = mirror.view(plan);
         self.slots.assign(&view);
-        let marks = Marks::build(&view, plan, &loaded.stands, &self.slots);
+        let marks = Marks::build_at(&view, plan, &loaded.stands, &self.slots, self.clock);
         self.view_json = serde_json::to_string(&view).map_err(js_err)?;
         self.view_version += 1;
         self.motion.sync(&marks);
@@ -1155,7 +1325,7 @@ impl App {
     }
 
     /// Uploads the plant with the marks: each machine's footprint tint, then the body, ring and
-    /// pin instances as the motion has them now. The tint table follows the footprints.
+    /// pin instances as the motion has them now.
     fn sync_scene(&mut self) {
         let Some(loaded) = &self.plant else {
             return;
@@ -1166,15 +1336,19 @@ impl App {
             scene.instances[instance].tint =
                 marks::machine_tint(&self.marks, plan_index, staged.as_deref());
         }
-        let hues: Vec<(usize, u8)> = self
-            .marks
-            .belt_hues
-            .iter()
-            .map(|&(plan_index, tint)| (loaded.plan_instance[plan_index], tint))
-            .collect();
-        scene.hue_lines = scene::hue_lines(&loaded.belts, &hues);
+        self.motion.set_px_units(self.dpr / self.camera.zoom());
         let riding = self.riding_agent();
-        scene.beams = marks::beams(&self.motion, &self.marks, self.dpr, riding);
+        let hovered = self.hovered.as_deref();
+        scene.beams = marks::beams(&self.motion, &self.marks, self.dpr, riding, hovered);
+        scene
+            .beams
+            .extend(marks::spots(&self.motion, &self.marks, self.dpr, riding));
+        scene
+            .beams
+            .extend(marks::trail_beams(&self.motion, self.dpr, riding));
+        scene
+            .beams
+            .extend(marks::ghost_beams(&self.motion, &self.marks, self.dpr));
         scene.instances.extend(marks::mark_instances(
             &self.motion,
             &self.marks,
@@ -1183,7 +1357,7 @@ impl App {
             riding,
         ));
         self.renderer.set_scene(&scene);
-        self.renderer.set_tints(&self.marks.tint_table());
+        self.renderer.set_tints(&acan_render::theme::tints());
     }
 
     /// A world point on screen, in CSS px.

@@ -89,7 +89,8 @@ pub struct HueVertex {
     pub a: [f32; 3],
     pub b: [f32; 3],
     pub corner: [f32; 2],
-    /// The stroke's width in device px.
+    /// The stroke's width in device px. A spot's radius in plan units is here negated, so the
+    /// shader tells a spot from a stroke without another attribute.
     pub width: f32,
     /// The stroke's opacity, which fades toward a belt's ends.
     pub alpha: f32,
@@ -266,11 +267,8 @@ pub fn hue_vertices(lines: &[HueLine]) -> Vec<HueVertex> {
     out
 }
 
-/// The device px width of a beam, and its opacity. A beam is as fine as a hue line.
-pub const BEAM_PX: f32 = HUE_PX;
-pub const BEAM_ALPHA: f32 = HUE_ALPHA;
-
-/// Four vertices per beam, one stroke from its `from` to its `to`.
+/// Four vertices per beam, one stroke from its `from` to its `to`, at the beam's own width and
+/// opacity, or one soft spot when the beam is a spot.
 pub fn beam_vertices(beams: &[Beam]) -> Vec<HueVertex> {
     beams
         .iter()
@@ -279,8 +277,12 @@ pub fn beam_vertices(beams: &[Beam]) -> Vec<HueVertex> {
                 a: beam.from,
                 b: beam.to,
                 corner,
-                width: BEAM_PX,
-                alpha: BEAM_ALPHA,
+                width: if beam.spot > 0.0 {
+                    -beam.spot
+                } else {
+                    beam.width_px
+                },
+                alpha: beam.alpha,
                 tint: u32::from(beam.tint),
                 origin: beam.origin,
                 grow: beam.grow,
@@ -319,8 +321,21 @@ fn point_at(points: &[[f32; 2]], along: f32) -> [f32; 2] {
     points.last().copied().unwrap_or([0.0; 2])
 }
 
-/// Six vertices covering `bounds` plus the contact shadow's reach and its shift.
+/// A model less tall than this, in plan units, is flat.
+const FLAT: f32 = 0.5;
+
+/// Six vertices covering `bounds` plus the contact shadow's reach and its shift. A model whose box
+/// reaches below its origin is built about its centre and hangs in the air, as a drone does, and a
+/// flat model is a mark laid on a plane, as the waiting ring is. Neither stands on the ground, so
+/// its six vertices fall on one point and draw nothing. The halo would otherwise lie as a grey
+/// plate through the drone's middle.
 pub fn halo_vertices(bounds: &Aabb) -> [HaloVertex; 6] {
+    if bounds.min[2] < 0.0 || bounds.max[2] - bounds.min[2] < FLAT {
+        return [HaloVertex {
+            position: [0.0; 3],
+            rect: [0.0; 4],
+        }; 6];
+    }
     let reach = SHADOW_REACH + SHADOW_SHIFT;
     let [x0, y0, x1, y1] = [
         bounds.min[0] - reach,
@@ -600,6 +615,25 @@ mod tests {
     }
 
     #[test]
+    fn a_model_hung_about_its_centre_or_laid_flat_casts_no_contact_shadow() {
+        let drone = Aabb {
+            min: [-12.0, -13.0, -12.0],
+            max: [12.0, 13.0, 17.0],
+        };
+        let ring = Aabb {
+            min: [-15.6, -15.6, 0.05],
+            max: [15.6, 15.6, 0.05],
+        };
+        for bounds in [drone, ring] {
+            let corners = halo_vertices(&bounds);
+            assert!(
+                corners.iter().all(|v| v.position == corners[0].position),
+                "every corner on one point, so nothing draws: {bounds:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_ribbon_keeps_its_width_through_a_right_angle_turn() {
         let ribbon = Ribbon {
             centre: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]],
@@ -658,17 +692,46 @@ mod tests {
             grow: [20.0, 24.0],
             turn: 0.5,
             tint: 2,
+            alpha: 0.3,
+            width_px: 1.5,
+            spot: 0.0,
         };
         let vertices = beam_vertices(&[beam]);
         assert_eq!(vertices.len(), QUAD_CORNERS as usize);
         assert!(vertices.iter().all(|v| v.a == beam.from && v.b == beam.to));
-        assert!(vertices.iter().all(|v| v.tint == 2 && v.width == BEAM_PX));
+        assert!(vertices.iter().all(|v| v.tint == 2));
+        assert!(
+            vertices.iter().all(|v| v.width == 1.5 && v.alpha == 0.3),
+            "a beam keeps its own width and opacity"
+        );
         assert!(
             vertices
                 .iter()
                 .all(|v| v.origin == beam.origin && v.grow == beam.grow && v.turn == beam.turn),
             "the start follows the drone it is measured from"
         );
+    }
+
+    #[test]
+    fn a_spot_carries_its_radius_as_a_negative_width() {
+        let spot = Beam {
+            from: [0.0, 0.0, -9.0],
+            to: [4.0, 5.0, 6.0],
+            origin: [7.0, 8.0, 9.0],
+            grow: [20.0, 24.0],
+            turn: 0.5,
+            tint: 2,
+            alpha: 0.4,
+            width_px: 1.5,
+            spot: 18.0,
+        };
+        let vertices = beam_vertices(&[spot]);
+        assert_eq!(vertices.len(), QUAD_CORNERS as usize);
+        assert!(
+            vertices.iter().all(|v| v.width == -18.0 && v.alpha == 0.4),
+            "the shader reads a negative width as a spot's radius"
+        );
+        assert!(vertices.iter().all(|v| v.a == spot.from && v.origin == spot.origin));
     }
 
     #[test]

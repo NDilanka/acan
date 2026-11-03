@@ -6,9 +6,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use acan_core::{
-    AgentId, Clash, ClashId, ClashState, Declaration, DeclarationInput, Event, FilePath, GateRunId,
-    GateVerdict, Locus, OrderId, OrderPhase, OverlapKind, Question, QuestionId, ReplayError,
-    Replica, Seq, Settlement, Stage, Stamped, Step, Task, TaskId, TaskState, Witness,
+    Actor, AgentId, Clash, ClashId, ClashState, Declaration, DeclarationInput, Event, FilePath,
+    GateRunId, GateVerdict, Locus, OrderId, OrderPhase, OverlapKind, Question, QuestionId,
+    ReplayError, Replica, Seq, Settlement, Stage, Stamped, Step, Task, TaskId, TaskState, Witness,
     WitnessOutcome, World,
 };
 use serde::Serialize;
@@ -46,6 +46,14 @@ pub struct Mirror {
     /// Events passed over because this build cannot read them, or because the world refused one
     /// after such an event. Above zero, the page is older than the origin.
     not_shown: u32,
+    /// The agent holding each live lease, from its grant until it ends. Unlike `holders`, an
+    /// ended lease leaves no holder, so a later event of the task is not heard from the agent.
+    leases: BTreeMap<TaskId, AgentId>,
+    /// When each agent was last heard of, in log milliseconds. The page's rail reads the same rule
+    /// from the raw log in `lanes.js`.
+    heard: BTreeMap<AgentId, u64>,
+    /// When each task landed, in log milliseconds.
+    landed_at: BTreeMap<TaskId, u64>,
 }
 
 impl Mirror {
@@ -78,6 +86,9 @@ impl Mirror {
             changes: BTreeMap::new(),
             last_used: BTreeMap::new(),
             not_shown: 0,
+            leases: BTreeMap::new(),
+            heard: BTreeMap::new(),
+            landed_at: BTreeMap::new(),
         };
         mirror.note(&first);
         for entry in entries {
@@ -170,6 +181,37 @@ impl Mirror {
             }
             _ => {}
         }
+        self.hear(stamped);
+    }
+
+    /// Notes who an event was heard from and when, as `lastActivity` in `lanes.js` reads it: the
+    /// acting agent, a registered agent, a lease's holder when it is granted and when it ends, and
+    /// the holder of the task any other event names. A landing also notes when its task landed.
+    fn hear(&mut self, stamped: &Stamped) {
+        let at = stamped.at.as_millis();
+        let mut heard: Vec<AgentId> = Vec::new();
+        if let Actor::Agent(agent) = &stamped.actor {
+            heard.push(agent.clone());
+        }
+        match &stamped.event {
+            Event::AgentRegistered { agent } => heard.push(agent.id.clone()),
+            Event::LeaseGranted { task, lease, .. } => {
+                self.leases.insert(*task, lease.holder.clone());
+                heard.push(lease.holder.clone());
+            }
+            Event::LeaseEnded { task, .. } => heard.extend(self.leases.remove(task)),
+            event => {
+                if let Event::Landed { task, .. } = event {
+                    self.landed_at.insert(*task, at);
+                }
+                if let Some(task) = event_task(event) {
+                    heard.extend(self.leases.get(&task).cloned());
+                }
+            }
+        }
+        for agent in heard {
+            self.heard.insert(agent, at);
+        }
     }
 
     /// Reads the folded state into the view the page draws, laid out on `plan`.
@@ -186,6 +228,19 @@ impl Mirror {
             .filter(|clash| unsettled(clash))
             .flat_map(|clash| plan.machines_at(clash.key.at()))
             .collect();
+        let mut landings: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
+        for (task, &at) in &self.landed_at {
+            let Some(machine) = world
+                .task(*task)
+                .and_then(|task| task_machine(world, plan, task))
+            else {
+                continue;
+            };
+            landings.entry(machine).or_default().push(at);
+        }
+        for times in landings.values_mut() {
+            times.sort_unstable();
+        }
         let machines = plan
             .machines
             .iter()
@@ -195,6 +250,8 @@ impl Mirror {
                 min: m.min,
                 size: m.size,
                 abnormal: abnormal.contains(&i),
+                landed_at: landings.get(&i).and_then(|times| times.last().copied()),
+                landings: landings.remove(&i).unwrap_or_default(),
             })
             .collect();
 
@@ -342,6 +399,7 @@ impl Mirror {
                     activity: focus.map_or("idle", |(_, activity)| activity),
                     machine: machine.map(|m| plan.machines[m].name.clone()),
                     body,
+                    heard_at: self.heard.get(agent).copied(),
                 }
             })
             .collect()
@@ -441,6 +499,10 @@ pub struct MachineView {
     pub size: [f32; 2],
     /// Whether an unsettled clash touches this machine.
     pub abnormal: bool,
+    /// When the last of its tasks landed, in log milliseconds.
+    pub landed_at: Option<u64>,
+    /// When each of its tasks landed, in log milliseconds, oldest first.
+    pub landings: Vec<u64>,
 }
 
 /// An order pinned on a machine.
@@ -496,6 +558,8 @@ pub struct AgentView {
     pub machine: Option<String>,
     /// The body rectangle `[x, y, w, h]`, in world units.
     pub body: Option<[f32; 4]>,
+    /// When the agent was last heard of, in log milliseconds.
+    pub heard_at: Option<u64>,
 }
 
 /// An open question with its two answers.
@@ -553,6 +617,12 @@ pub struct OptionView {
     pub label: String,
     /// The command payload for the choice.
     pub choice: Settlement,
+}
+
+/// The task an event names in its `task` field, as the page reads it from the event's JSON.
+fn event_task(event: &Event) -> Option<TaskId> {
+    let value = serde_json::to_value(event).ok()?;
+    serde_json::from_value(value.get("task")?.clone()).ok()
 }
 
 fn unsettled(clash: &Clash) -> bool {
@@ -1253,6 +1323,102 @@ mod tests {
             assert_eq!(agent.task, None, "a landed task releases its agent");
             assert!(agent.body.is_none(), "the landed bot leaves the plant");
         }
+    }
+
+    /// The demo through both landings, with each event a second after the one before.
+    fn landed_log() -> Vec<Stamped> {
+        let (mut origin, mut log, index) = scripted();
+        let events = scenario::land_script(
+            &mut origin,
+            &index,
+            &founder(),
+            Timestamp::from_millis(2_000),
+        )
+        .expect("the story runs");
+        log.extend(events);
+        for (i, stamped) in log.iter_mut().enumerate() {
+            stamped.at = Timestamp::from_millis(1_000 * (i as u64 + 1));
+        }
+        log
+    }
+
+    /// When each agent was last heard of, read from the log's JSON by the rule `lastActivity` in
+    /// `lanes.js` follows.
+    fn heard_as_the_page_reads_it(log: &[Stamped]) -> BTreeMap<String, u64> {
+        let mut holders: BTreeMap<String, String> = BTreeMap::new();
+        let mut last = BTreeMap::new();
+        for stamped in log {
+            let json = serde_json::to_value(stamped).expect("a stamped event serializes");
+            let at = json["at"].as_u64().expect("at is in milliseconds");
+            let event = &json["event"];
+            let mut touch = |agent: Option<&str>| {
+                if let Some(agent) = agent {
+                    last.insert(agent.to_owned(), at);
+                }
+            };
+            if json["actor"]["kind"] == "agent" {
+                touch(json["actor"]["id"].as_str());
+            }
+            // A task id is a number in the JSON, and the page keys its map by it as it is.
+            let task = (!event["task"].is_null()).then(|| event["task"].to_string());
+            match event["type"].as_str() {
+                Some("agent_registered") => touch(event["agent"]["id"].as_str()),
+                Some("lease_granted") => {
+                    let holder = event["lease"]["holder"].as_str().map(str::to_owned);
+                    touch(holder.as_deref());
+                    if let (Some(task), Some(holder)) = (task, holder) {
+                        holders.insert(task, holder);
+                    }
+                }
+                Some("lease_ended") => {
+                    let holder = task.and_then(|task| holders.remove(&task));
+                    touch(holder.as_deref());
+                }
+                _ => touch(task.and_then(|task| holders.get(&task)).map(String::as_str)),
+            }
+        }
+        last
+    }
+
+    #[test]
+    fn an_agent_is_heard_of_when_the_page_rail_says_it_was() {
+        let plan = plan();
+        let log = landed_log();
+        let page = heard_as_the_page_reads_it(&log);
+        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        assert!(!view.agents.is_empty());
+        for agent in &view.agents {
+            assert_eq!(
+                agent.heard_at,
+                page.get(&agent.id.to_string()).copied(),
+                "{}",
+                agent.id
+            );
+        }
+    }
+
+    #[test]
+    fn a_machine_keeps_when_its_last_task_landed() {
+        let plan = plan();
+        let log = landed_log();
+        let landed: Vec<u64> = log
+            .iter()
+            .filter(|stamped| matches!(stamped.event, Event::Landed { .. }))
+            .map(|stamped| stamped.at.as_millis())
+            .collect();
+        assert_eq!(landed.len(), 2, "both tasks land");
+        let view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        let api = machine_index(&view, "src/api");
+        assert_eq!(view.machines[api].landed_at, landed.iter().max().copied());
+        let mut oldest_first = landed.clone();
+        oldest_first.sort_unstable();
+        assert_eq!(view.machines[api].landings, oldest_first);
+        let ui = machine_index(&view, "src/ui");
+        assert_eq!(
+            view.machines[ui].landed_at, None,
+            "nothing landed on src/ui"
+        );
+        assert!(view.machines[ui].landings.is_empty());
     }
 
     #[test]

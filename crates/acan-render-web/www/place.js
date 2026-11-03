@@ -33,6 +33,25 @@ export function clearOf(left, top, w, h, placed, pad) {
   return y;
 }
 
+// Where a flag of size w by h, wanted at (left, top), shows clear of every box in `placed`. It
+// moves up as `clearOf` does. When that runs it off the top of the view, as a wide pill does under
+// a panel that reaches the top edge, it slides sideways instead, to the nearest left at which
+// moving up keeps it in view. Returns `{ left, top }`, the upward spot when no left does better.
+export function flagSpot(left, top, w, h, placed, pad, width) {
+  const up = clearOf(left, top, w, h, placed, pad);
+  if (up >= pad) return { left, top: up };
+  const lefts = [pad, width - w - pad];
+  for (const box of placed) lefts.push(box.left - pad - w, box.right + pad);
+  let found = null;
+  for (const x of lefts) {
+    if (x < pad || x + w > width - pad) continue;
+    const y = clearOf(x, top, w, h, placed, pad);
+    if (y < pad) continue;
+    const cost = Math.abs(x - left) + (top - y);
+    if (found === null || cost < found.cost) found = { left: x, top: y, cost };
+  }
+  return found === null ? { left, top: up } : { left: found.left, top: found.top };
+}
 // The top nearest `top` at which a box of size w by h, at `left`, lies wholly in the view and
 // clears every box in `placed`. It may move up or down, but not below `maxTop`. The free tops end
 // at the edges of the boxes, so the nearest one is `top` itself or just above or below a box. A
@@ -112,4 +131,104 @@ export function placeOverlays({ placed, labels, plots, width, height, pad }) {
     plotLeaders.push(leaderOf(plot, y));
   }
   return { labelShown, plotTops, plotLeaders };
+}
+
+// The most agent flags one machine's column shows. The rest fold into one `+N` flag.
+export const FLAGS_PER_COLUMN = 2;
+
+// How a column ranks its agents' flags, nearest the drones first: one that waits on the user,
+// then a stale one, then a working one, then an idle one.
+const FLAG_RANK = { waiting: 0, stale: 1, working: 2, idle: 3 };
+
+// Whether an agent's flag shows: always for a working, waiting or stale drone, and for an idle one
+// only while it is hovered or Alt is down.
+export function agentFlagShown(stateWord, alt, hovered) {
+  return stateWord !== "idle" || alt || hovered;
+}
+
+// The flags a machine's column shows, ranked, and how many fold into its `+N`. Each item carries
+// its drone's `state` word, and `hovered` when the pointer is over its drone, which brings it to
+// the front of the column. Items of one rank keep their order.
+export function foldColumn(items, max = FLAGS_PER_COLUMN) {
+  const rank = (item) => (item.hovered ? -1 : FLAG_RANK[item.state] ?? Object.keys(FLAG_RANK).length);
+  const ranked = items.map((item, i) => ({ item, i }))
+    .sort((a, b) => rank(a.item) - rank(b.item) || a.i - b.i)
+    .map(({ item }) => item);
+  return { shown: ranked.slice(0, max), folded: Math.max(0, ranked.length - max) };
+}
+
+// Whether a flag of `kind` starts beside its anchor, centred on its y, rather than centred above
+// it: a clash label right of its diamond, a landed dot right of its machine's point, and an away
+// dot with its ring on the plinth's corner.
+export function standsBeside(kind) {
+  return kind === "clash" || kind === "landed" || kind === "away";
+}
+
+// The flag kinds whose words wait for a hover: a clash's detail, an order's tag and a plot's
+// scope line. Everything else on the map keeps its words.
+export const HOVER_KINDS = new Set(["clash", "order", "plot"]);
+
+// What a flag shows now: "open" for its words, "mark" for a plot's small mark, or "hidden".
+// `hover` is `{ clash }` while a clash diamond or its badges are under the pointer, `{ machine }`
+// while a machine or its plot mark is, else null. A clash opens only on its own diamond, an order
+// or a plot only on its machine, and Alt opens them all. Until then a plot that `lead`s its
+// machine shows its mark, so each machine has at most one, and the rest show nothing.
+export function markWords(flag, hover, alt, lead = false) {
+  if (!HOVER_KINDS.has(flag.kind) || alt) return "open";
+  const hit = flag.kind === "clash"
+    ? hover?.clash !== undefined && hover.clash === flag.clash
+    : hover?.machine !== undefined && hover.machine === flag.on;
+  if (hit) return "open";
+  return flag.kind === "plot" && lead ? "mark" : "hidden";
+}
+
+// Whether a plot flag is a draft: its line says `draft rev N` until a human confirms the scope.
+export function isDraftPlot(flag) {
+  return flag.kind === "plot" && !flag.text.includes(" confirmed ");
+}
+
+// The plot flag that leads each machine, the first one on it, as a Map from its index in `flags`
+// to `{ draft }`, where `draft` says whether any plot on that machine is still a draft, so the
+// one mark keeps the draft's ring until every lane there is confirmed.
+export function plotLeads(flags) {
+  const first = new Map();
+  const leads = new Map();
+  flags.forEach((flag, index) => {
+    if (flag.kind !== "plot") return;
+    const key = flag.on ?? `#${index}`;
+    if (!first.has(key)) {
+      first.set(key, index);
+      leads.set(index, { draft: false });
+    }
+    if (isDraftPlot(flag)) leads.get(first.get(key)).draft = true;
+  });
+  return leads;
+}
+
+// A clash badge's diameter in CSS px, as the wasm side sizes it (`marks::BADGE_PX`).
+export const BADGE_PX = 16;
+
+// The boxes of a clash's two badges, centred at (leftX, y) and (rightX, y).
+export function badgeBoxes(leftX, rightX, y, size = BADGE_PX) {
+  const half = size / 2;
+  return [leftX, rightX].map((x) => ({ left: x - half, right: x + half, top: y - half, bottom: y + half }));
+}
+
+// The key under which the page keeps when the reader last saw it live.
+export const LAST_SEEN_KEY = "acan.lastSeen";
+
+// How long the reader must be away before the page shows, as ghosts, what landed meanwhile.
+export const AWAY_MS = 5 * 60_000;
+
+// How long the ghosts stay after the reader comes back, if nothing clears them first.
+export const GHOST_HOLD_MS = 90_000;
+
+// When the reader last saw the page, for a return at `now` with `stored` as the page kept it, or
+// 0 when there is nothing to show: the page is not live, nothing usable was kept, or the reader
+// was away less than AWAY_MS.
+export function seenOnReturn(stored, now, live) {
+  if (!live || stored === null || stored === undefined) return 0;
+  const seen = Number(stored);
+  if (!Number.isFinite(seen) || seen <= 0 || seen > now) return 0;
+  return now - seen >= AWAY_MS ? seen : 0;
 }
