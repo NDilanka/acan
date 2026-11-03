@@ -812,6 +812,7 @@ fn prepare_root(cache: &Path) -> Result<(), DepsError> {
     if let Some(parent) = cache.parent() {
         fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
     }
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
