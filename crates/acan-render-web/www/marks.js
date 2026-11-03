@@ -614,12 +614,15 @@ function awayStyle(el, ring, hue) {
     border: "none",
     padding: "0",
     gap: "4px",
-    font: "11px var(--mono)",
+    font: "12px var(--mono)",
     color: "var(--muted)",
   });
   Object.assign(ring.style, {
+    width: "10px",
+    height: "10px",
+    flex: "none",
     background: "none",
-    border: `1.5px solid ${hue}`,
+    border: `2px solid ${hue}`,
     boxSizing: "border-box",
   });
 }
