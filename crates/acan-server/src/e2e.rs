@@ -222,6 +222,91 @@ async fn a_land_in_one_project_moves_only_its_branch() {
     running.stop().await.expect("the server stops");
 }
 
+/// Two projects whose worlds both hold `t-0`, from one order each. An agent claims `t-0` through
+/// the first project's MCP endpoint, and only that project changes. The same token gets 401 on the
+/// second project's MCP endpoint, since the second project holds no agent token.
+#[tokio::test]
+async fn same_ids_do_not_collide() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let other = demo_repo();
+    let other_root = other.path();
+    write_owner_tokens(other_root);
+    let running = start_pair(root, other_root).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+
+    member_at(
+        &running,
+        "/api/p/plain/commands",
+        &HumanCmd::PostOrder {
+            machine: machine(),
+            sentence: "land the agent's file".to_owned(),
+            witnesses: Vec::new(),
+        },
+    )
+    .await;
+    settle_at(
+        &running,
+        "/api/p/plain/events",
+        "the offline split in plain",
+        |_, world| world.task(task).map(|found| found.order),
+    )
+    .await;
+    post_order(&running).await;
+    scope_first(&running, root, task).await;
+    let (plain_before, _) = snapshot_at(&running, "/api/p/plain/events").await;
+
+    let (status, body) = rpc_tool(
+        &running,
+        "/api/p/demo/mcp",
+        AGENT_TOKEN,
+        "claim_task",
+        json!({ "task": "t-0" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "demo's agent claims t-0: {body}"
+    );
+    settle(&running, "the claim in demo", |_, world| {
+        in_state(world, task, |state| {
+            matches!(state, TaskState::Claimed { .. })
+        })
+        .then_some(())
+    })
+    .await;
+
+    let (plain_after, plain_origin) = snapshot_at(&running, "/api/p/plain/events").await;
+    assert_eq!(
+        serde_json::to_value(&plain_after).expect("the log serializes"),
+        serde_json::to_value(&plain_before).expect("the log serializes"),
+        "plain's log did not change"
+    );
+    assert!(
+        !in_state(plain_origin.world(), task, |state| {
+            matches!(state, TaskState::Claimed { .. })
+        }),
+        "plain's t-0 is not claimed"
+    );
+
+    let (status, _) = rpc_tool(
+        &running,
+        "/api/p/plain/mcp",
+        AGENT_TOKEN,
+        "claim_task",
+        json!({ "task": "t-0" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED,
+        "demo's agent token gets 401 on plain's MCP endpoint"
+    );
+    running.stop().await.expect("the server stops");
+}
+
 /// The snapshot a worktree names holds the protected head's `.acan` files, prepared the way the
 /// gate prepares its base. A candidate's own edit to `.acan` in its worktree never reaches it, over
 /// HTTP or over MCP, and a move of the protected head names a new snapshot.
@@ -2655,6 +2740,19 @@ fn worktree_dir(root: &Path, task: TaskId) -> PathBuf {
 }
 
 /// Writes the token file before the first start, so the test holds an owner and an agent token.
+/// Writes a tokens file that holds only the owner, so the project has no agent token.
+fn write_owner_tokens(root: &Path) {
+    let state = root.join(".acan");
+    fs::create_dir_all(&state).expect("state directory");
+    fs::write(
+        state.join("tokens.json"),
+        format!(
+            r#"[{{"token": "{OWNER_TOKEN}", "principal": {{"kind": "member", "id": "owner"}}}}]"#
+        ),
+    )
+    .expect("tokens file");
+}
+
 fn write_tokens(root: &Path) {
     let state = root.join(".acan");
     fs::create_dir_all(&state).expect("state directory");
@@ -2724,6 +2822,7 @@ async fn start_pair(root: &Path, other: &Path) -> Running {
         web: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
         vision: None,
+        local_workers: 0,
     };
     let first = Offline::default();
     let first_ledger = first.ledger().clone();
@@ -2774,8 +2873,20 @@ async fn member(running: &Running, cmd: &HumanCmd) {
 /// Sends one member command over HTTP as the member `token` holds, and fails the test unless it
 /// is accepted.
 async fn member_as(running: &Running, token: &str, cmd: &HumanCmd) {
+    send_member(running, "/api/commands", token, cmd).await;
+}
+
+/// Sends one member command to the commands route at `path` as the owner, and fails the test
+/// unless it is accepted.
+async fn member_at(running: &Running, path: &str, cmd: &HumanCmd) {
+    send_member(running, path, OWNER_TOKEN, cmd).await;
+}
+
+/// Sends one member command to the commands route at `path` as the member `token` holds, and
+/// fails the test unless it is accepted.
+async fn send_member(running: &Running, path: &str, token: &str, cmd: &HumanCmd) {
     let response = client()
-        .post(url(running, "/api/commands"))
+        .post(url(running, path))
         .bearer_auth(token)
         .json(cmd)
         .send()
@@ -3050,6 +3161,35 @@ async fn wait_building(running: &Running, task: TaskId) {
     .await;
 }
 
+/// One `tools/call` to the MCP endpoint at `path` as `token`, and the status and JSON body it
+/// answers with.
+async fn rpc_tool(
+    running: &Running,
+    path: &str,
+    token: &str,
+    name: &str,
+    arguments: Value,
+) -> (reqwest::StatusCode, Value) {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": name, "arguments": arguments },
+    });
+    let response = client()
+        .post(url(running, path))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .expect("the MCP call is sent");
+    let status = response.status();
+    (
+        status,
+        response.json::<Value>().await.unwrap_or(Value::Null),
+    )
+}
+
 async fn agent_command(running: &Running, cmd: AgentCmd) {
     running
         .writer()
@@ -3227,8 +3367,13 @@ fn in_state(world: &World, task: TaskId, state: impl Fn(&TaskState) -> bool) -> 
 
 /// The stored log and the world it replays to, read through the owner's events route.
 async fn snapshot(running: &Running) -> (Vec<Stamped>, Origin) {
+    snapshot_at(running, "/api/events").await
+}
+
+/// The stored log at `path`, and the world it replays to.
+async fn snapshot_at(running: &Running, path: &str) -> (Vec<Stamped>, Origin) {
     let log: Vec<Stamped> = client()
-        .get(url(running, "/api/events"))
+        .get(url(running, path))
         .bearer_auth(OWNER_TOKEN)
         .send()
         .await
@@ -3249,9 +3394,19 @@ async fn settle<T>(
     what: &str,
     done: impl Fn(&[Stamped], &World) -> Option<T>,
 ) -> T {
+    settle_at(running, "/api/events", what, done).await
+}
+
+/// Waits until `done` accepts the log at `path`, the way [`settle`] does for the default project.
+async fn settle_at<T>(
+    running: &Running,
+    path: &str,
+    what: &str,
+    done: impl Fn(&[Stamped], &World) -> Option<T>,
+) -> T {
     let result = timeout(WAIT, async {
         loop {
-            let (log, origin) = snapshot(running).await;
+            let (log, origin) = snapshot_at(running, path).await;
             if let Some(found) = done(&log, origin.world()) {
                 return found;
             }
@@ -3260,7 +3415,7 @@ async fn settle<T>(
     })
     .await;
     let Ok(found) = result else {
-        let (log, _) = snapshot(running).await;
+        let (log, _) = snapshot_at(running, path).await;
         // Lease renewals arrive every few seconds and would hide the steps that stalled.
         let newest: Vec<&Event> = log
             .iter()
