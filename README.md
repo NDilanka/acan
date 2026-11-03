@@ -1,10 +1,8 @@
 # Acan
 
-Acan replaces the chat window between a developer and their coding agents with a live map of the codebase. Every agent, every scope it may work in, every conflict and every piece of evidence sits in one shared place, so you can direct several agents at once and see trouble before code is written.
+Acan is a scope-first behavior gate for coding agents. The developer approves what an agent may change, a scope with obligations, before any code exists. Acan then runs the old app twice and the new app once, side by side, on each probe. The old runs start from the protected head, and the new run uses the exact merged commit that would land. Differences outside the scope bounce back to the agent with a reproducer. The developer rules only on what is left. Each ruling is recorded, and every later receipt must report it or label it not enforced.
 
-Acan is a scope-first contract gate for coding agents. An order becomes a scope contract that names the files a worker may change and what must stay the same, and the gate checks it before any code is written.
-
-When two workers declare overlapping files, Acan pins the clash on the map and holds both before either one writes.
+The plant view shows where each agent went, what bounced, and any clash held before either worker writes. The developer decides on the anchored card.
 
 Work in progress for the Meta Global AI Developer Hackathon.
 
@@ -18,18 +16,33 @@ Muse Spark is the foreman: it splits each order into tasks and drafts the scope 
 
 ## Status
 
+What main proves today:
+
+- The scope-first gate. Its contract is in `crates/acan-intent`. A worker's readback of its task is refused until a human confirms the scope.
 - Live with receipts: a Muse Spark scope draft (`receipts/m01-scope-draft.md`) and six provider calls on three hosts (`receipts/p00-provider-smoke.md`).
-- Clash lane: proven live on Oct 28 (two tasks clashed on `src/middleware.ts`, were settled with one key before either wrote, then both landed). Since the scope-first gate landed, a take must confirm a scope before workers can claim, and the demo script is being updated for that.
-- In progress: a live two-order take (foreman draft, human confirmation, gate, a recorded ruling, and a second order blocked by that ruling).
+- The vision witness, live on two hand-made candidates of the demo's dashboard page (`receipts/vision01-live-vision.md`). The vision witness is advisory. Its verdicts never set pass or fail.
+- Muse Wonder, the advisory second look, live on one hand-made candidate (`receipts/vision02-live-wonder.md`). The first look called the candidate inconsistent, so Wonder ran once and also called it inconsistent. Its verdicts never set pass or fail.
+
+In progress, with no numbers yet:
+
+- T01, the tour director, is on main. Its two live calls, each on a landed receipt from the same test setup, gave one admitted tour (`receipts/director-live-2.md`). No other receipts have been run, and no measured comparison with the plain card has run.
+- DF1, `acan receipt`, which runs the gate's contrast on any clone that has an app contract.
+- The alpha release: a local app that takes a key for each provider the tester uses, an update check, a bug report, and a GitHub Pages replay.
+- X01, the 12-order replay. No numbers are published before it finishes.
 
 ## Meta models
 
-| Role | Model | Host | Receipts | Status |
+Every model role in the code is listed here. A role counts as live only when a row in `receipts/` shows a real call. The routes come from `crates/acan-llm/llm.example.toml`.
+
+| Role | Model | Host and route | Receipts | Status |
 | --- | --- | --- | --- | --- |
-| Foreman | Muse Spark, `muse-spark-1.3` | Meta Model API (`api.meta.ai`) | p00 rows 1-2; m01 row 1 | Live, pass |
-| Worker | Muse Spark Open, `meta-models/muse-spark-open-1026` | Baseten (`inference.baseten.co`) | p00 rows 3-4 | Live, pass |
-| Worker, second host | Muse Spark Open, `accounts/fireworks/models/muse-spark-open` | Fireworks (`api.fireworks.ai`) | p00 rows 5-6 | Live, pass. Fireworks serves Muse Spark Open, and the API echoed that model id. |
-| Vision witness (in progress) | Muse Spark, `muse-spark-1.3`, image input | Meta Model API | pending | Being built. Not yet proven live inside Acan. |
+| Foreman: splits orders and drafts scopes | Muse Spark, `muse-spark-1.3` | Meta Model API (`api.meta.ai`), `[routing.foreman]` | p00 rows 1-2; m01 row 1 | Live, pass |
+| Workers | Muse Spark Open, `meta-models/muse-spark-open-1026` | Baseten (`inference.baseten.co`), `[routing.worker]` | p00 rows 3-4 | Live, pass |
+| Workers, second host | Muse Spark Open, `accounts/fireworks/models/muse-spark-open` | Fireworks (`api.fireworks.ai`) | p00 rows 5-6 | Live, pass. Fireworks serves Muse Spark Open, and the API echoed that model id. |
+| Fast: clash explanations | Muse Spark Open | Baseten, `[routing.fast]` | none | Routed, not yet in a receipt |
+| Vision witness, advisory | Muse Spark, `muse-spark-1.3`, with images | Meta Model API, `[routing.vision]` | vision01 rows 1-2 | Live, pass on two hand-made candidates |
+| Director: proposes the receipt tour (T01) | Muse Spark, `muse-spark-1.3`, structured output | Meta Model API, `[routing.director]` or the foreman's route if unset | director-live-2 rows 1-2 | Live. Two calls, each on its own landed receipt. The second was admitted; the first was not, and its reason was not logged. The other roles in that run were stubbed. |
+| Second look at vision (Muse Wonder), advisory | Muse Wonder, `muse-wonder-1.0` | Meta Model API, `[routing.wonder]`, called only after an inconsistent or unclear first look | vision02 row 3 | Live, one call on one hand-made candidate. Its verdict matched the first look's. Not yet run on an unclear first look. |
 
 ## Architecture
 
@@ -84,7 +97,7 @@ The UI and API use port 7311, and the demo app uses port 7312. Both are set with
 
 ## X01: 12-order replay
 
-Pending. This runs after the two-order take lands. No numbers are published before then.
+In progress. No numbers are published before the run finishes.
 
 ## Honest limits
 
