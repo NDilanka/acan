@@ -149,6 +149,8 @@ pub trait ModelClient: Send + Sync {
 pub struct Structured<T> {
     pub value: T,
     pub call: CallRecord,
+    /// The request id the provider sent for the call, when it sent one.
+    pub request_id: Option<String>,
 }
 
 /// Asks the provider for a reply that matches the JSON Schema of `T`.
@@ -186,6 +188,7 @@ pub(crate) fn parse_structured<T: DeserializeOwned>(
         Ok(value) => Ok(Structured {
             value,
             call: response.call,
+            request_id,
         }),
         Err(err) => Err(LlmError::SchemaValidation {
             provider: response.call.provider.clone(),

@@ -149,6 +149,15 @@ pub(crate) async fn direct<C: ModelClient>(
         ..ChatRequest::default()
     };
     let reply = client.chat_json::<Tour>(Role::Director, request).await?;
+    tracing::info!(
+        receipt = %view.receipt_hash,
+        model = %reply.call.model,
+        request_id = ?reply.request_id,
+        prompt_tokens = reply.call.usage.prompt_tokens,
+        completion_tokens = reply.call.usage.completion_tokens,
+        latency = ?reply.call.latency,
+        "the director replied"
+    );
     let model: ModelRef = reply.call.model.parse()?;
     Ok(ModelProposal::new(reply.value, model))
 }
@@ -166,12 +175,22 @@ pub(crate) fn admit(
     let catalog = CaptionCatalog::trusted()?;
     let model = proposal.model().clone();
     let tour = proposal.proposal().clone();
-    let bindings = acan_intent::admit::tour(view, &catalog, &tour)?;
-    Ok(TourView::Directed {
-        model,
-        tour,
-        bindings,
-    })
+    match acan_intent::admit::tour(view, &catalog, &tour) {
+        Ok(bindings) => Ok(TourView::Directed {
+            model,
+            tour,
+            bindings,
+        }),
+        Err(rejection) => {
+            tracing::warn!(
+                receipt = %view.receipt_hash,
+                model = %model,
+                reason = %rejection,
+                "the director's tour is refused by admission; the plant view serves the deterministic tour"
+            );
+            Err(rejection.into())
+        }
+    }
 }
 
 /// The deterministic tour of `view` with its bindings, from [`acan_intent::deterministic`].
@@ -384,16 +403,8 @@ pub(crate) async fn fill_within<C: ModelClient + 'static>(
     wait: Duration,
 ) -> PlantView {
     let admitted = match directed(host, &view, wait).await {
-        Some(DirectorAnswer::Proposal(proposal)) => match admit(&view, proposal) {
-            Ok(tour) => Some(tour),
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "the director's tour does not fit this view; the plant view serves the deterministic tour"
-                );
-                None
-            }
-        },
+        // `admit` logs the refusal and its reason.
+        Some(DirectorAnswer::Proposal(proposal)) => admit(&view, proposal).ok(),
         Some(DirectorAnswer::Refused(_) | DirectorAnswer::Transient { .. }) | None => None,
     };
     view.tour = match admitted {
@@ -401,7 +412,11 @@ pub(crate) async fn fill_within<C: ModelClient + 'static>(
         None => match deterministic(&view) {
             Ok(tour) => Some(tour),
             Err(err) => {
-                tracing::warn!(error = %err, "no deterministic tour; the plant view has none");
+                tracing::warn!(
+                    receipt = %view.receipt_hash,
+                    error = %err,
+                    "no deterministic tour; the plant view has none"
+                );
                 None
             }
         },
@@ -473,6 +488,7 @@ fn spawn<C: ModelClient + 'static>(
             DirectorAnswer::Proposal(_) => {}
             DirectorAnswer::Refused(reason) | DirectorAnswer::Transient { reason, .. } => {
                 tracing::warn!(
+                    receipt = %view.receipt_hash,
                     reason = %reason,
                     "the director's tour was not served; the plant view serves the deterministic tour"
                 );
