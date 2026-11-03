@@ -122,6 +122,10 @@ const TRAIL_PX: f32 = 1.0;
 /// A working drone's bob: its height on screen in CSS px, and its period.
 const BOB_PX: f32 = 1.0;
 const BOB_PERIOD_MS: f32 = 2_400.0;
+/// An idle drone's bob, lower and slower than a working one's, so the two states still read apart.
+const IDLE_BOB_PX: f32 = 0.6;
+const IDLE_BOB_PERIOD_MS: f32 = 4_000.0;
+const _: () = assert!(IDLE_BOB_PX < BOB_PX && IDLE_BOB_PERIOD_MS > BOB_PERIOD_MS);
 /// Milliseconds a pin takes to rise in, or to sink out.
 pub const PIN_MS: f32 = 250.0;
 /// Milliseconds an agent that holds a task may be quiet before its drone reads stale.
@@ -250,7 +254,8 @@ impl Body {
 pub enum DroneState {
     /// On a claimed task: its eye is bright, its glow strong, it bobs and its beacon pulses.
     Working,
-    /// On an open, read-back, queued or landed task, or none: still, its eye dim and its glow faint.
+    /// On an open, read-back, queued or landed task, or none: its eye dim, its glow faint, and it
+    /// bobs lower and slower than a working drone.
     #[default]
     Idle,
     /// Its task is in an open clash, or its order asks a question: as idle, with an amber ring.
@@ -294,6 +299,17 @@ impl DroneState {
             Self::Working => 0.5,
             Self::Idle | Self::Waiting => 0.18,
             Self::Stale => 0.0,
+        }
+    }
+
+    /// The bob of a drone in this state: its height on screen in CSS px and its period in ms.
+    /// `None` for a drone that holds still: a waiting drone, so its ring stays put, and a stale one.
+    #[must_use]
+    pub fn bob(self) -> Option<(f32, f32)> {
+        match self {
+            Self::Working => Some((BOB_PX, BOB_PERIOD_MS)),
+            Self::Idle => Some((IDLE_BOB_PX, IDLE_BOB_PERIOD_MS)),
+            Self::Waiting | Self::Stale => None,
         }
     }
 
@@ -1191,6 +1207,7 @@ impl Rise {
 /// A still motion, from `?freeze=1`, lands every ease at once: a bot does not glide, a bot that
 /// left is gone, no flag fades, and a landed dot keeps its word because its hold never runs. Under
 /// reduced motion the drones jump to their places and do not bob, while flags still fade.
+/// Working and idle drones bob, each state at its own height and pace.
 #[derive(Debug, Default)]
 pub struct Motion {
     still: bool,
@@ -1209,6 +1226,12 @@ pub struct Motion {
     pulse_ms: f32,
     /// Where the working drones' bob is, in milliseconds through its period.
     bob_ms: f32,
+    /// Whether an idle drone is shown, so the idle bob runs. Set by [`Motion::sync`].
+    idling: bool,
+    /// Where the idle drones' bob is, in milliseconds through its period.
+    idle_ms: f32,
+    /// Whether the last [`Motion::advance`] ran only for the idle bob.
+    calm: bool,
     /// World units per CSS px at the drones, so the bob is [`BOB_PX`] on screen. Zero until the
     /// page sets it, which keeps every drone level.
     px_units: f32,
@@ -1332,6 +1355,10 @@ impl Motion {
             }
         }
         self.pulsing = marks.bodies.iter().any(Body::working);
+        self.idling = marks
+            .bodies
+            .iter()
+            .any(|body| body.state == DroneState::Idle);
 
         for pin in &marks.pins {
             self.pins
@@ -1518,6 +1545,10 @@ impl Motion {
                 self.bob_ms = (self.bob_ms + dt) % BOB_PERIOD_MS;
             }
         }
+        let idle_bob = self.idling && !self.reduced;
+        if idle_bob {
+            self.idle_ms = (self.idle_ms + dt) % IDLE_BOB_PERIOD_MS;
+        }
         let bodies = self.bodies.values().any(Glide::running);
         let turning = self.turns.values().any(Turn::running);
         let pins = self.pins.values().any(Rise::running);
@@ -1529,7 +1560,7 @@ impl Motion {
         let fading = !self.fades.is_empty();
         let trailing = !self.trails.is_empty();
         let ghosting = self.advance_ghosts(dt);
-        bodies
+        let busy = bodies
             || turning
             || pins
             || leaving
@@ -1537,7 +1568,16 @@ impl Motion {
             || fading
             || trailing
             || ghosting
-            || self.pulsing
+            || self.pulsing;
+        self.calm = idle_bob && !busy;
+        busy || idle_bob
+    }
+
+    /// Whether the last [`Motion::advance`] ran only for the idle bob. The bob then moves a small
+    /// fraction of a pixel a frame, so the page may draw it at a lower frame rate.
+    #[must_use]
+    pub fn calm(&self) -> bool {
+        self.calm
     }
 
     /// Moves each ghost's fade on, and drops the ghosts that have faded. Returns whether any is
@@ -1565,15 +1605,23 @@ impl Motion {
         0.5 - 0.5 * (TAU * self.pulse_ms / PULSE_MS).cos()
     }
 
-    /// How far a working drone in palette slot `slot` has bobbed now, in world units. Each slot
-    /// starts at its own phase, so the drones on one machine do not bob together.
+    /// How far a drone in palette slot `slot` and state `state` has bobbed now, in world units.
+    /// Each slot starts at its own phase, so the drones on one machine do not bob together.
     #[must_use]
-    pub fn bob(&self, slot: usize) -> f32 {
+    pub fn bob(&self, slot: usize, state: DroneState) -> f32 {
+        let Some((px, period)) = state.bob() else {
+            return 0.0;
+        };
         if self.still || self.reduced {
             return 0.0;
         }
-        let phase = self.bob_ms / BOB_PERIOD_MS + slot as f32 / AGENT_SLOTS as f32;
-        0.5 * BOB_PX * self.px_units * (TAU * phase).sin()
+        let ms = if state == DroneState::Working {
+            self.bob_ms
+        } else {
+            self.idle_ms
+        };
+        let phase = ms / period + slot as f32 / AGENT_SLOTS as f32;
+        0.5 * px * self.px_units * (TAU * phase).sin()
     }
 
     /// The heading a drone faces now, in radians from +x. A drone on the move faces the way it
@@ -1783,13 +1831,9 @@ pub fn mark_instances(
     out
 }
 
-/// A working drone's centre lifted by its bob. Any other drone keeps its place.
+/// A drone's centre lifted by its bob, which is zero for a drone that holds still.
 fn bobbed(motion: &Motion, body: &Body, at: [f32; 3]) -> [f32; 3] {
-    if body.working() {
-        [at[0], at[1], at[2] + motion.bob(body.slot)]
-    } else {
-        at
-    }
+    [at[0], at[1], at[2] + motion.bob(body.slot, body.state)]
 }
 
 /// The beams now run from each drone's eye to its target. The eye is on the nose, looking a little
@@ -3867,7 +3911,10 @@ mod tests {
         motion.advance(TURN_MS);
         let done = motion.heading_of("a").expect("the drone turned");
         assert!((done - PI / 2.0).abs() < 1e-4, "ends facing north: {done}");
-        assert!(!motion.advance(0.0), "a settled drone stops the frames");
+        assert!(
+            motion.advance(0.0) && motion.calm(),
+            "a settled idle drone keeps only its bob"
+        );
 
         // From just short of pi to just past -pi is a turn of a few degrees, not a full circle.
         let near_pi = drone("b", at, [-1.0, 0.0001, PLINTH_TOP], "idle");
@@ -3947,7 +3994,8 @@ mod tests {
             motion.sync(&marks_of(vec![second]));
             assert_eq!(motion.body_at("a"), Some([90.0, 0.0, 40.0]), "it jumps");
             motion.advance(BOB_PERIOD_MS / 4.0);
-            assert_eq!(motion.bob(0), 0.0, "and does not bob");
+            assert_eq!(motion.bob(0, DroneState::Working), 0.0, "and does not bob");
+            assert_eq!(motion.bob(0, DroneState::Idle), 0.0, "idle or working");
         }
     }
 
@@ -4005,7 +4053,10 @@ mod tests {
         );
         motion.advance(1.0);
         assert!(trail_beams(&motion, 1.0, None).is_empty(), "gone after 2 s");
-        assert!(!motion.advance(16.0), "and the page goes idle");
+        assert!(
+            motion.advance(16.0) && motion.calm(),
+            "and only the idle bob runs"
+        );
     }
 
     #[test]
@@ -4067,20 +4118,27 @@ mod tests {
         let mut hi = f32::NEG_INFINITY;
         for _ in 0..48 {
             motion.advance(BOB_PERIOD_MS / 48.0);
-            lo = lo.min(motion.bob(0));
-            hi = hi.max(motion.bob(0));
+            lo = lo.min(motion.bob(0, DroneState::Working));
+            hi = hi.max(motion.bob(0, DroneState::Working));
         }
         assert!(
             ((hi - lo) - BOB_PX * 2.0).abs() < 0.05,
             "the bob spans 1 CSS px: {lo} to {hi}"
         );
-        assert_ne!(motion.bob(0), motion.bob(1), "slots bob apart");
-        let idle = marks_of(vec![drone("a", [0.0, 0.0, 40.0], [9.0, 0.0, 9.0], "idle")]);
-        let shell = mark_instances(&motion, &idle, KINDS, 1.0, None)
-            .into_iter()
-            .find(|i| i.kind == KINDS.body)
-            .expect("the drone draws");
-        assert_eq!(shell.offset[2], 40.0, "an idle drone does not bob");
+        assert_ne!(
+            motion.bob(0, DroneState::Working),
+            motion.bob(1, DroneState::Working),
+            "slots bob apart"
+        );
+        for state in [DroneState::Waiting, DroneState::Stale] {
+            let mut still = drone("a", [0.0, 0.0, 40.0], [9.0, 0.0, 9.0], "idle");
+            still.state = state;
+            let shell = mark_instances(&motion, &marks_of(vec![still]), KINDS, 1.0, None)
+                .into_iter()
+                .find(|i| i.kind == KINDS.body)
+                .expect("the drone draws");
+            assert_eq!(shell.offset[2], 40.0, "a {state:?} drone does not bob");
+        }
     }
 
     #[test]

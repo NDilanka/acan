@@ -47,6 +47,9 @@ const ORBIT_DEG_PER_PX: f32 = 0.4;
 const TILT_DEG_PER_PX: f32 = 0.25;
 /// Duration of a Q or E turn, in milliseconds.
 const TURN_MS: f32 = 180.0;
+/// The gap between frames, in ms, while only the idle bob runs: about 20 frames a second. The bob
+/// moves a few hundredths of a pixel in that time, so the lower rate does not show.
+const CALM_FRAME_MS: f32 = 50.0;
 
 #[wasm_bindgen]
 pub struct App {
@@ -73,6 +76,8 @@ pub struct App {
     slots: AgentSlots,
     /// Whether the marks' eases were moving on the last frame.
     moving: bool,
+    /// Whether the last frame ran only for the idle bob, see [`App::frame_gap_ms`].
+    calm: bool,
     /// Whether the marks hold still, as `?freeze=1` asks. Set once before a plant loads.
     still: bool,
     /// The index of the clash whose card is open, if any.
@@ -191,6 +196,7 @@ impl App {
             motion: Motion::default(),
             slots: AgentSlots::default(),
             moving: false,
+            calm: false,
             still: false,
             card_clash: None,
             focus: None,
@@ -565,7 +571,14 @@ impl App {
         }
         self.moving = moving;
         let riding = self.advance_ride(dt_ms);
+        self.calm = moving && self.motion.calm() && !(turning || touring || riding);
         turning || touring || moving || riding
+    }
+
+    /// How long the page may wait before the next frame, in ms, after [`App::advance`] asked for
+    /// one: zero for the next display frame, or [`CALM_FRAME_MS`] while only the idle bob runs.
+    pub fn frame_gap_ms(&self) -> f32 {
+        if self.calm { CALM_FRAME_MS } else { 0.0 }
     }
 
     /// Follows the ride's drone, moves the ride's ease on, and leaves the ride once its drone has

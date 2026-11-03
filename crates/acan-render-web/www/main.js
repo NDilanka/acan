@@ -61,6 +61,7 @@ import { installHistory } from "./history.js";
 import { installScrub } from "./scrub.js";
 import { installFirstRun, paintFirstRun } from "./firstrun-panel.js";
 import { onWorkers, refreshWorkers, workersAnswer } from "./workers.js";
+import { nextFrame } from "./frames.js";
 import { closeViewer, installVision, placeVisionPins, syncVision, viewerOpen, viewerTakesEscape } from "./vision-pins.js";
 
 const ZOOM_KEY = 1.25;
@@ -107,7 +108,12 @@ const kit = {
   onKey: (hook) => keyHooks.push(hook),
 };
 
+// The wait before the next frame while only the idle bob runs, see `nextFrame`.
+let calmTimer = null;
+
 export function requestRender() {
+  clearTimeout(calmTimer);
+  calmTimer = null;
   if (state.scheduled || state.app === null) return;
   state.scheduled = true;
   requestAnimationFrame(drawFrame);
@@ -129,10 +135,13 @@ function drawFrame(now = performance.now()) {
     paintRide();
     placeLabels();
     placeVisionPins();
-    if (turning) {
+    const next = nextFrame({ moving: turning, hidden: document.hidden, gapMs: state.app.frame_gap_ms() });
+    if (next === "stop") {
+      state.lastFrame = null;
+    } else if (next === "now") {
       requestRender();
     } else {
-      state.lastFrame = null;
+      calmTimer = setTimeout(requestRender, next);
     }
   } catch (err) {
     console.error(err);
@@ -562,6 +571,10 @@ async function boot() {
   // Reduced motion turns the hover bob off, and the page follows the setting as it changes.
   followReducedMotion();
   reducedMotion.addEventListener("change", followReducedMotion);
+  // A hidden tab draws nothing, so the loop starts again when it shows.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) requestRender();
+  });
   await loadPlant();
   bindPlate();
   await installVision();
