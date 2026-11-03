@@ -3061,16 +3061,31 @@ mod tests {
             .iter()
             .find(|flag| flag.kind == FlagKind::Clash)
             .expect("the pin has a flag");
-        assert!(flag.text.starts_with(&clash.id.to_string()), "{}", flag.text);
-        assert_eq!(flag.on.as_deref(), Some("src/api"), "it marks the clashed machine");
-        let agents: Vec<String> = view.agents.iter().map(|agent| agent.id.to_string()).collect();
+        assert!(
+            flag.text.starts_with(&clash.id.to_string()),
+            "{}",
+            flag.text
+        );
+        assert_eq!(
+            flag.on.as_deref(),
+            Some("src/api"),
+            "it marks the clashed machine"
+        );
+        let agents: Vec<String> = view
+            .agents
+            .iter()
+            .map(|agent| agent.id.to_string())
+            .collect();
         let [a, b] = flag.detail.as_slice() else {
             panic!("the detail names two agents: {:?}", flag.detail);
         };
         assert!(a.ends_with(&format!(" · {}", clash.a)), "{a}");
         assert!(b.ends_with(&format!(" · {}", clash.b)), "{b}");
         let holder = |line: &str| line.split(" · ").next().unwrap_or_default().to_owned();
-        assert!(agents.contains(&holder(a)) && agents.contains(&holder(b)), "{agents:?}");
+        assert!(
+            agents.contains(&holder(a)) && agents.contains(&holder(b)),
+            "{agents:?}"
+        );
         assert_ne!(holder(a), holder(b), "the two agents differ");
     }
 
@@ -3086,8 +3101,15 @@ mod tests {
             .find(|flag| flag.kind == FlagKind::Order)
             .expect("the live order has a flag");
         assert_eq!(order.on.as_deref(), Some(view.orders[0].machine.as_str()));
-        for flag in marks.flags.iter().filter(|flag| flag.kind == FlagKind::Agent) {
-            assert_eq!(flag.on, None, "an agent's pill is not a machine's hover text");
+        for flag in marks
+            .flags
+            .iter()
+            .filter(|flag| flag.kind == FlagKind::Agent)
+        {
+            assert_eq!(
+                flag.on, None,
+                "an agent's pill is not a machine's hover text"
+            );
         }
     }
 
@@ -4098,11 +4120,7 @@ mod tests {
         );
         let facing = motion.heading_of("a").expect("the drone faces east");
         assert_eq!(beam.turn, facing, "the beam turns as the drone does");
-        assert_eq!(
-            beam.from,
-            eye_point(),
-            "the beam starts on the lens"
-        );
+        assert_eq!(beam.from, eye_point(), "the beam starts on the lens");
     }
 
     #[test]
@@ -4125,7 +4143,10 @@ mod tests {
         let reach = ahead[0].hypot(ahead[1]);
         let flat = eye[0].hypot(eye[1]);
         let along = (eye[0] * ahead[0] + eye[1] * ahead[1]) / (flat * reach);
-        assert!((along - 1.0).abs() < 1e-5, "the eye faces the target: {along}");
+        assert!(
+            (along - 1.0).abs() < 1e-5,
+            "the eye faces the target: {along}"
+        );
         assert!(eye[2] < 0.0, "and looks down at it from above");
         let gap = |p: [f32; 3]| {
             (0..3)
@@ -4134,7 +4155,10 @@ mod tests {
                 .sqrt()
         };
         let eye_at = [at[0] + eye[0], at[1] + eye[1], at[2] + eye[2]];
-        assert!(gap(eye_at) < gap(at), "the eye is the near side of the body");
+        assert!(
+            gap(eye_at) < gap(at),
+            "the eye is the near side of the body"
+        );
     }
 
     #[test]
@@ -4249,7 +4273,11 @@ mod tests {
                 .map(|i| i.tint)
                 .collect()
         };
-        assert_eq!(tints(KINDS.body), [0; 4], "the body is white in every state");
+        assert_eq!(
+            tints(KINDS.body),
+            [0; 4],
+            "the body is white in every state"
+        );
         let dim = u8::try_from(TINT_DIM0 + TINT_BODY0).expect("fits");
         assert_eq!(
             tints(KINDS.accent),
@@ -4349,7 +4377,10 @@ mod tests {
         let (under_low, under_high) = (&shadows[0], &shadows[1]);
         assert_eq!(under_low.origin, [low[0], low[1], PLINTH_TOP]);
         assert_eq!(under_high.origin, [high[0], high[1], PLINTH_TOP]);
-        assert!(under_high.spot < under_low.spot, "the higher shadow is smaller");
+        assert!(
+            under_high.spot < under_low.spot,
+            "the higher shadow is smaller"
+        );
         assert!(under_high.alpha < under_low.alpha, "and fainter");
         assert!(under_low.spot <= acan_iso::SHADOW_RADIUS);
         assert_eq!(

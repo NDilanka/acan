@@ -731,7 +731,11 @@ mod tests {
             vertices.iter().all(|v| v.width == -18.0 && v.alpha == 0.4),
             "the shader reads a negative width as a spot's radius"
         );
-        assert!(vertices.iter().all(|v| v.a == spot.from && v.origin == spot.origin));
+        assert!(
+            vertices
+                .iter()
+                .all(|v| v.a == spot.from && v.origin == spot.origin)
+        );
     }
 
     #[test]

@@ -613,7 +613,10 @@ mod tests {
             body.bounds
         );
         let (lowest, _) = mesh_heights(&body);
-        assert!(lowest >= -BODY_RADIUS - 1e-4, "no rotor or claw hangs below");
+        assert!(
+            lowest >= -BODY_RADIUS - 1e-4,
+            "no rotor or claw hangs below"
+        );
     }
 
     #[test]
@@ -713,22 +716,36 @@ mod tests {
             (dot3(eye, eye).sqrt() - EYE_DISTANCE).abs() < 1e-4,
             "the eye is on the body's surface"
         );
-        assert!(eye[0] > 0.0 && eye[1] == 0.0 && eye[2] < 0.0, "ahead and below");
+        assert!(
+            eye[0] > 0.0 && eye[1] == 0.0 && eye[2] < 0.0,
+            "ahead and below"
+        );
     }
 
     #[test]
     fn the_shadow_shrinks_and_fades_as_the_drone_rises() {
         assert_eq!(shadow_at(0.0), (SHADOW_RADIUS, 1.0), "whole at the plinth");
-        assert_eq!(shadow_at(BODY_RADIUS), (SHADOW_RADIUS, 1.0), "whole while the belly is down");
+        assert_eq!(
+            shadow_at(BODY_RADIUS),
+            (SHADOW_RADIUS, 1.0),
+            "whole while the belly is down"
+        );
         let heights: Vec<f32> = (1..=12).map(|i| i as f32 * BODY_RADIUS * 0.5).collect();
         for pair in heights.windows(2) {
             let (low, high) = (shadow_at(pair[0]), shadow_at(pair[1]));
-            assert!(high.0 <= low.0 && high.1 <= low.1, "{pair:?}: {low:?} then {high:?}");
+            assert!(
+                high.0 <= low.0 && high.1 <= low.1,
+                "{pair:?}: {low:?} then {high:?}"
+            );
         }
         let (radius, strength) = shadow_at(SHADOW_RISE);
         assert!((radius - SHADOW_FAR_RADIUS * SHADOW_RADIUS).abs() < 1e-4);
         assert!((strength - SHADOW_FAR_STRENGTH).abs() < 1e-6);
-        assert_eq!(shadow_at(10.0 * SHADOW_RISE), shadow_at(SHADOW_RISE), "it stops shrinking");
+        assert_eq!(
+            shadow_at(10.0 * SHADOW_RISE),
+            shadow_at(SHADOW_RISE),
+            "it stops shrinking"
+        );
         let half = shadow_at(0.5 * (BODY_RADIUS + SHADOW_RISE));
         assert!(
             half.0 < 0.5 * (SHADOW_RADIUS + radius),

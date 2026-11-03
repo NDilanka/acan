@@ -508,7 +508,10 @@ mod tests {
             }
         }
         let stale = table[TINT_STALE as usize];
-        assert!((stale[0] - stale[2]).abs() <= 6.0 / 255.0, "a stale eye is grey");
+        assert!(
+            (stale[0] - stale[2]).abs() <= 6.0 / 255.0,
+            "a stale eye is grey"
+        );
     }
 
     #[test]
