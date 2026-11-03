@@ -1,7 +1,8 @@
 # Replays the recorded provider receipts in receipts/ without any API key.
 #
-# It checks each receipt against receipts/SHA256SUMS, then prints the receipts. It reads no keys and
-# makes no network calls, so a judge can run it on a machine with no provider accounts.
+# It checks each receipt against receipts/SHA256SUMS, then prints the receipts and where the recorded run
+# plays. It reads no keys and makes no network calls, so a judge can run it on a machine with no provider
+# accounts.
 #
 # Runs on PowerShell 7 on Windows and Linux (macOS not tested): pwsh -File demo/replay.ps1
 # Exit code 0 when every receipt matches its checksum, 1 otherwise.
@@ -66,5 +67,15 @@ if (-not $VerifyOnly) {
         Get-Content -LiteralPath (Join-Path $ReceiptsDir $name)
     }
 }
+
+# Where the recorded run plays. Neither route needs a key.
+$replayUrl = 'https://ndilanka.github.io/acan/?replay=1'
+Write-Output ''
+Write-Output 'Recorded run, no keys needed:'
+Write-Output "  hosted: $replayUrl"
+Write-Output '  local:  build the UI once with crates/acan-render-web/build.ps1'
+Write-Output '          copy replay/ into crates/acan-render-web/www/'
+Write-Output '          cargo run -p acan-server -- serve --repo . --web crates/acan-render-web/www'
+Write-Output '          then open http://127.0.0.1:7311/?replay=1'
 
 exit 0
