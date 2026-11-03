@@ -11,7 +11,10 @@
       ],
       "lang_mix": {
         "typescript": 1
-      }
+      },
+      "kind": "gate",
+      "kind_guessed": true,
+      "kind_reason": "name word \"auth\""
     },
     {
       "id": 1,
@@ -22,7 +25,9 @@
       ],
       "lang_mix": {
         "typescript": 1
-      }
+      },
+      "kind": "assembler",
+      "kind_reason": "no rule matched; default"
     },
     {
       "id": 2,
@@ -33,7 +38,9 @@
       ],
       "lang_mix": {
         "typescript": 1
-      }
+      },
+      "kind": "assembler",
+      "kind_reason": "no rule matched; default"
     },
     {
       "id": 3,
@@ -44,7 +51,9 @@
       ],
       "lang_mix": {
         "typescript": 1
-      }
+      },
+      "kind": "assembler",
+      "kind_reason": "no rule matched; default"
     },
     {
       "id": 4,
@@ -55,7 +64,10 @@
       ],
       "lang_mix": {
         "typescript": 1
-      }
+      },
+      "kind": "splitter",
+      "kind_guessed": true,
+      "kind_reason": "name word \"middleware\""
     },
     {
       "id": 5,
@@ -66,7 +78,10 @@
       ],
       "lang_mix": {
         "typescript": 1
-      }
+      },
+      "kind": "valve",
+      "kind_guessed": true,
+      "kind_reason": "name word \"ratelimit\""
     },
     {
       "id": 6,
@@ -77,7 +92,10 @@
       ],
       "lang_mix": {
         "typescript": 1
-      }
+      },
+      "kind": "intake",
+      "kind_guessed": true,
+      "kind_reason": "name word \"server\""
     },
     {
       "id": 7,
@@ -88,7 +106,10 @@
       ],
       "lang_mix": {
         "typescript": 1
-      }
+      },
+      "kind": "tank",
+      "kind_guessed": true,
+      "kind_reason": "name word \"store\""
     },
     {
       "id": 8,
@@ -102,7 +123,9 @@
       ],
       "lang_mix": {
         "typescript": 4
-      }
+      },
+      "kind": "crate",
+      "kind_reason": "only tests"
     }
   ],
   "belts": [

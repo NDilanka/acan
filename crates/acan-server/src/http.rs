@@ -6,6 +6,7 @@
 //! and never reaches the origin. A command the origin refuses is 409, with the `Rejection` as the
 //! body.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -73,6 +74,7 @@ fn project_routes<C: ModelClient + 'static>(
         .route(&format!("{api}/plant"), get(get_plant::<C>))
         .route(&format!("{api}/contract"), get(get_contract::<C>))
         .route(&format!("{api}/scan"), post(post_scan::<C>))
+        .route(&format!("{api}/plant/kinds"), put(put_plant_kinds::<C>))
         .route(&format!("{api}/usage"), get(get_usage::<C>))
         .route(&format!("{api}/workers"), get(get_workers::<C>))
         .route(&format!("{api}/update"), get(get_update::<C>))
@@ -496,6 +498,53 @@ async fn post_scan<C: ModelClient + 'static>(
     headers: HeaderMap,
 ) -> Result<Json<Vec<Stamped>>, ApiError> {
     member(&host, &headers)?;
+    let events = host.rescan().await?;
+    Ok(Json(events))
+}
+
+/// Sets or clears the kinds of machines, then rescans so the map redraws. The body maps a machine
+/// name to a kind name, or to null to clear the kind the user set. The change is written to
+/// `.acan/kinds.json` in the repo. Only the owner may do this: a member gets 403, and an agent
+/// gets 403 from [`member`].
+async fn put_plant_kinds<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+    Json(body): Json<BTreeMap<String, Option<String>>>,
+) -> Result<Json<Vec<Stamped>>, ApiError> {
+    let member = member(&host, &headers)?;
+    let owner = host.read(|world| {
+        world
+            .member(&member)
+            .is_some_and(|found| found.role == acan_core::Role::Owner)
+    });
+    if !owner {
+        return Err(ApiError::Forbidden(
+            "only the owner may set a machine's kind",
+        ));
+    }
+    let machines: BTreeSet<String> = host
+        .scan()
+        .plant
+        .machines
+        .iter()
+        .map(|machine| machine.name.clone())
+        .collect();
+    let mut changes = BTreeMap::new();
+    for (name, kind) in body {
+        let kind = match kind {
+            None => None,
+            Some(text) => Some(acan_scan::kind_named(&text).ok_or(ApiError::BadRequest("kind"))?),
+        };
+        if kind.is_some() && !machines.contains(&name) {
+            return Err(ApiError::NotFound("machine"));
+        }
+        changes.insert(name, kind);
+    }
+    let repo = host.repo().to_path_buf();
+    tokio::task::spawn_blocking(move || acan_scan::write_kind_overrides(&repo, &changes))
+        .await
+        .map_err(|err| ApiError::Internal(err.into()))?
+        .map_err(|err| ApiError::Internal(err.into()))?;
     let events = host.rescan().await?;
     Ok(Json(events))
 }
