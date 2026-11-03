@@ -35,9 +35,10 @@ const _: () = assert!(
     "a director reply needs room for hidden reasoning as well as the tour"
 );
 
-/// How long a plant view waits for the director before it serves the deterministic tour. The call
-/// keeps running after the wait, and its answer is cached for the receipt.
-pub(crate) const DIRECTOR_WAIT: Duration = Duration::from_secs(20);
+/// How long a plant view waits for the director before it serves the deterministic tour. No view
+/// waits: a call keeps running after the view is served, and its answer is cached for the receipt,
+/// so a view opened after the answer gets the director's tour.
+pub(crate) const DIRECTOR_WAIT: Duration = Duration::ZERO;
 
 /// How long one director call may take, counted from when it is accepted, so the wait for a slot
 /// is part of it. A call still running then is refused, and the receipt is asked again after
@@ -388,11 +389,13 @@ impl TourCache {
     }
 }
 
-/// The view with its tour filled: the director's admitted tour when it answers in time, else the
-/// deterministic tour. The plant view never waits longer than [`DIRECTOR_WAIT`] for the model.
+/// The view with its tour filled: the director's admitted tour when its answer is already cached,
+/// else the deterministic tour. The plant view never waits longer than [`DIRECTOR_WAIT`] for the
+/// model.
 pub(crate) async fn fill<C: ModelClient + 'static>(host: &Host<C>, view: PlantView) -> PlantView {
     fill_within(host, view, DIRECTOR_WAIT).await
 }
+
 
 /// [`fill`] with the wait given. The director's call runs in its own task, so a wait that ends
 /// first leaves the call running and its answer cached. The cached proposal is admitted against
@@ -950,6 +953,23 @@ mod tests {
         let mut view = fixture(text);
         view.tour = None;
         view
+    }
+
+    #[tokio::test]
+    async fn a_view_is_served_at_once_when_the_director_has_not_answered() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let host = host_with(dir.path(), Stalled::default()).await;
+
+        let filled = tokio::time::timeout(Duration::from_secs(5), fill(&host, untoured(VIEW)))
+            .await
+            .expect("the view is not held for the director");
+
+        assert!(matches!(filled.tour, Some(TourView::Deterministic { .. })));
+        assert_eq!(
+            host.tours().calls_accepted(),
+            1,
+            "the call keeps running, for the cache"
+        );
     }
 
     #[tokio::test]
