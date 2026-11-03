@@ -13,10 +13,11 @@ use std::f32::consts::{PI, TAU};
 use acan_core::{OrderId, TaskId, World};
 use acan_iso::{
     BEACON_RADIUS, BODY_RADIUS, BOT_HEIGHT, EYE_DISTANCE, GLOW_DROP, GLOW_RADIUS, PIN_HEIGHT,
-    PLINTH_TOP, STALK_HEIGHT,
+    PLINTH_TOP, STALK_HEIGHT, shadow_at,
 };
 use acan_render::theme::{
-    AGENT_SLOTS, TINT_BODY0, TINT_CLASH, TINT_DIM0, TINT_GHOST, TINT_SCOPE0, TINT_STALE,
+    AGENT_SLOTS, TINT_BODY0, TINT_CLASH, TINT_DIM0, TINT_GHOST, TINT_SCOPE0, TINT_SHADOW,
+    TINT_STALE,
 };
 use acan_render::{Beam, Instance};
 use serde::Serialize;
@@ -64,6 +65,8 @@ const BEACON_PX: f32 = 7.0;
 const BEACON_SWING: f32 = 0.5;
 /// The width of the tether from a drone's eye to its target, in device px.
 const TETHER_PX: f32 = 1.5;
+/// The opacity of a drone's shadow at full strength, which [`shadow_at`] thins as the drone rises.
+const SHADOW_ALPHA: f32 = 0.28;
 /// How far a stale drone sits below its seat, in plan units, so it reads as sagging.
 const STALE_DROP: f32 = 0.25 * BODY_RADIUS;
 /// Milliseconds for one pulse of a working agent's beacon.
@@ -1669,12 +1672,10 @@ impl Motion {
 /// The model kinds of the marks, after the machine kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MarkKinds {
-    /// A drone's shell.
+    /// A drone's white body.
     pub body: u16,
-    /// A drone's glass and lamp, at full hue.
+    /// A drone's iris, lens ring, ear hubs and antenna tip, in its state's tint.
     pub accent: u16,
-    /// A drone's shadow on the plinth top.
-    pub shadow: u16,
     pub ring: u16,
     pub pin: u16,
     pub stalk: u16,
@@ -1682,9 +1683,8 @@ pub struct MarkKinds {
 }
 
 /// A drone's instances: its white body and its accent at its centre, the accent in `accent`,
-/// which [`eye_tint`] gives for the drone's state, and its shadow on the plinth top under the
-/// centre. The shadow keeps its plan size, since it lies on the plinth.
-fn drone(kinds: MarkKinds, at: [f32; 3], accent: u8, turn: f32, bot: [f32; 2]) -> [Instance; 3] {
+/// which [`eye_tint`] gives for the drone's state. Its glow and shadow are [`spots`].
+fn drone(kinds: MarkKinds, at: [f32; 3], accent: u8, turn: f32, bot: [f32; 2]) -> [Instance; 2] {
     [
         Instance {
             offset: at,
@@ -1700,13 +1700,6 @@ fn drone(kinds: MarkKinds, at: [f32; 3], accent: u8, turn: f32, bot: [f32; 2]) -
             grow: bot,
             turn,
         },
-        Instance {
-            offset: [at[0], at[1], PLINTH_TOP],
-            kind: kinds.shadow,
-            tint: 0,
-            grow: [0.0; 2],
-            turn: 0.0,
-        },
     ]
 }
 
@@ -1721,7 +1714,7 @@ fn drone_grow(dpr: f32) -> [f32; 2] {
 /// pin's stalk and diamond. A drone, its ring, a beacon and a diamond grow to their screen floor,
 /// which `dpr` turns from CSS px into device px. A stalk keeps its plan size. A working agent's
 /// beacon swells with its pulse. A drone's accent takes its state's tint. The riding agent's drone
-/// has no body, accent or shadow, but its ring and beacon still draw.
+/// has no body or accent, but its ring and beacon still draw.
 #[must_use]
 pub fn mark_instances(
     motion: &Motion,
@@ -1837,10 +1830,11 @@ pub fn beams(
         .collect()
 }
 
-/// The soft spots now: the glow under each drone, in its agent's hue at its state's strength. A
-/// glow hangs from the drone's centre in its own frame, so it bobs and grows with the drone. A
-/// stale drone has none, a leaving drone glows as an idle one does, and the riding agent's drone
-/// has none.
+/// The soft spots now: the glow under each drone, in its agent's hue at its state's strength, and
+/// its shadow on the plinth top under its centre, which shrinks and fades as the drone rises. A
+/// glow hangs from the drone's centre in its own frame, so it bobs and grows with the drone, and a
+/// shadow grows with the drone too. A stale drone has no glow, a leaving drone glows as an idle
+/// one does, and the riding agent's drone has neither.
 #[must_use]
 pub fn spots(motion: &Motion, marks: &Marks, dpr: f32, riding: Option<&str>) -> Vec<Beam> {
     let glow = |at: [f32; 3], slot: usize, alpha: f32| Beam {
@@ -1853,6 +1847,21 @@ pub fn spots(motion: &Motion, marks: &Marks, dpr: f32, riding: Option<&str>) -> 
         alpha,
         width_px: 0.0,
         spot: GLOW_RADIUS,
+    };
+    let shadow = |at: [f32; 3]| {
+        let (radius, strength) = shadow_at(at[2] - PLINTH_TOP);
+        let ground = [at[0], at[1], PLINTH_TOP];
+        Beam {
+            from: [0.0; 3],
+            to: ground,
+            origin: ground,
+            grow: drone_grow(dpr),
+            turn: 0.0,
+            tint: u8::try_from(TINT_SHADOW).expect("tint slots fit in a byte"),
+            alpha: SHADOW_ALPHA * strength,
+            width_px: 0.0,
+            spot: radius,
+        }
     };
     let bodies = marks
         .bodies
@@ -1872,8 +1881,10 @@ pub fn spots(motion: &Motion, marks: &Marks, dpr: f32, riding: Option<&str>) -> 
         });
     bodies
         .chain(leaving)
-        .filter(|&(_, _, alpha)| alpha > 0.0)
-        .map(|(at, slot, alpha)| glow(at, slot, alpha))
+        .flat_map(|(at, slot, alpha)| {
+            let glow = (alpha > 0.0).then(|| glow(at, slot, alpha));
+            [Some(shadow(at)), glow].into_iter().flatten()
+        })
         .collect()
 }
 
@@ -2899,11 +2910,10 @@ mod tests {
         let kinds = MarkKinds {
             body: 40,
             accent: 41,
-            shadow: 42,
-            ring: 43,
-            pin: 44,
-            stalk: 45,
-            beacon: 46,
+            ring: 42,
+            pin: 43,
+            stalk: 44,
+            beacon: 45,
         };
         for dpr in [1.0_f32, 2.0] {
             let bot = mark_instances(&motion, &marks, kinds, dpr, None)
@@ -3216,22 +3226,23 @@ mod tests {
         let kinds = MarkKinds {
             body: 40,
             accent: 41,
-            shadow: 42,
-            ring: 43,
-            pin: 44,
-            stalk: 45,
-            beacon: 46,
+            ring: 42,
+            pin: 43,
+            stalk: 44,
+            beacon: 45,
         };
         let instances = mark_instances(&motion, &marks, kinds, 1.0, None);
         let count = |kind: u16| instances.iter().filter(|i| i.kind == kind).count();
-        assert_eq!(count(kinds.body), 2, "each drone has a shell");
+        assert_eq!(count(kinds.body), 2, "each drone has a body");
         assert_eq!(count(kinds.accent), 2, "each drone has an accent");
-        assert_eq!(count(kinds.shadow), 2, "each drone has a shadow");
+        let shadow = u8::try_from(TINT_SHADOW).expect("fits");
+        let shadows: Vec<Beam> = spots(&motion, &marks, 1.0, None)
+            .into_iter()
+            .filter(|spot| spot.tint == shadow)
+            .collect();
+        assert_eq!(shadows.len(), 2, "each drone has a shadow");
         assert!(
-            instances
-                .iter()
-                .filter(|i| i.kind == kinds.shadow)
-                .all(|i| i.offset[2] == PLINTH_TOP),
+            shadows.iter().all(|s| s.origin[2] == PLINTH_TOP),
             "a shadow lies on the plinth top"
         );
         assert_eq!(count(kinds.ring), 2, "each waiting agent has a ring");
@@ -3774,11 +3785,10 @@ mod tests {
     const KINDS: MarkKinds = MarkKinds {
         body: 40,
         accent: 41,
-        shadow: 42,
-        ring: 43,
-        pin: 44,
-        stalk: 45,
-        beacon: 46,
+        ring: 42,
+        pin: 43,
+        stalk: 44,
+        beacon: 45,
     };
 
     #[test]
@@ -4188,11 +4198,19 @@ mod tests {
             ],
             "the eye is bright at work, dim at idle and while waiting, and grey once stale"
         );
-        let glows: Vec<f32> = spots(&motion, &marks, 1.0, None)
+        let shadow = u8::try_from(TINT_SHADOW).expect("fits");
+        let all = spots(&motion, &marks, 1.0, None);
+        let glows: Vec<f32> = all
             .iter()
+            .filter(|spot| spot.tint != shadow)
             .map(|spot| spot.alpha)
             .collect();
         assert_eq!(glows, [0.5, 0.18, 0.18], "a stale drone has no glow");
+        assert_eq!(
+            all.iter().filter(|spot| spot.tint == shadow).count(),
+            4,
+            "every drone has a shadow, a stale one too"
+        );
         let ring = instances
             .iter()
             .find(|i| i.kind == KINDS.ring)
@@ -4233,9 +4251,8 @@ mod tests {
         motion.sync(&marks);
         let instances = mark_instances(&motion, &marks, KINDS, 1.0, Some("a"));
         let count = |kind: u16| instances.iter().filter(|i| i.kind == kind).count();
-        assert_eq!(count(KINDS.body), 1, "only the other drone has a shell");
+        assert_eq!(count(KINDS.body), 1, "only the other drone has a body");
         assert_eq!(count(KINDS.accent), 1, "only the other drone has an accent");
-        assert_eq!(count(KINDS.shadow), 1, "only the other drone has a shadow");
         assert_eq!(
             count(KINDS.beacon),
             1,
@@ -4244,9 +4261,39 @@ mod tests {
         let ridden = beams(&motion, &marks, 1.0, Some("a"), None);
         assert_eq!(ridden.len(), 1, "the riding drone has no beam");
         assert_eq!(ridden[0].origin, [9.0, 3.0, 40.0]);
-        let glows = spots(&motion, &marks, 1.0, Some("a"));
-        assert_eq!(glows.len(), 1, "the riding drone has no glow");
-        assert_eq!(glows[0].origin, [9.0, 3.0, 40.0]);
+        let spots = spots(&motion, &marks, 1.0, Some("a"));
+        assert_eq!(spots.len(), 2, "the riding drone has no glow or shadow");
+        assert!(spots.iter().all(|s| s.origin[..2] == [9.0, 3.0]));
+    }
+
+    #[test]
+    fn a_higher_drone_casts_a_smaller_fainter_shadow_under_its_centre() {
+        let target = [5.0, 3.0, 9.0];
+        let low = [2.0, 3.0, PLINTH_TOP + 1.5 * BODY_RADIUS];
+        let high = [20.0, 3.0, PLINTH_TOP + 4.0 * BODY_RADIUS];
+        let marks = marks_of(vec![
+            drone("low", low, target, "idle"),
+            drone("high", high, target, "idle"),
+        ]);
+        let mut motion = Motion::new(true);
+        motion.sync(&marks);
+        let shadow = u8::try_from(TINT_SHADOW).expect("fits");
+        let shadows: Vec<Beam> = spots(&motion, &marks, 1.0, None)
+            .into_iter()
+            .filter(|spot| spot.tint == shadow)
+            .collect();
+        assert_eq!(shadows.len(), 2);
+        let (under_low, under_high) = (&shadows[0], &shadows[1]);
+        assert_eq!(under_low.origin, [low[0], low[1], PLINTH_TOP]);
+        assert_eq!(under_high.origin, [high[0], high[1], PLINTH_TOP]);
+        assert!(under_high.spot < under_low.spot, "the higher shadow is smaller");
+        assert!(under_high.alpha < under_low.alpha, "and fainter");
+        assert!(under_low.spot <= acan_iso::SHADOW_RADIUS);
+        assert_eq!(
+            under_low.grow,
+            drone_grow(1.0),
+            "a shadow grows with its drone at the screen floor"
+        );
     }
 
     /// The scripted view with tasks landed on src/api at `api` and on src/ui at `ui`.

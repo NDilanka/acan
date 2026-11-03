@@ -27,6 +27,11 @@ pub const EYE_DISTANCE: f32 = BODY_RADIUS;
 /// The shadow's radius on the plinth top when the drone is low. It is a soft halo, so it reads as
 /// light on the ground.
 pub const SHADOW_RADIUS: f32 = 0.9 * BODY_RADIUS;
+/// The height of the drone's centre over the plinth top at which its shadow has shrunk and faded
+/// to its far share of radius and strength. A drone higher still keeps the far shadow.
+pub const SHADOW_RISE: f32 = 6.0 * BODY_RADIUS;
+const SHADOW_FAR_RADIUS: f32 = 0.55;
+const SHADOW_FAR_STRENGTH: f32 = 0.4;
 /// The glow under the body: a soft level disc in the agent's hue, this far below the centre and
 /// this wide, which the renderer draws. The body hides its middle, so it shows round the belly.
 pub const GLOW_DROP: f32 = 0.8 * BODY_RADIUS;
@@ -117,13 +122,18 @@ pub fn agent_accent() -> Model {
     accent()
 }
 
-/// A drone's shadow: one soft dot on the plinth top, centred on the origin, which the renderer sets
-/// under the drone's centre.
+/// A drone's shadow on the plinth top when its centre is `height` above it, as the shadow's
+/// radius in plan units and its strength from 0 to 1. The shadow is whole while the centre is
+/// within one body radius of the plinth, and shrinks and fades as the drone rises, eased so it
+/// changes most near the plinth. The renderer draws it as a soft spot.
 #[must_use]
-pub fn agent_shadow() -> Model {
-    let mut build = Build::default();
-    build.dot(ORIGIN, UP, SHADOW_RADIUS, Ink::Shadow, Detail::Always);
-    finish(build).0
+pub fn shadow_at(height: f32) -> (f32, f32) {
+    let t = ((height - BODY_RADIUS) / (SHADOW_RISE - BODY_RADIUS)).clamp(0.0, 1.0);
+    let eased = t * (2.0 - t);
+    (
+        SHADOW_RADIUS * (1.0 - (1.0 - SHADOW_FAR_RADIUS) * eased),
+        1.0 - (1.0 - SHADOW_FAR_STRENGTH) * eased,
+    )
 }
 
 /// The drone's body parts, counted as its model is built.
@@ -664,14 +674,23 @@ mod tests {
     }
 
     #[test]
-    fn the_shadow_is_one_soft_dot_on_the_origin() {
-        let shadow = agent_shadow();
-        assert_eq!(shadow.dots.len(), 1, "one shadow dot");
-        let dot = &shadow.dots[0];
-        assert_eq!(dot.tone, Ink::Shadow);
-        assert_eq!(dot.center, ORIGIN, "the shadow is centred on the origin");
-        assert!((dot.normal[2] - 1.0).abs() < 1e-6, "the disc lies flat");
-        assert!((dot.radius - SHADOW_RADIUS).abs() < 1e-6);
+    fn the_shadow_shrinks_and_fades_as_the_drone_rises() {
+        assert_eq!(shadow_at(0.0), (SHADOW_RADIUS, 1.0), "whole at the plinth");
+        assert_eq!(shadow_at(BODY_RADIUS), (SHADOW_RADIUS, 1.0), "whole while the belly is down");
+        let heights: Vec<f32> = (1..=12).map(|i| i as f32 * BODY_RADIUS * 0.5).collect();
+        for pair in heights.windows(2) {
+            let (low, high) = (shadow_at(pair[0]), shadow_at(pair[1]));
+            assert!(high.0 <= low.0 && high.1 <= low.1, "{pair:?}: {low:?} then {high:?}");
+        }
+        let (radius, strength) = shadow_at(SHADOW_RISE);
+        assert!((radius - SHADOW_FAR_RADIUS * SHADOW_RADIUS).abs() < 1e-4);
+        assert!((strength - SHADOW_FAR_STRENGTH).abs() < 1e-6);
+        assert_eq!(shadow_at(10.0 * SHADOW_RISE), shadow_at(SHADOW_RISE), "it stops shrinking");
+        let half = shadow_at(0.5 * (BODY_RADIUS + SHADOW_RISE));
+        assert!(
+            half.0 < 0.5 * (SHADOW_RADIUS + radius),
+            "most of the change is near the plinth"
+        );
     }
 
     #[test]

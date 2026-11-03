@@ -321,8 +321,21 @@ fn point_at(points: &[[f32; 2]], along: f32) -> [f32; 2] {
     points.last().copied().unwrap_or([0.0; 2])
 }
 
-/// Six vertices covering `bounds` plus the contact shadow's reach and its shift.
+/// A model less tall than this, in plan units, is flat.
+const FLAT: f32 = 0.5;
+
+/// Six vertices covering `bounds` plus the contact shadow's reach and its shift. A model whose box
+/// reaches below its origin is built about its centre and hangs in the air, as a drone does, and a
+/// flat model is a mark laid on a plane, as the waiting ring is. Neither stands on the ground, so
+/// its six vertices fall on one point and draw nothing. The halo would otherwise lie as a grey
+/// plate through the drone's middle.
 pub fn halo_vertices(bounds: &Aabb) -> [HaloVertex; 6] {
+    if bounds.min[2] < 0.0 || bounds.max[2] - bounds.min[2] < FLAT {
+        return [HaloVertex {
+            position: [0.0; 3],
+            rect: [0.0; 4],
+        }; 6];
+    }
     let reach = SHADOW_REACH + SHADOW_SHIFT;
     let [x0, y0, x1, y1] = [
         bounds.min[0] - reach,
@@ -599,6 +612,25 @@ mod tests {
         let lowest = xs.iter().copied().fold(f32::INFINITY, f32::min);
         assert!((lowest - (-48.0 - SHADOW_REACH - SHADOW_SHIFT)).abs() < 1e-4);
         assert!(corners.iter().all(|v| v.rect == [-48.0, -43.0, 48.0, 43.0]));
+    }
+
+    #[test]
+    fn a_model_hung_about_its_centre_or_laid_flat_casts_no_contact_shadow() {
+        let drone = Aabb {
+            min: [-12.0, -13.0, -12.0],
+            max: [12.0, 13.0, 17.0],
+        };
+        let ring = Aabb {
+            min: [-15.6, -15.6, 0.05],
+            max: [15.6, 15.6, 0.05],
+        };
+        for bounds in [drone, ring] {
+            let corners = halo_vertices(&bounds);
+            assert!(
+                corners.iter().all(|v| v.position == corners[0].position),
+                "every corner on one point, so nothing draws: {bounds:?}"
+            );
+        }
     }
 
     #[test]

@@ -36,6 +36,8 @@ pub const GHOST_GREY: u32 = 0x6e6e73;
 /// Tint slot of each agent's accent at full hue: `TINT_BODY0 + slot`. A working drone's eye, its
 /// glow, its beam and its beacon draw with it, and an idle drone's eye with its dimmed copy.
 pub const TINT_BODY0: u32 = 1;
+/// Tint slot of a drone's shadow on the plinth top: black, which the spot's own opacity thins.
+pub const TINT_SHADOW: u32 = 7;
 /// Tint slot of a stale drone's eye. The drone's body is white in every state.
 pub const TINT_STALE: u32 = 13;
 /// Tint slot of a ghost's outline.
@@ -219,13 +221,14 @@ pub fn palette(srgb_surface: bool) -> [[f32; 4]; PALETTE_LEN] {
 }
 
 /// The tint table in sRGB. Slot 0 is the identity, each agent has a body slot at full hue, and the
-/// stale, ghost, clash and scope slots follow.
+/// shadow, stale, ghost, clash and scope slots follow.
 pub fn tints() -> [[f32; 4]; TINT_LEN] {
     let mut table = [[1.0; 4]; TINT_LEN];
     for slot in 0..AGENT_SLOTS {
         let hue = agent_colour(slot);
         table[TINT_BODY0 as usize + slot] = hue;
     }
+    table[TINT_SHADOW as usize] = rgb(0x000000, 1.0);
     table[TINT_STALE as usize] = rgb(STALE_GREY, 1.0);
     table[TINT_GHOST as usize] = rgb(GHOST_GREY, 1.0);
     table[TINT_CLASH as usize] = mixed_into_white(rgb(CLASH_RED, 1.0), CLASH_MIX);
@@ -329,12 +332,13 @@ const _: () = assert!(
     "agents do not run into the belt slots"
 );
 const _: () = assert!(
-    TINT_BODY0 as usize + AGENT_SLOTS <= TINT_STALE as usize
+    TINT_BODY0 as usize + AGENT_SLOTS <= TINT_SHADOW as usize
+        && TINT_SHADOW < TINT_STALE
         && TINT_STALE < TINT_GHOST
         && TINT_GHOST < TINT_CLASH
         && TINT_CLASH < TINT_SCOPE0
         && TINT_SCOPE0 as usize + SCOPE_TINTS.len() <= TINT_DIM0 as usize,
-    "body, stale, ghost, clash and scope tints do not overlap"
+    "body, shadow, stale, ghost, clash and scope tints do not overlap"
 );
 const _: () = assert!(GRID_MINOR_ALPHA < GRID_MAJOR_ALPHA);
 const _: () = assert!(PAPER_TOP > 0.0, "a top never matches the page");
