@@ -650,12 +650,12 @@ fn admitted_range(range: &str) -> bool {
         && plain_spec(range)
 }
 
-/// Whether a dist-tag holds only the characters npm writes in a tag, such as `canary_1` or
-/// `beta!`. A tag with a `/` or a `:` names another source, and so does one that is a path.
+/// Whether a dist-tag holds only the characters npm writes in a tag, such as `canary_1`, `beta!`
+/// or `rc(1)`. A tag with a `/` or a `:` names another source, and so does one that is a path.
 fn admitted_tag(tag: &str) -> bool {
     tag.trim()
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "-_.~!".contains(c))
+        .all(|c| c.is_ascii_alphanumeric() || "-_.~!'()".contains(c))
         && plain_spec(tag)
 }
 
@@ -1319,6 +1319,8 @@ mod tests {
             "npm:left-pad",
             "canary_1",
             "beta!",
+            "rc(1)",
+            "it's",
             "next-1.0",
             "npm:left-pad@canary_1",
         ] {
