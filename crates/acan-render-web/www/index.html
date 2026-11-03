@@ -486,9 +486,14 @@
   #lanes .doing { grid-column: 2; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #lanes .chip { grid-column: 3; justify-self: end; }
   /* The replay panel shows on a recorded run only (`?replay=1`). */
-  #replay { right: 12px; bottom: 12px; display: flex; gap: 10px; align-items: center; font: 12px var(--mono); }
-  #replay button { font: 12px var(--mono); padding: 2px 8px; background: var(--face); color: var(--ink); border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+  #replay { right: 12px; bottom: 12px; display: flex; gap: 8px; align-items: center; padding: 5px 10px; }
+  #replay button { width: 24px; height: 24px; padding: 0; font: 12px/22px var(--mono); text-align: center; background: var(--face);
+    color: var(--ink); border: 1px solid var(--rule); border-radius: 50%; cursor: pointer; }
   #replay button:hover { border-color: var(--ink); }
+  #replay progress { width: 160px; height: 4px; appearance: none; border: none; border-radius: 2px; background: var(--rule); }
+  #replay progress::-webkit-progress-bar { background: var(--rule); border-radius: 2px; }
+  #replay progress::-webkit-progress-value { background: var(--ink); border-radius: 2px; }
+  #replay progress::-moz-progress-bar { background: var(--ink); border-radius: 2px; }
 </style>
 <link rel="stylesheet" href="review.css">
 </head>
@@ -635,11 +640,8 @@
   </section>
 </div>
 <div class="island" id="replay" hidden>
-  <span>Replay of a recorded run</span>
-  <span id="replay-progress" class="muted"></span>
-  <button type="button" id="replay-toggle">Pause</button>
-  <button type="button" id="replay-restart">Restart</button>
-  <button type="button" id="replay-speed">1x</button>
+  <button type="button" id="replay-toggle" aria-label="Pause">&#9208;</button>
+  <progress id="replay-progress" max="1" value="0" aria-label="Replay progress"></progress>
 </div>
 <div class="island" id="notice" hidden></div>
 <script type="module" src="main.js"></script>

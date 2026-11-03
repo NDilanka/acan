@@ -70,3 +70,15 @@ test("the Meta badge names the count, from the server or the log", () => {
   assert.match(html, /<button type="button" id="meta-badge"[^>]*aria-controls="usage-meta"><\/button>/);
   assert.match(www("panels.js"), /metaBadge.addEventListener\("click"/);
 });
+
+test("the replay bar is a play or pause button and a progress bar, with no sentence", () => {
+  const bar = www("index.html").match(/<div class="island" id="replay" hidden>([\s\S]*?)<\/div>/)[1];
+  const words = bar.replace(/<[^>]+>/g, " ").replace(/&#\d+;/g, " ").trim();
+  assert.equal(words, "", "no visible words");
+  assert.match(bar, /<button[^>]*id="replay-toggle"[^>]*aria-label="/);
+  assert.match(bar, /<progress[^>]*id="replay-progress"/);
+  assert.doesNotMatch(bar, /Restart|speed|Replay of/);
+  const js = www("replay.js");
+  assert.match(js, /progressEl\.value = String\(playback\.next\)/);
+  assert.doesNotMatch(js, /event \$\{playback\.next\} of/);
+});

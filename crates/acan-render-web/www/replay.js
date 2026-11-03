@@ -1,6 +1,6 @@
 // The replay page. A recorded run is read from `replay/` beside the page: `manifest.json`,
 // `plant.json` and `events.json`, as `acan export-replay` writes them. The log folds one event at
-// a time on the recorded clock, with pause, restart and speed. The page makes no API call, opens
+// a time on the recorded clock, with a play or pause button and a progress bar. The page makes no API call, opens
 // no socket and sends no command.
 import { requestRender } from "./main.js";
 import { $, state } from "./state.js";
@@ -13,18 +13,16 @@ const DIR = "replay/";
 const MIN_GAP_MS = 25;
 const MAX_GAP_MS = 1200;
 
-const SPEEDS = [1, 4, 16];
+// The gap divisor; the bar keeps one speed.
+const SPEEDS = [1];
 
-const playback = { events: [], next: 0, speed: 0, playing: false, timer: null };
+const playback = { events: [], next: 0, playing: false, timer: null };
 
 const panel = $("replay");
 const progressEl = $("replay-progress");
 const toggleEl = $("replay-toggle");
-const speedEl = $("replay-speed");
 
-$("replay-toggle").addEventListener("click", togglePlay);
-$("replay-restart").addEventListener("click", restart);
-speedEl.addEventListener("click", cycleSpeed);
+toggleEl.addEventListener("click", togglePlay);
 
 async function fetchText(name) {
   const res = await fetch(DIR + name);
@@ -117,21 +115,16 @@ function finish() {
 
 // The pause before the next event: the recorded gap, divided by the speed and kept in range.
 function waitMs(event, following) {
-  const gap = (following.at - event.at) / SPEEDS[playback.speed];
+  const gap = (following.at - event.at) / SPEEDS[0];
   if (!Number.isFinite(gap)) return MIN_GAP_MS;
   return Math.min(MAX_GAP_MS, Math.max(MIN_GAP_MS, gap));
-}
-
-function cycleSpeed() {
-  playback.speed = (playback.speed + 1) % SPEEDS.length;
-  speedEl.textContent = `${SPEEDS[playback.speed]}x`;
 }
 
 function paint() {
   const total = playback.events.length;
   const done = playback.next >= total;
-  toggleEl.textContent = done ? "Play again" : playback.playing ? "Pause" : "Play";
-  const notShown = state.app.not_shown();
-  const passed = notShown > 0 ? `, ${notShown} not shown` : "";
-  progressEl.textContent = `event ${playback.next} of ${total}${passed}`;
+  toggleEl.textContent = playback.playing ? "\u23F8" : "\u25B6";
+  toggleEl.setAttribute("aria-label", done ? "Play again" : playback.playing ? "Pause" : "Play");
+  progressEl.max = String(total);
+  progressEl.value = String(playback.next);
 }
