@@ -94,6 +94,12 @@ const STATE_DIR: &str = ".acan";
 const DB_FILE: &str = "world.db";
 const OWNER: &str = "owner";
 
+/// The file that holds the repository's tokens: the owner's and each agent's.
+#[must_use]
+pub fn tokens_file(repo: &Path) -> PathBuf {
+    repo.join(STATE_DIR).join(auth::TOKENS_FILE)
+}
+
 /// How long shutdown waits for stream tasks to close before giving up on them. Streams only
 /// read the log and write to their socket, so a wedged one cannot hold a write hostage.
 const STREAM_DRAIN: Duration = Duration::from_secs(2);

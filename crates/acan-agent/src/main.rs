@@ -1,6 +1,7 @@
 //! `acan-worker`: one harness worker. It takes a task from an acan origin over MCP and builds it
 //! in its worktree. The step log goes to stderr; the final exit goes to stdout.
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -19,9 +20,13 @@ struct Cli {
     /// The origin's base URL, such as `http://127.0.0.1:7311`.
     #[arg(long)]
     server: String,
-    /// The agent's bearer token. Without it, the `ACAN_AGENT_TOKEN` variable is used. The scripts
-    /// set the variable, because a flag shows in the process list.
-    #[arg(long)]
+    /// A file that holds the agent's bearer token and nothing else. Its contents are read, never
+    /// printed. Use this or the `ACAN_AGENT_TOKEN` variable rather than `--token`.
+    #[arg(long, value_name = "PATH", conflicts_with = "token")]
+    token_file: Option<PathBuf>,
+    /// The agent's bearer token, given on the command line. Prefer `--token-file` or the
+    /// `ACAN_AGENT_TOKEN` variable: a flag value can show in the process list.
+    #[arg(long, conflicts_with = "token_file")]
     token: Option<String>,
     /// The repository the origin serves. Its tracked files ground each plan.
     #[arg(long)]
@@ -81,7 +86,11 @@ async fn run_cli() -> Result<Exit> {
     match cli.role {
         Role::Worker => {}
     }
-    let token = agent_token(cli.token, std::env::var("ACAN_AGENT_TOKEN").ok())?;
+    let file = cli.token_file.as_deref().map(read_token_file).transpose()?;
+    let token = agent_token(
+        file.flatten().or(cli.token),
+        std::env::var("ACAN_AGENT_TOKEN").ok(),
+    )?;
     load_env(&cli.env)?;
     let config =
         LlmConfig::load(&cli.llm).with_context(|| format!("loading {}", cli.llm.display()))?;
@@ -101,12 +110,22 @@ async fn run_cli() -> Result<Exit> {
     Ok(run(&worker, &model).await.exit)
 }
 
-/// The agent token: the `--token` flag when it is set, else the `ACAN_AGENT_TOKEN` variable. An
-/// empty value counts as missing. The error names both sources and shows no value.
-fn agent_token(flag: Option<String>, variable: Option<String>) -> Result<String> {
-    flag.filter(|token| !token.is_empty())
+/// The agent token: the token from `--token-file` or `--token` when one is given, else the
+/// `ACAN_AGENT_TOKEN` variable. An empty value counts as missing. The error names the sources and
+/// shows no value.
+fn agent_token(given: Option<String>, variable: Option<String>) -> Result<String> {
+    given
+        .filter(|token| !token.is_empty())
         .or_else(|| variable.filter(|token| !token.is_empty()))
-        .context("no agent token: pass --token or set ACAN_AGENT_TOKEN")
+        .context("no agent token: pass --token-file, or set ACAN_AGENT_TOKEN")
+}
+
+/// Reads the agent token from a file that holds it alone. Surrounding whitespace is dropped, and
+/// an empty file is no token. The error names the file and never its contents.
+fn read_token_file(path: &Path) -> Result<Option<String>> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("reading the token file {}", path.display()))?;
+    Ok(Some(text.trim().to_owned()).filter(|token| !token.is_empty()))
 }
 
 /// Loads the provider keys from `path`. A missing file is normal; a file that does not parse is
@@ -138,10 +157,11 @@ fn load_env(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
 
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
-    use super::{Cli, agent_token, load_env};
+    use super::{Cli, agent_token, load_env, read_token_file};
 
     #[test]
     fn the_flag_wins_and_the_variable_fills_in() {
@@ -190,6 +210,94 @@ mod tests {
         ])
         .expect("the flags parse without --token");
         assert!(cli.token.is_none());
+    }
+
+    #[test]
+    fn the_token_file_holds_the_token_alone() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("token");
+        fs::write(&path, "  acan_agent_file\r\n").expect("the token file");
+        assert_eq!(
+            read_token_file(&path).expect("the file reads"),
+            Some("acan_agent_file".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_empty_token_file_counts_as_missing() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("token");
+        fs::write(&path, " \n").expect("the token file");
+        assert_eq!(read_token_file(&path).expect("the file reads"), None);
+    }
+
+    #[test]
+    fn a_token_file_that_cannot_be_read_names_the_file() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("absent-token");
+        let err = read_token_file(&path).expect_err("a missing file is an error");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("absent-token"),
+            "the message does not name the file: {text}"
+        );
+    }
+
+    #[test]
+    fn the_token_file_and_the_flag_cannot_both_be_given() {
+        // `Cli` has no `Debug`, so the result is checked as a bool rather than with `expect_err`.
+        let parsed = Cli::try_parse_from([
+            "acan-worker",
+            "--server",
+            "http://127.0.0.1:7311",
+            "--repo",
+            ".",
+            "--token-file",
+            "token",
+            "--token",
+            "acan_agent_flag",
+        ]);
+        assert!(parsed.is_err(), "the two sources of one token conflict");
+    }
+
+    #[test]
+    fn the_token_file_option_parses_without_the_flag() {
+        let cli = Cli::try_parse_from([
+            "acan-worker",
+            "--server",
+            "http://127.0.0.1:7311",
+            "--repo",
+            ".",
+            "--token-file",
+            "token",
+        ])
+        .expect("the file option parses");
+        assert_eq!(cli.token_file.as_deref(), Some(Path::new("token")));
+        assert!(cli.token.is_none());
+    }
+
+    #[test]
+    fn the_help_offers_the_file_and_the_variable_before_the_flag() {
+        let help = Cli::command().render_help().to_string();
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        let file = help
+            .find("--token-file <PATH>")
+            .expect("the help names the file option");
+        let flag = help
+            .find("--token <TOKEN>")
+            .expect("the help names the flag");
+        assert!(
+            file < flag,
+            "the help offers the flag before the file: {help}"
+        );
+        assert!(
+            help.contains("ACAN_AGENT_TOKEN"),
+            "the help does not name the variable: {help}"
+        );
+        assert!(
+            help.contains("process list"),
+            "the help does not say why the flag is the weaker choice: {help}"
+        );
     }
 
     #[test]
