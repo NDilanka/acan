@@ -244,15 +244,38 @@ async fn version() -> Json<VersionInfo> {
 
 /// Every human command. The scope-first human commands arrive here too, as bodies: ReviseScope,
 /// ConfirmScope, ResolveContest and RecordRuling. Only a member reaches the origin, and the origin
-/// checks that the member is the order's poster or an owner. An agent token gets 403 here.
+/// checks that the member is the order's poster or an owner. An agent token gets 403 here. A scope
+/// revision with a fixed base anchor in a must-keep rule gets 400, see [`refuse_fixed_must_keep`].
 async fn post_command<C: ModelClient + 'static>(
     State(host): State<Host<C>>,
     headers: HeaderMap,
     Json(cmd): Json<HumanCmd>,
 ) -> Result<Json<Vec<Stamped>>, ApiError> {
     let member = member(&host, &headers)?;
+    refuse_fixed_must_keep(&cmd)?;
     let events = host.submit(Command::Human { member, cmd }).await?;
     Ok(Json(events))
+}
+
+/// Refuses a scope revision whose must-keep obligations name a saved example as their base. A later
+/// gate run loads no saved examples, so it would read such an obligation as unknown and block on
+/// it. The rule's predicates are checked at any depth, so a fixed anchor under `all` is refused too.
+fn refuse_fixed_must_keep(cmd: &HumanCmd) -> Result<(), ApiError> {
+    let HumanCmd::ReviseScope { scope, .. } = cmd else {
+        return Ok(());
+    };
+    let fixed = scope
+        .body
+        .must_keep
+        .iter()
+        .flat_map(|rule| rule.obligations.iter())
+        .any(|obligation| !obligation.predicate.fixed_anchors().is_empty());
+    if fixed {
+        return Err(ApiError::BadRequest(
+            "must-keep predicate must use a fresh base anchor: fixed anchors are not supported yet",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]

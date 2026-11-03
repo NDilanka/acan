@@ -2171,6 +2171,101 @@ async fn a_posted_ruling_is_judged_at_the_gate_run_that_follows_it() {
     running.stop().await.expect("the server stops");
 }
 
+/// A must-keep obligation that names a saved example as its base is refused when a member revises
+/// the scope. The refusal is a 400 that names the anchor, and the scope does not move. A fixed
+/// anchor nested under `all` is refused too. The same rule with a fresh anchor is accepted.
+#[tokio::test]
+async fn a_fixed_anchor_in_a_must_keep_rule_is_refused_and_the_scope_does_not_move() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let running = start_plant(root).await;
+    post_order(&running).await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let base = git(root, &["rev-parse", PROTECTED_BRANCH])
+        .trim()
+        .to_owned();
+    let fixed = json!({ "kind": "fixed", "example": format!("sha256:{}", "a".repeat(64)) });
+
+    let mut direct = revise_command(order, &base);
+    direct["scope"]["body"]["must_keep"][0]["obligations"][0]["predicate"]["anchor"] =
+        fixed.clone();
+    let (status, body) = send_command(&running, &direct).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "a fixed anchor in a must-keep rule is refused: {body}"
+    );
+    assert!(
+        body.contains("fixed anchors are not supported yet"),
+        "the refusal names the anchor: {body}"
+    );
+
+    let mut nested = revise_command(order, &base);
+    nested["scope"]["body"]["must_keep"][0]["obligations"][0]["predicate"] = json!({
+        "predicate": "all",
+        "of": [
+            same_as_base(),
+            { "predicate": "equals_base", "step_id": "s1", "path": "body", "anchor": fixed }
+        ]
+    });
+    let (status, body) = send_command(&running, &nested).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "a fixed anchor nested under all is refused: {body}"
+    );
+    assert!(
+        body.contains("fixed anchors are not supported yet"),
+        "the nested refusal names the anchor: {body}"
+    );
+    let (_, origin) = snapshot(&running).await;
+    assert!(
+        origin.world().lane(order).is_none(),
+        "a refused scope revision moves nothing"
+    );
+
+    member(
+        &running,
+        &HumanCmd::ReviseScope {
+            order,
+            scope: Box::new(scope_for(order, &base)),
+        },
+    )
+    .await;
+    let (_, origin) = snapshot(&running).await;
+    assert!(
+        origin.world().lane(order).is_some(),
+        "the same rule with a fresh anchor is accepted"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A `ReviseScope` command as the HTTP body the owner sends, for the scope `scope_for` builds.
+fn revise_command(order: OrderId, base: &str) -> Value {
+    serde_json::to_value(HumanCmd::ReviseScope {
+        order,
+        scope: Box::new(scope_for(order, base)),
+    })
+    .expect("the command serializes")
+}
+
+/// Posts one command body to `/api/commands` as the owner. Returns the status and the body.
+async fn send_command(running: &Running, cmd: &Value) -> (reqwest::StatusCode, String) {
+    let response = client()
+        .post(url(running, "/api/commands"))
+        .bearer_auth(OWNER_TOKEN)
+        .json(cmd)
+        .send()
+        .await
+        .expect("the command is sent");
+    let status = response.status();
+    (status, response.text().await.unwrap_or_default())
+}
+
 /// The plant as the owner reads it over HTTP.
 async fn plant_of(running: &Running) -> Value {
     let response = client()
