@@ -54,6 +54,27 @@ export function nearestClear(left, top, w, h, placed, pad, width, height, maxTop
   return found === null ? null : found.y;
 }
 
+// The spots for the names the wasm side left out. It drops a name whose spots under and above
+// its machine are both covered by other machines, but every machine on screen keeps its name, so
+// such a machine gets a spot under its footprint's front corner, where the wasm side hangs a name.
+// `machines` are `{ index, quad }`, each footprint as four screen corners, and `named` the
+// indexes the wasm side placed. A footprint narrower than `minPx` on screen, or with its spot out
+// of view, gets none. The page places these last, so they never push out a name the wasm side
+// placed.
+export function unnamedSpots(machines, named, width, height, minPx) {
+  const spots = [];
+  for (const { index, quad } of machines) {
+    if (named.has(index)) continue;
+    const xs = quad.map((p) => p[0]);
+    if (Math.max(...xs) - Math.min(...xs) < minPx) continue;
+    const x = xs.reduce((sum, v) => sum + v, 0) / xs.length;
+    const y = Math.max(...quad.map((p) => p[1]));
+    if (x < 0 || x > width || y < 0 || y > height) continue;
+    spots.push({ index, x, y });
+  }
+  return spots;
+}
+
 // The leader a plot flag draws once it has moved off its natural top: a line from the edge of its
 // box that faces the anchor (x, y), the machine's top point, to that anchor. Null when it stays.
 export function leaderOf(plot, top) {

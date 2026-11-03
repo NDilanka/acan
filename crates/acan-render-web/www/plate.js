@@ -1,4 +1,4 @@
-// The receipt plate: the facts of the receipt the order island shows, the directed and plain
+// The receipt plate: the facts of the receipt of the shown order, the directed and plain
 // toggle, and the playback of the admitted tour. The wasm side admits the tour, fills every caption
 // and moves the camera. This file shows what the payload says and never a model's words. Every
 // item is listed in view order whatever the tour does, so a tour cannot hide a failure.

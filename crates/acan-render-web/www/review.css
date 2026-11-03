@@ -1,0 +1,116 @@
+/* Review evidence on the map: the vision pins and their before and after viewer, and the first-run
+   checklist. The page's own palette and type come from index.html. */
+
+/* A vision pin sits beside its machine. Its tone never reads as a pass: consistent is plain ink,
+   a doubt is amber, and a page no model judged is a grey dashed ring. */
+#vision-pins { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+.vpin { position: absolute; left: 0; top: 0; pointer-events: auto; cursor: pointer; display: flex; gap: 5px;
+  align-items: center; white-space: nowrap; font: 11px/1.2 var(--mono); color: var(--ink); background: var(--face);
+  border: 1px solid var(--rule); border-radius: 10px; padding: 2px 8px 2px 6px; }
+.vpin span { color: var(--muted); }
+.vpin:hover, .vpin.open { border-color: var(--ink); }
+.vpin:focus-visible, #vision button:focus-visible, #firstrun button:focus-visible, #firstrun a:focus-visible {
+  outline: 2px solid var(--ink); outline-offset: 1px; }
+.vpin i, #vision .vsum i, #vision .vverdict i { display: inline-block; width: 9px; height: 9px; box-sizing: border-box;
+  border-radius: 50%; flex: none; }
+.tone-consistent > i { background: var(--ink); }
+.tone-doubt > i { background: var(--amber); }
+.tone-none > i { border: 1.5px dashed var(--muted); }
+.vpin.tone-doubt { border-color: var(--amber); }
+.vpin.tone-none b { color: var(--muted); font-weight: 500; }
+
+/* The viewer opens beside its pin. With no pin on screen it docks at the top right, beside the
+   right rail (12px from the window, 300px wide, 12px gap). */
+#vision { position: fixed; width: min(440px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow-y: auto;
+  box-sizing: border-box; padding: 10px 12px; color: var(--ink); font: 12px/1.4 var(--sans); z-index: 2; }
+#vision.docked { left: auto !important; right: 324px; top: 56px !important; max-height: calc(100vh - 68px); }
+#vision .vhead { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+#vision h2 { margin: 0; font: 600 13px/1.3 var(--mono); display: flex; gap: 8px; align-items: center; outline: none; }
+#vision .fixture { font: 600 10px var(--mono); letter-spacing: 0.08em; color: var(--muted);
+  border: 1px dashed var(--muted); border-radius: 3px; padding: 0 4px; }
+#vision .advisory { margin: 4px 0 6px; font: 11px/1.4 var(--sans); color: var(--muted); }
+#vision .vsum, #vision .vverdict { display: flex; gap: 6px; align-items: baseline; margin: 4px 0; }
+#vision .vsum i, #vision .vverdict i { transform: translateY(1px); }
+#vision .vsum b, #vision .vverdict b { font: 600 12px var(--mono); white-space: nowrap; }
+#vision .vsum span { font: 11px var(--mono); color: var(--muted); }
+#vision .tone-doubt b { color: var(--ink); }
+#vision .tone-none b { color: var(--muted); }
+#vision .vline, #vision .vroute { margin: 4px 0; font: 11px/1.4 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+#vision .vnav { display: flex; gap: 8px; align-items: center; margin: 8px 0 2px; font: 11px var(--mono); color: var(--muted);
+  border-top: 1px solid var(--rule); padding-top: 6px; }
+#vision button { font: 11px/1.3 var(--mono); background: var(--face); color: var(--ink); border: 1px solid var(--rule);
+  border-radius: 4px; padding: 2px 8px; cursor: pointer; }
+#vision button:hover:not(:disabled) { border-color: var(--ink); }
+#vision button:disabled { color: var(--muted); cursor: default; }
+#vision button[aria-pressed="true"] { background: var(--ink); color: #ffffff; border-color: var(--ink); }
+#vision .modes { display: inline-flex; }
+#vision .modes button { border-radius: 0; }
+#vision .modes button:first-child { border-radius: 4px 0 0 4px; }
+#vision .modes button:last-child { border-radius: 0 4px 4px 0; border-left: none; }
+#vision .vmodes { display: flex; gap: 8px; align-items: center; margin: 4px 0 6px; }
+#vision .vmodes input[type=range] { flex: 1; accent-color: var(--ink); }
+
+/* Side by side: before on the left, after on the right. Swipe: the two pages stacked, the after
+   page shown right of the slider's line. */
+#vision .vcompare { margin: 6px 0 2px; }
+#vision .vcompare.mode-side { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+#vision .vside { margin: 0; min-width: 0; }
+#vision .vside img { display: block; width: 100%; height: auto; border: 1px solid var(--rule); border-radius: 3px; background: var(--card); }
+#vision .vside figcaption { font: 10px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-top: 2px; }
+#vision .vmissing { margin: 0; padding: 18px 8px; font: 11px/1.4 var(--sans); color: var(--muted); text-align: center;
+  border: 1px dashed var(--rule); border-radius: 3px; }
+#vision .vcompare.mode-swipe { position: relative; }
+#vision .vcompare.mode-swipe .vside.after { position: absolute; inset: 0; clip-path: inset(0 0 0 var(--swipe)); }
+#vision .vcompare.mode-swipe .vside.after figcaption { text-align: right; }
+#vision .vcompare.mode-swipe::after { content: ""; position: absolute; top: 0; bottom: 14px; left: var(--swipe);
+  width: 2px; margin-left: -1px; background: var(--ink); pointer-events: none; }
+#vision .vverdict span { color: var(--soft); }
+#vision .vsecond { margin: 8px 0 4px; padding: 6px 8px; border-left: 2px solid var(--rule); background: var(--card); border-radius: 0 4px 4px 0; }
+#vision .vsecond.tone-doubt { border-left-color: var(--ink); }
+#vision .vsecond h3 { margin: 0 0 2px; font: 600 11px/1.3 var(--sans); }
+#vision .vsecond p { margin: 2px 0; }
+#vision .vreason { color: var(--soft); }
+#vision .vsecond .muted { font: 10px var(--mono); }
+#vision details.vkeeps summary { font: 11px var(--mono); color: var(--muted); cursor: pointer; }
+#vision details.vkeeps ul { margin: 4px 0 0; padding-left: 16px; }
+#vision .foot { color: var(--muted); font: 10px/1.4 var(--mono); border-top: 1px solid var(--rule); margin: 8px 0 0; padding-top: 6px; }
+@media (prefers-reduced-motion: reduce) { #vision * { transition: none !important; } }
+
+/* The sign-in gate: the token field, and one line on where the token comes from. */
+#gate form { flex-direction: column; align-items: stretch; gap: 8px; max-width: 440px; }
+#gate .gate-row { display: flex; gap: 8px; align-items: center; }
+#gate .gate-row input { flex: 1; width: auto; min-width: 0; }
+#gate .gate-hint { margin: 0; font: 12px/1.45 var(--sans); color: var(--muted); }
+#gate code, #firstrun code { font: 11px var(--mono); color: var(--ink); }
+
+/* The first-run checklist: the top of the right rail, folded to its head line while the clash card
+   or the slip shows. Only the current step opens its words and its control. */
+#firstrun { color: var(--ink); font: 12px/1.4 var(--sans); }
+#firstrun .fr-head { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+#firstrun .fr-toggle { display: flex; gap: 8px; align-items: baseline; background: none; border: none; padding: 0;
+  font: 12px var(--sans); color: var(--ink); cursor: pointer; text-align: left; }
+#firstrun .fr-toggle b { font: 600 12px var(--sans); }
+#firstrun .fr-toggle span { font: 11px var(--mono); }
+#firstrun .fr-toggle .chev { font: 12px var(--sans); transition: transform 120ms; }
+#firstrun .fr-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
+#firstrun .fr-hide { font: 11px var(--mono); color: var(--muted); background: none; border: none; padding: 0; cursor: pointer; }
+#firstrun .fr-hide:hover { color: var(--ink); text-decoration: underline; }
+#firstrun ol.fr-steps { list-style: none; margin: 6px 0 0; padding: 0; border-top: 1px solid var(--rule); }
+#firstrun .fr-step { display: grid; grid-template-columns: 18px 1fr; gap: 0 6px; align-items: baseline; padding: 4px 0; }
+#firstrun .fr-step > :not(.fr-mark) { grid-column: 2; }
+#firstrun .fr-mark { grid-column: 1; grid-row: 1; width: 16px; height: 16px; box-sizing: border-box; border-radius: 50%;
+  display: inline-grid; place-items: center; font: 10px var(--mono); color: var(--muted); border: 1px solid var(--rule); }
+#firstrun .fr-title { grid-row: 1; }
+#firstrun .state-done .fr-mark { background: var(--ink); border-color: var(--ink); color: #ffffff; }
+#firstrun .state-done .fr-title, #firstrun .state-unavailable .fr-title { color: var(--muted); }
+#firstrun .state-unavailable .fr-mark { border-style: dashed; }
+#firstrun .current .fr-mark { border-color: var(--ink); color: var(--ink); }
+#firstrun .current .fr-title { font-weight: 600; }
+#firstrun .fr-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+#firstrun .fr-detail { margin: 2px 0 4px; color: var(--soft); }
+#firstrun .state-unavailable .fr-detail { color: var(--muted); }
+#firstrun .fr-command { display: block; margin: 2px 0 6px; padding: 4px 6px; background: var(--card); border: 1px solid var(--rule);
+  border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+#firstrun .fr-action { justify-self: start; font: 11px/1.3 var(--mono); background: var(--ink); color: #ffffff;
+  border: 1px solid var(--ink); border-radius: 4px; padding: 2px 8px; cursor: pointer; margin-bottom: 2px; }
+#firstrun .fr-action:disabled { opacity: 0.6; cursor: default; }

@@ -1,9 +1,12 @@
 // The HTML marks over the canvas: agent flags with their witness chips, the leaders to each
 // drone, the machine labels and the clash pins. Positions come from the wasm side; this file
 // only places the elements.
-import { openCard, paintCard } from "./cards.js";
+import { openCard, openQuestionCard, paintCard, placeQuestion, syncQuestions } from "./cards.js";
+import { placeCompose, syncCompose } from "./compose.js";
+import { machineQuad } from "./order.js";
 import { canvas, flagsEl, labelsEl, leadersEl, state } from "./state.js";
-import { boxAt, clearOf, inView, placeOverlays } from "./place.js";
+import { boxAt, clearOf, inView, placeOverlays, unnamedSpots } from "./place.js";
+import { questionOfFlag } from "./question.js";
 
 const ID_PREFIX = { order: "o", clash: "c", question: "q", task: "t" };
 
@@ -15,6 +18,16 @@ const PIN_PICK_PX = 18;
 
 // The gap between the flags of one machine, stacked in a column above its bots.
 const FLAG_ROW_GAP_PX = 4;
+
+// A machine the wasm side left unnamed gets a name once its footprint is this wide on screen, the
+// size the wasm side names a machine at rest (`labels::REST_MIN_CSS_PX`).
+const UNNAMED_MIN_PX = 18;
+
+// The note of the scope machines the plant lacks: its top, its left with no receipt plate, and
+// its gap from the plate when one shows.
+const UNPLACED_TOP_PX = 96;
+const UNPLACED_LEFT_PX = 12;
+const UNPLACED_GAP_PX = 12;
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -33,6 +46,7 @@ export function placeLabels() {
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
   state.labelGeneration += 1;
+  placeUnplacedNote();
   const placedBoxes = hudBoxes();
   const { plots, leaders } = placeFlags(placedBoxes);
   const quads = state.app.label_layout(state.altDown);
@@ -42,19 +56,11 @@ export function placeLabels() {
     const x = quads[k + 1];
     const y = quads[k + 2];
     const opacity = quads[k + 3];
-    let el = state.labels.get(index);
-    if (el === undefined) {
-      el = makeLabel(index);
-      state.labels.set(index, el);
-      labelsEl.appendChild(el);
-    }
-    el.generation = state.labelGeneration;
-    if (el.size === undefined || el.sizedAlt !== state.altDown) {
-      el.size = [el.offsetWidth, el.offsetHeight];
-      el.sizedAlt = state.altDown;
-    }
-    const [w, h] = el.size;
-    shown.push({ el, x, y, opacity, w, h });
+    shown.push({ index, ...labelAt(index), x, y, opacity });
+  }
+  const named = new Set(shown.map(({ index }) => index));
+  for (const { index, x, y } of unnamedSpots(footprints(), named, width, height, UNNAMED_MIN_PX)) {
+    shown.push({ index, ...labelAt(index), x, y, opacity: 1 });
   }
   const { labelShown, plotTops, plotLeaders } = placeOverlays({
     placed: placedBoxes,
@@ -89,12 +95,66 @@ export function placeLabels() {
       state.labels.delete(index);
     }
   }
+  placeCompose();
+  placeQuestion();
 }
 
-// The page's fixed panels: the shell, the order card, the key bar, the clash card, the usage
-// panel, the notice and the scope note. A flag or a name never sits under one. A panel that is
-// hidden has no box, so it blocks nothing.
-const HUD_SELECTORS = "#shell, #order, #hint, #card, #usage, #notice, #pov-chip, #slip, .flag.unplaced";
+// The label element of machine `index`, made on first use and measured, with its size.
+function labelAt(index) {
+  let el = state.labels.get(index);
+  if (el === undefined) {
+    el = makeLabel(index);
+    state.labels.set(index, el);
+    labelsEl.appendChild(el);
+  }
+  el.generation = state.labelGeneration;
+  if (el.size === undefined || el.sizedAlt !== state.altDown) {
+    el.size = [el.offsetWidth, el.offsetHeight];
+    el.sizedAlt = state.altDown;
+  }
+  const [w, h] = el.size;
+  return { el, w, h };
+}
+
+// The wasm side's machine index of each name, for the view the page holds.
+let indexes = { view: null, of: new Map() };
+
+// Each machine of the view with its wasm index and its footprint on screen.
+function footprints() {
+  if (state.view === null) return [];
+  if (indexes.view !== state.view) {
+    const of = new Map();
+    for (let i = 0; i < state.app.machine_count(); i += 1) of.set(state.app.machine_name(i), i);
+    indexes = { view: state.view, of };
+  }
+  const project = (x, y) => state.app.world_to_screen(x, y);
+  return state.view.machines
+    .filter((machine) => indexes.of.has(machine.name))
+    .map((machine) => ({ index: indexes.of.get(machine.name), quad: machineQuad(machine, project) }));
+}
+
+// The note sits at the top left, and beside the receipt plate while that shows, so it never
+// covers the plate. The note is fixed, so these are window coordinates.
+function placeUnplacedNote() {
+  const note = flagsEl.querySelector(".flag.unplaced");
+  if (note === null) return;
+  const receipt = document.getElementById("receipt");
+  const box = receipt !== null && !receipt.hidden ? receipt.getBoundingClientRect() : null;
+  const left = box !== null && box.width > 0 ? box.right + UNPLACED_GAP_PX : UNPLACED_LEFT_PX;
+  note.style.left = `${left}px`;
+  note.style.top = `${UNPLACED_TOP_PX}px`;
+}
+
+// The page's fixed panels: the shell, the order line, the key bar, the usage panel, the notice,
+// the ride chip, each panel of the right rail (the first-run checklist, the clash card, the slip,
+// the inbox, the lanes, the history and the timeline), the receipt plate, the compose panel, the
+// question card, the command bar, the vision viewer and its pins, the alpha banner and the replay
+// bar. A flag or a name never sits under one. A panel that is hidden has no box, so it blocks
+// nothing.
+export const HUD_SELECTORS = [
+  "#shell", "#order", "#hint", "#usage", "#notice", "#pov-chip", "#watch > .island", "#receipt",
+  "#compose", "#question", "#command", "#vision", ".vpin", "#alpha", "#replay", ".flag.unplaced",
+].join(", ");
 
 // Each shown panel's box in canvas coordinates, as `{ left, right, top, bottom }`.
 function hudBoxes() {
@@ -147,6 +207,8 @@ export function paintMarks() {
     flagsEl.append(note);
   }
   paintCard();
+  syncCompose();
+  syncQuestions();
 }
 
 function flagElement(flag) {
@@ -199,6 +261,12 @@ function flagElement(flag) {
   }
   if (flag.clash !== null) {
     el.addEventListener("click", () => openCard(flag.clash));
+  }
+  if (flag.kind === "question") {
+    el.addEventListener("click", () => {
+      const question = questionOfFlag(state.view, flag);
+      if (question !== undefined) openQuestionCard(question.id);
+    });
   }
   return el;
 }

@@ -29,6 +29,22 @@ export function setCanvas(next) {
   canvas = next;
 }
 
+// The band of the canvas, `{ left, right }` in CSS pixels, that a panel opened beside a machine may
+// use: right of the receipt plate and left of the right rail, when they show, so it never covers
+// either.
+export function freeBand() {
+  let left = 0;
+  let right = canvas.clientWidth;
+  const rail = document.getElementById("watch")?.getBoundingClientRect();
+  if (rail && rail.width > 0 && rail.height > 0) right = Math.min(right, rail.left);
+  const receipt = document.getElementById("receipt");
+  if (receipt && !receipt.hidden) {
+    const box = receipt.getBoundingClientRect();
+    if (box.width > 0) left = Math.max(left, box.right);
+  }
+  return right - left < 320 ? { left: 0, right } : { left, right };
+}
+
 export const labelsEl = $("labels");
 
 export const leadersEl = $("leaders");
@@ -43,10 +59,6 @@ export const link = $("link");
 
 export const stale = $("stale");
 
-export const orderEl = $("order");
-
-export const orderLine = $("order-line");
-
 export const slipEl = $("slip");
 
 export const usagePanel = $("usage");
@@ -54,6 +66,12 @@ export const usagePanel = $("usage");
 export const metaBody = $("meta-body");
 
 export const metaNote = $("meta-note");
+
+export const metaBadge = $("meta-badge");
+
+export const metaSection = $("usage-meta");
+
+export const metaLegend = $("meta-legend");
 
 export const historyEl = $("usage-history");
 
@@ -66,6 +84,10 @@ export const noticeEl = $("notice");
 export const hintEl = $("hint");
 
 export const hintRest = hintEl.innerHTML;
+
+export const shellEl = $("shell");
+
+export const helpToggle = $("help-toggle");
 
 export const povEls = ["pov-vignette", "pov-frame", "pov-reticle", "pov-chip"].map((id) => $(id));
 
@@ -104,9 +126,9 @@ export const state = {
   altDown: false,
   // The agent the page rides, or "" when it does not ride.
   ridden: "",
-  // Whether the view holds an order to show in the order island.
-  hasOrder: false,
-  // Whether the slip shows: the order island's order has a scope lane. See `slip.js`.
+  // The id of the order this page posted last, or null. The slip shows it while it is in flight.
+  postedOrder: null,
+  // Whether the slip shows: the shown order has a scope lane. See `slip.js`.
   hasSlip: false,
   // The origin's confirmation route for each order with a scope, as `seal.js` keeps it.
   sealViews: new Map(),
@@ -119,6 +141,9 @@ export const state = {
   // Whether a Seal or a Strike is being sent, and the note the last one left.
   slipPending: false,
   slipNote: "",
+  // The scope-draft answer of each order with no lane yet, as `slip.js` fetches it: `{ answer,
+  // inFlight, retryAt }`, with `answer` null until the route has a draft or a failure to show.
+  drafts: new Map(),
   labelGeneration: 0,
   labels: new Map(),
   // The plant view summary of each order that has receipts, as the wasm side checked it, with the

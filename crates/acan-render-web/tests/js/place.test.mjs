@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { boxAt, clearOf, overlaps, placeOverlays } from "../../www/place.js";
+import { boxAt, clearOf, overlaps, placeOverlays, unnamedSpots } from "../../www/place.js";
 
 const PAD = 4;
 const VIEW = { width: 800, height: 600 };
@@ -216,4 +216,16 @@ test("a flag moved below its anchor starts its leader on its top edge", () => {
   });
   assert.equal(plotTops[0], 60 + PAD);
   assert.deepEqual(plotLeaders[0], { x1: 360, y1: 64, x2: 360, y2: 20 });
+});
+
+test("a machine the wasm side left unnamed gets a spot under its front corner", () => {
+  const square = (left, top, side) => [[left, top], [left + side, top], [left + side, top + side], [left, top + side]];
+  const machines = [
+    { index: 0, quad: square(100, 100, 60) },
+    { index: 1, quad: square(300, 100, 60) },
+    { index: 2, quad: square(500, 100, 10) },
+    { index: 3, quad: square(900, 100, 60) },
+  ];
+  const spots = unnamedSpots(machines, new Set([1]), VIEW.width, VIEW.height, 18);
+  assert.deepEqual(spots, [{ index: 0, x: 130, y: 160 }], "named, too small and off screen get none");
 });

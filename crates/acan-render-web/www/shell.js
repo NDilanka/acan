@@ -4,6 +4,7 @@
 // in release.js and setup.js. These calls do not use stream.js's `get`, because a refused report,
 // key or pick (403 for an agent token) must not sign the tester out.
 import { $, state } from "./state.js";
+import { alphaShown } from "./chrome.js";
 import { bugReportOutcome, stillChecking, updateNotice, versionLabel, versionLine } from "./release.js";
 import {
   bannerText,
@@ -64,7 +65,9 @@ export function bindShell() {
 // Shows what the page can show for the token it holds, and checks for a newer build and the model
 // key. Called at boot, and again when a token arrives.
 export async function startShell() {
-  $("alpha").hidden = !state.token;
+  // Report a bug lives in the key bar; the bottom island shows only a notice or a setup control.
+  $("report-bug").hidden = !state.token;
+  paintAlpha();
   if (build === null) build = await loadVersion();
   paintVersion();
   checkUpdate(++checkRun, 1);
@@ -107,9 +110,15 @@ async function checkUpdate(run, attempt) {
   }
 }
 
+function paintAlpha() {
+  const parts = ["setup-banner", "update", "setup-manage", "bug-note"].map((id) => $(id).hidden);
+  $("alpha").hidden = !alphaShown(Boolean(state.token), parts);
+}
+
 function paintUpdate(update) {
   const notice = updateNotice(update);
   $("update").hidden = notice === null;
+  paintAlpha();
   if (notice === null) return;
   $("update-text").textContent = `New build available: v${notice.latest}`;
   $("update-link").href = notice.href;
@@ -143,6 +152,7 @@ async function reportBug() {
 function showBugDialog(outcome) {
   reportBody = outcome.body;
   $("bug-note").hidden = true;
+  paintAlpha();
   $("bug-title").textContent = outcome.title;
   $("bug-body").textContent = outcome.body;
   $("bug-open").href = outcome.url;
@@ -172,6 +182,7 @@ function showNote(text) {
   const note = $("bug-note");
   note.textContent = text;
   note.hidden = false;
+  paintAlpha();
 }
 
 // Reads GET /api/setup and shows the banner when no key is in use. Any principal may read it.
@@ -191,6 +202,7 @@ async function loadSetup() {
   $("setup-open").hidden = setupStatus?.can_save !== true;
   // Once the banner's "Set a key" is gone, this is the way back to the keys and the role picks.
   $("setup-manage").hidden = setupStatus === null || (banner && setupStatus.can_save === true);
+  paintAlpha();
   if ($("setup-dialog").open) paintSetupText();
 }
 
