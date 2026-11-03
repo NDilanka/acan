@@ -12,6 +12,7 @@
     --ink: #1f1f1d;
     --muted: #7a7a72;
     --rule: #dcdcd6;
+    /* Red is for failures and the Strike only; the map's own colours are the drone code's. */
     --red: #d0453a;
     --amber: #d99a1e;
     --soft: #4a4a45;
@@ -182,7 +183,7 @@
   #card p { margin: 6px 0; }
   #card .row { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
   #card .row .muted { font-size: 11px; }
-  #card .row.witness { color: var(--red); font-family: var(--mono); }
+  #card .row.witness { color: var(--ink); font-family: var(--mono); }
   #card .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
   #card .resolved { font-family: var(--mono); color: var(--muted); }
   #card ol { list-style: none; margin: 8px 0 0; padding: 0; }
@@ -413,7 +414,7 @@
   #inbox button.item:hover .text, #inbox button.item:focus-visible .text { text-decoration: underline; }
   #inbox button.item:disabled { cursor: default; }
   #inbox .kind { flex: none; width: 56px; font: 10px/1.6 var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-  #inbox .item.clash .kind, #inbox .item.stopped .kind { color: var(--red); }
+  #inbox .item.stopped .kind { color: var(--red); }
   #inbox .item.vision .kind { color: var(--muted); }
   #inbox h3.alone { margin-bottom: 0; }
   #inbox .opt-in { font: 11px var(--mono); padding: 0 6px; background: var(--face); color: var(--muted);
@@ -437,8 +438,8 @@
   #history li.cancelled .sentence { color: var(--muted); text-decoration: line-through; }
   #history button.cancel { flex: none; font: 11px var(--mono); padding: 1px 6px; background: var(--face); color: var(--muted);
     border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
-  #history button.cancel:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
-  #history button.cancel.armed { color: #ffffff; background: var(--red); border-color: var(--red); }
+  #history button.cancel:hover:not(:disabled) { color: var(--ink); border-color: var(--ink); }
+  #history button.cancel.armed { color: #ffffff; background: var(--ink); border-color: var(--ink); }
   #history button.cancel:disabled { cursor: default; opacity: 0.6; }
   #history .more, #history .note { margin: 4px 0 0; font: 11px/1.4 var(--sans); color: var(--muted); }
   #history .note:not(:empty) { color: var(--ink); }
