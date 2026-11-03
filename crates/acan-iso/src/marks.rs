@@ -14,8 +14,9 @@ use crate::parts::PLINTH;
 /// The height of the plinth top. A drone's shadow lies on it.
 pub const PLINTH_TOP: f32 = PLINTH;
 /// The amber ring round a waiting agent's drone, with its inner and outer radius in plan units.
-/// The renderer grows it with the drone, so the two keep their proportions.
-const RING_INNER: f32 = 1.15 * BODY_RADIUS;
+/// The renderer grows it with the drone, so the two keep their proportions. The band is thin: a
+/// wide one reads as a belt round the drone's lower half from a low camera.
+const RING_INNER: f32 = 1.2 * BODY_RADIUS;
 const RING_OUTER: f32 = 1.3 * BODY_RADIUS;
 // The ring clears the drone's shadow when seen from above.
 const _: () = assert!(RING_INNER > SHADOW_RADIUS);

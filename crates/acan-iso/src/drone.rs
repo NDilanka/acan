@@ -41,10 +41,11 @@ const _: () = assert!(LIFT[2] > 0.0, "the lift leans back over the crown");
 /// light on the ground.
 pub const SHADOW_RADIUS: f32 = 0.9 * BODY_RADIUS;
 /// The height of the drone's centre over the plinth top at which its shadow has shrunk and faded
-/// to its far share of radius and strength. A drone higher still keeps the far shadow.
+/// out. A drone higher still casts none: a shadow that far up sits off its machine and reads as
+/// a stain on the floor.
 pub const SHADOW_RISE: f32 = 6.0 * BODY_RADIUS;
 const SHADOW_FAR_RADIUS: f32 = 0.55;
-const SHADOW_FAR_STRENGTH: f32 = 0.4;
+const SHADOW_FAR_STRENGTH: f32 = 0.0;
 /// The glow under the body: a soft level disc in the agent's hue, this far below the centre and
 /// this wide, which the renderer draws. The body hides its middle, so it shows round the belly.
 pub const GLOW_DROP: f32 = 0.8 * BODY_RADIUS;
@@ -790,7 +791,7 @@ mod tests {
         }
         let (radius, strength) = shadow_at(SHADOW_RISE);
         assert!((radius - SHADOW_FAR_RADIUS * SHADOW_RADIUS).abs() < 1e-4);
-        assert!((strength - SHADOW_FAR_STRENGTH).abs() < 1e-6);
+        assert_eq!(strength, 0.0, "a drone this high casts no shadow");
         assert_eq!(
             shadow_at(10.0 * SHADOW_RISE),
             shadow_at(SHADOW_RISE),
