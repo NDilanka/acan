@@ -11,11 +11,11 @@ use std::sync::OnceLock;
 
 use std::time::Duration;
 
-use acan_llm::{Stub, UsageLedger};
+use acan_llm::{KeyFile, Stub, UsageLedger};
 use acan_server::projects::ProjectSet;
-use acan_server::{DEFAULT_WITNESS_CONCURRENCY, Running, ServeConfig, start_projects};
+use acan_server::{DEFAULT_WITNESS_CONCURRENCY, Models, Running, ServeConfig, start_projects};
 use futures_util::{SinkExt, StreamExt};
-use reqwest::StatusCode;
+use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -83,6 +83,26 @@ async fn boot(repos: &[PathBuf]) -> Running {
     try_boot(repos, SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .expect("the server starts")
+}
+
+/// Boots a server over `repos` whose model clients read and write the one keys file, the way the
+/// binary builds them. A project with its own routing file ignores that file.
+async fn boot_sharing_keys(repos: &[PathBuf], keys: &KeyFile) -> Running {
+    let clients = repos
+        .iter()
+        .map(|repo| {
+            let llm = repo.join(".acan").join("llm.toml");
+            let models = Models::open(&llm, Some(keys.clone())).expect("the models open");
+            let ledger = models.ledger();
+            (models, ledger)
+        })
+        .collect();
+    start_projects(
+        config(repos, SocketAddr::from(([127, 0, 0, 1], 0))),
+        clients,
+    )
+    .await
+    .expect("the server starts")
 }
 
 /// One client for every request, so the tests share its connection pool.
@@ -746,6 +766,134 @@ async fn tokens_are_per_project() {
         list.as_array().expect("a list").len(),
         1,
         "the member lists only alpha"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// One request to a project with `token`, and the status and JSON body it answers with.
+async fn send(
+    running: &Running,
+    method: Method,
+    path: &str,
+    token: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut request = client()
+        .request(method, format!("http://{}{path}", running.local_addr))
+        .bearer_auth(token);
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request.send().await.expect("the request is sent");
+    let status = response.status();
+    (
+        status,
+        response.json::<Value>().await.unwrap_or(Value::Null),
+    )
+}
+
+/// The entry for `role` in a setup status.
+fn role<'a>(status: &'a Value, name: &str) -> &'a Value {
+    status["roles"]
+        .as_array()
+        .expect("a list of roles")
+        .iter()
+        .find(|role| role["role"] == json!(name))
+        .unwrap_or_else(|| panic!("the status holds {name}"))
+}
+
+/// Routing for a project that decides its own providers.
+const ROUTING: &str = r#"
+[[providers]]
+name = "meta"
+base_url = "http://127.0.0.1:9/v1"
+api_key_env = "ACAN_TEST_UNSET_META_KEY"
+default_model = "muse-spark-1.3"
+
+[routing.foreman]
+provider = "meta"
+
+[routing.worker]
+provider = "meta"
+
+[routing.fast]
+provider = "meta"
+"#;
+
+#[tokio::test]
+async fn keys_shared_routing_not_shared() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let alpha = repo(root.path(), "alpha");
+    let beta = repo(root.path(), "beta");
+    let routed = repo(root.path(), "gamma");
+    fs::create_dir_all(routed.join(".acan")).expect("the state directory");
+    fs::write(routed.join(".acan").join("llm.toml"), ROUTING).expect("the routing file");
+    let keys = KeyFile::new(root.path().join("keys").join("keys.toml"));
+    keys.set_key("meta", "meta-saved-key-0123456789")
+        .expect("a key is saved");
+    let running = boot_sharing_keys(&[alpha, beta, routed], &keys).await;
+    let owner = owner_token(&running);
+
+    let (_, before) = get(&running, "/api/p/beta/setup", &owner).await;
+    assert_eq!(before["configured"], json!(true), "beta sees the saved key");
+
+    let (status, body) = send(
+        &running,
+        Method::PUT,
+        "/api/p/alpha/setup/roles/worker",
+        &owner,
+        Some(json!({ "provider": "meta" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "alpha picks meta for worker: {body}"
+    );
+    let (_, after_pick) = get(&running, "/api/p/beta/setup", &owner).await;
+    assert_eq!(
+        role(&after_pick, "worker")["picked"],
+        json!(true),
+        "beta uses the pick made in alpha"
+    );
+
+    let (status, body) = send(
+        &running,
+        Method::DELETE,
+        "/api/p/alpha/setup/keys/meta",
+        &owner,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "alpha removes the key: {body}");
+    assert_eq!(body["removed"], json!(true));
+    let (_, after_removal) = get(&running, "/api/p/beta/setup", &owner).await;
+    assert_eq!(
+        after_removal["configured"],
+        json!(false),
+        "beta no longer has the key"
+    );
+    assert_eq!(
+        role(&after_removal, "worker")["picked"],
+        json!(false),
+        "beta drops the pick that used the key"
+    );
+
+    let (_, routed_status) = get(&running, "/api/p/gamma/setup", &owner).await;
+    assert_eq!(routed_status["source"], json!("routing_file"));
+    assert_eq!(routed_status["can_save"], json!(false));
+    let (status, _) = send(
+        &running,
+        Method::DELETE,
+        "/api/p/gamma/setup/keys/meta",
+        &owner,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a routing project refuses a removal, so the shared keys do not reach it"
     );
     running.stop().await.expect("the server stops");
 }
