@@ -62,7 +62,7 @@ import { installScrub } from "./scrub.js";
 import { installFirstRun, paintFirstRun } from "./firstrun-panel.js";
 import { onWorkers, refreshWorkers, workersAnswer } from "./workers.js";
 import { closeViewer, installVision, placeVisionPins, syncVision, viewerOpen, viewerTakesEscape } from "./vision-pins.js";
-import { installMulti, nameOf } from "./multi.js";
+import { installMulti, nameOf, zoomAround } from "./multi.js";
 import { placePlates } from "./nameplates.js";
 import { placeParked } from "./parked.js";
 import { canvasState } from "./projects.js";
@@ -199,7 +199,7 @@ function showNotice(text) {
 
 function zoomAtCentre(factor) {
   const rect = canvas.getBoundingClientRect();
-  state.app.zoom_at(rect.width / 2, rect.height / 2, factor);
+  zoomAround(rect.width / 2, rect.height / 2, factor);
   requestRender();
 }
 
@@ -289,7 +289,7 @@ function bindCanvas() {
       const factor = Math.exp(-event.deltaY * lines * WHEEL_RATE);
       // Wheel up brings the drone closer: the distance scale shrinks as the wheel turns up.
       if (state.ridden !== "") state.app.pov_scale(1 / factor);
-      else state.app.zoom_at(event.clientX - rect.left, event.clientY - rect.top, factor);
+      else zoomAround(event.clientX - rect.left, event.clientY - rect.top, factor);
       requestRender();
     },
     { passive: false },

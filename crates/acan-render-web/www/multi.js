@@ -21,7 +21,7 @@ import {
   worldBounds,
 } from "./projects.js";
 import { installPlates, paintPlates } from "./nameplates.js";
-import { parkedClick, pinNear } from "./overlays.js";
+import { nearestGap, parkedClick, pinNear } from "./overlays.js";
 import { installParked } from "./parked.js";
 import { applyStreamed, feed, forgetToken, get, hold, setLink } from "./stream.js";
 import { canvas, freeze, repoEl, state } from "./state.js";
@@ -100,6 +100,56 @@ export function nameOf(id) {
 export function boundsOf(id) {
   const place = multi.places.get(id);
   return place === undefined ? null : worldBounds(multi.origin.get(id), place);
+}
+
+// A zoom-out stops once the two nearest plants are this far apart on screen, in CSS px. A plate is
+// about 80 px wide, so at about half that gap each plate still hangs beside its own plant.
+const ZOOM_FLOOR_GAP_PX = 48;
+
+// A project's plant on screen, `[left, top, right, bottom]` in CSS px, or null when unknown.
+function screenBoxOf(id) {
+  const box = boundsOf(id);
+  if (box === null) return null;
+  const corners = [[box[0], box[1]], [box[2], box[1]], [box[0], box[3]], [box[2], box[3]]]
+    .map(([x, y]) => state.app.world_to_screen(x, y));
+  const xs = corners.map((p) => p[0]);
+  const ys = corners.map((p) => p[1]);
+  return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+}
+
+// The least screen gap between two plants, in CSS px, or null when there is no pair to measure.
+function gapOnScreen() {
+  return nearestGap(canvasState.list.map((project) => screenBoxOf(project.id)).filter((box) => box !== null));
+}
+
+// Whether a zoom by `step` keeps the nearest plants the floor apart. The zoom is applied, measured
+// and undone about the same point, so the camera is left as it was.
+function keepsFloor(x, y, step) {
+  state.app.zoom_at(x, y, step);
+  const gap = gapOnScreen();
+  state.app.zoom_at(x, y, 1 / step);
+  return gap === null || Number.isNaN(gap) || gap >= ZOOM_FLOOR_GAP_PX;
+}
+
+// Zooms about the CSS point (x, y) by `factor`. On a canvas of several plants a zoom-out stops where
+// the nearest two plants are ZOOM_FLOOR_GAP_PX apart on screen, so each plate keeps the room beside
+// its plant. Zoom-ins and a single plant are unchanged; a canvas already closer than the floor does
+// not zoom out at all. The zoom is not linear in the gap, so the largest step that keeps the floor is
+// found by bisection.
+export function zoomAround(x, y, factor) {
+  if (!canvasState.multi || !(factor < 1)) return state.app.zoom_at(x, y, factor);
+  const gap = gapOnScreen();
+  if (gap === null || Number.isNaN(gap)) return state.app.zoom_at(x, y, factor);
+  if (gap < ZOOM_FLOOR_GAP_PX) return undefined;
+  if (keepsFloor(x, y, factor)) return state.app.zoom_at(x, y, factor);
+  let lo = factor;
+  let hi = 1;
+  for (let i = 0; i < 6; i += 1) {
+    const mid = (lo + hi) / 2;
+    if (keepsFloor(x, y, mid)) hi = mid;
+    else lo = mid;
+  }
+  return state.app.zoom_at(x, y, hi);
 }
 
 export async function startMulti(list) {

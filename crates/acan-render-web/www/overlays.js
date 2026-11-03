@@ -112,3 +112,17 @@ export function plateSpots(plates, blocked, pad) {
   }
   return out;
 }
+
+// The least gap in CSS px between two plants' screen boxes, each `[left, top, right, bottom]`:
+// 0 where two overlap, `null` with fewer than two boxes.
+export function nearestGap(boxes) {
+  let least = null;
+  for (let i = 0; i < boxes.length; i += 1) {
+    for (let j = i + 1; j < boxes.length; j += 1) {
+      const [a, b] = [boxes[i], boxes[j]];
+      const gap = Math.max(0, b[0] - a[2], a[0] - b[2], b[1] - a[3], a[1] - b[3]);
+      least = least === null ? gap : Math.min(least, gap);
+    }
+  }
+  return least;
+}

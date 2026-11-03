@@ -11,6 +11,7 @@ import {
   parkedEntries,
   parkedKind,
   pinNear,
+  nearestGap,
   plateSpots,
   splitByProject,
 } from "../../www/overlays.js";
@@ -99,4 +100,12 @@ test("a plate moves below a machine name it would cover, and a plate far away ke
   const spots = plateSpots([{ id: "notes", x: 110, y: 50, w: 60, h: 20 }, { id: "far", x: 600, y: 50, w: 60, h: 20 }], names, 3);
   assert.equal(spots.get("notes").top, 63);
   assert.deepEqual(spots.get("far"), { left: 570, top: 50 });
+});
+
+test("the nearest gap is the least separation on screen, 0 where two overlap, null with fewer than two", () => {
+  assert.equal(nearestGap([]), null);
+  assert.equal(nearestGap([[0, 0, 10, 10]]), null);
+  assert.equal(nearestGap([[0, 0, 10, 10], [40, 0, 60, 10], [100, 0, 120, 10]]), 30);
+  assert.equal(nearestGap([[0, 0, 10, 10], [0, 30, 10, 40]]), 20, "a gap above or below counts");
+  assert.equal(nearestGap([[0, 0, 10, 10], [5, 5, 20, 20]]), 0);
 });
