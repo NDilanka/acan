@@ -179,11 +179,24 @@ function sealBlock(lane, picks) {
   if (panel.accepted) children.push(el("p", "sub", SENT_LINE));
   else if (panel.sent) children.push(el("p", "sub", UNSENT_LINE));
   else if (panel.missing.length > 0) {
-    children.push(el("p", "sub", `Needs ${panel.missing.map((missing) => missingWords(missing, lane)).join("; ")}.`));
+    // The count reads at a glance; each open choice and broad plot below carries its own control.
+    const needs = el("p", "sub", `Needs ${missingCount(panel.missing)}`);
+    needs.title = `Needs ${panel.missing.map((missing) => missingWords(missing, lane)).join("; ")}.`;
+    children.push(needs);
   }
   children.push(send);
   if (blocked !== null) children.push(el("p", "reason", blocked));
   return children;
+}
+
+// "1 answer · 3 acks": what an unsent Seal still needs, by kind.
+function missingCount(missing) {
+  const answers = missing.filter((item) => item.kind === "choice").length;
+  const acks = missing.length - answers;
+  const parts = [];
+  if (answers > 0) parts.push(`${answers} ${answers === 1 ? "answer" : "answers"}`);
+  if (acks > 0) parts.push(`${acks} ${acks === 1 ? "ack" : "acks"}`);
+  return parts.join(" · ");
 }
 
 function withheld(seal) {

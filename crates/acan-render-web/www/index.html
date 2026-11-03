@@ -365,15 +365,17 @@
   /* The right rail, top right: the first-run checklist, the clash card and the slip, then who is
      doing what, what waits on you, what happened, and the timeline. One column, so no two of them
      overlap; the lists scroll when the window is short. A row that changed glows once. */
+  /* The rail scrolls as one column, so each panel keeps its own height and its body: no panel
+     shrinks to its head when the window is short. Long lists still cap and scroll inside. */
   #watch { position: fixed; top: 12px; right: 12px; width: 300px; max-height: calc(100vh - 24px);
-    display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
-  #watch > .island { position: static; pointer-events: auto; padding: 10px 12px; min-height: 0;
-    display: flex; flex-direction: column; overflow: hidden; }
+    display: flex; flex-direction: column; gap: 8px; pointer-events: none; overflow-y: auto;
+    overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--rule) transparent; }
+  #watch > .island { position: static; flex: none; pointer-events: auto; padding: 10px 12px;
+    display: flex; flex-direction: column; }
   #watch > .island > * { flex: none; }
-  #watch > .island > ol { flex: 0 1 auto; min-height: 0; }
-  #watch > #scrub { flex: none; }
-  #watch > #firstrun, #watch > #card { flex: none; width: auto; }
-  #watch > #slip { display: block; width: auto; max-height: 50vh; overflow-y: auto; }
+  #watch > #firstrun, #watch > #card { width: auto; }
+  /* The slip is the longest panel, so it scrolls inside a cap and the panels under it stay in view. */
+  #watch > #slip { display: block; width: auto; max-height: 58vh; overflow-y: auto; scrollbar-width: thin; }
   #watch h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 0 4px;
     font: 600 11px/1.2 var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
   #watch h3 .keys { text-transform: none; letter-spacing: 0; font-weight: 400; }
