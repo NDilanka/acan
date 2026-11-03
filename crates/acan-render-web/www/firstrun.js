@@ -127,7 +127,7 @@ function contractStep(token, contract) {
     return { ...step, detail: `Your repository has an app contract${version}.`, action: null };
   }
   const run = `Run \`acan init\` in your repo${INIT_SHIPPED ? "" : " (coming in this alpha)"}, so the gate has an app contract to check against.`;
-  const detail = contract === null ? `${run} This acan does not report the contract yet, so check for .acan/app.json yourself.` : run;
+  const detail = contract === null ? `${run} This acan cannot report it yet, so check for .acan/app.json.` : run;
   return { ...step, detail, action: token ? { kind: "contract", label: "Check again" } : null };
 }
 
@@ -150,7 +150,7 @@ export function steps({ token = false, setup = null, contract, workers = null, v
       : { id: "order", title: "Send a first order", state: TODO, detail: "Click a machine and write one sentence about what should change there.", action: { kind: "focus", target: "compose", label: "Write an order" } },
     sealed
       ? { id: "seal", title: "Seal a lane", state: DONE, detail: "A scope is sealed, so workers may build inside it.", action: null }
-      : { id: "seal", title: "Seal a lane", state: TODO, detail: "Read the order's scope on the slip, then press Seal to let workers build.", action: { kind: "focus", target: "slip", label: "Open the slip" } },
+      : { id: "seal", title: "Seal a lane", state: TODO, detail: "On the slip, adopt the drafted scope if it asks, read it, then press Seal to let workers build.", action: { kind: "focus", target: "slip", label: "Open the slip" } },
     watched
       ? { id: "watch", title: "Watch the map", state: DONE, detail: "You are watching.", action: null }
       : { id: "watch", title: "Watch the map", state: TODO, detail: "Agents work on the map from here, and a pin shows when something needs you.", action: { kind: "dismiss", label: "Done" } },

@@ -103,7 +103,7 @@ test("the contract step says to run acan init, marked as coming while the comman
   assert.match(asked.detail, /^Run `acan init` in your repo \(coming in this alpha\), so the gate/);
   assert.deepEqual(asked.action, { kind: "contract", label: "Check again" });
   const silent = byId(steps({ token: true, setup: KEYED, contract: null })).contract;
-  assert.match(silent.detail, /does not report the contract yet/);
+  assert.match(silent.detail, /cannot report it yet/);
 });
 
 function workers(...states) {

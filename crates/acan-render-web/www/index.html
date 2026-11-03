@@ -456,6 +456,9 @@
   #lanes h3 .status[data-kind="no_key"], #lanes h3 .status[data-kind="none"] { color: var(--ink); }
   #lanes .workers { margin: 0 0 4px; font: 12px/1.4 var(--sans); color: var(--ink); }
   #lanes .set-key { display: block; margin-top: 6px; }
+  #lanes details.start { display: inline; margin-left: 6px; }
+  #lanes details.start summary { display: inline; cursor: pointer; font: 11px var(--mono); color: var(--muted); text-decoration: underline; }
+  #lanes details.start[open] { display: block; margin-left: 0; }
   #lanes li + li { border-top: 1px solid var(--rule); }
   #lanes li.hl { background: var(--page); box-shadow: inset 2px 0 0 var(--ink); }
   #lanes button.lane { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 1px 8px; width: 100%;

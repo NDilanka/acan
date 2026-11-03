@@ -126,7 +126,7 @@ export function checkWords(check) {
 // command that starts an outside worker, the same command the first-run checklist offers.
 export function emptyLines(origin) {
   return {
-    line: "No worker connected. Start one with:",
+    line: "No worker connected.",
     command: workerCommand(origin),
   };
 }
@@ -216,11 +216,17 @@ function rowButton(row) {
 }
 
 // The worker line as nodes: its words with `code` in backticks, the command, and Set a key, which
-// opens the page's key setup when the shell shows its button.
-function workerWords(workers) {
+// opens the page's key setup when the shell shows its button. The command folds under a summary,
+// since the first-run checklist often shows the same one; `open` keeps it unfolded across repaints.
+function workerWords(workers, open = false) {
   const nodes = [element("span", undefined, "")];
   nodes[0].replaceChildren(...workers.line.split("`").map((part, i) => (i % 2 === 0 ? document.createTextNode(part) : element("code", undefined, part))));
-  if (workers.command) nodes.push(element("code", undefined, workers.command));
+  if (workers.command) {
+    const fold = element("details", "start");
+    fold.open = open;
+    fold.append(element("summary", undefined, "start one"), element("code", undefined, workers.command));
+    nodes.push(fold);
+  }
   if (workers.setKey) {
     const opener = ["setup-open", "setup-manage"].map((id) => document.getElementById(id)).find((el) => el !== null && !el.hidden);
     if (opener) {
@@ -270,7 +276,7 @@ export function installLanes(kit) {
     status.dataset.kind = workers.kind;
     waiting.hidden = !(workers.setKey && rows.length > 0);
     if (!waiting.hidden) waiting.replaceChildren(...workerWords(workers));
-    if (rows.length === 0) empty.replaceChildren(...workerWords(workers));
+    if (rows.length === 0) empty.replaceChildren(...workerWords(workers, empty.querySelector("details")?.open));
     const focused = list.contains(document.activeElement) ? document.activeElement.dataset.agent : null;
     const items = rows.map((row, index) => {
       const before = shown.get(row.agent);

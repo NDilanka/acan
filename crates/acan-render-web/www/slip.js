@@ -268,11 +268,9 @@ function strikeWarning(lane, item) {
   const words = strikeWords(lane, item);
   box.append(el("p", null, words.removes));
   if (words.last !== null) box.append(el("p", "mismatch", words.last));
-  box.append(el(
-    "p",
-    "sub",
-    "A lease shows that an agent's authority is valid, not that its work is safe. Leases do not expire while a run gates. A newer revision ends them.",
-  ));
+  const lease = el("p", "sub", "A lease is authority, not proof the work is safe.");
+  lease.title = "A lease shows that an agent's authority is valid, not that its work is safe. Leases do not expire while a run gates. A newer revision ends them.";
+  box.append(lease);
   const confirm = el("button", "danger", state.slipPending ? "sending…" : "Strike");
   confirm.type = "button";
   confirm.dataset.focusKey = "strike-confirm";
