@@ -1401,22 +1401,18 @@ mod tests {
         }
     }
 
-    /// Runs git in `dir` with `input` on standard input, and `index` as its index when one is
-    /// given. Returns its standard output, trimmed.
-    fn git_in(dir: &Path, args: &[&str], input: &[u8], index: Option<&Path>) -> String {
+    /// Runs git in `dir` with `input` on standard input. Returns its standard output, trimmed.
+    fn git_in(dir: &Path, args: &[&str], input: &[u8]) -> String {
         use std::io::Write;
-        let mut command = Command::new("git");
-        command
+        let mut child = Command::new("git")
             .arg("-C")
             .arg(dir)
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(index) = index {
-            command.env("GIT_INDEX_FILE", index);
-        }
-        let mut child = command.spawn().expect("git runs");
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("git runs");
         child
             .stdin
             .take()
@@ -1435,30 +1431,89 @@ mod tests {
     /// A repository whose `main` is one commit of `files`, built with git's plumbing and not the
     /// file system. A name that Windows would store differently, such as one with a backslash or a
     /// trailing dot, reaches the commit exactly as written, so the test is the same on every
-    /// platform.
+    /// platform. The trees are written as raw bytes with `--literally`: git's index and tree
+    /// checks refuse some of these names on Windows before any commit is made.
     fn commit_files(files: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("temporary repository");
         git(dir.path(), &["init", "-q", "-b", "main"]);
-        let index = dir.path().join(".git").join("fixture-index");
+        git(dir.path(), &["config", "user.name", "Tester"]);
+        git(dir.path(), &["config", "user.email", "tester@localhost"]);
+        let mut root = FixtureTree::default();
         for (path, text) in files {
             let blob = git_in(
                 dir.path(),
                 &["hash-object", "-w", "--stdin"],
                 text.as_bytes(),
-                None,
             );
-            let entry = format!("100644,{blob},{path}");
-            git_in(
-                dir.path(),
-                &["update-index", "--add", "--cacheinfo", &entry],
-                &[],
-                Some(index.as_path()),
-            );
+            root.insert(path, &blob);
         }
-        let tree = git_in(dir.path(), &["write-tree"], &[], Some(index.as_path()));
-        let commit = git_in(dir.path(), &["commit-tree", &tree, "-m", "base"], &[], None);
+        let tree = root.write(dir.path());
+        let commit = git_in(dir.path(), &["commit-tree", &tree, "-m", "base"], &[]);
         git(dir.path(), &["update-ref", "refs/heads/main", &commit]);
         dir
+    }
+
+    /// The directories and files of one fixture tree, by name.
+    #[derive(Default)]
+    struct FixtureTree {
+        files: BTreeMap<String, String>,
+        dirs: BTreeMap<String, FixtureTree>,
+    }
+
+    impl FixtureTree {
+        /// Adds the blob `blob` at `path`, making each directory the path names on the way.
+        fn insert(&mut self, path: &str, blob: &str) {
+            match path.split_once('/') {
+                Some((dir, rest)) => self
+                    .dirs
+                    .entry(dir.to_owned())
+                    .or_default()
+                    .insert(rest, blob),
+                None => {
+                    self.files.insert(path.to_owned(), blob.to_owned());
+                }
+            }
+        }
+
+        /// Writes this tree and every tree under it, and returns the id of this one. Entries are
+        /// sorted as git sorts them, a directory by its name followed by a slash.
+        fn write(&self, repo: &Path) -> String {
+            let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+            for (name, blob) in &self.files {
+                let entry = tree_entry(b"100644", name, &hex_bytes(blob));
+                entries.push((name.as_bytes().to_vec(), entry));
+            }
+            for (name, tree) in &self.dirs {
+                let id = tree.write(repo);
+                let entry = tree_entry(b"40000", name, &hex_bytes(&id));
+                entries.push((format!("{name}/").into_bytes(), entry));
+            }
+            entries.sort();
+            let raw: Vec<u8> = entries.into_iter().flat_map(|(_, entry)| entry).collect();
+            git_in(
+                repo,
+                &["hash-object", "-t", "tree", "-w", "--literally", "--stdin"],
+                &raw,
+            )
+        }
+    }
+
+    /// One tree entry as git stores it: the mode, the name, a zero byte and the id in binary.
+    fn tree_entry(mode: &[u8], name: &str, id: &[u8]) -> Vec<u8> {
+        let mut entry = mode.to_vec();
+        entry.push(b' ');
+        entry.extend_from_slice(name.as_bytes());
+        entry.push(0);
+        entry.extend_from_slice(id);
+        entry
+    }
+
+    /// The bytes of a hexadecimal object id.
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("a hexadecimal id"))
+            .collect()
     }
 
     #[tokio::test]
