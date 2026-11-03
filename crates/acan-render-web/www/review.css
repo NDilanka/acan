@@ -91,6 +91,8 @@
   font: 12px var(--sans); color: var(--ink); cursor: pointer; text-align: left; }
 #firstrun .fr-toggle b { font: 600 12px var(--sans); }
 #firstrun .fr-toggle span { font: 11px var(--mono); }
+#firstrun .fr-toggle .chev { font: 12px var(--sans); transition: transform 120ms; }
+#firstrun .fr-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
 #firstrun .fr-hide { font: 11px var(--mono); color: var(--muted); background: none; border: none; padding: 0; cursor: pointer; }
 #firstrun .fr-hide:hover { color: var(--ink); text-decoration: underline; }
 #firstrun ol.fr-steps { list-style: none; margin: 6px 0 0; padding: 0; border-top: 1px solid var(--rule); }

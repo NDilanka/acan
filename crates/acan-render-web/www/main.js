@@ -55,6 +55,7 @@ import {
 } from "./stream.js";
 import { requestUsage } from "./usage.js";
 import { goKeys, installLanes } from "./lanes.js";
+import { installRailTabs } from "./rail.js";
 import { installInbox } from "./inbox.js";
 import { installHistory } from "./history.js";
 import { installScrub } from "./scrub.js";
@@ -551,6 +552,7 @@ async function boot() {
   sizeCanvas();
   bindCanvas();
   bindKeys();
+  installRailTabs(kit);
   installLanes(kit);
   installInbox(kit);
   installHistory(kit);

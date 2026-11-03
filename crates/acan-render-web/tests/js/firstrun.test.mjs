@@ -12,6 +12,7 @@ import {
   UNKNOWN,
   contractOf,
   contractState,
+  progressShort,
   progressText,
   setupState,
   shouldShow,
@@ -180,4 +181,10 @@ test("the checklist never shows on a replay, nor once dismissed", () => {
   assert.equal(shouldShow({}), true);
   assert.equal(shouldShow({ replay: true }), false);
   assert.equal(shouldShow({ dismissed: true }), false);
+});
+
+test("the folded checklist reads Setup N/7", () => {
+  assert.equal(progressShort(steps()), "0/7");
+  const list = steps({ token: true, setup: KEYED, contract: CONTRACT, view: view({ agents: 1, orders: 1, lanes: [{ state: "confirmed" }] }), watched: true });
+  assert.equal(progressShort(list), "7/7");
 });

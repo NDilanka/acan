@@ -12,6 +12,7 @@
 // it once, at load, through `listenForDroneHover`.
 
 import { workerCommand, workerSummary } from "./firstrun.js";
+import { isRailOpen } from "./rail.js";
 
 // A worker renews its lease every 20 seconds, so two minutes with no event from an agent that
 // holds a task means it has stopped talking to the origin. From AWAY_MS the map takes its drone
@@ -316,7 +317,7 @@ export function installLanes(kit) {
     const answer = kit.workers?.answer() ?? null;
     if (last.version === kit.state.renderedVersion && last.feed === kit.feed.version && last.tick === tick && last.answer === answer) return;
     last = { version: kit.state.renderedVersion, feed: kit.feed.version, tick, answer };
-    panel.hidden = false;
+    panel.hidden = !isRailOpen("lanes");
     const rows = laneRows(view, lastActivity(kit.feed.events), now, { live: kit.isLive() });
     kit.lanes = rows;
     empty.hidden = rows.length > 0;

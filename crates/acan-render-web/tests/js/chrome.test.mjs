@@ -40,3 +40,22 @@ test("the shell hides healthy link words and keeps a problem in view", () => {
     assert.equal(linkQuiet(text), false, String(text));
   }
 });
+
+test("the rail shows only what needs you at rest; Agents, Orders and Timeline are tabs", () => {
+  const html = www("index.html");
+  const rail = html.match(/<div id="watch">([\s\S]*?)<\/div>/)[1];
+  const ids = [...rail.matchAll(/id="([\w-]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(ids.slice(0, 5), ["firstrun", "card", "slip", "inbox", "rail-tabs"]);
+  const tabs = rail.match(/<aside id="rail-tabs"[^>]*aria-label="([^"]+)"/);
+  assert.ok(tabs, "the tab bar sits before the tabbed panels");
+  for (const [file, line] of [["lanes.js", "lanes"], ["history.js", "history"], ["scrub.js", "scrub"]]) {
+    assert.match(www(file), new RegExp(`isRailOpen\\("${line}"\\)`), `${file} gates on its tab`);
+  }
+});
+
+test("the checklist rests folded as one line and expands on click", () => {
+  const panel = www("firstrun-panel.js");
+  assert.match(panel, /collapsedByUser \?\? true/);
+  assert.match(panel, /element\("b", undefined, "Setup"\)/);
+  assert.match(panel, /hide.hidden = folded/);
+});

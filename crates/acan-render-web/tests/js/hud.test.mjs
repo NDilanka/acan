@@ -34,7 +34,7 @@ test("the names and flags avoid every new panel", () => {
 test("the first-run checklist, the clash card and the slip sit in the right rail, before the watch panels", () => {
   const rail = www("index.html").match(/<div id="watch">([\s\S]*?)<\/div>/)[1];
   const ids = [...rail.matchAll(/id="([\w-]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(ids, ["firstrun", "card", "slip", "inbox", "lanes", "history", "scrub"]);
+  assert.deepEqual(ids, ["firstrun", "card", "slip", "inbox", "rail-tabs", "lanes", "history", "scrub"]);
   assert.equal((www("index.html").match(/id="card"/g) ?? []).length, 1, "the card is on the page once");
 });
 

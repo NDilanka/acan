@@ -3,6 +3,7 @@
 // shows an earlier point, so no event is lost while the user looks back. The logic has no DOM
 // at load, so Node can test it. `installScrub` binds the scrubber to the page.
 import { goKeys } from "./lanes.js";
+import { isRailOpen, openRailTab } from "./rail.js";
 
 // A drag rebuilds the map once it pauses this long, or at once on release.
 export const SETTLE_MS = 150;
@@ -206,7 +207,7 @@ export function installScrub(kit) {
 
   const paintLive = () => {
     const extent = scrubRange(hold.on ? hold.live : feed.events);
-    panel.hidden = extent === null;
+    panel.hidden = extent === null || (!isRailOpen("scrub") && !hold.on);
     if (extent === null) return;
     range.min = String(extent.min);
     range.max = String(extent.max);
@@ -251,5 +252,8 @@ export function installScrub(kit) {
   kit.onHoldEvent(() => paintLive());
   // Esc goes live once no panel is left to close; keys.js owns the order and calls this.
   kit.goLive = resume;
-  goKeys.set("t", () => range.focus());
+  goKeys.set("t", () => {
+  openRailTab("scrub");
+  range.focus();
+});
 }

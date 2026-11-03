@@ -420,6 +420,10 @@
   #inbox .opt-in { font: 11px var(--mono); padding: 0 6px; background: var(--face); color: var(--muted);
     border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
   #inbox .opt-in[hidden] { display: none; }
+  #watch > #rail-tabs { flex-direction: row; gap: 6px; padding: 6px 8px; }
+  #rail-tabs button { flex: 1; font: 11px var(--mono); padding: 2px 0; background: var(--card); color: var(--muted);
+    border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+  #rail-tabs button:hover, #rail-tabs button[aria-expanded="true"] { color: var(--ink); border-color: var(--ink); }
   #inbox .opt-in:hover { color: var(--ink); border-color: var(--ink); }
   #lanes ol { max-height: 30vh; }
   #history ol { max-height: 26vh; }
@@ -542,6 +546,7 @@
   <aside id="card" class="island" hidden></aside>
   <aside id="slip" class="island" hidden></aside>
   <aside id="inbox" class="island" aria-label="needs you" hidden></aside>
+  <aside id="rail-tabs" class="island" aria-label="More panels"></aside>
   <aside id="lanes" class="island" aria-label="agents" hidden></aside>
   <aside id="history" class="island" aria-label="orders" hidden></aside>
   <aside id="scrub" class="island" aria-label="timeline" hidden></aside>

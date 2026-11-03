@@ -165,6 +165,12 @@ export function progressText(list) {
   return `${done} of ${list.length} done`;
 }
 
+// The folded checklist's count, such as "3/7".
+export function progressShort(list) {
+  const done = list.filter((step) => step.state === DONE || step.state === UNAVAILABLE).length;
+  return `${done}/${list.length}`;
+}
+
 // Whether the checklist shows: never on a recorded replay, which has no server, and never once
 // dismissed.
 export function shouldShow({ replay = false, dismissed = false } = {}) {

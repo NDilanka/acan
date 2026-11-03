@@ -5,6 +5,7 @@
 // so Node can test it. `installHistory` binds it to the page.
 import { historyBlock } from "./guard.js";
 import { flyTo, goKeys } from "./lanes.js";
+import { isRailOpen, openRailTab } from "./rail.js";
 
 // The ribbon shows this many orders at rest, newest first. Alt shows every one.
 export const REST_ORDERS = 5;
@@ -203,7 +204,7 @@ export function installHistory(kit) {
     if (!force && now.version === last.version && now.feed === last.feed && now.alt === last.alt) return;
     last = now;
     const rows = ribbonRows(orderHistory(kit.feed.events), view);
-    panel.hidden = rows.length === 0;
+    panel.hidden = rows.length === 0 || !isRailOpen("history");
     const shown = kit.state.altDown ? rows : rows.slice(0, REST_ORDERS);
     more.hidden = shown.length === rows.length;
     more.textContent = `+${rows.length - shown.length} earlier · Alt shows all`;
@@ -303,5 +304,8 @@ export function installHistory(kit) {
     });
   }
   window.addEventListener("blur", () => paint());
-  goKeys.set("h", () => list.querySelector("button")?.focus());
+  goKeys.set("h", () => {
+  openRailTab("history");
+  list.querySelector("button")?.focus();
+});
 }
