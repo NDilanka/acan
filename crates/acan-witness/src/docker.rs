@@ -11,6 +11,8 @@ use std::path::Path;
 
 use acan_intent::{ContainerNetwork, ContainerPolicy, Driver, MissingProtected};
 
+use crate::volume::DependencyMount;
+
 /// The label key every container this runner starts carries. The value is the run id, so
 /// cleanup and tests can find the containers of one run.
 pub(crate) const LABEL_KEY: &str = "acan.witness";
@@ -27,7 +29,7 @@ pub(crate) struct MountSources<'a> {
     pub empty: &'a Path,
     /// The install phase's `node_modules` for this run's lockfile, mounted read-only at the
     /// policy's `mounts.dependencies`. Must be present exactly when the policy names that mount.
-    pub dependencies: Option<&'a Path>,
+    pub dependencies: Option<DependencyMount<'a>>,
 }
 
 /// Builds the `--mount` values of a container.
@@ -64,8 +66,11 @@ pub(crate) fn mount_values(
         }
     }
     mounts.push(bind(sources.harness, policy.mounts.harness.as_str(), true)?);
-    match (policy.mounts.dependencies.as_ref(), sources.dependencies) {
-        (Some(target), Some(source)) => mounts.push(bind(source, target.as_str(), true)?),
+    match (
+        policy.mounts.dependencies.as_ref(),
+        sources.dependencies.as_ref(),
+    ) {
+        (Some(target), Some(source)) => mounts.push(dependency_value(source, target.as_str())?),
         (None, None) => {}
         (Some(target), None) => {
             return Err(format!(
@@ -80,9 +85,20 @@ pub(crate) fn mount_values(
     Ok(mounts)
 }
 
+/// The `--mount` value for the install's `node_modules`: a read-only bind of the cache entry, or a
+/// read-only mount of its volume.
+fn dependency_value(source: &DependencyMount<'_>, target: &str) -> Result<String, String> {
+    match source {
+        DependencyMount::Bind(path) => bind(path, target, true),
+        DependencyMount::Volume(name) => Ok(format!(
+            "type=volume,source={name},target={target},readonly"
+        )),
+    }
+}
+
 /// The `--mount` value for one bind mount. A comma or quote in a path would split the value,
 /// so such a path is refused rather than quoted.
-fn bind(source: &Path, target: &str, readonly: bool) -> Result<String, String> {
+pub(crate) fn bind(source: &Path, target: &str, readonly: bool) -> Result<String, String> {
     let Some(source_text) = source.to_str() else {
         return Err(format!("mount source is not UTF-8: {}", source.display()));
     };
@@ -171,7 +187,7 @@ fn shared_args(
 }
 
 /// The image reference a container starts from: the name and the digest the runner checks.
-fn image_ref(policy: &ContainerPolicy) -> Result<String, String> {
+pub(crate) fn image_ref(policy: &ContainerPolicy) -> Result<String, String> {
     let Some(digest) = policy.image.digest.as_ref() else {
         return Err("the image must be pinned by digest".to_owned());
     };
@@ -375,6 +391,55 @@ mod tests {
             !mounts.iter().any(|mount| mount.contains("target=/harness")),
             "the default harness path is not mounted: {mounts:?}"
         );
+    }
+
+    #[test]
+    fn a_volume_dependency_is_mounted_read_only_at_the_policy_target() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut policy = pinned_policy("masked");
+        policy.mounts.dependencies = Some("/work/node_modules".parse().expect("a container path"));
+        let sources = MountSources {
+            worktree: dir.path(),
+            snapshot: dir.path(),
+            harness: dir.path(),
+            empty: dir.path(),
+            dependencies: Some(DependencyMount::Volume("acan-deps-sha256-ab12".to_owned())),
+        };
+        let mounts = mount_values(&policy, &sources).expect("the mounts build");
+        assert!(
+            mounts.contains(
+                &"type=volume,source=acan-deps-sha256-ab12,target=/work/node_modules,readonly"
+                    .to_owned()
+            ),
+            "{mounts:?}"
+        );
+        assert!(
+            !mounts
+                .iter()
+                .any(|mount| mount.contains("source=acan-deps") && mount.starts_with("type=bind")),
+            "{mounts:?}"
+        );
+    }
+
+    #[test]
+    fn a_bound_dependency_keeps_its_read_only_bind_at_the_policy_target() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let modules = dir.path().join("node_modules");
+        let mut policy = pinned_policy("masked");
+        policy.mounts.dependencies = Some("/work/node_modules".parse().expect("a container path"));
+        let sources = MountSources {
+            worktree: dir.path(),
+            snapshot: dir.path(),
+            harness: dir.path(),
+            empty: dir.path(),
+            dependencies: Some(DependencyMount::Bind(&modules)),
+        };
+        let mounts = mount_values(&policy, &sources).expect("the mounts build");
+        let bound = format!(
+            "type=bind,source={},target=/work/node_modules,readonly",
+            modules.display()
+        );
+        assert!(mounts.contains(&bound), "{mounts:?}");
     }
 
     #[test]

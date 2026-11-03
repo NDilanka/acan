@@ -31,6 +31,7 @@ use crate::driver::{
     self, CallError, Container, CreateError, DRIVER_SOURCE, NODE_DRIVER_SOURCE, Op, Ready, Reply,
 };
 use crate::record::{self, MAX_REDIRECTS, method_text, route_template, same_origin_path};
+use crate::volume;
 
 /// Directory under the run's workspace that holds the harness mounted at `/harness`.
 const HARNESS_DIR: &str = "harness";
@@ -412,6 +413,23 @@ impl<'a> Sequence<'a> {
                 )));
             }
         }
+        // The install's node_modules. A host that copies them into a volume makes the copy here, and
+        // the time it takes is not charged to the deadline, so a first copy costs the probe nothing.
+        let dependencies = match input.dependencies {
+            Some(modules) => {
+                let started = Instant::now();
+                let image = docker::image_ref(input.policy).map_err(setup_failed)?;
+                let mount =
+                    volume::prepare(&input.config.docker, &image, modules, volume::FROM_VOLUME)
+                        .await
+                        .map_err(|detail| RunOutcome::Error {
+                            detail: format!("cannot prepare the dependencies: {detail}"),
+                        })?;
+                self.deadline += started.elapsed();
+                Some(mount)
+            }
+            None => None,
+        };
         let workspace =
             Workspace::create(self.run_id.as_str(), input.policy.driver).map_err(|err| {
                 RunOutcome::Error {
@@ -425,7 +443,7 @@ impl<'a> Sequence<'a> {
                 snapshot: input.snapshot,
                 harness: &workspace.harness(),
                 empty: &workspace.empty(),
-                dependencies: input.dependencies,
+                dependencies,
             },
         )
         .map_err(setup_failed)?;
