@@ -73,9 +73,12 @@ fn full_loop() -> Fx {
     fx.system(SystemCmd::IndexUpdated).expect("first scan");
     fx.system(SystemCmd::ModelUsed {
         model: "muse-spark".to_owned(),
+        provider: None,
         step: Step::Split,
-        input_tokens: 900,
-        output_tokens: 120,
+        input_tokens: Some(900),
+        output_tokens: Some(120),
+        failure: None,
+        detail: None,
     })
     .expect("usage recorded");
 
@@ -181,6 +184,39 @@ fn the_stored_json_replays_to_the_same_world() {
     let stored: Vec<acan_core::Stamped> = serde_json::from_str(&json).expect("log parses");
     let replica = Replica::from_log(stored).expect("log folds");
     assert_eq!(replica.world(), fx.origin.world());
+}
+
+#[test]
+fn a_log_with_the_old_model_used_shape_replays() {
+    // A log as the server wrote it before providers, failures and details: a usage row has no
+    // provider, failure or detail key, and its token counts are plain numbers. The log is written
+    // out here, so the old shape does not depend on the current writer.
+    let old = r#"[
+        {"seq":0,"at":1000,"actor":{"kind":"system"},"event":{"type":"world_opened","world":{"id":"w","repo":"demo"},"founder":"owner"}},
+        {"seq":1,"at":2000,"actor":{"kind":"system"},"event":{"type":"model_used","model":"muse-spark","step":"split","input_tokens":900,"output_tokens":120}}
+    ]"#;
+    let stored: Vec<Stamped> = serde_json::from_str(old).expect("the old shape parses");
+    assert!(
+        matches!(
+            stored[1].event,
+            Event::ModelUsed {
+                provider: None,
+                failure: None,
+                detail: None,
+                ..
+            }
+        ),
+        "an old row decodes with no provider, failure or detail: {:?}",
+        stored[1].event
+    );
+
+    let replica = Replica::from_log(stored).expect("the old shape folds");
+    let count = replica.world().usage().totals["muse-spark"][&Step::Split];
+    assert_eq!(
+        (count.input, count.output, count.calls),
+        (900, 120, 1),
+        "an old row is counted as a reply"
+    );
 }
 
 #[test]

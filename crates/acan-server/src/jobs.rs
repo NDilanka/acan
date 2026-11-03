@@ -46,9 +46,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::Instant;
 
 use acan_core::{
-    Check, ClashId, Command, CommitId, GateRunId, Generation, Job, OrderId, OrderRev, Rejection,
-    Stage, Step, SystemCmd, TaskId, TaskState, Timestamp, WitnessId, WitnessKind, WitnessOutcome,
-    World,
+    CallFailure, Check, ClashId, Command, CommitId, GateRunId, Generation, Job, OrderId, OrderRev,
+    Rejection, Stage, Step, SystemCmd, TaskId, TaskState, Timestamp, WitnessId, WitnessKind,
+    WitnessOutcome, World,
 };
 use acan_git::{Preparation, PrepareOutcome, ProtectedExport, Repo};
 use acan_intent::{
@@ -56,7 +56,7 @@ use acan_intent::{
     OrderRef, PreparedCommit, ProbeCorpus, RepoPath, Scope, ScopeConfirmation, ScopeDraft,
     ScopeDraftV1, ScopeRev, UnixMillis,
 };
-use acan_llm::{CallRecord, LlmError, ModelClient, Role};
+use acan_llm::{CallRecord, Destination, LlmError, ModelClient, Role};
 use acan_witness::RunnerConfig;
 use tokio::sync::Semaphore;
 use tokio::task::{self, JoinHandle, JoinSet};
@@ -603,7 +603,8 @@ async fn split<C: ModelClient>(
         .client()
         .chat_json::<model::SplitReply>(Role::Foreman, request)
         .await?;
-    record_usage(host, job, &reply.call, Step::Split).await;
+    let detail = format!("split {order} into {} tasks", reply.value.tasks.len());
+    record_usage(host, job, &reply.call, Step::Split, Some(detail)).await;
     Ok(Some(model::split_result(
         order,
         rev,
@@ -653,13 +654,37 @@ async fn draft_scope<C: ModelClient>(
     // The foreman drafts from the order's sentence, what the human asked for. The order ref is
     // only the draft's key, so it never stands in for the request.
     let request = model::scope_request(&sentence, &bounds, previous);
-    let reply = host
+    let detail = format!("scope draft for {order} rev {}", rev.get());
+    let reply = match host
         .client()
         .chat_json::<model::DraftReply>(Role::Foreman, request)
-        .await?;
-    // The draft's usage is not a `ModelUsed` event: `Step` has no scope variant, and the usage
-    // panel matches `Step` exhaustively in a crate this change does not touch. The client's own
-    // ledger still counts the call.
+        .await
+    {
+        Ok(reply) => reply,
+        Err(err) => {
+            // A reply the foreman sent that Acan cannot use still cost its tokens, so it is metered.
+            // A call that was sent and gave no reply is metered as a failure, with no tokens. A call
+            // refused before any request was sent is not metered.
+            if let Some(trace) = err.reply_trace() {
+                record_usage(host, job, &trace.call, Step::Scope, Some(detail)).await;
+            } else if err.was_sent() {
+                match host.client().destination(Role::Foreman) {
+                    Some(destination) => {
+                        let failure = failure_of(&err);
+                        let detail = format!("{detail}: {}", failure_word(failure));
+                        record_failed_usage(host, job, &destination, Step::Scope, failure, detail)
+                            .await;
+                    }
+                    None => tracing::warn!(
+                        ?job,
+                        "a failed scope draft has no foreman route to name; its usage is not recorded"
+                    ),
+                }
+            }
+            return Err(err.into());
+        }
+    };
+    record_usage(host, job, &reply.call, Step::Scope, Some(detail)).await;
     let model = ModelRef::from_str(&reply.call.model)
         .map_err(|err| JobError::Unavailable(format!("the model id: {err}")))?;
     let proposal = model::scope_from_reply(reply.value, model, &bounds)
@@ -703,7 +728,8 @@ async fn explain<C: ModelClient>(
         .client()
         .chat_json::<model::ExplainReply>(Role::Fast, request)
         .await?;
-    record_usage(host, job, &reply.call, Step::Explain).await;
+    let detail = format!("explained {clash}");
+    record_usage(host, job, &reply.call, Step::Explain, Some(detail)).await;
     Ok(Some(SystemCmd::ClashExplained {
         clash,
         explanation: model::explanation(reply.value)?,
@@ -1658,16 +1684,68 @@ fn unique_suffix() -> u128 {
         .map_or(0, |elapsed| elapsed.as_nanos())
 }
 
-async fn record_usage<C: ModelClient>(host: &Host<C>, job: &Job, call: &CallRecord, step: Step) {
+/// Records one model call that gave a reply in the usage panel, with the step that made it and the
+/// detail code built from its outcome.
+async fn record_usage<C: ModelClient>(
+    host: &Host<C>,
+    job: &Job,
+    call: &CallRecord,
+    step: Step,
+    detail: Option<String>,
+) {
     let command = SystemCmd::ModelUsed {
         model: call.model.clone(),
+        provider: Some(call.provider.clone()),
         step,
-        input_tokens: call.usage.prompt_tokens,
-        output_tokens: call.usage.completion_tokens,
+        input_tokens: Some(call.usage.prompt_tokens),
+        output_tokens: Some(call.usage.completion_tokens),
+        failure: None,
+        detail,
     };
     // Metering is best-effort: a lost usage event must not retry the model call it paid for.
     if let Err(err) = host.submit(Command::System(command)).await {
         tracing::warn!(?job, error = %err, "recording model usage failed");
+    }
+}
+
+/// Records a call that was sent and gave no reply. Its model and provider are the route it was sent
+/// to, and it has no token counts, so it is not counted in the usage totals.
+async fn record_failed_usage<C: ModelClient>(
+    host: &Host<C>,
+    job: &Job,
+    destination: &Destination,
+    step: Step,
+    failure: CallFailure,
+    detail: String,
+) {
+    let command = SystemCmd::ModelUsed {
+        model: destination.model.clone(),
+        provider: Some(destination.provider.clone()),
+        step,
+        input_tokens: None,
+        output_tokens: None,
+        failure: Some(failure),
+        detail: Some(detail),
+    };
+    if let Err(err) = host.submit(Command::System(command)).await {
+        tracing::warn!(?job, error = %err, "recording model usage failed");
+    }
+}
+
+/// Why a call that gave no reply failed: a timeout, or any other error.
+pub(crate) fn failure_of(err: &LlmError) -> CallFailure {
+    if matches!(err, LlmError::Timeout { .. }) {
+        CallFailure::Timeout
+    } else {
+        CallFailure::Error
+    }
+}
+
+/// The word a usage detail ends with for a call that failed.
+pub(crate) fn failure_word(failure: CallFailure) -> &'static str {
+    match failure {
+        CallFailure::Timeout => "timeout",
+        CallFailure::Error => "error",
     }
 }
 

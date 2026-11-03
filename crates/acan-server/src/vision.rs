@@ -756,9 +756,12 @@ async fn record_usage<C: ModelClient>(
 ) {
     let command = SystemCmd::ModelUsed {
         model: call.model.clone(),
+        provider: Some(call.provider.clone()),
         step: Step::Vision,
-        input_tokens: call.usage.prompt_tokens,
-        output_tokens: call.usage.completion_tokens,
+        input_tokens: Some(call.usage.prompt_tokens),
+        output_tokens: Some(call.usage.completion_tokens),
+        failure: None,
+        detail: None,
     };
     if let Err(err) = host.submit_advisory(Command::System(command)).await {
         tracing::warn!(%task, %run, error = %err, "recording the vision call's usage failed");

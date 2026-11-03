@@ -430,6 +430,51 @@ async fn schema_invalid_reply_is_a_validation_error_and_still_metered() {
 }
 
 #[tokio::test]
+async fn a_reply_with_no_choice_is_malformed_and_keeps_the_trace_of_its_tokens() {
+    let meta = MockServer::start().await;
+    let baseten = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15}
+        })))
+        .expect(1)
+        .mount(&meta)
+        .await;
+
+    let client = client(&meta, &baseten, "baseten");
+    let err = client
+        .chat_json::<Verdict>(
+            Role::Foreman,
+            ChatRequest {
+                messages: vec![Message::user("Do agents clash?")],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("a reply with no choice is not a reply");
+
+    assert!(
+        matches!(err, LlmError::MalformedResponse { .. }),
+        "got {err:?}"
+    );
+    assert!(err.was_sent(), "the request was sent");
+    let trace = err
+        .reply_trace()
+        .expect("the tokens of the reply keep their trace");
+    assert_eq!(trace.call.provider, "meta");
+    assert_eq!(
+        (
+            trace.call.usage.prompt_tokens,
+            trace.call.usage.completion_tokens
+        ),
+        (12, 3)
+    );
+    assert_eq!(client.ledger().records().len(), 1, "tokens were billed");
+}
+
+#[tokio::test]
 async fn structured_reply_cut_at_the_output_cap_is_refused_and_names_the_cap() {
     let meta = MockServer::start().await;
     let baseten = MockServer::start().await;
@@ -861,6 +906,8 @@ provider = "meta"
         other => panic!("expected MissingKey, got {other:?}"),
     }
     assert!(err.to_string().contains("no key for provider meta"));
+    assert!(!err.was_sent(), "no request was sent for a missing key");
+    assert!(err.reply_trace().is_none());
     assert_eq!(meta.received_requests().await.unwrap_or_default().len(), 0);
     assert_eq!(
         baseten.received_requests().await.unwrap_or_default().len(),

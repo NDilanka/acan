@@ -57,9 +57,15 @@ pub enum LlmError {
         source: reqwest::Error,
     },
 
-    /// `detail` is the parser message with configured keys replaced.
+    /// `detail` is the parser message with configured keys replaced. `trace` is the call that
+    /// produced the reply when the body parsed but held no choice to read, so its tokens are known.
+    /// A body that does not parse has no trace.
     #[error("{provider} sent a response Acan cannot read")]
-    MalformedResponse { provider: String, detail: String },
+    MalformedResponse {
+        provider: String,
+        detail: String,
+        trace: Option<Box<ReplyTrace>>,
+    },
 
     /// `detail` is the parser message. `raw` is the full reply text. Both have configured keys
     /// replaced. `trace` is the call that produced the reply.
@@ -92,12 +98,37 @@ pub enum LlmError {
 
 impl LlmError {
     /// The trace of the reply this error came from, when the provider sent one: a reply cut at
-    /// the output cap, or one that does not parse. Transport and status errors have none.
+    /// the output cap, a reply that does not parse, or a reply with no choice to read. Transport
+    /// and status errors have none.
     #[must_use]
     pub fn reply_trace(&self) -> Option<&ReplyTrace> {
         match self {
             Self::OutputCapped { trace, .. } | Self::SchemaValidation { trace, .. } => Some(trace),
+            Self::MalformedResponse { trace, .. } => trace.as_deref(),
             _ => None,
+        }
+    }
+
+    /// Whether a request reached a provider before this error. Configuration, a missing key, a
+    /// role that is off, and a call with no scripted reply fail before any request is sent. Every
+    /// other error comes from a request that was sent, including one that timed out, failed in
+    /// transport, or sent a reply that could not be used.
+    #[must_use]
+    pub fn was_sent(&self) -> bool {
+        match self {
+            Self::Config(_)
+            | Self::MissingKey { .. }
+            | Self::RoleOff { .. }
+            | Self::NoScriptedReply { .. } => false,
+            Self::PaymentRequired { .. }
+            | Self::RateLimited { .. }
+            | Self::ServerError { .. }
+            | Self::Status { .. }
+            | Self::Timeout { .. }
+            | Self::Transport { .. }
+            | Self::MalformedResponse { .. }
+            | Self::SchemaValidation { .. }
+            | Self::OutputCapped { .. } => true,
         }
     }
 }
