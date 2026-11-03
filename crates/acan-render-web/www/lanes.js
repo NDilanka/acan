@@ -115,14 +115,16 @@ export function awayStamp(quietMs) {
   return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h`;
 }
 
-// The agents that wait on the user: their task is in an open or proposed clash, or their order
-// asks a question. The map gives their drones a waiting ring, never stale or away.
+// The agents that wait on the user: their task is in an open or proposed clash, their order asks
+// a question, or its lane is stopped on the repair budget or has an open contest. The map gives
+// their drones a waiting ring, never stale or away.
 export function waitingAgents(view) {
   const clashed = new Set((view.clashes ?? []).filter((c) => c.state === "open" || c.state === "proposed").flatMap((c) => [c.a, c.b]));
   const asked = new Set((view.questions ?? []).map((q) => q.order));
+  const held = new Set((view.lanes ?? []).filter((lane) => lane.stopped || (lane.open_contests ?? 0) > 0).map((lane) => lane.order));
   const tasks = new Map(view.tasks.map((task) => [task.id, task]));
   return new Set(view.agents.filter((agent) => agent.task !== null && agent.task !== undefined
-    && (clashed.has(agent.task) || asked.has(tasks.get(agent.task)?.order))).map((agent) => agent.id));
+    && (clashed.has(agent.task) || asked.has(tasks.get(agent.task)?.order) || held.has(tasks.get(agent.task)?.order))).map((agent) => agent.id));
 }
 
 // "stale", "away" or null for one agent, by the map's rule: only an agent that holds a task (not
@@ -141,6 +143,8 @@ export function quietState({ holds, waiting, quietMs }) {
 export function laneRows(view, activity, now, { live = true } = {}) {
   const tasks = new Map(view.tasks.map((task) => [task.id, task]));
   const waiting = waitingAgents(view);
+  // The sentence of each held order's lane, by order. A row whose task is on that order carries it.
+  const holds = new Map((view.lanes ?? []).map((lane) => [lane.order, lane.hold]));
   return [...view.agents].sort(byName).map((agent, index) => {
     const task = agent.task === null || agent.task === undefined ? null : tasks.get(agent.task) ?? null;
     const seen = activity.get(agent.id) ?? null;
@@ -150,6 +154,7 @@ export function laneRows(view, activity, now, { live = true } = {}) {
       waiting: waiting.has(agent.id),
       quietMs: live ? quiet : null,
     });
+    const hold = task === null ? null : holds.get(task.order);
     return {
       agent: agent.id,
       key: index < 9 ? index + 1 : null,
@@ -164,6 +169,7 @@ export function laneRows(view, activity, now, { live = true } = {}) {
       stamp: state === "away" ? awayStamp(quiet) : null,
       check: task?.check ?? null,
       rideable: Array.isArray(agent.body),
+      hold: typeof hold === "string" && hold !== "" ? hold : null,
     };
   });
 }
@@ -339,6 +345,8 @@ export function installLanes(kit) {
       button.dataset.agent = row.agent;
       button.addEventListener("click", () => visit(kit, row));
       li.append(button);
+      // Why the row's order is held, and what frees it, under the row.
+      if (row.hold) li.append(element("p", "hold muted", row.hold));
       // A row whose task, activity, machine or check moved glows once, so a change is seen.
       if (before !== undefined && before !== signature(row)) li.classList.add("moved");
       return li;

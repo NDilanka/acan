@@ -240,7 +240,7 @@ impl Body {
     }
 
     /// Whether the agent waits on the user: its task is in an open clash, or its order asks a
-    /// question.
+    /// question, is stopped, or has an open contest.
     #[must_use]
     pub fn waiting(&self) -> bool {
         self.state == DroneState::Waiting
@@ -258,7 +258,8 @@ pub enum DroneState {
     /// bobs lower and slower than a working drone.
     #[default]
     Idle,
-    /// Its task is in an open clash, or its order asks a question: as idle, with an amber ring.
+    /// Its task is in an open clash, or its order asks a question, is stopped or has an open
+    /// contest: as idle, with an amber ring.
     Waiting,
     /// It holds a task but has been quiet for a while: still and lower, its eye grey, no glow.
     Stale,
@@ -2111,7 +2112,8 @@ fn is_open(clash: &ClashView) -> bool {
     matches!(clash.state, "open" | "proposed")
 }
 
-/// The agents that wait on the user: their task is in an open clash, or their order asks a question.
+/// The agents that wait on the user: their task is in an open clash, or their order asks a
+/// question, has its repair budget spent, or has an open contest.
 fn waiting_agents(view: &View) -> BTreeSet<String> {
     let open_tasks: Vec<TaskId> = view
         .clashes
@@ -2124,6 +2126,12 @@ fn waiting_agents(view: &View) -> BTreeSet<String> {
         .iter()
         .map(|question| question.order)
         .collect();
+    let held: Vec<OrderId> = view
+        .lanes
+        .iter()
+        .filter(|lane| lane.stopped || lane.open_contests > 0)
+        .map(|lane| lane.order)
+        .collect();
     view.agents
         .iter()
         .filter(|agent| {
@@ -2133,7 +2141,9 @@ fn waiting_agents(view: &View) -> BTreeSet<String> {
                         .tasks
                         .iter()
                         .find(|candidate| candidate.id == task)
-                        .is_some_and(|candidate| asked.contains(&candidate.order))
+                        .is_some_and(|candidate| {
+                            asked.contains(&candidate.order) || held.contains(&candidate.order)
+                        })
             })
         })
         .map(|agent| agent.id.to_string())
@@ -2627,9 +2637,11 @@ mod tests {
         Belt, CodeIndex, CodeRev, Command, Ctx, Event, FilePath, HumanCmd, IndexedFile,
         IndexedSymbol, MachineKey, MemberId, Origin, Stamped, Timestamp, WorldId, WorldRef,
     };
+    use acan_intent::Scope;
     use serde_json::json;
 
     use super::*;
+    use crate::lanes::LaneView;
     use crate::mirror::Mirror;
     use crate::plant::from_scan_json;
     use crate::scenario::{self, Target};
@@ -3812,6 +3824,89 @@ mod tests {
         assert_eq!(DroneState::of("open", false, true), DroneState::Stale);
         assert_eq!(
             DroneState::of("building", false, false),
+            DroneState::Working
+        );
+    }
+
+    /// The scripted view with its clashes and questions cleared, agent-a building on its task, and
+    /// that task's order given one scope lane, stopped or not, with `open_contests` contests.
+    fn view_with_lane(stopped: bool, open_contests: u32) -> View {
+        let plan = plan();
+        let (_origin, log, _index) = scripted();
+        let mut view = Mirror::from_log(log).expect("the log replays").view(&plan);
+        view.clashes.clear();
+        view.questions.clear();
+        view.agents[0].activity = "building";
+        let order = view.agents[0]
+            .task
+            .and_then(|task| view.tasks.iter().find(|candidate| candidate.id == task))
+            .map(|task| task.order)
+            .expect("the agent holds a task");
+        let scope: Scope = serde_json::from_value(json!({
+            "version": "acan-scope/1",
+            "order": order.to_string(),
+            "rev": 1,
+            "base_commit": "0123456789abcdef0123456789abcdef01234567",
+            "body": {"may": [], "must_keep": [], "open": []}
+        }))
+        .expect("the scope fixture decodes");
+        let scope_hash = scope.scope_hash().expect("the scope hashes");
+        view.lanes = vec![LaneView {
+            order,
+            rev: scope.rev,
+            scope_hash,
+            scope,
+            state: "unconfirmed",
+            may: Vec::new(),
+            must_keep: Vec::new(),
+            open: Vec::new(),
+            confirmation: None,
+            live_leases: 0,
+            stopped,
+            open_contests,
+            episodes_opened: 0,
+            max_episodes: None,
+            rounds_used: 0,
+            repair_rounds: None,
+            hold: None,
+        }];
+        view
+    }
+
+    /// The state of the first agent's drone in `view`. There is no clock, so it is never stale.
+    fn first_drone_state(view: &View) -> DroneState {
+        let plan = plan();
+        let agent = view.agents[0].id.to_string();
+        Marks::build(view, &plan, &stands(&plan), &slots_for(view))
+            .bodies
+            .iter()
+            .find(|body| body.agent == agent)
+            .map(|body| body.state)
+            .expect("the agent has a drone")
+    }
+
+    #[test]
+    fn an_agent_on_a_stopped_order_waits() {
+        assert_eq!(
+            first_drone_state(&view_with_lane(true, 0)),
+            DroneState::Waiting,
+            "a spent repair budget holds the order's agents"
+        );
+    }
+
+    #[test]
+    fn an_agent_under_an_open_contest_waits() {
+        assert_eq!(
+            first_drone_state(&view_with_lane(false, 1)),
+            DroneState::Waiting,
+            "an open contest holds the order's agents"
+        );
+    }
+
+    #[test]
+    fn an_agent_on_a_live_order_still_works() {
+        assert_eq!(
+            first_drone_state(&view_with_lane(false, 0)),
             DroneState::Working
         );
     }

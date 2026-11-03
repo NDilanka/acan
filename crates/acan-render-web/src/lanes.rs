@@ -41,6 +41,20 @@ pub struct LaneView {
     /// Whether the repair budget ran out. A stopped lane takes no claim or build, and no seal or
     /// newer revision lifts the stop.
     pub stopped: bool,
+    /// How many contests of the order wait for the human.
+    pub open_contests: u32,
+    /// How many discrepancy episodes the order has opened.
+    pub episodes_opened: u32,
+    /// The most open episodes one repair round may bounce, from the confirmed budget. `None`
+    /// before a confirmation fixes one.
+    pub max_episodes: Option<u32>,
+    /// The repair rounds opened so far.
+    pub rounds_used: u32,
+    /// The repair rounds the confirmed budget allows. `None` before a confirmation fixes one.
+    pub repair_rounds: Option<u32>,
+    /// Why the lane is held and what frees it, in one sentence, or `None` when nothing holds it.
+    /// See [`hold_sentence`].
+    pub hold: Option<String>,
 }
 
 /// One may-change item.
@@ -126,7 +140,7 @@ fn receipt_count(lane: &ScopeLane) -> Option<ReceiptCount> {
 
 fn lane_view(world: &World, lane: &ScopeLane) -> LaneView {
     let body = &lane.scope.body;
-    LaneView {
+    let mut view = LaneView {
         order: lane.order,
         rev: lane.scope.rev,
         scope_hash: lane.scope_hash,
@@ -142,7 +156,35 @@ fn lane_view(world: &World, lane: &ScopeLane) -> LaneView {
         confirmation: lane.confirmation.clone(),
         live_leases: live_leases(world, lane.order),
         stopped: lane.stopped,
+        open_contests: u32::try_from(lane.open_contests().count()).unwrap_or(u32::MAX),
+        episodes_opened: u32::try_from(lane.episodes.len()).unwrap_or(u32::MAX),
+        max_episodes: lane.budget.map(|budget| budget.max_episodes),
+        rounds_used: u32::try_from(lane.rounds_used()).unwrap_or(u32::MAX),
+        repair_rounds: lane.budget.map(|budget| budget.repair_rounds.get()),
+        hold: None,
+    };
+    view.hold = hold_sentence(&view);
+    view
+}
+
+/// The sentence that says why a lane is held and what frees it: a spent repair budget first, then
+/// an open contest that waits for the human's ruling. `None` when nothing holds the lane.
+#[must_use]
+pub fn hold_sentence(lane: &LaneView) -> Option<String> {
+    if lane.stopped {
+        return Some(match (lane.max_episodes, lane.repair_rounds) {
+            (Some(cap), Some(rounds)) => format!(
+                "Budget spent: {} findings against a cap of {cap}, {} of {rounds} repair rounds used. Cancel the order to free it.",
+                lane.episodes_opened, lane.rounds_used
+            ),
+            _ => format!(
+                "Budget spent: {} findings. Cancel the order to free it.",
+                lane.episodes_opened
+            ),
+        });
     }
+    (lane.open_contests > 0)
+        .then(|| format!("{} contest(s) wait for your ruling.", lane.open_contests))
 }
 
 /// The tasks of `order` that hold a lease: the ones a revision ends as `Superseded`.
@@ -215,6 +257,7 @@ fn method_word(method: MethodSelector) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn each_method_word_is_its_wire_spelling() {
@@ -232,5 +275,78 @@ mod tests {
             let wire = serde_json::to_value(method).expect("a method serializes");
             assert_eq!(wire.as_str(), Some(method_word(method)), "{method:?}");
         }
+    }
+
+    /// A lane with no budget, episodes or rounds yet, for the sentence tests to change.
+    fn lane(stopped: bool, open_contests: u32) -> LaneView {
+        let scope: Scope = serde_json::from_value(json!({
+            "version": "acan-scope/1",
+            "order": "o-1",
+            "rev": 1,
+            "base_commit": "0123456789abcdef0123456789abcdef01234567",
+            "body": {"may": [], "must_keep": [], "open": []}
+        }))
+        .expect("the scope fixture decodes");
+        LaneView {
+            order: "o-1".parse().expect("an order id"),
+            rev: scope.rev,
+            scope_hash: scope.scope_hash().expect("the scope hashes"),
+            scope,
+            state: "unconfirmed",
+            may: Vec::new(),
+            must_keep: Vec::new(),
+            open: Vec::new(),
+            confirmation: None,
+            live_leases: 0,
+            stopped,
+            open_contests,
+            episodes_opened: 0,
+            max_episodes: None,
+            rounds_used: 0,
+            repair_rounds: None,
+            hold: None,
+        }
+    }
+
+    #[test]
+    fn a_stopped_lane_has_a_budget_sentence() {
+        let view = LaneView {
+            episodes_opened: 10,
+            max_episodes: Some(4),
+            rounds_used: 0,
+            repair_rounds: Some(2),
+            ..lane(true, 0)
+        };
+        assert_eq!(
+            hold_sentence(&view).as_deref(),
+            Some(
+                "Budget spent: 10 findings against a cap of 4, 0 of 2 repair rounds used. Cancel the order to free it."
+            ),
+        );
+    }
+
+    #[test]
+    fn a_stopped_lane_without_a_budget_names_no_missing_value() {
+        let view = LaneView {
+            episodes_opened: 3,
+            ..lane(true, 0)
+        };
+        assert_eq!(
+            hold_sentence(&view).as_deref(),
+            Some("Budget spent: 3 findings. Cancel the order to free it."),
+        );
+    }
+
+    #[test]
+    fn an_open_contest_has_a_ruling_sentence() {
+        assert_eq!(
+            hold_sentence(&lane(false, 2)).as_deref(),
+            Some("2 contest(s) wait for your ruling."),
+        );
+    }
+
+    #[test]
+    fn a_live_lane_has_no_sentence() {
+        assert_eq!(hold_sentence(&lane(false, 0)), None);
     }
 }
