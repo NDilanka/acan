@@ -85,6 +85,8 @@ This checks each receipt in `receipts/` against `receipts/SHA256SUMS`, then prin
 
 `sh demo/replay.sh` does the same check with a POSIX shell and prints the same lines. `sh demo/replay.sh -v` checks the checksums only.
 
+`replay/` holds one recorded run from 1 November 2026, exported with `acan export-replay`. The Pages site plays it at `?replay=1` with no keys. Its log has two scope drafts, three candidate receipts, one landed change and one failed land attempt. It has no clashes, so the clash and trail beats are not in it, and its log records no director call.
+
 ### Live take (needs your keys)
 
 1. Clone the repo: `git clone https://github.com/NDilanka/acan.git`, then `cd acan`.
@@ -106,7 +108,7 @@ In progress. No numbers are published before the run finishes.
 - The take and the worker slots pass each worker its per-take local acan agent token in the `ACAN_AGENT_TOKEN` variable, not on the command line, so the process list does not show it. The control identity's token goes the same way. These tokens are created by the take for its own server. They are not provider keys.
 - The probe driver runs in the same container as the candidate code. The container has a read-only root and all Linux capabilities dropped.
 - `model_cost_micros` is stored in each order's repair budget, but no check reads it. The model cost cap is not enforced.
-- There is no hosted replay yet. The recorded receipts replay the provider calls, not the full UI.
+- The hosted replay is one recorded run without clashes (see Replay without keys). The recorded receipts replay the provider calls, not the full UI.
 
 ## Rulings disclosure
 
