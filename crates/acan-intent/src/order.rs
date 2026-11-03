@@ -2,10 +2,10 @@
 //!
 //! The server and the page both build this tour with [`deterministic`], so they show the same
 //! walk. The order is residue items, then ruling violations, then bounced items, then the other
-//! mandatory items, then fulfilled items, and each bucket keeps the view's order. Every mandatory
-//! item is visited. An optional item whose caption cannot be bound is left out. A step's caption
-//! is the first catalog template that describes the item and binds its evidence, and the whole
-//! tour then passes [`admit::tour`].
+//! mandatory items, then fulfilled items, then a few open preserved checks, and each bucket keeps
+//! the view's order. Every mandatory item is visited. An optional item whose caption cannot be
+//! bound is left out. A step's caption is the first catalog template that describes the item and
+//! binds its evidence, and the whole tour then passes [`admit::tour`].
 
 use std::collections::BTreeMap;
 
@@ -59,11 +59,16 @@ pub fn deterministic(view: &PlantView) -> Result<TourView, DeterministicError> {
     Ok(TourView::Deterministic { tour, bindings })
 }
 
+/// How many open preserved checks the deterministic tour visits, after the other items. A check
+/// that passed is no fault, so the walk shows a few of them and keeps the rest out.
+const PRESERVED_STEPS: usize = 3;
+
 /// The items in deterministic order: residue, then ruling violations, then bounced, then the
-/// other mandatory items, then fulfilled. View order holds within each bucket, and an item that
-/// fits no bucket is left out.
+/// other mandatory items, then fulfilled, then up to [`PRESERVED_STEPS`] open preserved checks.
+/// View order holds within each bucket, and an item that fits no bucket is left out.
 fn ordered_items(view: &PlantView) -> Vec<&PlantItem> {
-    let bucket = |item: &PlantItem| -> Option<u8> {
+    let mut preserved = 0;
+    let mut bucket = |item: &PlantItem| -> Option<u8> {
         if item.state == ItemState::Residue {
             Some(0)
         } else if item.class == ItemClass::ViolatesRuling {
@@ -74,6 +79,9 @@ fn ordered_items(view: &PlantView) -> Vec<&PlantItem> {
             Some(3)
         } else if item.state == ItemState::Fixed || item.class == ItemClass::ObligationFulfilled {
             Some(4)
+        } else if item.class == ItemClass::Preserved && preserved < PRESERVED_STEPS {
+            preserved += 1;
+            Some(5)
         } else {
             None
         }

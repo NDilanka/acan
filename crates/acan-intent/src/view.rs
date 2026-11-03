@@ -512,7 +512,8 @@ pub enum TourView {
         /// The admitted bindings, one per step.
         bindings: Vec<BoundItemView>,
     },
-    /// The deterministic order: residue, then violations, then bounced, then fulfilled.
+    /// The deterministic order: residue, then violations, then bounced, then the other mandatory
+    /// items, then fulfilled, then a few open preserved checks.
     Deterministic {
         /// The tour.
         tour: Tour,

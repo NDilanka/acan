@@ -151,6 +151,7 @@ fn the_deterministic_order_is_residue_then_violations_then_bounced_then_the_rest
             "chk-links-delete",
             "chk-signup-store",
             "i-login-limit",
+            "chk-health",
         ]
     );
 }
@@ -225,7 +226,7 @@ fn an_optional_item_that_cannot_be_bound_is_left_out() {
     let tour = deterministic_tour(&view);
 
     assert!(!tour.reaches(&"i-login-limit".parse().expect("an id")));
-    assert_eq!(tour.steps.len(), 7);
+    assert_eq!(tour.steps.len(), 8);
 }
 
 #[test]
@@ -255,6 +256,48 @@ fn a_view_with_nothing_to_visit_has_no_tour() {
         deterministic(&view),
         Err(DeterministicError::NothingToVisit)
     ));
+}
+
+#[test]
+fn a_view_of_passing_checks_only_still_has_a_tour_of_its_open_preserved_checks() {
+    // A clean receipt: nothing to rule on, every check passed and is open. The walk still has a
+    // step, so the page has a tour before the director answers.
+    let mut view = view(DIRECTED);
+    view.items.retain(|item| item.class == ItemClass::Preserved);
+
+    let tour = deterministic_tour(&view);
+
+    assert_eq!(order(&tour), ["chk-health"]);
+    assert_eq!(template_of(&tour, "chk-health"), "preserved.open");
+    assert!(admit::tour(&view, &trusted(), &tour).is_ok());
+}
+
+/// The directed fixture with `count` more open preserved checks, each a copy of `chk-health`.
+fn with_open_preserved_checks(count: usize) -> PlantView {
+    let mut value = raw_view();
+    item_mut(&mut value, "chk-health")["state"] = json!("open");
+    let copy = item_mut(&mut value, "chk-health").clone();
+    let items = value["items"].as_array_mut().expect("items");
+    for number in 1..=count {
+        let mut item = copy.clone();
+        item["item_id"] = json!(format!("chk-health-{number}"));
+        items.push(item);
+    }
+    serde_json::from_value(value).expect("decoding the view")
+}
+
+#[test]
+fn the_fallback_visits_at_most_three_open_preserved_checks() {
+    let view = with_open_preserved_checks(4);
+
+    let tour = deterministic_tour(&view);
+
+    let preserved: Vec<&str> = order(&tour)
+        .into_iter()
+        .filter(|item| item.starts_with("chk-health"))
+        .collect();
+    assert_eq!(preserved, ["chk-health", "chk-health-1", "chk-health-2"]);
+    assert!(admit::tour(&view, &trusted(), &tour).is_ok());
 }
 
 #[test]

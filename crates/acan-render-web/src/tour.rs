@@ -673,7 +673,7 @@ mod tests {
             order.first().map(String::as_str),
             Some("d-login-error-body")
         );
-        assert_eq!(order.last().map(String::as_str), Some("i-login-limit"));
+        assert_eq!(order.last().map(String::as_str), Some("chk-health"));
         let residue = play
             .steps
             .iter()
