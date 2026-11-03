@@ -19,6 +19,7 @@ use acan_llm::ModelClient;
 use serde::Serialize;
 use tokio::task::JoinHandle;
 
+use crate::auth::{Principal, Tokens};
 use crate::host::{Host, now};
 
 /// How many model calls one run may make. The same default `acan-worker` uses.
@@ -188,13 +189,29 @@ pub(crate) fn spawn<C: ModelClient + 'static>(
         .collect()
 }
 
+/// The token loop `index` should use when the tokens file holds a different one than `current`.
+/// `None` when the file holds the same token, or none.
+fn rotated_token(tokens: &Tokens, index: usize, current: &str) -> Option<String> {
+    let principal = Principal::Agent(agent(index).ok()?);
+    tokens.token_of(&principal).filter(|token| token != current)
+}
+
 /// One loop: a run while a model key is set, then the next run after a pause.
-async fn drive<C: ModelClient>(host: Host<C>, board: Board, index: usize, config: WorkerConfig) {
+async fn drive<C: ModelClient>(
+    host: Host<C>,
+    board: Board,
+    index: usize,
+    mut config: WorkerConfig,
+) {
     loop {
         if !host.client().key_status().configured {
             board.set_state(index, State::NoKey);
             tokio::time::sleep(NO_KEY_CHECK).await;
             continue;
+        }
+        // An owner may rotate the token. The next run then authenticates with the new one.
+        if let Some(token) = rotated_token(host.tokens(), index, &config.token) {
+            config.token = token;
         }
         board.set_state(index, State::Running);
         let outcome = run_worker(&config, host.client()).await;
@@ -261,6 +278,40 @@ mod tests {
                 reason: "r".to_owned()
             }),
             "failed"
+        );
+    }
+
+    #[test]
+    fn a_loop_picks_up_its_rotated_token_and_keeps_an_unchanged_one() {
+        use acan_core::MemberId;
+
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let owner = MemberId::from_str("owner").expect("valid member id");
+        let (mut tokens, _) = Tokens::load_or_create(dir.path(), &owner).expect("tokens load");
+        let first = tokens
+            .agent_token(dir.path(), &agent(0).expect("valid id"))
+            .expect("the loop gets a token");
+
+        assert_eq!(
+            rotated_token(&tokens, 0, first.as_str()),
+            None,
+            "the same token is no change"
+        );
+
+        let new = Tokens::mint_token();
+        tokens
+            .replace_token(
+                dir.path(),
+                &Principal::Agent(agent(0).expect("valid id")),
+                &new,
+            )
+            .expect("the token rotates");
+        assert_eq!(rotated_token(&tokens, 0, first.as_str()), Some(new.clone()));
+        assert_eq!(rotated_token(&tokens, 0, &new), None);
+        assert_eq!(
+            rotated_token(&tokens, 1, first.as_str()),
+            None,
+            "a loop with no token in the file changes nothing"
         );
     }
 }

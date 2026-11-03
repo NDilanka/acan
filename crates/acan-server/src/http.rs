@@ -41,6 +41,7 @@ use crate::public::{self, PublicRoot};
 use crate::registry::{self, Registry};
 use crate::release::{self, BugReport, UpdateStatus, VersionInfo};
 use crate::ruling::{self, RulingBody, RulingDraftView};
+use crate::settings::{self, Settings};
 use crate::vision::{self, Side, VisionWitness};
 use crate::workers::{Board, WorkersView};
 use crate::{STATE_DIR, observe, redact, setup, stream, stream_all};
@@ -153,10 +154,11 @@ async fn refuse_when_stopped<C: ModelClient + 'static>(
 /// Builds the router for every project. Each project answers under `/api/p/{id}`, and the default
 /// project also answers at the unprefixed paths, which the setup page and older clients use. The
 /// server's own health and version are not any project's. The public files are served for every
-/// path the API does not claim.
+/// path the API does not claim. The settings are the server's, so their route is global too.
 pub(crate) fn router<C: ModelClient + 'static>(
     projects: Arc<Registry<C>>,
     web: Option<PublicRoot>,
+    settings: Arc<Settings<C>>,
 ) -> Router {
     let mut router = Router::new()
         .route("/health", get(health))
@@ -167,7 +169,8 @@ pub(crate) fn router<C: ModelClient + 'static>(
                 .route("/api/projects", get(registry::list_projects::<C>))
                 .route("/api/stream/all", get(stream_all::upgrade::<C>))
                 .with_state(Arc::clone(&projects)),
-        );
+        )
+        .merge(settings::routes(settings));
     for entry in projects.entries() {
         let api = format!("/api/p/{}", entry.id);
         let mcp = format!("{api}/mcp");
@@ -199,6 +202,16 @@ pub(crate) fn router<C: ModelClient + 'static>(
     }
 }
 
+/// One field a request got wrong, and the rule it broke. The path names the field, such as
+/// `budgets.repair_rounds`. The rule never repeats the value the request sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FieldError {
+    /// The path of the field in the request.
+    pub path: String,
+    /// The rule the field broke.
+    pub why: String,
+}
+
 /// A failed request, with the status it maps to.
 #[derive(Debug)]
 pub enum ApiError {
@@ -212,6 +225,8 @@ pub enum ApiError {
     BadRequest(&'static str),
     /// The request is valid, but the server's state does not allow it. The name says why.
     Conflict(&'static str),
+    /// The request's values break the rules. Each failing field is listed with its rule.
+    Invalid(Vec<FieldError>),
     /// The origin refused the command. The body is the [`Rejection`].
     Rejected(Rejection),
     /// The scope-first lane refused the call with a closed code. The body is the [`McpError`].
@@ -248,6 +263,11 @@ impl IntoResponse for ApiError {
             Self::Conflict(why) => (
                 StatusCode::CONFLICT,
                 Json(json!({ "error": "conflict", "what": why })),
+            )
+                .into_response(),
+            Self::Invalid(fields) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "invalid", "fields": fields })),
             )
                 .into_response(),
             Self::Rejected(rejection) => (StatusCode::CONFLICT, Json(rejection)).into_response(),
@@ -325,7 +345,6 @@ pub(crate) fn authenticate<C: ModelClient>(
 ) -> Result<Principal, ApiError> {
     token
         .and_then(|token| host.tokens().principal(token))
-        .cloned()
         .ok_or(ApiError::Unauthorized)
 }
 

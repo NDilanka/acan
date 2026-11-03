@@ -3,7 +3,8 @@
 //! A client authenticates with an `Authorization: Bearer` header on the upgrade, or, because
 //! browsers cannot set headers on a WebSocket, with a first text frame `{"token": "..."}` sent
 //! within [`AUTH_FRAME_TIMEOUT`]. Nothing is sent before the token is accepted. Tokens never go
-//! in the URL, where proxies and access logs would keep them.
+//! in the URL, where proxies and access logs would keep them. A connection whose token is revoked
+//! is closed with [`CLOSE_REVOKED`] and the reason [`REVOKED_REASON`].
 
 use std::time::Duration;
 
@@ -14,10 +15,10 @@ use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use serde::Deserialize;
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::watch;
 
-use crate::auth::Principal;
+use crate::auth::{Principal, subscribe_revocations};
 use crate::host::Host;
 use crate::http::{ApiError, authenticate, bearer};
 use crate::redact;
@@ -34,6 +35,11 @@ pub(crate) const CLOSE_SHUTDOWN: u16 = 1001;
 pub(crate) const CLOSE_UNAUTHORIZED: u16 = 1008;
 /// WebSocket close code for a server-side failure while reading the backlog.
 pub(crate) const CLOSE_INTERNAL: u16 = 1011;
+/// WebSocket close code for a connection whose token was revoked, such as by an owner's rotation.
+/// It is the same number as [`CLOSE_RESUME`]; the reason, [`REVOKED_REASON`], tells them apart.
+pub(crate) const CLOSE_REVOKED: u16 = 4001;
+/// The close reason sent with [`CLOSE_REVOKED`].
+pub(crate) const REVOKED_REASON: &str = "token revoked";
 
 #[derive(Deserialize)]
 pub struct StreamQuery {
@@ -49,8 +55,9 @@ pub(crate) struct AuthFrame {
 
 /// How a stream proves its token.
 enum Access {
-    /// The upgrade's `Authorization` header carried a valid token, of this principal.
-    Granted(Principal),
+    /// The upgrade's `Authorization` header carried a valid token, of this principal. `token` is
+    /// the token's text, which the connection watches for revocation.
+    Granted { principal: Principal, token: String },
     /// The token must arrive in the first frame.
     FirstFrame,
 }
@@ -68,17 +75,31 @@ pub async fn upgrade<C: ModelClient + 'static>(
     Query(query): Query<StreamQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
+    // Subscribed before the token is checked, so a revocation that lands after the check still
+    // reaches this connection.
+    let revocations = subscribe_revocations();
     let access = match bearer(&headers) {
-        Some(token) => Access::Granted(authenticate(&host, Some(token))?),
+        Some(token) => Access::Granted {
+            principal: authenticate(&host, Some(token))?,
+            token: token.to_owned(),
+        },
         None => Access::FirstFrame,
     };
     let from = Seq::new(query.from);
-    Ok(ws.on_upgrade(move |socket| async move { track(&host, socket, from, access) }))
+    Ok(ws.on_upgrade(move |socket| async move {
+        track(&host, socket, from, access, revocations);
+    }))
 }
 
 /// Registers the stream so shutdown can wait for it to close, then runs it.
-fn track<C: ModelClient + 'static>(host: &Host<C>, socket: WebSocket, from: Seq, access: Access) {
-    let pump = pump(host.clone(), socket, from, access);
+fn track<C: ModelClient + 'static>(
+    host: &Host<C>,
+    socket: WebSocket,
+    from: Seq,
+    access: Access,
+    revocations: broadcast::Receiver<String>,
+) {
+    let pump = pump(host.clone(), socket, from, access, revocations);
     let mut streams = host.streams().lock().expect("stream set lock poisoned");
     // Reap closed streams so a long-running server does not keep one entry per connection.
     while streams.try_join_next().is_some() {}
@@ -110,21 +131,28 @@ pub(crate) async fn next_text(socket: &mut WebSocket) -> Option<String> {
         .map(|text| text.to_string())
 }
 
-/// Waits for a valid token frame and returns the principal it names. `None` means the client sent
-/// anything else, sent nothing in time, or left.
+/// Waits for a valid token frame and returns the principal it names, with the token's text. `None`
+/// means the client sent anything else, sent nothing in time, or left.
 async fn first_frame_authenticates<C: ModelClient>(
     host: &Host<C>,
     socket: &mut WebSocket,
-) -> Option<Principal> {
+) -> Option<(Principal, String)> {
     let text = next_text(socket).await?;
     let frame = serde_json::from_str::<AuthFrame>(&text).ok()?;
-    authenticate(host, Some(&frame.token)).ok()
+    let principal = authenticate(host, Some(&frame.token)).ok()?;
+    Some((principal, frame.token))
 }
 
-async fn pump<C: ModelClient>(host: Host<C>, mut socket: WebSocket, from: Seq, access: Access) {
+async fn pump<C: ModelClient>(
+    host: Host<C>,
+    mut socket: WebSocket,
+    from: Seq,
+    access: Access,
+    mut revocations: broadcast::Receiver<String>,
+) {
     let mut shutdown = host.shutdown_signal();
-    let principal = match access {
-        Access::Granted(principal) => principal,
+    let (principal, token) = match access {
+        Access::Granted { principal, token } => (principal, token),
         Access::FirstFrame => {
             let authenticated = tokio::select! {
                 () = shutting_down(&mut shutdown) => {
@@ -133,13 +161,15 @@ async fn pump<C: ModelClient>(host: Host<C>, mut socket: WebSocket, from: Seq, a
                 }
                 authenticated = first_frame_authenticates(&host, &mut socket) => authenticated,
             };
-            let Some(principal) = authenticated else {
+            let Some(authenticated) = authenticated else {
                 close(&mut socket, CLOSE_UNAUTHORIZED, "unauthorized".to_owned()).await;
                 return;
             };
-            principal
+            authenticated
         }
     };
+    // Cleared when the revocation channel closes, so the loop stops polling it.
+    let mut watching = true;
 
     // Subscribe before reading the backlog. An event committed in between is then both in the
     // backlog and in the subscription, and `Resume` drops the copy that arrives second.
@@ -208,6 +238,22 @@ async fn pump<C: ModelClient>(host: Host<C>, mut socket: WebSocket, from: Seq, a
                     return;
                 }
                 Err(RecvError::Closed) => return,
+            },
+            revoked = revocations.recv(), if watching => match revoked {
+                Ok(revoked) if revoked == token => {
+                    close(&mut socket, CLOSE_REVOKED, REVOKED_REASON.to_owned()).await;
+                    return;
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => {
+                    // Revocations were skipped, so this connection's own token is checked
+                    // directly rather than trusting the channel to have said everything.
+                    if host.tokens().principal(&token).is_none() {
+                        close(&mut socket, CLOSE_REVOKED, REVOKED_REASON.to_owned()).await;
+                        return;
+                    }
+                }
+                Err(RecvError::Closed) => watching = false,
             },
         }
     }
