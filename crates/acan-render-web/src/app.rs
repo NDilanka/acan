@@ -378,6 +378,8 @@ impl App {
     pub fn load_log(&mut self, json: &str) -> Result<(), JsError> {
         let entries = feed::entries(json).map_err(js_err)?;
         self.mirror = Some(Mirror::from_entries(entries).map_err(js_err)?);
+        // A replaced log is a seek: the drones land where the new log puts them.
+        self.motion.cut();
         self.dirty = true;
         Ok(())
     }
@@ -1174,6 +1176,9 @@ impl App {
         self.motion.set_px_units(self.dpr / self.camera.zoom());
         let riding = self.riding_agent();
         scene.beams = marks::beams(&self.motion, &self.marks, self.dpr, riding);
+        scene
+            .beams
+            .extend(marks::trail_beams(&self.motion, self.dpr, riding));
         scene.instances.extend(marks::mark_instances(
             &self.motion,
             &self.marks,

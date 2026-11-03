@@ -103,6 +103,13 @@ const ARC_CLEAR: f32 = 1.5 * BODY_RADIUS;
 /// Milliseconds a moving drone takes to turn to its way of travel at the start of a move, and to
 /// its target at the end.
 const FACE_MS: f32 = 150.0;
+/// A move's trail: the pieces it is cut into, its opacity as the drone passes, and the
+/// milliseconds each piece takes to fade out after that.
+const TRAIL_PIECES: usize = 24;
+const TRAIL_ALPHA: f32 = 0.45;
+const TRAIL_FADE_MS: f32 = 2_000.0;
+/// The width of a trail in CSS px.
+const TRAIL_PX: f32 = 1.0;
 /// A working drone's bob: its height on screen in CSS px, and its period.
 const BOB_PX: f32 = 1.0;
 const BOB_PERIOD_MS: f32 = 2_400.0;
@@ -753,6 +760,46 @@ impl Glide {
     }
 }
 
+/// The pen line a move leaves on the plinth plane, under the path the drone flew. Each piece
+/// inks in as the drone passes over it and fades out over [`TRAIL_FADE_MS`].
+#[derive(Debug, Clone, PartialEq)]
+struct Trail {
+    agent: String,
+    slot: usize,
+    from: [f32; 2],
+    to: [f32; 2],
+    duration: f32,
+    elapsed: f32,
+}
+
+impl Trail {
+    /// The pieces drawn now, as their ends and their opacity.
+    fn pieces(&self) -> Vec<([f32; 2], [f32; 2], f32)> {
+        let point = |share: f32| {
+            [
+                self.from[0] + (self.to[0] - self.from[0]) * share,
+                self.from[1] + (self.to[1] - self.from[1]) * share,
+            ]
+        };
+        (0..TRAIL_PIECES)
+            .filter_map(|i| {
+                let (start, end) = (
+                    i as f32 / TRAIL_PIECES as f32,
+                    (i + 1) as f32 / TRAIL_PIECES as f32,
+                );
+                let passed = self.duration * cubic_in_out_inverse(end);
+                let age = self.elapsed - passed;
+                let alpha = TRAIL_ALPHA * (1.0 - age / TRAIL_FADE_MS);
+                (age >= 0.0 && alpha > 0.0).then(|| (point(start), point(end), alpha))
+            })
+            .collect()
+    }
+
+    fn running(&self) -> bool {
+        self.elapsed < self.duration + TRAIL_FADE_MS
+    }
+}
+
 /// Milliseconds a move of `units` plan units takes.
 fn move_ms(units: f32) -> f32 {
     (MOVE_BASE_MS + MOVE_PER_UNIT_MS * units).clamp(MOVE_BOUNDS_MS.0, MOVE_BOUNDS_MS.1)
@@ -907,6 +954,10 @@ pub struct Motion {
     /// World units per CSS px at the drones, so the bob is [`BOB_PX`] on screen. Zero until the
     /// page sets it, which keeps every drone level.
     px_units: f32,
+    /// The trails of recent moves, oldest first.
+    trails: Vec<Trail>,
+    /// Whether the next sync lands every drone at once, as after a replay seek.
+    cut: bool,
 }
 
 impl Motion {
@@ -923,6 +974,13 @@ impl Motion {
         self.reduced = reduced;
     }
 
+    /// Lands every drone at its place at the next sync, with no glide and no trail, and clears the
+    /// trails there are. The page calls it when the log is replaced, as a replay seek does.
+    pub fn cut(&mut self) {
+        self.cut = true;
+        self.trails.clear();
+    }
+
     /// Sets how many world units a CSS px covers at the drones, which sizes the bob.
     pub fn set_px_units(&mut self, units: f32) {
         self.px_units = if units.is_finite() {
@@ -936,9 +994,9 @@ impl Motion {
     /// moves arcs from where it is, a body that leaves rises off its machine, and a pin that leaves
     /// sinks out.
     pub fn sync(&mut self, marks: &Marks) {
+        let jump = self.still || self.reduced || std::mem::take(&mut self.cut);
         for body in &marks.bodies {
             let top = body.target[2] - BEACON_RADIUS;
-            let jump = self.still || self.reduced;
             let glide = match self.bodies.get(&body.agent) {
                 Some(glide) if glide.to == body.at => {
                     self.sync_turn(body);
@@ -952,6 +1010,16 @@ impl Motion {
                 None => Glide::arrive(body.at, body.slot, top),
             };
             let moves = matches!(glide.path, Path::Move { .. });
+            if moves {
+                self.trails.push(Trail {
+                    agent: body.agent.clone(),
+                    slot: body.slot,
+                    from: [glide.from[0], glide.from[1]],
+                    to: [glide.to[0], glide.to[1]],
+                    duration: glide.duration,
+                    elapsed: 0.0,
+                });
+            }
             self.bodies.insert(body.agent.clone(), glide);
             if moves {
                 // The move's own heading carries the turn, so the drone ends facing its target.
@@ -978,6 +1046,8 @@ impl Motion {
             .collect();
         self.bodies.retain(|agent, _| live.contains(agent.as_str()));
         self.turns.retain(|agent, _| live.contains(agent.as_str()));
+        self.trails
+            .retain(|trail| live.contains(trail.agent.as_str()));
         for (agent, glide, heading) in gone {
             if !self.still && !self.reduced {
                 self.leaving.insert(
@@ -1097,6 +1167,10 @@ impl Motion {
         for leave in self.leaving.values_mut() {
             leave.elapsed += dt;
         }
+        for trail in &mut self.trails {
+            trail.elapsed += dt;
+        }
+        self.trails.retain(Trail::running);
         self.leaving.retain(|_, leave| leave.elapsed < LEAVE_MS);
         for rise in self.pins.values_mut() {
             rise.elapsed += dt;
@@ -1132,7 +1206,8 @@ impl Motion {
             .values()
             .any(|landing| landing.elapsed < LANDED_HOLD_MS);
         let fading = !self.fades.is_empty();
-        bodies || turning || pins || leaving || holding || fading || self.pulsing
+        let trailing = !self.trails.is_empty();
+        bodies || turning || pins || leaving || holding || fading || trailing || self.pulsing
     }
 
     /// How far a working agent's beacon has swollen now, from 0 at rest to 1 at the top of a pulse.
@@ -1419,6 +1494,30 @@ pub fn beams(motion: &Motion, marks: &Marks, dpr: f32, riding: Option<&str>) -> 
         .collect()
 }
 
+/// The trails now, as fine pen lines in each agent's hue on the plinth plane under the paths the
+/// drones flew. The riding agent leaves none, since the ride's camera flies the path itself.
+#[must_use]
+pub fn trail_beams(motion: &Motion, dpr: f32, riding: Option<&str>) -> Vec<Beam> {
+    motion
+        .trails
+        .iter()
+        .filter(|trail| riding != Some(trail.agent.as_str()))
+        .flat_map(|trail| {
+            let tint = body_tint(trail.slot);
+            trail.pieces().into_iter().map(move |(a, b, alpha)| Beam {
+                from: [a[0], a[1], PLINTH_TOP],
+                to: [b[0], b[1], PLINTH_TOP],
+                origin: [0.0; 3],
+                grow: [0.0; 2],
+                turn: 0.0,
+                tint,
+                alpha,
+                width_px: TRAIL_PX * dpr,
+            })
+        })
+        .collect()
+}
+
 /// Where a flag anchors on screen, in CSS px, given its point `at` in world units and how the
 /// camera projects a world point to the screen. A drone's flag anchors above its crown, and the
 /// page stacks the flags of one machine above it with a leader. A clash flag anchors to the right
@@ -1483,6 +1582,16 @@ fn ease(t: f32) -> f32 {
 fn cubic_out(t: f32) -> f32 {
     let u = 1.0 - t.clamp(0.0, 1.0);
     1.0 - u * u * u
+}
+
+/// The share of a move's time at which [`cubic_in_out`] reaches `y`.
+fn cubic_in_out_inverse(y: f32) -> f32 {
+    let y = y.clamp(0.0, 1.0);
+    if y < 0.5 {
+        (y / 4.0).cbrt()
+    } else {
+        1.0 - (2.0 * (1.0 - y)).cbrt() / 2.0
+    }
 }
 
 fn cubic_in_out(t: f32) -> f32 {
@@ -2745,6 +2854,106 @@ mod tests {
             motion.advance(BOB_PERIOD_MS / 4.0);
             assert_eq!(motion.bob(0), 0.0, "and does not bob");
         }
+    }
+
+    /// A drone that has settled on one machine and then moves to another, 200 units east.
+    fn moved(motion: &mut Motion) {
+        let at = |x: f32| drone("a", [x, 0.0, 40.0], [x, 30.0, 9.0], "idle");
+        motion.sync(&marks_of(vec![at(0.0)]));
+        motion.advance(ARRIVE_MS + TURN_MS);
+        motion.sync(&marks_of(vec![at(200.0)]));
+    }
+
+    #[test]
+    fn a_move_leaves_a_trail_that_inks_in_behind_the_drone_and_fades_over_two_seconds() {
+        let mut motion = Motion::default();
+        motion.sync(&marks_of(vec![drone(
+            "a",
+            [0.0, 0.0, 40.0],
+            [0.0, 30.0, 9.0],
+            "idle",
+        )]));
+        assert!(
+            trail_beams(&motion, 1.0, None).is_empty(),
+            "an arrival leaves no trail"
+        );
+        motion.advance(ARRIVE_MS + TURN_MS);
+        motion.sync(&marks_of(vec![drone(
+            "a",
+            [200.0, 0.0, 40.0],
+            [200.0, 30.0, 9.0],
+            "idle",
+        )]));
+        let duration = move_ms(200.0);
+        motion.advance(duration / 2.0);
+        let half = trail_beams(&motion, 2.0, None);
+        assert_eq!(half.len(), TRAIL_PIECES / 2, "half the way is inked");
+        assert!(
+            half.iter()
+                .all(|beam| beam.from[2] == PLINTH_TOP && beam.width_px == 2.0)
+        );
+        assert!(
+            half.iter()
+                .all(|beam| beam.alpha <= TRAIL_ALPHA && beam.alpha > 0.0)
+        );
+        assert_eq!(half[0].tint, body_tint(0), "the trail is the agent's hue");
+        motion.advance(duration / 2.0);
+        let full = trail_beams(&motion, 1.0, None);
+        assert_eq!(full.len(), TRAIL_PIECES, "at most 24 pieces");
+        assert!(
+            full[0].alpha < full[TRAIL_PIECES - 1].alpha,
+            "the oldest piece is the faintest"
+        );
+        assert!(
+            motion.advance(TRAIL_FADE_MS - 1.0),
+            "the fade keeps frames coming"
+        );
+        motion.advance(1.0);
+        assert!(trail_beams(&motion, 1.0, None).is_empty(), "gone after 2 s");
+        assert!(!motion.advance(16.0), "and the page goes idle");
+    }
+
+    #[test]
+    fn no_trail_under_freeze_reduced_motion_a_seek_or_a_ride() {
+        let mut still = Motion::new(true);
+        moved(&mut still);
+        assert!(trail_beams(&still, 1.0, None).is_empty(), "freeze");
+        let mut reduced = Motion::default();
+        reduced.set_reduced(true);
+        moved(&mut reduced);
+        assert!(
+            trail_beams(&reduced, 1.0, None).is_empty(),
+            "reduced motion"
+        );
+        let mut seek = Motion::default();
+        seek.sync(&marks_of(vec![drone(
+            "a",
+            [0.0, 0.0, 40.0],
+            [0.0, 30.0, 9.0],
+            "idle",
+        )]));
+        seek.advance(ARRIVE_MS);
+        seek.cut();
+        seek.sync(&marks_of(vec![drone(
+            "a",
+            [200.0, 0.0, 40.0],
+            [200.0, 30.0, 9.0],
+            "idle",
+        )]));
+        assert_eq!(seek.body_at("a"), Some([200.0, 0.0, 40.0]), "a seek jumps");
+        seek.advance(100.0);
+        assert!(
+            trail_beams(&seek, 1.0, None).is_empty(),
+            "a seek leaves no trail"
+        );
+        let mut ride = Motion::default();
+        moved(&mut ride);
+        ride.advance(move_ms(200.0));
+        assert!(!trail_beams(&ride, 1.0, None).is_empty());
+        assert!(
+            trail_beams(&ride, 1.0, Some("a")).is_empty(),
+            "the ride's drone leaves none"
+        );
     }
 
     #[test]
