@@ -604,25 +604,47 @@ fn admitted_spec(spec: &str) -> bool {
     let spec = spec.trim();
     match spec.strip_prefix("npm:") {
         Some(alias) => match alias.rfind('@') {
-            Some(at) if at > 0 => is_package_name(&alias[..at]) && admitted_range(&alias[at + 1..]),
+            Some(at) if at > 0 => {
+                is_package_name(&alias[..at]) && admitted_version(&alias[at + 1..])
+            }
             _ => is_package_name(alias),
         },
-        None => admitted_range(spec),
+        None => admitted_version(spec),
     }
 }
 
-/// Whether a version range or a tag holds only the characters of a semver range. A path, a
-/// relative name, and a tarball name fall outside that grammar.
+/// Whether a version range or a dist-tag names a version of the registry's package.
+fn admitted_version(spec: &str) -> bool {
+    admitted_range(spec) || admitted_tag(spec)
+}
+
+/// Whether a version range holds only the characters of a semver range.
 fn admitted_range(range: &str) -> bool {
-    let range = range.trim();
-    let lower = range.to_ascii_lowercase();
-    !range.starts_with('.')
+    range
+        .trim()
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || " .-+*<>=|~^".contains(c))
+        && plain_spec(range)
+}
+
+/// Whether a dist-tag holds only the characters npm writes in a tag, such as `canary_1` or
+/// `beta!`. A tag with a `/` or a `:` names another source, and so does one that is a path.
+fn admitted_tag(tag: &str) -> bool {
+    tag.trim()
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_.~!".contains(c))
+        && plain_spec(tag)
+}
+
+/// Whether a spec is not a relative path or a tarball name, which npm would fetch from the file
+/// system rather than the registry.
+fn plain_spec(spec: &str) -> bool {
+    let spec = spec.trim();
+    let lower = spec.to_ascii_lowercase();
+    !spec.starts_with('.')
         && !lower.ends_with(".tgz")
         && !lower.ends_with(".tar")
         && !lower.ends_with(".tar.gz")
-        && range
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || " .-+*<>=|~^".contains(c))
 }
 
 /// Whether `name` is a package name: an optional scope and a name, each of the URL-safe characters
@@ -1251,9 +1273,31 @@ mod tests {
             "npm:left-pad@^1.3.0",
             "npm:@scope/left-pad@1.3.0",
             "npm:left-pad",
+            "canary_1",
+            "beta!",
+            "next-1.0",
+            "npm:left-pad@canary_1",
         ] {
             let manifest = format!(r#"{{"dependencies": {{"left-pad": "{spec}"}}}}"#);
             assert_eq!(manifest_refusal(&manifest), None, "{spec:?} is admitted");
+        }
+    }
+
+    #[test]
+    fn a_dist_tag_shaped_like_a_path_a_tarball_or_another_source_is_refused() {
+        for spec in [
+            "beta.tgz",
+            "beta.tar",
+            "beta.tar.gz",
+            ".beta",
+            "beta/x",
+            "beta:1",
+            "beta#x",
+            "beta@1",
+        ] {
+            let manifest = format!(r#"{{"dependencies": {{"left-pad": "{spec}"}}}}"#);
+            let text = manifest_refusal(&manifest).expect("the spec is refused");
+            assert!(!text.contains(spec), "the spec is not echoed: {text}");
         }
     }
 
