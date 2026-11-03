@@ -1220,7 +1220,7 @@ mod tests {
     #[test]
     fn a_source_other_than_the_registry_is_refused_and_no_url_is_named() {
         let sources = [
-            "http://169.254.169.254/latest/meta-data.tgz",
+            "http://192.0.2.10/pkg.tgz",
             "https://10.0.0.5/pkg.tgz",
             "git+ssh://git@github.com/x/y.git#abc",
             "file:../../outside",
@@ -1262,7 +1262,7 @@ mod tests {
     /// hold them.
     const OTHER_SOURCES: [&str; 9] = [
         "https://evil.example.test/left-pad.tgz",
-        "http://169.254.169.254/latest/meta-data.tgz",
+        "http://192.0.2.10/pkg.tgz",
         "git+ssh://git@github.com/x/y.git#abc",
         "github:x/y",
         "x/y",
@@ -1487,7 +1487,7 @@ mod tests {
                 assert!(!text.contains(source), "the selector is not echoed: {text}");
             }
         }
-        let lock = r#"{"lockfileVersion": 3, "packages": {"": {"overrides": {"left-pad@http://169.254.169.254/x.tgz": {}}}}}"#;
+        let lock = r#"{"lockfileVersion": 3, "packages": {"": {"overrides": {"left-pad@http://192.0.2.10/x.tgz": {}}}}}"#;
         assert!(
             refusal(lock).is_some(),
             "a lockfile selector is refused too"
@@ -2111,14 +2111,14 @@ mod tests {
 
     #[test]
     fn under_compares_whole_components_without_case() {
-        assert!(under(Path::new("/home/me/cache"), Path::new("/home/me")));
-        assert!(under(Path::new("/home/me"), Path::new("/home/me")));
-        assert!(under(Path::new("/HOME/Me/cache"), Path::new("/home/me")));
+        assert!(under(Path::new("/srv/me/cache"), Path::new("/srv/me")));
+        assert!(under(Path::new("/srv/me"), Path::new("/srv/me")));
+        assert!(under(Path::new("/SRV/Me/cache"), Path::new("/srv/me")));
         assert!(
-            !under(Path::new("/home/meg/cache"), Path::new("/home/me")),
+            !under(Path::new("/srv/meg/cache"), Path::new("/srv/me")),
             "a prefix of a name is not the name"
         );
-        assert!(!under(Path::new("/home/me/../you"), Path::new("/home/me")));
+        assert!(!under(Path::new("/srv/me/../you"), Path::new("/srv/me")));
     }
 
     #[test]
