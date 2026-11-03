@@ -14,14 +14,14 @@ use acan_core::{
     ScopeConfirmation, ScopeDraftOutcome, Seq, Stamped, TaskId, TaskState,
 };
 use acan_intent::{
-    ContrastExample, ContrastExampleHash, EpisodeId, GetReceiptRequest, GetReceiptResponse,
-    GetRulingsRequest, GetRulingsResponse, GetScopeRequest, GetScopeResponse, LedgerHead,
-    MachineId, McpError, McpErrorCode, McpV1, NormalizationHash, NormalizationVersion, ProbeHash,
-    ScopeHash, Selector, TaskRef,
+    AppContractV1, EpisodeId, GetReceiptRequest, GetReceiptResponse, GetRulingsRequest,
+    GetRulingsResponse, GetScopeRequest, GetScopeResponse, MachineId, McpError, McpErrorCode,
+    McpV1, TaskRef,
 };
-use acan_llm::{ModelClient, UsageTotals};
+use acan_llm::{ModelClient, Role, RoleStatus, UsageTotals};
 use acan_scan::Plant;
-use axum::extract::{Path, Query, State};
+use axum::body::Bytes;
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -31,7 +31,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::auth::Principal;
-use crate::examples;
 use crate::host::{Host, SubmitError};
 use crate::intent_api::{self, IntentError};
 use crate::jobs;
@@ -39,8 +38,10 @@ use crate::mcp;
 use crate::plant_view;
 use crate::public::{self, PublicRoot};
 use crate::release::{self, BugReport, UpdateStatus, VersionInfo};
+use crate::ruling::{self, RulingBody, RulingDraftView};
 use crate::vision::{self, Side, VisionWitness};
-use crate::{STATE_DIR, redact, setup, stream};
+use crate::workers::{Board, WorkersView};
+use crate::{STATE_DIR, observe, redact, setup, stream};
 
 /// Builds the router. The public files are served for every path the API does not claim.
 pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<PublicRoot>) -> Router {
@@ -51,8 +52,10 @@ pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<Public
         .route("/api/commands", post(post_command::<C>))
         .route("/api/events", get(get_events::<C>))
         .route("/api/plant", get(get_plant::<C>))
+        .route("/api/contract", get(get_contract::<C>))
         .route("/api/scan", post(post_scan::<C>))
         .route("/api/usage", get(get_usage::<C>))
+        .route("/api/workers", get(get_workers::<C>))
         .route("/api/update", get(get_update::<C>))
         .route("/api/bug-report", get(get_bug_report::<C>))
         .route("/setup", get(setup::page))
@@ -74,6 +77,10 @@ pub(crate) fn router<C: ModelClient + 'static>(host: Host<C>, web: Option<Public
         .route(
             "/api/orders/{order}/episodes/{episode}/ruling-draft",
             get(get_ruling_draft::<C>),
+        )
+        .route(
+            "/api/orders/{order}/episodes/{episode}/ruling",
+            post(post_ruling::<C>),
         )
         .route("/api/tasks/{task}/vision", get(get_vision::<C>))
         .route(
@@ -239,15 +246,38 @@ async fn version() -> Json<VersionInfo> {
 
 /// Every human command. The scope-first human commands arrive here too, as bodies: ReviseScope,
 /// ConfirmScope, ResolveContest and RecordRuling. Only a member reaches the origin, and the origin
-/// checks that the member is the order's poster or an owner. An agent token gets 403 here.
+/// checks that the member is the order's poster or an owner. An agent token gets 403 here. A scope
+/// revision with a fixed base anchor in a must-keep rule gets 400, see [`refuse_fixed_must_keep`].
 async fn post_command<C: ModelClient + 'static>(
     State(host): State<Host<C>>,
     headers: HeaderMap,
     Json(cmd): Json<HumanCmd>,
 ) -> Result<Json<Vec<Stamped>>, ApiError> {
     let member = member(&host, &headers)?;
+    refuse_fixed_must_keep(&cmd)?;
     let events = host.submit(Command::Human { member, cmd }).await?;
     Ok(Json(events))
+}
+
+/// Refuses a scope revision whose must-keep obligations name a saved example as their base. A later
+/// gate run loads no saved examples, so it would read such an obligation as unknown and block on
+/// it. The rule's predicates are checked at any depth, so a fixed anchor under `all` is refused too.
+fn refuse_fixed_must_keep(cmd: &HumanCmd) -> Result<(), ApiError> {
+    let HumanCmd::ReviseScope { scope, .. } = cmd else {
+        return Ok(());
+    };
+    let fixed = scope
+        .body
+        .must_keep
+        .iter()
+        .flat_map(|rule| rule.obligations.iter())
+        .any(|obligation| !obligation.predicate.fixed_anchors().is_empty());
+    if fixed {
+        return Err(ApiError::BadRequest(
+            "must-keep predicate must use a fresh base anchor: fixed anchors are not supported yet",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -272,13 +302,48 @@ async fn get_events<C: ModelClient + 'static>(
     Ok(Json(views))
 }
 
+/// The plant, with the two flags the UI reads from it: whether the protected app contract is in
+/// place, and whether the advisory vision check runs. The plant's own fields stay at the top level.
+#[derive(Serialize)]
+struct PlantResponse {
+    #[serde(flatten)]
+    plant: Plant,
+    contract: ContractView,
+    vision: VisionView,
+}
+
 async fn get_plant<C: ModelClient + 'static>(
     State(host): State<Host<C>>,
     headers: HeaderMap,
-) -> Result<Json<Plant>, ApiError> {
+) -> Result<Json<PlantResponse>, ApiError> {
     authenticate(&host, bearer(&headers))?;
-    let scan = host.scan();
-    Ok(Json(scan.plant.clone()))
+    let plant = host.scan().plant.clone();
+    // The plant still loads when the protected head cannot be read. The contract then reads absent.
+    let contract = match contract_of(&host).await {
+        Ok(contract) => contract,
+        Err(err) => {
+            tracing::warn!(error = ?err, "the protected app contract could not be read for the plant");
+            ContractView {
+                present: false,
+                version: None,
+            }
+        }
+    };
+    Ok(Json(PlantResponse {
+        plant,
+        contract,
+        vision: vision_of(&host),
+    }))
+}
+
+/// Whether the protected app contract is in place, and its version. Any authenticated principal may
+/// read it: it is the protected head's file, and the agent's worktree holds the same one.
+async fn get_contract<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+) -> Result<Json<ContractView>, ApiError> {
+    authenticate(&host, bearer(&headers))?;
+    Ok(Json(contract_of(&host).await?))
 }
 
 async fn post_scan<C: ModelClient + 'static>(
@@ -298,6 +363,17 @@ async fn get_usage<C: ModelClient + 'static>(
     Ok(Json(host.ledger().snapshot()))
 }
 
+/// The local workers this server runs and what each is doing. Members only, since an agent token
+/// reads the origin through MCP, not through this route.
+async fn get_workers<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    Extension(board): Extension<Board>,
+    headers: HeaderMap,
+) -> Result<Json<WorkersView>, ApiError> {
+    member(&host, &headers)?;
+    Ok(Json(board.view()))
+}
+
 /// The update check's status. Any principal may read it.
 async fn get_update<C: ModelClient + 'static>(
     State(host): State<Host<C>>,
@@ -315,6 +391,68 @@ async fn get_bug_report<C: ModelClient + 'static>(
 ) -> Result<Json<BugReport>, ApiError> {
     member(&host, &headers)?;
     Ok(Json(release::bug_report()))
+}
+
+/// Whether the protected app contract is in place at the protected head, and its version.
+#[derive(Serialize)]
+pub(crate) struct ContractView {
+    present: bool,
+    version: Option<String>,
+}
+
+/// The contract at the protected head, read from the same snapshot the gate tests against. It is
+/// present when the app contract and the probe corpus both read and decode, since the gate needs
+/// both. A server with no git repository has no protected head to read, so that is an error.
+pub(crate) async fn contract_of<C: ModelClient>(host: &Host<C>) -> Result<ContractView, ApiError> {
+    let workspace = host
+        .workspace()
+        .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("the server has no git repository")))?;
+    let snapshot = jobs::protected_snapshot(workspace.repo(), &host.repo().join(STATE_DIR)).await?;
+    Ok(match observe::read_protected(&snapshot) {
+        Ok(_) => ContractView {
+            present: true,
+            version: Some(AppContractV1::TAG.to_owned()),
+        },
+        Err(_) => ContractView {
+            present: false,
+            version: None,
+        },
+    })
+}
+
+/// Whether the advisory vision check runs, and why it does not. The UI reads this rather than
+/// parsing the reason a vision record gives.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct VisionView {
+    on: bool,
+    reason: Option<String>,
+}
+
+/// The vision flag of this server: the check runs when the server runs it and a provider serves
+/// the vision role.
+fn vision_of<C: ModelClient>(host: &Host<C>) -> VisionView {
+    let keys = host.client().key_status();
+    vision_view(host.vision().is_some(), keys.role(Role::Vision))
+}
+
+/// The vision flag from whether the server runs the check and the status of the vision role.
+fn vision_view(configured: bool, role: Option<&RoleStatus>) -> VisionView {
+    if !configured {
+        return VisionView {
+            on: false,
+            reason: Some("the server runs no vision checks".to_owned()),
+        };
+    }
+    match role {
+        Some(status) => VisionView {
+            on: status.off_reason.is_none(),
+            reason: status.off_reason.map(str::to_owned),
+        },
+        None => VisionView {
+            on: false,
+            reason: Some("no model serves vision".to_owned()),
+        },
+    }
 }
 
 /// Where a claimed task's worktree is, the branch it is on, and the protected-head snapshot its
@@ -508,38 +646,8 @@ async fn get_scope_confirmation<C: ModelClient + 'static>(
     Ok(Json(body))
 }
 
-/// What a member needs to rule on one discrepancy episode: the contrast examples kept for it, the
-/// example the ruling is on, and the hashes and versions a decision names. Members only, since a
-/// human rules. The draft confirms nothing. `RecordRuling` checks the decision a member sends.
-#[derive(Serialize)]
-struct RulingDraftView {
-    order: String,
-    episode: EpisodeId,
-    scope_hash: ScopeHash,
-    ledger_head: LedgerHead,
-    selector: Selector,
-    probe_hash: ProbeHash,
-    /// The example the ruling is on: the episode's latest candidate run, for its probe.
-    ruled_on: ContrastExampleHash,
-    normalization_version: NormalizationVersion,
-    normalization_hash: NormalizationHash,
-    /// Every example kept for the episode, by run and then hash.
-    examples: Vec<DraftExample>,
-}
-
-/// One example kept for an episode, with the normalization it was compared under.
-#[derive(Serialize)]
-struct DraftExample {
-    run: String,
-    hash: ContrastExampleHash,
-    probe_hash: ProbeHash,
-    normalization_version: NormalizationVersion,
-    normalization_hash: NormalizationHash,
-    example: ContrastExample,
-}
-
-/// The ruling draft of an episode. The episode's latest evidence names the candidate run the
-/// ruling is on, so the example of that run and the episode's probe is `ruled_on`.
+/// The ruling draft of an episode: what a member rules from. Members only, since a human rules.
+/// See [`ruling::draft`].
 async fn get_ruling_draft<C: ModelClient + 'static>(
     State(host): State<Host<C>>,
     headers: HeaderMap,
@@ -548,89 +656,26 @@ async fn get_ruling_draft<C: ModelClient + 'static>(
     member(&host, &headers)?;
     let order: OrderId = order.parse().map_err(|_| ApiError::NotFound("order"))?;
     let episode: EpisodeId = episode.parse().map_err(|_| ApiError::NotFound("episode"))?;
-    let (scope_hash, ledger_head, selector, latest) = host.read(|world| {
-        let lane = world
-            .lane(order)
-            .ok_or(ApiError::NotFound("scope for this order"))?;
-        let found = lane
-            .episodes
-            .get(&episode)
-            .ok_or(ApiError::NotFound("episode"))?;
-        let latest = found
-            .evidence
-            .last()
-            .ok_or(ApiError::NotFound("evidence for this episode"))?;
-        Ok::<_, ApiError>((
-            lane.scope_hash,
-            world.ledger().head(),
-            found.selector.clone(),
-            (latest.run.to_string(), latest.probe_hash),
-        ))
-    })?;
-    let (run, probe_hash) = latest;
-    let dir = host.repo().join(STATE_DIR).join(examples::DIR);
-    let kept = examples::read(&dir, &episode).map_err(|err| ApiError::Internal(err.into()))?;
-    let examples = kept
-        .into_iter()
-        .map(|stored| {
-            let internal = |err| ApiError::Internal(anyhow::Error::from(err));
-            let probe = stored.example.probe.spec.probe_hash().map_err(internal)?;
-            let normalization = &stored.example.probe.normalization;
-            Ok(DraftExample {
-                run: stored.run,
-                hash: stored.hash,
-                probe_hash: probe,
-                normalization_version: normalization.version.clone(),
-                normalization_hash: normalization.normalization_hash().map_err(internal)?,
-                example: stored.example,
-            })
-        })
-        .collect::<Result<Vec<_>, ApiError>>()?;
-    let ruled = ruled_example(&examples, &run, probe_hash)?;
-    Ok(Json(RulingDraftView {
-        order: order.to_string(),
-        episode,
-        scope_hash,
-        ledger_head,
-        selector,
-        probe_hash,
-        ruled_on: ruled.hash,
-        normalization_version: ruled.normalization_version.clone(),
-        normalization_hash: ruled.normalization_hash,
-        examples,
-    }))
+    Ok(Json(ruling::draft(&host, order, episode)?))
 }
 
-/// The example a ruling is on: the one kept for the episode's latest run and probe. A run that
-/// crashed before its receipt was recorded is run again under the same id, and the store then holds
-/// an example from each attempt. The receipt does not say which attempt it rests on, so when more
-/// than one example matches, the draft refuses rather than pick one.
-fn ruled_example<'a>(
-    examples: &'a [DraftExample],
-    run: &str,
-    probe_hash: ProbeHash,
-) -> Result<&'a DraftExample, ApiError> {
-    let mut matching = examples
-        .iter()
-        .filter(|kept| kept.run == run && kept.probe_hash == probe_hash);
-    match (matching.next(), matching.next()) {
-        (None, _) => Err(ApiError::NotFound(
-            "retained example for the episode's latest run",
-        )),
-        (Some(kept), None) => Ok(kept),
-        (Some(_), Some(_)) => {
-            let message = format!(
-                "two retained examples match run {run}: the receipt does not say which \
-                 attempt it rests on, so the ruling draft refuses"
-            );
-            Err(ApiError::Refused(McpError::new(
-                McpErrorCode::StaleEvidence {
-                    detail: message.clone(),
-                },
-                message,
-            )))
-        }
-    }
+/// A member's ruling on one episode. The body is the decision and predicate the member chose and
+/// the draft it was made from; the server builds the ledger event. Members only, since a human
+/// rules. See [`ruling::record`].
+async fn post_ruling<C: ModelClient + 'static>(
+    State(host): State<Host<C>>,
+    headers: HeaderMap,
+    Path((order, episode)): Path<(String, String)>,
+    body: Bytes,
+) -> Result<Json<Vec<Stamped>>, ApiError> {
+    let member = member(&host, &headers)?;
+    let order: OrderId = order.parse().map_err(|_| ApiError::NotFound("order"))?;
+    let episode: EpisodeId = episode.parse().map_err(|_| ApiError::NotFound("episode"))?;
+    let body: RulingBody =
+        serde_json::from_slice(&body).map_err(|_| ApiError::BadRequest("ruling body"))?;
+    Ok(Json(
+        ruling::record(&host, &member, order, episode, body).await?,
+    ))
 }
 
 /// The latest receipt of a task's gate runs.
@@ -742,58 +787,61 @@ fn invalid_request(detail: &str) -> ApiError {
 mod tests {
     use super::*;
 
-    /// A kept example of the fixture's probe, filed under `run`. `digit` names its hash.
-    fn kept(run: &str, digit: &str) -> DraftExample {
-        let example: ContrastExample = serde_json::from_str(include_str!(
-            "../../acan-intent/fixtures/contrast-example.json"
-        ))
-        .expect("the fixture decodes");
-        DraftExample {
-            run: run.to_owned(),
-            hash: ContrastExampleHash::from_str(&format!("sha256:{}", digit.repeat(64)))
-                .expect("a hash"),
-            probe_hash: example.probe.spec.probe_hash().expect("hashing"),
-            normalization_version: example.probe.normalization.version.clone(),
-            normalization_hash: example
-                .probe
-                .normalization
-                .normalization_hash()
-                .expect("hashing"),
-            example,
+    fn vision_role(off_reason: Option<&'static str>) -> RoleStatus {
+        RoleStatus {
+            role: Role::Vision,
+            provider: off_reason.is_none().then(|| "meta".to_owned()),
+            picked: false,
+            off_reason,
+            meta_only: true,
         }
     }
 
     #[test]
-    fn the_one_example_of_the_latest_run_and_probe_is_the_ruled_one() {
-        let examples = [kept("run-1", "a"), kept("run-2", "b")];
-        let probe = examples[0].probe_hash;
-        let ruled = ruled_example(&examples, "run-1", probe).expect("one example matches");
-        assert_eq!(ruled.hash, examples[0].hash);
+    fn a_server_that_runs_no_vision_checks_says_so() {
+        let view = vision_view(false, Some(&vision_role(None)));
+        assert_eq!(
+            view,
+            VisionView {
+                on: false,
+                reason: Some("the server runs no vision checks".to_owned()),
+            }
+        );
     }
 
     #[test]
-    fn two_examples_of_the_latest_run_refuse_rather_than_pick_one() {
-        // A run that crashed before its receipt was recorded runs again under the same id, and
-        // the store then keeps an example from each attempt.
-        let examples = [kept("run-1", "a"), kept("run-1", "b")];
-        let probe = examples[0].probe_hash;
-        match ruled_example(&examples, "run-1", probe).err() {
-            Some(ApiError::Refused(err)) => assert!(
-                matches!(err.error, McpErrorCode::StaleEvidence { .. }),
-                "two matches are stale evidence: {:?}",
-                err.error
-            ),
-            other => panic!("two matching examples must refuse, got {other:?}"),
-        }
+    fn vision_is_on_when_a_provider_serves_its_role() {
+        let view = vision_view(true, Some(&vision_role(None)));
+        assert_eq!(
+            view,
+            VisionView {
+                on: true,
+                reason: None,
+            }
+        );
     }
 
     #[test]
-    fn no_example_of_the_latest_run_is_not_found() {
-        let examples = [kept("run-1", "a")];
-        let probe = examples[0].probe_hash;
-        assert!(matches!(
-            ruled_example(&examples, "run-2", probe).err(),
-            Some(ApiError::NotFound(_))
-        ));
+    fn vision_is_off_with_the_reason_its_role_gives() {
+        let view = vision_view(true, Some(&vision_role(Some("it needs a Meta key"))));
+        assert_eq!(
+            view,
+            VisionView {
+                on: false,
+                reason: Some("it needs a Meta key".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn vision_is_off_when_no_model_lists_its_role() {
+        let view = vision_view(true, None);
+        assert_eq!(
+            view,
+            VisionView {
+                on: false,
+                reason: Some("no model serves vision".to_owned()),
+            }
+        );
     }
 }

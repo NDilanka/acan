@@ -129,6 +129,7 @@ dependencies = [
 name = "acan-server"
 version = "0.1.0"
 dependencies = [
+ "acan-agent",
  "acan-core",
  "acan-git",
  "acan-intent",

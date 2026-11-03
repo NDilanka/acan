@@ -231,17 +231,18 @@ async fn close(socket: &mut WebSocket, code: u16, reason: String) {
     let _ = socket.send(Message::Close(Some(frame))).await;
 }
 
-/// A gate each stream waits at once, after its backlog and before its first live event. Tests
-/// hold it to fall a stream behind the live buffer without depending on socket buffer sizes.
+/// A gate a test can hold at one point of the server: each stream after its backlog, so a test
+/// can fall a stream behind the live buffer without depending on socket buffer sizes, and each
+/// ruling after its checks and before the writer decides it.
 #[cfg(test)]
 #[derive(Debug, Clone)]
-pub(crate) struct StreamHold {
+pub(crate) struct Hold {
     held: std::sync::Arc<watch::Sender<bool>>,
     parked: std::sync::Arc<watch::Sender<usize>>,
 }
 
 #[cfg(test)]
-impl Default for StreamHold {
+impl Default for Hold {
     fn default() -> Self {
         Self {
             held: std::sync::Arc::new(watch::Sender::new(false)),
@@ -251,8 +252,8 @@ impl Default for StreamHold {
 }
 
 #[cfg(test)]
-impl StreamHold {
-    /// Makes every stream that reaches the gate wait there.
+impl Hold {
+    /// Makes every request that reaches the gate wait there.
     pub(crate) fn hold(&self) {
         self.held.send_replace(true);
     }
@@ -262,7 +263,7 @@ impl StreamHold {
         self.held.send_replace(false);
     }
 
-    /// Resolves once `count` streams have reached the gate since the server started.
+    /// Resolves once `count` requests have reached the gate since the server started.
     pub(crate) async fn parked(&self, count: usize) {
         let _ = self
             .parked
@@ -271,7 +272,7 @@ impl StreamHold {
             .await;
     }
 
-    async fn wait(&self) {
+    pub(crate) async fn wait(&self) {
         self.parked.send_modify(|parked| *parked += 1);
         let _ = self.held.subscribe().wait_for(|held| !*held).await;
     }
