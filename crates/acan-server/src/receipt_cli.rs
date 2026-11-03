@@ -805,6 +805,12 @@ fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '/')
 }
 
+/// Whether a character can be part of a bearer token: the RFC 6750 `b64token` set. A quote, a
+/// bracket or a comma after a token is not part of it, so it is kept.
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~' | '+' | '/' | '=')
+}
+
 /// Replaces the token after every `Bearer ` in `text`, matched without regard to case.
 fn redact_bearer(text: &str) -> String {
     const PREFIX: &str = "bearer ";
@@ -815,7 +821,7 @@ fn redact_bearer(text: &str) -> String {
         let start = cursor + found + PREFIX.len();
         out.push_str(&text[cursor..start]);
         let end = text[start..]
-            .find(char::is_whitespace)
+            .find(|c: char| !is_token_char(c))
             .map_or(text.len(), |offset| start + offset);
         if end > start {
             out.push_str(REDACTED);
@@ -1193,6 +1199,15 @@ mod tests {
         );
         assert!(redacted.contains("Bearer <redacted>"));
         assert!(redacted.ends_with("done"), "text after the secret is kept");
+    }
+
+    #[test]
+    fn a_quote_after_a_bearer_token_is_kept() {
+        let text = "header: \"Bearer ab.cd-ef~1+2/3=\", next: 'Bearer xyz'`ok`";
+        assert_eq!(
+            redact_bearer(text),
+            "header: \"Bearer <redacted>\", next: 'Bearer <redacted>'`ok`"
+        );
     }
 
     #[test]
