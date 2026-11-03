@@ -37,7 +37,7 @@ import {
   setCanvas,
   state,
 } from "./state.js";
-import { playOf, syncPlantViews } from "./plant.js";
+import { markReplayReceipts, playOf, syncPlantViews } from "./plant.js";
 import { bindPlate, paintPlate, stepBy, toggleMode, togglePlay } from "./plate.js";
 import { startReplay } from "./replay.js";
 import { bindShell, startShell } from "./shell.js";
@@ -175,9 +175,15 @@ function paint() {
   paintMarks();
   paintUsage();
   paintStale();
-  syncPlantViews(state, get, paintPlate);
+  // A replay has no origin to ask, so it makes no plant-view or route call. Its receipts and
+  // scopes say what the replay lacks instead (see `markReplayReceipts` and the Seal block).
+  if (replay) {
+    markReplayReceipts(state);
+  } else {
+    syncPlantViews(state, get, paintPlate);
+    syncSeals(state, get, paintSlip);
+  }
   paintPlate();
-  syncSeals(state, get, paintSlip);
   paintSlip();
   requestUsage(state, get, paintUsage);
   syncVision();

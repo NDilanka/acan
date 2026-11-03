@@ -18,6 +18,27 @@ export const RECHECK_FOR_MS = 180_000;
 // The browser's timer and clock. A test passes its own.
 const BROWSER_TIMERS = { schedule: (fn, wait) => setTimeout(fn, wait), now: () => Date.now() };
 
+// What the receipt says in a replay, which has no origin to ask for a view.
+export const REPLAY_PLATE_LINE = "The plant view is not in this replay, so no tour plays here.";
+
+// A replay makes no plant-view call. Each receipt gets an entry that says the view is not in the
+// replay, kept with the count it was for, so a count that moves gets a new entry.
+export function markReplayReceipts(state) {
+  for (const { order, recorded } of state.view.receipts) {
+    if (state.plantViews.get(order)?.recorded === recorded) continue;
+    state.plantViews.set(order, {
+      recorded,
+      summary: null,
+      error: null,
+      play: null,
+      playError: null,
+      items: [],
+      since: null,
+      replay: true,
+    });
+  }
+}
+
 // `fetchText` is the stream's `get`. A failed fetch or check is kept with the count it was for,
 // so the order is not asked again until its count moves. `timers` sets the recheck's timer and
 // reads the clock.

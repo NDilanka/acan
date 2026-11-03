@@ -134,8 +134,9 @@ impl Mirror {
     }
 
     /// Applies one entry of the log or the stream. An event this build cannot read is passed over
-    /// and counted. Once one has been passed over, an event the world refuses is passed over too:
-    /// the event it depends on may be one this build cannot read.
+    /// and counted. An event the origin withheld from this reader is passed over and not counted.
+    /// Once one has been passed over, an event the world refuses is passed over too: the event it
+    /// depends on may be one this build cannot read.
     ///
     /// # Errors
     ///
@@ -144,6 +145,7 @@ impl Mirror {
     pub fn ingest_entry(&mut self, entry: Entry) -> Result<(), ReplayError> {
         match entry {
             Entry::Unknown(seq) => self.pass_over(seq),
+            Entry::Withheld(seq) => self.replica.skip(seq),
             Entry::Known(stamped) => match self.ingest(&stamped) {
                 Err(ReplayError::InvalidEvent { .. }) if self.not_shown > 0 => {
                     self.pass_over(stamped.seq)
@@ -1213,6 +1215,17 @@ mod tests {
         assert!(clash.options.is_empty());
         assert!(clash.resolved.is_some());
         assert!(!after.machines[machine_index(&after, "src/api")].abnormal);
+    }
+
+    // The recording the replay page ships, read the way the page reads it: one entry at a time,
+    // the withheld drafts passed over and not counted. A page older than the origin would count one.
+    #[test]
+    fn the_shipped_recording_replays_with_nothing_passed_over() {
+        let entries = feed::entries(include_str!("../../../replay/events.json"))
+            .expect("the recording is a list of events");
+        let mirror = Mirror::from_entries(entries).expect("the recording replays");
+        assert_eq!(mirror.not_shown(), 0);
+        assert_eq!(mirror.next_seq(), Seq::new(140));
     }
 
     #[test]
