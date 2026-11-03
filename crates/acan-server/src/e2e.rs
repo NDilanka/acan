@@ -1033,6 +1033,44 @@ async fn a_scope_draft_refused_for_a_side_effect_path_is_asked_again_with_the_re
     running.stop().await.expect("the server stops");
 }
 
+#[tokio::test]
+async fn a_scope_draft_naming_an_undefined_step_is_asked_again_with_the_refusal() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let mut refused = drafted_scope_body();
+    refused["may"][0]["selector"]["step_context"] =
+        json!({ "kind": "step", "step_id": "login-step" });
+    let asked = std::sync::Arc::<std::sync::Mutex<Vec<String>>>::default();
+    let foreman = RefusedFirst {
+        inner: TwoTasks::default(),
+        refused,
+        then: drafted_scope_body(),
+        asked: std::sync::Arc::clone(&asked),
+    };
+    let running = start_with(root, foreman, UsageLedger::default()).await;
+    post_order(&running).await;
+    let order = settle(&running, "the order", |_, world| {
+        world.orders().next().map(|found| found.id)
+    })
+    .await;
+    let view = scope_draft_of(&running, order).await;
+    assert_eq!(view["state"], "drafted", "the retry is stored: {view}");
+    let sent = asked
+        .lock()
+        .expect("the asked lock is not poisoned")
+        .clone();
+    assert!(sent.len() >= 2, "the foreman was asked again: {sent:?}");
+    let retry: Value = serde_json::from_str(&sent[1]).expect("the request is JSON");
+    assert!(
+        retry["previous_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("login-step")),
+        "the retry names the undefined step: {retry}"
+    );
+    running.stop().await.expect("the server stops");
+}
+
 /// Text only the stored scope draft carries. It is the obligation id of the draft's one check, so
 /// the agent's views never contain it.
 const DRAFT_MARKER: &str = "obl-signup-may";

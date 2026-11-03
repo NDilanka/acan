@@ -5,8 +5,9 @@
 //!
 //! Scope and probe drafts are different: a reply becomes an `acan_intent` proposal that only a
 //! human can adopt. [`scope_draft`] and [`probe_draft`] refuse a draft that names a route, machine
-//! or capture the plant does not have, or that exceeds the run bounds. A failed foreman call for a
-//! draft is an error, never an offline answer.
+//! or capture the plant does not have, a step id or side-effect witness the probe corpus does not
+//! define, or that exceeds the run bounds. A failed foreman call for a draft is an error, never an
+//! offline answer.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -17,8 +18,9 @@ use acan_core::{
     Settlement, Stage, SystemCmd, Task, TaskId, TaskSpec, TaskState, Witness, WitnessId, World,
 };
 use acan_intent::{
-    Fixture, MachineId, ModelProposal, ModelRef, ProbeProposal, RequestTemplate, RouteEntry,
-    RouteTemplate, RunLimits, ScopeBody, Step, StepId, Template,
+    Channel, CorpusProbe, Fixture, HttpMethod, MachineId, MethodSelector, ModelProposal, ModelRef,
+    Operand, Predicate, ProbeProposal, RequestTemplate, RouteEntry, RouteTemplate, RunLimits,
+    ScopeBody, Selector, Step, StepContext, StepId, Template, TrustedSink, ValueRef, WindowAnchor,
 };
 use acan_llm::{ChatRequest, Message};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
@@ -33,7 +35,7 @@ pub const EXPLAIN_PROMPT: &str = "You explain a clash between two tasks that dec
 
 /// The scope draft prompt. The reply is an `acan_intent::ScopeBody`, which Acan wraps as a
 /// `ModelProposal` that gains no authority until a human confirms it.
-pub const SCOPE_PROMPT: &str = "You draft the scope of one order for a code change. Reply with one JSON object that has three keys, may, must_keep and open, that matches the JSON schema under schema in the context. may lists what the order allows to change. Each may item names one HTTP route, copied exactly from the routes in the context, and the machines it touches, copied exactly from the machines in the context. Give every item at least one acceptance obligation, each with a predicate and one line of text. Give every item an example: one target value for one field of one step, written before any code exists. Set provenance to user when the order states the item, model when you interpret the order, and open when a human must still answer it. must_keep lists behavior the order must not break. open lists questions a human must answer, each with two or more options. Never state an observed value, a verdict or a pass. Never invent a route or a machine. A side_effect selector needs a field_path that starts with store or outbound_http. When previous_error in the context is not null, the last attempt failed for that reason: fix it and reply again.";
+pub const SCOPE_PROMPT: &str = "You draft the scope of one order for a code change. Reply with one JSON object that has three keys, may, must_keep and open, that matches the JSON schema under schema in the context. may lists what the order allows to change. Each may item names one HTTP route, copied exactly from the routes in the context, and the machines it touches, copied exactly from the machines in the context. Give every item at least one acceptance obligation, each with a predicate and one line of text. Give every item an example: one target value for one field of one step, written before any code exists. Set provenance to user when the order states the item, model when you interpret the order, and open when a human must still answer it. must_keep lists behavior the order must not break. open lists questions a human must answer, each with two or more options. Never state an observed value, a verdict or a pass. Never invent a route or a machine. A side_effect selector needs a field_path that starts with store or outbound_http. Its sink, method and route_template match one side_effects entry in the context, and its step_context is that entry's step_id or any. Name only step ids listed in the steps in the context. When previous_error in the context is not null, the last attempt failed for that reason: fix it and reply again.";
 
 /// The probe prompt. The reply is an input-only `acan_intent::ProbeProposal`.
 pub const PROBE_PROMPT: &str = "You propose input only probe steps for one order. Reply with one JSON object that has four keys, fixture, steps, route_template and rationale, that matches the JSON schema under schema in the context. fixture is one id copied from the fixtures in the context. steps is a non empty list of steps. An http step sends one request, and its path, headers and body may use ${name} for a value that an earlier capture step bound. A capture step reads a value from an earlier http step. An advance_time step moves the controlled clock. route_template is one route copied exactly from the routes in the context, and the probe sends no more http requests than max_requests. Propose inputs only. Never write an expected value, a count, a mask, a class, an observed value or a verdict. rationale is one sentence.";
@@ -94,6 +96,10 @@ pub struct DraftBounds<'a> {
     /// The fixtures the probe corpus defines. A probe runs after its fixture's recipe, so the
     /// recipe's requests, captures and step ids count against the probe.
     pub fixtures: &'a [Fixture],
+    /// The probes of the corpus. A scope may name only the step ids these probes and their
+    /// fixtures define, and a side effect only where one of these probes observes its sink after
+    /// a request.
+    pub probes: &'a [CorpusProbe],
     /// Per-sequence bounds from the app contract.
     pub limits: RunLimits,
 }
@@ -114,6 +120,19 @@ pub enum DraftError {
     /// The probe names a fixture that the corpus does not define.
     #[error("probe names fixture {0:?}, which the corpus does not define")]
     UnknownFixture(String),
+    /// The scope names a step id that no probe or fixture recipe of the corpus defines.
+    #[error(
+        "scope names step {0:?}, which the probe corpus does not define; name a step from the steps in the context"
+    )]
+    UndefinedStep(String),
+    /// The scope reads a side effect that no probe observes after a request to its route.
+    #[error(
+        "scope names a {sink} side effect after {route:?}, which no probe observes after a request to that route; name a side_effects entry from the context"
+    )]
+    UnwitnessedSideEffect { sink: String, route: String },
+    /// The scope reads events of a sink that no probe of the corpus observes.
+    #[error("scope reads {0} events, which no probe observes")]
+    UnobservedSink(String),
     /// A step uses a capture that no earlier capture step binds.
     #[error("step {step:?} uses capture {name:?}, which no earlier step binds")]
     UnknownCapture { step: String, name: String },
@@ -420,20 +439,24 @@ fn schema_value<T: JsonSchema>() -> Value {
 }
 
 /// The scope draft prompt for an order's `sentence`, the order as the human wrote it, with the
-/// plant's machines, the routes a scope may name, and the schema of the scope body.
-/// `previous_error` is why the last attempt failed, or none for a first attempt.
+/// plant's machines, the routes a scope may name, the step ids and side effects the corpus
+/// defines, and the schema of the scope body. `previous_error` is why the last attempt failed, or
+/// none for a first attempt.
 #[must_use]
 pub fn scope_request(
     sentence: &str,
     bounds: &DraftBounds<'_>,
     previous_error: Option<&str>,
 ) -> ChatRequest {
+    let corpus = CorpusSteps::of(bounds);
     draft_request(
         SCOPE_PROMPT,
         &json!({
             "order": sentence,
             "machines": bounds.machines,
             "routes": bounds.routes,
+            "steps": corpus.ids,
+            "side_effects": corpus.side_effects(bounds.routes),
             "schema": schema_value::<ScopeBody>(),
             "previous_error": previous_error,
         }),
@@ -518,8 +541,9 @@ pub fn probe_from_reply(
 ///
 /// # Errors
 ///
-/// Returns [`DraftError`] when the draft has no may-change items, or names a machine or route
-/// that the plant or the route table does not have.
+/// Returns [`DraftError`] when the draft has no may-change items, names a machine or route that
+/// the plant or the route table does not have, or names a step id or side effect that the probe
+/// corpus does not define.
 pub fn scope_draft(
     body: ScopeBody,
     model: ModelRef,
@@ -549,18 +573,282 @@ fn check_scope(body: &ScopeBody, bounds: &DraftBounds<'_>) -> Result<(), DraftEr
     if body.may.is_empty() {
         return Err(DraftError::EmptyScope);
     }
+    let corpus = CorpusSteps::of(bounds);
     for item in &body.may {
         check_route(&item.selector.route_template, bounds.routes)?;
         check_machines(item.machine_ids.as_slice(), bounds.machines)?;
+        check_selector(&item.selector, &corpus)?;
+        corpus.check_step(&item.example.step_id)?;
+        for obligation in item.acceptance.as_slice() {
+            check_predicate(&obligation.predicate, &corpus)?;
+        }
     }
     for rule in &body.must_keep {
         check_route(&rule.selector.route_template, bounds.routes)?;
         check_machines(rule.machine_ids.as_slice(), bounds.machines)?;
+        check_selector(&rule.selector, &corpus)?;
+        for obligation in rule.obligations.as_slice() {
+            check_predicate(&obligation.predicate, &corpus)?;
+        }
     }
     for choice in &body.open {
         check_machines(std::slice::from_ref(&choice.machine_id), bounds.machines)?;
     }
     Ok(())
+}
+
+/// What a scope may name: the step ids the corpus defines, and the sequences its probes run. A
+/// sequence is the probe's fixture recipe followed by the probe's own steps.
+struct CorpusSteps<'a> {
+    ids: BTreeSet<&'a str>,
+    sequences: Vec<Vec<&'a Step>>,
+}
+
+impl<'a> CorpusSteps<'a> {
+    fn of(bounds: &DraftBounds<'a>) -> Self {
+        let fixtures: &'a [Fixture] = bounds.fixtures;
+        let probes: &'a [CorpusProbe] = bounds.probes;
+        let recipe_steps = fixtures.iter().flat_map(|fixture| fixture.recipe.iter());
+        let probe_steps = probes
+            .iter()
+            .flat_map(|probe| probe.spec.steps.as_slice().iter());
+        let ids = recipe_steps
+            .chain(probe_steps)
+            .map(|step| step.id().as_str())
+            .collect();
+        let sequences = probes
+            .iter()
+            .map(|probe| {
+                let recipe: &[Step] = fixtures
+                    .iter()
+                    .find(|fixture| fixture.id == probe.spec.fixture)
+                    .map_or(&[], |fixture| fixture.recipe.as_slice());
+                recipe.iter().chain(probe.spec.steps.as_slice()).collect()
+            })
+            .collect();
+        Self { ids, sequences }
+    }
+
+    fn check_step(&self, step: &StepId) -> Result<(), DraftError> {
+        if self.ids.contains(step.as_str()) {
+            Ok(())
+        } else {
+            Err(DraftError::UndefinedStep(step.as_str().to_owned()))
+        }
+    }
+
+    /// Whether some probe observes `sink` at all.
+    fn observes(&self, sink: TrustedSink) -> bool {
+        self.sequences
+            .iter()
+            .flatten()
+            .any(|step| matches!(step, Step::ObserveSideEffect(effect) if effect.sink == sink))
+    }
+
+    /// Whether some probe reads `sink` after a request that `method` and `route` admit, for the
+    /// steps `context` admits. The read is correlated with the request it follows, as the
+    /// corpus writes it.
+    fn witnesses(
+        &self,
+        context: &StepContext,
+        sink: TrustedSink,
+        method: MethodSelector,
+        route: &RouteTemplate,
+    ) -> bool {
+        self.sequences.iter().any(|sequence| {
+            sequence.iter().any(|step| {
+                let Step::ObserveSideEffect(effect) = step else {
+                    return false;
+                };
+                let admitted = match context {
+                    StepContext::Any {} => true,
+                    StepContext::Step { step_id } => *step_id == effect.id,
+                };
+                admitted
+                    && effect.sink == sink
+                    && sequence.iter().any(|request| {
+                        matches!(request, Step::Http(http)
+                            if http.id == effect.correlate
+                                && method_matches(method, http.request.method)
+                                && route_matches(http.request.path.as_str(), route))
+                    })
+            })
+        })
+    }
+
+    /// Each side effect the corpus reads, with the step a selector names for it and the method
+    /// and route of the request it follows, as the route table writes them.
+    fn side_effects(&self, routes: &[RouteEntry]) -> Vec<Value> {
+        let mut found: Vec<Value> = Vec::new();
+        for sequence in &self.sequences {
+            for step in sequence {
+                let Step::ObserveSideEffect(effect) = step else {
+                    continue;
+                };
+                for request in sequence {
+                    let Step::Http(http) = request else {
+                        continue;
+                    };
+                    if http.id != effect.correlate {
+                        continue;
+                    }
+                    for entry in routes {
+                        if entry.method != http.request.method
+                            || !route_matches(http.request.path.as_str(), &entry.route_template)
+                        {
+                            continue;
+                        }
+                        let value = json!({
+                            "step_id": effect.id,
+                            "sink": sink_name(effect.sink),
+                            "after": {
+                                "method": entry.method,
+                                "route_template": entry.route_template,
+                            },
+                        });
+                        if !found.contains(&value) {
+                            found.push(value);
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+}
+
+/// Checks the step a selector names, and for a side-effect selector that a probe observes its
+/// sink after a request the selector admits.
+fn check_selector(selector: &Selector, corpus: &CorpusSteps<'_>) -> Result<(), DraftError> {
+    if let StepContext::Step { step_id } = &selector.step_context {
+        corpus.check_step(step_id)?;
+    }
+    if selector.channel != Channel::SideEffect {
+        return Ok(());
+    }
+    // The decoder requires a side-effect selector to carry a path that starts with its sink.
+    let Some(sink) = selector
+        .field_path
+        .as_ref()
+        .and_then(|path| sink_of(path.as_str()))
+    else {
+        return Ok(());
+    };
+    if corpus.witnesses(
+        &selector.step_context,
+        sink,
+        selector.method,
+        &selector.route_template,
+    ) {
+        Ok(())
+    } else {
+        Err(DraftError::UnwitnessedSideEffect {
+            sink: sink_name(sink).to_owned(),
+            route: selector.route_template.as_str().to_owned(),
+        })
+    }
+}
+
+/// Checks each step a predicate reads, and that a probe observes each sink whose events it reads.
+fn check_predicate(predicate: &Predicate, corpus: &CorpusSteps<'_>) -> Result<(), DraftError> {
+    let mut steps = Vec::new();
+    let mut sinks = Vec::new();
+    predicate_refs(predicate, &mut steps, &mut sinks);
+    for step in steps {
+        corpus.check_step(step)?;
+    }
+    for sink in sinks {
+        if !corpus.observes(sink) {
+            return Err(DraftError::UnobservedSink(sink_name(sink).to_owned()));
+        }
+    }
+    Ok(())
+}
+
+/// The step ids and trusted sinks a predicate reads, in the order it names them.
+fn predicate_refs<'p>(
+    predicate: &'p Predicate,
+    steps: &mut Vec<&'p StepId>,
+    sinks: &mut Vec<TrustedSink>,
+) {
+    match predicate {
+        Predicate::EqualsBase { step_id, .. } | Predicate::StatusIn { step_id, .. } => {
+            steps.push(step_id);
+        }
+        Predicate::Equals { at, .. }
+        | Predicate::Present { at }
+        | Predicate::Absent { at }
+        | Predicate::MatchesSchema { at, .. } => value_refs(at, steps, sinks),
+        Predicate::AfterNWithin { then, .. } => predicate_refs(then, steps, sinks),
+        Predicate::All { of } => {
+            for inner in of.as_slice() {
+                predicate_refs(inner, steps, sinks);
+            }
+        }
+        Predicate::Compare { left, right, .. } => {
+            value_refs(left, steps, sinks);
+            if let Operand::Ref { value_ref } = right {
+                value_refs(value_ref, steps, sinks);
+            }
+        }
+        Predicate::Count { .. } => {}
+        Predicate::Window { policy } => {
+            if let WindowAnchor::Step { step_id } = &policy.anchor {
+                steps.push(step_id);
+            }
+        }
+    }
+}
+
+fn value_refs<'p>(value: &'p ValueRef, steps: &mut Vec<&'p StepId>, sinks: &mut Vec<TrustedSink>) {
+    match value {
+        ValueRef::Field { step_id, .. } => steps.push(step_id),
+        ValueRef::Capture { .. } => {}
+        ValueRef::Event { sink, .. } => sinks.push(*sink),
+    }
+}
+
+/// The trusted sink a side-effect field path starts with.
+fn sink_of(path: &str) -> Option<TrustedSink> {
+    match path.split(['.', '[']).next()? {
+        "store" => Some(TrustedSink::Store),
+        "outbound_http" => Some(TrustedSink::OutboundHttp),
+        _ => None,
+    }
+}
+
+fn sink_name(sink: TrustedSink) -> &'static str {
+    match sink {
+        TrustedSink::Store => "store",
+        TrustedSink::OutboundHttp => "outbound_http",
+    }
+}
+
+/// Whether a selector's method admits a request's method.
+fn method_matches(selector: MethodSelector, method: HttpMethod) -> bool {
+    match selector {
+        MethodSelector::Any => true,
+        MethodSelector::Get => method == HttpMethod::Get,
+        MethodSelector::Head => method == HttpMethod::Head,
+        MethodSelector::Post => method == HttpMethod::Post,
+        MethodSelector::Put => method == HttpMethod::Put,
+        MethodSelector::Patch => method == HttpMethod::Patch,
+        MethodSelector::Delete => method == HttpMethod::Delete,
+        MethodSelector::Options => method == HttpMethod::Options,
+    }
+}
+
+/// Whether a request path is one request of a route template. Both split into segments that
+/// match one for one. A `:name` segment matches any segment, and so does a path segment with a
+/// `${capture}` placeholder. A literal segment must be equal. A query string is ignored.
+fn route_matches(path: &str, route: &RouteTemplate) -> bool {
+    let path = path.split('?').next().unwrap_or_default();
+    let requested: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let templated: Vec<&str> = route.as_str().trim_start_matches('/').split('/').collect();
+    requested.len() == templated.len()
+        && requested.iter().zip(&templated).all(|(part, pattern)| {
+            pattern.starts_with(':') || part.contains("${") || part == pattern
+        })
 }
 
 fn check_probe(probe: &ProbeProposal, bounds: &DraftBounds<'_>) -> Result<(), DraftError> {
@@ -754,6 +1042,20 @@ mod tests {
         )
         .expect_err("no tasks");
         assert!(matches!(err, ReplyError::NoTasks), "got {err:?}");
+    }
+
+    #[test]
+    fn a_route_template_matches_its_requests_and_no_others() {
+        let route = RouteTemplate::from_str("/api/links/:code").expect("a route template");
+
+        assert!(route_matches("/api/links/${code}", &route));
+        assert!(route_matches("/api/links/abc?expand=1", &route));
+        assert!(!route_matches("/api/links", &route), "one segment short");
+        assert!(!route_matches("/api/links/a/b", &route), "one segment long");
+        assert!(
+            !route_matches("/api/users/abc", &route),
+            "a literal differs"
+        );
     }
 
     #[test]

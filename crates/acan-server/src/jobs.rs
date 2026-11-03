@@ -642,6 +642,7 @@ async fn draft_scope<C: ModelClient>(
         machines: &machines,
         routes: &corpus.routes,
         fixtures: &corpus.fixtures,
+        probes: &corpus.probes,
         limits: app.limits,
     };
     // The foreman drafts from the order's sentence, what the human asked for. The order ref is
