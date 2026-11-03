@@ -93,7 +93,7 @@ pub fn drone_discs<'a>(
         .filter(|body| skip != Some(body.agent.as_str()))
         .map(|body| {
             let at = motion.body_at(&body.agent).unwrap_or(body.at);
-            let ([x, y], radius) = marks::drone_disc(at, &screen);
+            let ([x, y], radius) = marks::drone_disc(marks::bobbed(motion, body, at), &screen);
             (body.agent.as_str(), [x, y, radius])
         })
         .collect()

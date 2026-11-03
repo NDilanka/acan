@@ -34,7 +34,7 @@ pub const STALE_GREY: u32 = 0xc4c4c8;
 /// The grey of a ghost: the outline a landed machine keeps for a returning reader.
 pub const GHOST_GREY: u32 = 0x6e6e73;
 /// Tint slot of each agent's accent at full hue: `TINT_BODY0 + slot`. A working drone's eye, its
-/// glow, its beam and its beacon draw with it, and an idle drone's eye with its dimmed copy.
+/// beam and its beacon draw with it, and an idle drone's eye with its dimmed copy.
 pub const TINT_BODY0: u32 = 1;
 /// Tint slot of a drone's shadow on the plinth top: black, which the spot's own opacity thins.
 pub const TINT_SHADOW: u32 = 7;

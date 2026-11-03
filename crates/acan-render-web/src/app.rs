@@ -1217,7 +1217,7 @@ impl App {
             .iter()
             .map(|body| {
                 let at = self.motion.body_at(&body.agent).unwrap_or(body.at);
-                marks::drone_disc(at, |p| self.screen(p))
+                marks::drone_disc(marks::bobbed(&self.motion, body, at), |p| self.screen(p))
             })
             .collect();
         marks::disc_under(&discs, [x, y]).map_or_else(String::new, |i| bodies[i].agent.clone())
@@ -1232,7 +1232,8 @@ impl App {
             .find(|body| body.agent == agent)
             .map_or_else(Vec::new, |body| {
                 let at = self.motion.body_at(&body.agent).unwrap_or(body.at);
-                let ([x, y], radius) = marks::drone_disc(at, |p| self.screen(p));
+                let ([x, y], radius) =
+                    marks::drone_disc(marks::bobbed(&self.motion, body, at), |p| self.screen(p));
                 vec![x, y, radius]
             })
     }
