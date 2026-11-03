@@ -1100,6 +1100,72 @@ fn a_violated_standing_ruling_names_the_episode_its_selector_keys() {
     );
 }
 
+#[test]
+fn an_incomparable_item_names_the_episode_keyed_by_no_obligation() {
+    // A must-keep obligation the probe cannot judge makes the item incomparable, not a failure, so
+    // no obligation fails. The order keys the item's episode by none, and the receipt must name it:
+    // the origin refuses a failing item that names no episode.
+    let scope = edited_scope(|value| {
+        let rule = &mut value["body"]["must_keep"][0];
+        rule["selector"] = json!({
+            "surface": "http",
+            "method": "POST",
+            "route_template": "/api/login",
+            "step_context": { "kind": "any" },
+            "principal": { "kind": "anonymous" },
+            "channel": "status"
+        });
+        rule["obligations"] = json!([{
+            "obligation_id": "obl-login-missing",
+            "predicate": {
+                "predicate": "equals_base",
+                "step_id": "no-such-step",
+                "path": "status",
+                "anchor": { "kind": "fresh" }
+            },
+            "text": "The login status stays identical to base."
+        }]);
+    });
+    let confirmation = confirmation_for(&scope);
+    let ledger = empty_ledger();
+    let context = prepared_context(&confirmation, &ledger);
+    let measured = login(
+        STANDARD,
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+        sequence(SIX_FAILURES),
+    );
+    let results = [measured.result()];
+    let episodes = [open_episode(&scope, &scope.body.must_keep[0].selector)];
+    let corpus: ProbeCorpus = parse(PROBE_CORPUS);
+    let inputs = ReceiptInputs {
+        scope: &scope,
+        confirmation: &confirmation,
+        prepared: &context,
+        ledger: &ledger,
+        corpus: &corpus,
+        results: &results,
+        anchors: &[],
+        episodes: &episodes,
+        contests: &[],
+        gate_state: GateState::Prepared,
+    };
+    let receipt = receipt::build_receipt(&inputs)
+        .expect("the receipt builds")
+        .value()
+        .clone();
+    let rule = item(&receipt, "mk-login-ok");
+    assert_eq!(rule.class, ItemClass::Incomparable);
+    assert_eq!(
+        rule.episode_id.as_ref(),
+        Some(&episodes[0].id),
+        "an incomparable item names the episode keyed by no obligation"
+    );
+    receipt
+        .check_episode_ids()
+        .expect("every named episode is the key of its item");
+}
+
 /// The selector of the login ruling: the sixth login's status, on any login request.
 fn login_selector() -> Selector {
     serde_json::from_value(json!({
