@@ -11,6 +11,7 @@ import {
   checkWords,
   emptyLines,
   goStep,
+  highlightLane,
   laneRows,
   lastActivity,
   workerLines,
@@ -191,4 +192,29 @@ test("the strip and the first-run worker step never disagree on the same answer"
       if (step.command) assert.equal(lanes.command, step.command);
     }
   }
+});
+
+// A stand-in for the strip: rows with a dataset and a class list, as the page builds them.
+function fakeStrip(agents) {
+  const rows = agents.map((agent, index) => {
+    const classes = new Set();
+    return {
+      dataset: { lane: String(index), agent },
+      classList: { toggle: (name, on) => (on ? classes.add(name) : classes.delete(name)), contains: (name) => classes.has(name) },
+    };
+  });
+  return { rows, querySelectorAll: (selector) => (selector === "li[data-agent]" ? rows : []) };
+}
+
+test("highlightLane marks one agent's row, moves the mark, and clears it on null", () => {
+  const strip = fakeStrip(["agent-1", "agent-2"]);
+  assert.equal(highlightLane("agent-2", strip), true);
+  assert.deepEqual(strip.rows.map((row) => row.classList.contains("hl")), [false, true]);
+  assert.equal(strip.rows[1].dataset.highlighted, "true");
+  assert.equal(highlightLane("agent-1", strip), true);
+  assert.deepEqual(strip.rows.map((row) => row.classList.contains("hl")), [true, false]);
+  assert.equal(strip.rows[1].dataset.highlighted, undefined);
+  assert.equal(highlightLane("agent-9", strip), false, "an agent with no row marks nothing");
+  assert.equal(highlightLane(null, strip), false);
+  assert.deepEqual(strip.rows.map((row) => row.classList.contains("hl")), [false, false]);
 });

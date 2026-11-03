@@ -1,6 +1,12 @@
 // The agent lanes strip: one row per registered agent, with its task, machine, last activity
 // and check. A row whose agent holds a task but has sent nothing for STALE_MS is flagged stale.
 // The row logic has no DOM, so Node can test it. `installLanes` binds the strip to the page.
+//
+// Hover hook for the map: each row is `<li data-lane="<index>" data-agent="<agent id>">`, stable
+// across repaints. `highlightLane(agentId)` marks that agent's row (class `hl`, and
+// `data-highlighted="true"`), and `highlightLane(null)` clears it. The mark survives a repaint, so
+// a caller such as a drone hover sets it once on enter and clears it once on leave. Nothing on the
+// map calls it yet.
 
 import { workerCommand, workerSummary } from "./firstrun.js";
 
@@ -58,6 +64,28 @@ export function agoWords(ms) {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
+}
+
+// The agent whose row is marked, or null. Kept here so a repaint marks the new row again.
+let highlighted = null;
+
+// Marks the lane row of `agentId`, or clears the mark for null. `root` is the strip; tests pass
+// a stand-in. Returns whether a row now carries the mark.
+export function highlightLane(agentId, root = typeof document === "undefined" ? null : document.getElementById("lanes")) {
+  highlighted = agentId ?? null;
+  return markRows(root);
+}
+
+function markRows(root) {
+  let found = false;
+  for (const li of root?.querySelectorAll("li[data-agent]") ?? []) {
+    const on = highlighted !== null && li.dataset.agent === highlighted;
+    li.classList.toggle("hl", on);
+    if (on) li.dataset.highlighted = "true";
+    else delete li.dataset.highlighted;
+    found ||= on;
+  }
+  return found;
 }
 
 function byName(a, b) {
@@ -244,9 +272,11 @@ export function installLanes(kit) {
     if (!waiting.hidden) waiting.replaceChildren(...workerWords(workers));
     if (rows.length === 0) empty.replaceChildren(...workerWords(workers));
     const focused = list.contains(document.activeElement) ? document.activeElement.dataset.agent : null;
-    const items = rows.map((row) => {
+    const items = rows.map((row, index) => {
       const before = shown.get(row.agent);
       const li = element("li");
+      li.dataset.lane = String(index);
+      li.dataset.agent = row.agent;
       const button = rowButton(row);
       button.dataset.agent = row.agent;
       button.addEventListener("click", () => visit(kit, row));
@@ -258,6 +288,7 @@ export function installLanes(kit) {
     shown.clear();
     for (const row of rows) shown.set(row.agent, signature(row));
     list.replaceChildren(...items);
+    markRows(panel);
     // A rebuild keeps the keyboard where it was.
     if (focused) list.querySelector(`button[data-agent="${CSS.escape(focused)}"]`)?.focus();
   };
