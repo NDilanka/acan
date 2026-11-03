@@ -22,17 +22,18 @@ use crate::host::Host;
 use crate::http::{ApiError, authenticate, bearer};
 use crate::redact;
 
-/// How long a connection without an `Authorization` header has to send its token frame.
-const AUTH_FRAME_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a connection without an `Authorization` header has to send its token frame, and the
+/// multiplexed stream its subscription frame.
+pub(crate) const AUTH_FRAME_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// WebSocket close code for a client that must resume from a seq. The reason gives the seq.
-const CLOSE_RESUME: u16 = 4001;
+pub(crate) const CLOSE_RESUME: u16 = 4001;
 /// WebSocket close code for a server that is shutting down.
-const CLOSE_SHUTDOWN: u16 = 1001;
+pub(crate) const CLOSE_SHUTDOWN: u16 = 1001;
 /// WebSocket close code for a missing, late, or unknown token (policy violation).
-const CLOSE_UNAUTHORIZED: u16 = 1008;
+pub(crate) const CLOSE_UNAUTHORIZED: u16 = 1008;
 /// WebSocket close code for a server-side failure while reading the backlog.
-const CLOSE_INTERNAL: u16 = 1011;
+pub(crate) const CLOSE_INTERNAL: u16 = 1011;
 
 #[derive(Deserialize)]
 pub struct StreamQuery {
@@ -42,8 +43,8 @@ pub struct StreamQuery {
 
 /// The first frame of a stream whose upgrade carried no `Authorization` header.
 #[derive(Deserialize)]
-struct AuthFrame {
-    token: String,
+pub(crate) struct AuthFrame {
+    pub(crate) token: String,
 }
 
 /// How a stream proves its token.
@@ -85,17 +86,14 @@ fn track<C: ModelClient + 'static>(host: &Host<C>, socket: WebSocket, from: Seq,
 }
 
 /// Resolves once the server is shutting down, even when the signal was sent before the call.
-async fn shutting_down(shutdown: &mut watch::Receiver<bool>) {
+pub(crate) async fn shutting_down(shutdown: &mut watch::Receiver<bool>) {
     // An error means the sender is gone, which is a shutdown too.
     let _ = shutdown.wait_for(|off| *off).await;
 }
 
-/// Waits for a valid token frame and returns the principal it names. `None` means the client sent
-/// anything else, sent nothing in time, or left.
-async fn first_frame_authenticates<C: ModelClient>(
-    host: &Host<C>,
-    socket: &mut WebSocket,
-) -> Option<Principal> {
+/// The next text frame the client sends, within [`AUTH_FRAME_TIMEOUT`]. `None` means the client
+/// sent nothing in time, or left.
+pub(crate) async fn next_text(socket: &mut WebSocket) -> Option<String> {
     let first_text = async {
         loop {
             match socket.recv().await {
@@ -105,9 +103,20 @@ async fn first_frame_authenticates<C: ModelClient>(
             }
         }
     };
-    let Ok(Some(text)) = tokio::time::timeout(AUTH_FRAME_TIMEOUT, first_text).await else {
-        return None;
-    };
+    tokio::time::timeout(AUTH_FRAME_TIMEOUT, first_text)
+        .await
+        .ok()
+        .flatten()
+        .map(|text| text.to_string())
+}
+
+/// Waits for a valid token frame and returns the principal it names. `None` means the client sent
+/// anything else, sent nothing in time, or left.
+async fn first_frame_authenticates<C: ModelClient>(
+    host: &Host<C>,
+    socket: &mut WebSocket,
+) -> Option<Principal> {
+    let text = next_text(socket).await?;
     let frame = serde_json::from_str::<AuthFrame>(&text).ok()?;
     authenticate(host, Some(&frame.token)).ok()
 }
@@ -222,7 +231,7 @@ async fn send(socket: &mut WebSocket, principal: &Principal, event: &Stamped) ->
     socket.send(Message::Text(json.into())).await.is_ok()
 }
 
-async fn close(socket: &mut WebSocket, code: u16, reason: String) {
+pub(crate) async fn close(socket: &mut WebSocket, code: u16, reason: String) {
     let frame = CloseFrame {
         code,
         reason: reason.into(),

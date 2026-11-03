@@ -50,7 +50,7 @@ pub use lane::{
 pub use lease::{Claim, DECLARE_BARRIER_MS, Fence, LEASE_TTL_MS, Lease, LeaseEnd};
 pub use member::{AgentPrincipal, Member, Role, SettleRight};
 pub use order::{
-    Check, Judgement, Order, OrderPhase, OrderState, Question, QuestionDraft, Readback,
+    Check, Judgement, NeedsYou, Order, OrderPhase, OrderState, Question, QuestionDraft, Readback,
     ReadbackVerdict, Region, Stage, Task, TaskSpec, TaskState, Witness, WitnessKind, WitnessSpec,
 };
 pub use repair::{

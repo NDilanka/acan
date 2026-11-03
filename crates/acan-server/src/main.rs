@@ -1,4 +1,4 @@
-//! The `acan` command line: serves one repository's world.
+//! The `acan` command line: serves one or more repositories' worlds.
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -6,17 +6,18 @@ use std::path::PathBuf;
 
 use acan_llm::{KeyFile, ModelClient};
 use acan_server::init_cli::{self, InitArgs};
+use acan_server::projects::ProjectSet;
 use acan_server::receipt_cli::{self, Format, ShadowArgs};
 use acan_server::release::{self, Redaction};
 use acan_server::replay;
 use acan_server::{
-    DEFAULT_WITNESS_CONCURRENCY, Models, ServerConfig, VisionConfig, default_browser,
-    default_data_dir, start_with_workers,
+    DEFAULT_WITNESS_CONCURRENCY, Models, ServeConfig, VisionConfig, default_browser,
+    default_data_dir, start_projects,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 
-/// Acan's local server: one world per repository.
+/// Acan's local server: one world per repository, one or more repositories per server.
 #[derive(Debug, Parser)]
 #[command(name = "acan", version)]
 struct Cli {
@@ -26,7 +27,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Serves the world of one repository.
+    /// Serves the worlds of one or more repositories.
     Serve(ServeArgs),
     /// Exports the recorded run of one repository as static files for the replay page.
     ExportReplay(ExportReplayArgs),
@@ -80,9 +81,13 @@ struct ReceiptArgs {
 
 #[derive(Debug, Args)]
 struct ServeArgs {
-    /// The repository to serve.
-    #[arg(long, default_value = ".")]
-    repo: PathBuf,
+    /// A repository to serve as a project. Repeat it to serve several. The first is the default
+    /// project, which also answers the unprefixed routes. Its id is its folder name.
+    #[arg(long = "repo")]
+    repos: Vec<PathBuf>,
+    /// A projects file with pinned ids, names and settings. Replaces --repo.
+    #[arg(long, conflicts_with = "repos")]
+    projects: Option<PathBuf>,
     /// The port to listen on.
     #[arg(long, default_value_t = 7311)]
     port: u16,
@@ -96,17 +101,19 @@ struct ServeArgs {
     /// the binary is served, when there is one.
     #[arg(long)]
     web: Option<PathBuf>,
-    /// The model routing file. Defaults to `<repo>/.acan/llm.toml`.
+    /// The model routing file of the one project. Defaults to `<repo>/.acan/llm.toml`. When
+    /// serving several projects, set it per project in a projects file.
     #[arg(long)]
     llm: Option<PathBuf>,
     /// The branch finished work lands on. Defaults to the branch checked out in the repository.
+    /// Names one project; set it per project in a projects file when serving several.
     #[arg(long)]
     protected_branch: Option<String>,
     /// The base URL HTTP witness checks target, such as `http://127.0.0.1:3000`. Without it,
-    /// every HTTP check reports an error.
+    /// every HTTP check reports an error. Names one project, like --protected-branch.
     #[arg(long)]
     witness_http_base_url: Option<String>,
-    /// How many witness runs may run at once.
+    /// How many witness runs may run at once, across every project.
     #[arg(long, default_value_t = DEFAULT_WITNESS_CONCURRENCY)]
     witness_concurrency: usize,
     /// Does not check GitHub Releases for a newer build. The check is also off when the
@@ -117,14 +124,15 @@ struct ServeArgs {
     #[arg(long)]
     vision_browser: Option<PathBuf>,
     /// Where vision records and screenshots are kept. Defaults to the per-user data directory,
-    /// and must not be inside the repository.
+    /// and must not be inside any repository.
     #[arg(long)]
     vision_dir: Option<PathBuf>,
     /// Runs no advisory vision checks.
     #[arg(long)]
     no_vision: bool,
-    /// How many workers this server runs in its own process, each taking one task at a time.
-    /// Zero runs none. A worker waits, and is reported as having no model key, until a key is set.
+    /// How many workers this server runs in its own process for each project, each taking one
+    /// task at a time. Zero runs none. A worker waits, and is reported as having no model key,
+    /// until a key is set.
     #[arg(long, default_value_t = 1)]
     workers: usize,
 }
@@ -194,10 +202,43 @@ async fn receipt(args: ReceiptArgs) -> Result<()> {
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {
-    load_dotenv(&args.repo)?;
+    let mut projects = match &args.projects {
+        Some(file) => ProjectSet::from_file(file)?,
+        None => {
+            let repos = if args.repos.is_empty() {
+                vec![PathBuf::from(".")]
+            } else {
+                args.repos.clone()
+            };
+            ProjectSet::from_repos(&repos)
+        }
+    };
+    if let [project] = projects.projects.as_mut_slice() {
+        if let Some(branch) = &args.protected_branch {
+            project.protected_branch = Some(branch.clone());
+        }
+        if let Some(url) = &args.witness_http_base_url {
+            project.witness_http_base_url = Some(url.clone());
+        }
+        if let Some(llm) = &args.llm {
+            project.llm = Some(llm.clone());
+        }
+    } else if args.protected_branch.is_some()
+        || args.witness_http_base_url.is_some()
+        || args.llm.is_some()
+    {
+        bail!(
+            "--protected-branch, --witness-http-base-url and --llm name one project; set them per project in a --projects file"
+        );
+    }
+    projects.validate()?;
 
-    // The bug report removes the keys this process was given, so it is set after `.env` is loaded.
-    release::configure(Redaction::for_repo(&args.repo));
+    // The keys of every project's `.env` are loaded before the bug report's redaction is built.
+    for project in &projects.projects {
+        load_dotenv(&project.repo)?;
+    }
+    // The bug report removes what every project holds: its secrets and its repository's paths.
+    release::configure(projects.redaction());
     tracing::info!(
         version = release::version(),
         commit = release::commit(),
@@ -207,36 +248,42 @@ async fn serve(args: ServeArgs) -> Result<()> {
         release::spawn_update_check();
     }
 
-    let llm = args
-        .llm
-        .unwrap_or_else(|| args.repo.join(".acan").join("llm.toml"));
-    let models = Models::open(&llm, KeyFile::for_user())?;
-    let needs_key = !models.key_status().configured;
-    let ledger = models.ledger();
-    let config = ServerConfig {
-        repo: args.repo.clone(),
+    let mut clients = Vec::with_capacity(projects.projects.len());
+    let mut needs_key = false;
+    for project in &projects.projects {
+        let llm = project
+            .llm
+            .clone()
+            .unwrap_or_else(|| project.repo.join(".acan").join("llm.toml"));
+        let models = Models::open(&llm, KeyFile::for_user())?;
+        // Model keys are user-wide, so every project reports the same key status.
+        needs_key = !models.key_status().configured;
+        let ledger = models.ledger();
+        clients.push((models, ledger));
+    }
+    let config = ServeConfig {
+        projects,
         addr: SocketAddr::new(args.bind, args.port),
         team: args.team,
         web: args.web.or_else(bundled_web),
-        protected_branch: args.protected_branch,
-        witness_http_base_url: args.witness_http_base_url,
         witness_concurrency: args.witness_concurrency,
         vision: (!args.no_vision).then(|| VisionConfig {
             browser: args.vision_browser.unwrap_or_else(default_browser),
             data_dir: args.vision_dir.unwrap_or_else(default_data_dir),
         }),
+        local_workers: args.workers,
     };
-    let mut running = start_with_workers(config, models, ledger, args.workers).await?;
+    let mut running = start_projects(config, clients).await?;
     if let Some(token) = &running.owner_token {
         println!(
-            "owner token, shown once and saved in .acan/tokens.json: {}",
+            "owner token, shown once and saved in each project's .acan/tokens.json: {}",
             token.as_str()
         );
         println!("http://{}/#token={}", running.local_addr, token.as_str());
     }
     println!(
-        "acan serving {} at http://{}",
-        args.repo.display(),
+        "acan serving projects {} at http://{}",
+        running.project_ids().join(", "),
         running.local_addr
     );
     if needs_key {

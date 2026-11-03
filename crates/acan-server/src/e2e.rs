@@ -40,7 +40,10 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
 use crate::model::{self, Ask};
 use crate::offline::Offline;
-use crate::{DEFAULT_WITNESS_CONCURRENCY, Running, ServerConfig, start};
+use crate::projects::{ProjectSet, ProjectSpec};
+use crate::{
+    DEFAULT_WITNESS_CONCURRENCY, Running, ServeConfig, ServerConfig, start, start_projects,
+};
 
 const OWNER_TOKEN: &str = "acan_owner_e2e";
 const AGENT_TOKEN: &str = "acan_agent_e2e";
@@ -155,6 +158,151 @@ async fn an_order_is_gated_in_its_worktree_and_lands_on_the_protected_branch() {
     assert!(
         !root.join(LANDED).exists(),
         "the land never writes the user's working tree"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// A land in one project moves that project's branch and nothing else. The second project is a
+/// plain repository on the same server, and its branch, working tree, and worktrees stay as they
+/// were. The land runs the same flow as the test above, through the default project.
+#[tokio::test]
+async fn a_land_in_one_project_moves_only_its_branch() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let plain = plain_repo();
+    let plain_root = plain.path();
+    let plain_head = git(plain_root, &["rev-parse", PROTECTED_BRANCH]);
+    let plain_status = git(plain_root, &["status", "--porcelain"]);
+    let running = start_pair(root, plain_root).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+
+    post_order(&running).await;
+    let _scope = scope_first(&running, root, task).await;
+    let fence = claim(&running, task).await;
+    let worktree = worktree_dir(root, task);
+    wait_for_worktree(root, task, fence.generation).await;
+    assert!(
+        worktree.is_dir(),
+        "the claim's worktree is in the demo project's state folder"
+    );
+    let built = build(&running, root, task, fence, LANDED, AGENT_CONTENT).await;
+    settle(&running, "the task to land", |_, world| {
+        in_state(world, task, |state| {
+            matches!(state, TaskState::Landed { .. })
+        })
+        .then_some(())
+    })
+    .await;
+    assert_eq!(
+        git(root, &["rev-parse", PROTECTED_BRANCH]).trim(),
+        built.to_string(),
+        "the demo project's branch moved to the built commit"
+    );
+
+    assert_eq!(
+        git(plain_root, &["rev-parse", PROTECTED_BRANCH]),
+        plain_head,
+        "the plain project's branch did not move"
+    );
+    assert_eq!(
+        git(plain_root, &["status", "--porcelain"]),
+        plain_status,
+        "the plain project's working tree did not change"
+    );
+    assert!(
+        !plain_root.join(".acan").join("worktrees").exists(),
+        "the plain project has no worktree folder"
+    );
+    let plain_worktrees = git(plain_root, &["worktree", "list", "--porcelain"]);
+    assert!(
+        !plain_worktrees.contains(&root.display().to_string()),
+        "the plain project's git lists no worktree of the demo project: {plain_worktrees}"
+    );
+    running.stop().await.expect("the server stops");
+}
+
+/// Two projects whose worlds both hold `t-0`, from one order each. An agent claims `t-0` through
+/// the first project's MCP endpoint, and only that project changes. The same token gets 401 on the
+/// second project's MCP endpoint, since the second project holds no agent token.
+#[tokio::test]
+async fn same_ids_do_not_collide() {
+    let _docker = DOCKER.lock().await;
+    let repo = demo_repo();
+    let root = repo.path();
+    let other = demo_repo();
+    let other_root = other.path();
+    write_owner_tokens(other_root);
+    let running = start_pair(root, other_root).await;
+    let task = TaskId::from_str("t-0").expect("valid task id");
+
+    member_at(
+        &running,
+        "/api/p/plain/commands",
+        &HumanCmd::PostOrder {
+            machine: machine(),
+            sentence: "land the agent's file".to_owned(),
+            witnesses: Vec::new(),
+        },
+    )
+    .await;
+    settle_at(
+        &running,
+        "/api/p/plain/events",
+        "the offline split in plain",
+        |_, world| world.task(task).map(|found| found.order),
+    )
+    .await;
+    post_order(&running).await;
+    scope_first(&running, root, task).await;
+    let (plain_before, _) = snapshot_at(&running, "/api/p/plain/events").await;
+
+    let (status, body) = rpc_tool(
+        &running,
+        "/api/p/demo/mcp",
+        AGENT_TOKEN,
+        "claim_task",
+        json!({ "task": "t-0" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "demo's agent claims t-0: {body}"
+    );
+    settle(&running, "the claim in demo", |_, world| {
+        in_state(world, task, |state| {
+            matches!(state, TaskState::Claimed { .. })
+        })
+        .then_some(())
+    })
+    .await;
+
+    let (plain_after, plain_origin) = snapshot_at(&running, "/api/p/plain/events").await;
+    assert_eq!(
+        serde_json::to_value(&plain_after).expect("the log serializes"),
+        serde_json::to_value(&plain_before).expect("the log serializes"),
+        "plain's log did not change"
+    );
+    assert!(
+        !in_state(plain_origin.world(), task, |state| {
+            matches!(state, TaskState::Claimed { .. })
+        }),
+        "plain's t-0 is not claimed"
+    );
+
+    let (status, _) = rpc_tool(
+        &running,
+        "/api/p/plain/mcp",
+        AGENT_TOKEN,
+        "claim_task",
+        json!({ "task": "t-0" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED,
+        "demo's agent token gets 401 on plain's MCP endpoint"
     );
     running.stop().await.expect("the server stops");
 }
@@ -2592,6 +2740,19 @@ fn worktree_dir(root: &Path, task: TaskId) -> PathBuf {
 }
 
 /// Writes the token file before the first start, so the test holds an owner and an agent token.
+/// Writes a tokens file that holds only the owner, so the project has no agent token.
+fn write_owner_tokens(root: &Path) {
+    let state = root.join(".acan");
+    fs::create_dir_all(&state).expect("state directory");
+    fs::write(
+        state.join("tokens.json"),
+        format!(
+            r#"[{{"token": "{OWNER_TOKEN}", "principal": {{"kind": "member", "id": "owner"}}}}]"#
+        ),
+    )
+    .expect("tokens file");
+}
+
 fn write_tokens(root: &Path) {
     let state = root.join(".acan");
     fs::create_dir_all(&state).expect("state directory");
@@ -2636,6 +2797,56 @@ async fn start_with<C: ModelClient + 'static>(
         .expect("the server starts on the test repository")
 }
 
+/// Starts one server over two projects. `root` comes first, so the unprefixed routes reach it,
+/// and `other` is the second project. Both protect `main`.
+async fn start_pair(root: &Path, other: &Path) -> Running {
+    write_tokens(root);
+    let project = |id: &str, name: &str, repo: &Path| ProjectSpec {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        repo: repo.to_path_buf(),
+        protected_branch: Some(PROTECTED_BRANCH.to_owned()),
+        llm: None,
+        witness_http_base_url: None,
+    };
+    let config = ServeConfig {
+        projects: ProjectSet {
+            default: "demo".to_owned(),
+            projects: vec![
+                project("demo", "Demo", root),
+                project("plain", "Plain", other),
+            ],
+        },
+        addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        team: false,
+        web: None,
+        witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
+        vision: None,
+        local_workers: 0,
+    };
+    let first = Offline::default();
+    let first_ledger = first.ledger().clone();
+    let second = Offline::default();
+    let second_ledger = second.ledger().clone();
+    start_projects(config, vec![(first, first_ledger), (second, second_ledger)])
+        .await
+        .expect("the server starts on both projects")
+}
+
+/// A plain repository with one commit on `main` and a file of its own.
+fn plain_repo() -> DemoRepo {
+    let dir = tempfile::tempdir().expect("temporary repository");
+    let root = dir.path().join("plain");
+    fs::create_dir_all(&root).expect("the repository folder");
+    git(&root, &["init", "-q", "-b", PROTECTED_BRANCH]);
+    git(&root, &["config", "user.name", "Test User"]);
+    git(&root, &["config", "user.email", "test@example.test"]);
+    fs::write(root.join("notes.txt"), "the plain project\n").expect("a file");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "initial"]);
+    DemoRepo { _dir: dir, root }
+}
+
 fn url(running: &Running, path: &str) -> String {
     format!("http://{}{path}", running.local_addr)
 }
@@ -2662,8 +2873,20 @@ async fn member(running: &Running, cmd: &HumanCmd) {
 /// Sends one member command over HTTP as the member `token` holds, and fails the test unless it
 /// is accepted.
 async fn member_as(running: &Running, token: &str, cmd: &HumanCmd) {
+    send_member(running, "/api/commands", token, cmd).await;
+}
+
+/// Sends one member command to the commands route at `path` as the owner, and fails the test
+/// unless it is accepted.
+async fn member_at(running: &Running, path: &str, cmd: &HumanCmd) {
+    send_member(running, path, OWNER_TOKEN, cmd).await;
+}
+
+/// Sends one member command to the commands route at `path` as the member `token` holds, and
+/// fails the test unless it is accepted.
+async fn send_member(running: &Running, path: &str, token: &str, cmd: &HumanCmd) {
     let response = client()
-        .post(url(running, "/api/commands"))
+        .post(url(running, path))
         .bearer_auth(token)
         .json(cmd)
         .send()
@@ -2843,7 +3066,7 @@ async fn claim(running: &Running, task: TaskId) -> Fence {
 /// A renewal the origin rejects means the claim is over, because the task landed, was released,
 /// or was claimed again. The test's own steps check that outcome, so the rejection is ignored.
 fn keep_lease(running: &Running, fence: Fence) {
-    let writer = running.writer.clone();
+    let writer = running.writer().clone();
     tokio::spawn(async move {
         loop {
             sleep(LEASE_RENEWAL).await;
@@ -2938,9 +3161,38 @@ async fn wait_building(running: &Running, task: TaskId) {
     .await;
 }
 
+/// One `tools/call` to the MCP endpoint at `path` as `token`, and the status and JSON body it
+/// answers with.
+async fn rpc_tool(
+    running: &Running,
+    path: &str,
+    token: &str,
+    name: &str,
+    arguments: Value,
+) -> (reqwest::StatusCode, Value) {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": name, "arguments": arguments },
+    });
+    let response = client()
+        .post(url(running, path))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .expect("the MCP call is sent");
+    let status = response.status();
+    (
+        status,
+        response.json::<Value>().await.unwrap_or(Value::Null),
+    )
+}
+
 async fn agent_command(running: &Running, cmd: AgentCmd) {
     running
-        .writer
+        .writer()
         .submit(Command::Agent {
             agent: agent(),
             cmd,
@@ -3115,8 +3367,13 @@ fn in_state(world: &World, task: TaskId, state: impl Fn(&TaskState) -> bool) -> 
 
 /// The stored log and the world it replays to, read through the owner's events route.
 async fn snapshot(running: &Running) -> (Vec<Stamped>, Origin) {
+    snapshot_at(running, "/api/events").await
+}
+
+/// The stored log at `path`, and the world it replays to.
+async fn snapshot_at(running: &Running, path: &str) -> (Vec<Stamped>, Origin) {
     let log: Vec<Stamped> = client()
-        .get(url(running, "/api/events"))
+        .get(url(running, path))
         .bearer_auth(OWNER_TOKEN)
         .send()
         .await
@@ -3137,9 +3394,19 @@ async fn settle<T>(
     what: &str,
     done: impl Fn(&[Stamped], &World) -> Option<T>,
 ) -> T {
+    settle_at(running, "/api/events", what, done).await
+}
+
+/// Waits until `done` accepts the log at `path`, the way [`settle`] does for the default project.
+async fn settle_at<T>(
+    running: &Running,
+    path: &str,
+    what: &str,
+    done: impl Fn(&[Stamped], &World) -> Option<T>,
+) -> T {
     let result = timeout(WAIT, async {
         loop {
-            let (log, origin) = snapshot(running).await;
+            let (log, origin) = snapshot_at(running, path).await;
             if let Some(found) = done(&log, origin.world()) {
                 return found;
             }
@@ -3148,7 +3415,7 @@ async fn settle<T>(
     })
     .await;
     let Ok(found) = result else {
-        let (log, _) = snapshot(running).await;
+        let (log, _) = snapshot_at(running, path).await;
         // Lease renewals arrive every few seconds and would hide the steps that stalled.
         let newest: Vec<&Event> = log
             .iter()
