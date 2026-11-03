@@ -6,11 +6,11 @@
 //! surface once.
 //! Model buffers are uploaded once per model set and per scene, never per frame.
 
+use std::borrow::Cow;
 use std::mem::size_of;
 use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
-use wgpu::util::DeviceExt;
 
 use crate::camera::{Camera, NEAR_FRACTION, ORTHO_FAR, Projection};
 use crate::geometry::{
@@ -289,11 +289,13 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let theme_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("theme"),
-            contents: bytemuck::bytes_of(&theme_uniform),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let theme_buf = upload(
+            &device,
+            &queue,
+            "theme",
+            wgpu::BufferUsages::UNIFORM,
+            std::slice::from_ref(&theme_uniform),
+        );
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("uniforms"),
             entries: &[uniform_entry(0), uniform_entry(1)],
@@ -414,6 +416,7 @@ impl Renderer {
             .unwrap_or(0);
         self.quads = Some(upload(
             &self.device,
+            &self.queue,
             "stroke quads",
             wgpu::BufferUsages::INDEX,
             &geometry::quad_indices(most / geometry::QUAD_CORNERS),
@@ -424,6 +427,7 @@ impl Renderer {
             .collect();
         self.halos = Some(upload(
             &self.device,
+            &self.queue,
             "halos",
             wgpu::BufferUsages::VERTEX,
             &halos,
@@ -453,6 +457,7 @@ impl Renderer {
         self.ribbons = Some((
             upload(
                 &self.device,
+                &self.queue,
                 "ribbons",
                 wgpu::BufferUsages::VERTEX,
                 &ribbons,
@@ -462,6 +467,7 @@ impl Renderer {
         let (raw, ranges) = geometry::instance_data(&scene.instances, self.models.len());
         self.instances = Some(upload(
             &self.device,
+            &self.queue,
             "instances",
             wgpu::BufferUsages::VERTEX,
             &raw,
@@ -473,9 +479,16 @@ impl Renderer {
         let quads = (hue.len() / geometry::QUAD_CORNERS as usize) as u32;
         let indices = geometry::quad_indices(quads);
         self.hue = (!hue.is_empty()).then(|| HueBuffers {
-            vertices: upload(&self.device, "hue lines", wgpu::BufferUsages::VERTEX, &hue),
+            vertices: upload(
+                &self.device,
+                &self.queue,
+                "hue lines",
+                wgpu::BufferUsages::VERTEX,
+                &hue,
+            ),
             indices: upload(
                 &self.device,
+                &self.queue,
                 "hue indices",
                 wgpu::BufferUsages::INDEX,
                 &indices,
@@ -745,12 +758,14 @@ impl Renderer {
         MeshBuffers {
             vertices: upload(
                 &self.device,
+                &self.queue,
                 "mesh vertices",
                 wgpu::BufferUsages::VERTEX,
                 &vertices,
             ),
             indices: upload(
                 &self.device,
+                &self.queue,
                 "mesh indices",
                 wgpu::BufferUsages::INDEX,
                 &mesh.indices,
@@ -763,6 +778,7 @@ impl Renderer {
         StrokeBuffers {
             buffer: upload(
                 &self.device,
+                &self.queue,
                 label,
                 wgpu::BufferUsages::VERTEX,
                 &strokes.vertices,
@@ -1192,18 +1208,52 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 
 const EMPTY: [u8; 16] = [0; 16];
 
-/// Uploads `data`. An empty list gets a placeholder so the buffer is never zero sized.
+/// Uploads `data`. An empty list gets a placeholder so the buffer is never zero sized. The bytes
+/// go in with `write_buffer` rather than at creation: a browser's WebGPU can refuse a
+/// mapped-at-creation buffer that it would take otherwise, and wgpu panics on that refusal.
 fn upload<T: Pod>(
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     label: &str,
     usage: wgpu::BufferUsages,
     data: &[T],
 ) -> wgpu::Buffer {
     let bytes = bytemuck::cast_slice::<T, u8>(data);
-    let contents = if bytes.is_empty() { &EMPTY[..] } else { bytes };
-    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+    let contents = aligned(if bytes.is_empty() { &EMPTY[..] } else { bytes });
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
-        contents,
-        usage,
-    })
+        size: contents.len() as u64,
+        usage: usage | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&buffer, 0, &contents);
+    buffer
+}
+
+/// `bytes` with zeros after them up to a multiple of four, the alignment `write_buffer` takes.
+fn aligned(bytes: &[u8]) -> Cow<'_, [u8]> {
+    let pad = (4 - bytes.len() % 4) % 4;
+    if pad == 0 {
+        return Cow::Borrowed(bytes);
+    }
+    let mut padded = bytes.to_vec();
+    padded.resize(bytes.len() + pad, 0);
+    Cow::Owned(padded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::aligned;
+
+    #[test]
+    fn aligned_pads_with_zeros_to_four_bytes() {
+        for len in 0usize..=9 {
+            let bytes: Vec<u8> = (1..=len as u8).collect();
+            let out = aligned(&bytes);
+            assert_eq!(out.len() % 4, 0, "length {len}");
+            assert_eq!(out.len(), len.div_ceil(4) * 4, "length {len}");
+            assert_eq!(&out[..len], &bytes[..], "length {len}");
+            assert!(out[len..].iter().all(|&b| b == 0), "length {len}");
+        }
+    }
 }
