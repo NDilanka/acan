@@ -4141,6 +4141,112 @@ mod tests {
         }
     }
 
+    /// The span of a drone's bob over `period` ms, sampled 48 times, in world units.
+    fn bob_span(motion: &mut Motion, state: DroneState, period: f32) -> f32 {
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for _ in 0..48 {
+            motion.advance(period / 48.0);
+            lo = lo.min(motion.bob(0, state));
+            hi = hi.max(motion.bob(0, state));
+        }
+        hi - lo
+    }
+
+    #[test]
+    fn an_idle_drone_bobs_lower_and_slower_than_a_working_one() {
+        let (working, idle) = (
+            DroneState::Working.bob().expect("a working drone bobs"),
+            DroneState::Idle.bob().expect("an idle drone bobs"),
+        );
+        assert!(idle.0 < working.0, "lower: {idle:?} against {working:?}");
+        assert!(idle.1 > working.1, "slower: {idle:?} against {working:?}");
+        assert_eq!(
+            DroneState::Waiting.bob(),
+            None,
+            "a waiting drone holds still"
+        );
+        assert_eq!(DroneState::Stale.bob(), None, "a stale drone holds still");
+
+        let mut motion = Motion::default();
+        motion.set_px_units(2.0);
+        let marks = marks_of(vec![drone("a", [0.0, 0.0, 40.0], [9.0, 0.0, 9.0], "idle")]);
+        motion.sync(&marks);
+        motion.advance(ARRIVE_MS + TURN_MS);
+        let span = bob_span(&mut motion, DroneState::Idle, IDLE_BOB_PERIOD_MS);
+        assert!(
+            (span - IDLE_BOB_PX * 2.0).abs() < 0.05,
+            "the idle bob spans {IDLE_BOB_PX} CSS px: {span}"
+        );
+        let before = motion.bob(0, DroneState::Idle);
+        motion.advance(IDLE_BOB_PERIOD_MS);
+        assert!(
+            (motion.bob(0, DroneState::Idle) - before).abs() < 1e-3,
+            "and repeats every {IDLE_BOB_PERIOD_MS} ms"
+        );
+        let shell = mark_instances(&motion, &marks, KINDS, 1.0, None)
+            .into_iter()
+            .find(|i| i.kind == KINDS.body)
+            .expect("the drone draws");
+        assert_eq!(shell.offset[2], 40.0 + motion.bob(0, DroneState::Idle));
+    }
+
+    #[test]
+    fn reduced_motion_or_freeze_holds_an_idle_drone_and_asks_for_no_frames() {
+        for (still, reduced) in [(false, true), (true, false)] {
+            let mut motion = Motion::new(still);
+            motion.set_reduced(reduced);
+            motion.set_px_units(2.0);
+            motion.sync(&marks_of(vec![drone(
+                "a",
+                [0.0, 0.0, 40.0],
+                [9.0, 0.0, 9.0],
+                "idle",
+            )]));
+            motion.advance(ARRIVE_MS + TURN_MS);
+            assert!(!motion.advance(IDLE_BOB_PERIOD_MS / 4.0), "no frames");
+            assert_eq!(motion.bob(0, DroneState::Idle), 0.0, "and no bob");
+        }
+    }
+
+    #[test]
+    fn the_loop_runs_only_while_a_drone_bobs_and_runs_calm_for_idle_drones_alone() {
+        let settled = |states: &[DroneState]| {
+            let mut motion = Motion::default();
+            motion.set_px_units(2.0);
+            let bodies = states
+                .iter()
+                .enumerate()
+                .map(|(i, &state)| {
+                    let x = 100.0 * i as f32;
+                    let mut body = drone(&format!("d{i}"), [x, 0.0, 40.0], [x, 9.0, 9.0], "idle");
+                    body.state = state;
+                    body
+                })
+                .collect();
+            motion.sync(&marks_of(bodies));
+            motion.advance(ARRIVE_MS + TURN_MS);
+            let more = motion.advance(16.0);
+            (more, motion.calm())
+        };
+        assert_eq!(
+            settled(&[DroneState::Waiting, DroneState::Stale]),
+            (false, false),
+            "no drone bobs, so no frames"
+        );
+        assert_eq!(settled(&[]), (false, false), "no drones, no frames");
+        assert_eq!(
+            settled(&[DroneState::Idle, DroneState::Waiting]),
+            (true, true),
+            "an idle drone keeps a calm loop"
+        );
+        assert_eq!(
+            settled(&[DroneState::Idle, DroneState::Working]),
+            (true, false),
+            "a working drone keeps the full rate"
+        );
+    }
+
     #[test]
     fn a_drone_on_its_machines_centre_keeps_the_heading_it_had() {
         let at = [0.0, 0.0, PLINTH_TOP];
