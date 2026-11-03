@@ -87,8 +87,6 @@ pub enum Ink {
     /// A seam: a light painted line where two parts of a surface meet. Lighter than the contours
     /// and creases the renderer strokes from the mesh.
     Edge,
-    /// The soft contact shadow under an agent's drone. It draws as a disc that fades to its rim.
-    Shadow,
     /// Amber. Reserved for waiting on the user, so no model draws it.
     Lit,
     /// A status colour.

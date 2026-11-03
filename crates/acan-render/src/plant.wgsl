@@ -676,7 +676,7 @@ fn fs_hue(v: StrokeOut) -> @location(0) vec4<f32> {
         if (r >= 1.0) {
             discard;
         }
-        // Like a shadow dot, a spot fades to its rim, so it reads as light and not as a disc.
+        // A spot fades to its rim, so it reads as light and not as a disc.
         return vec4<f32>(v.ink.rgb, v.ink.a * (1.0 - smoothstep(0.0, 1.0, r)));
     }
     return vec4<f32>(v.ink.rgb, v.ink.a * stroke_coverage(v));
@@ -724,12 +724,10 @@ fn fs_dot(v: DotOut) -> @location(0) vec4<f32> {
     if (coverage <= 0.0) {
         discard;
     }
-    // A shadow fades to its rim, so it reads as light on the ground and not as a disc.
-    let falloff = select(1.0, 1.0 - smoothstep(0.0, 1.0, r), v.tone == SLOT_SHADOW);
     let ink = theme.palette[v.tone];
     let page = theme.palette[SLOT_PAGE].rgb;
     let fog = fog_at(v.world);
-    return vec4<f32>(mix(ink.rgb, page, fog), ink.a * coverage * falloff);
+    return vec4<f32>(mix(ink.rgb, page, fog), ink.a * coverage);
 }
 
 // Ink pass: a full-screen triangle that lays the resolved line ink on the frame. Its blend

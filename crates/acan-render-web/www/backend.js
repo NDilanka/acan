@@ -7,16 +7,18 @@ export const BACKENDS = ["webgpu", "webgl"];
 
 export const NO_BACKEND_LINE = "This browser can't draw the map: it needs WebGPU or WebGL2.";
 
-// `override` is the `?backend=` value, or null or "" when the page should choose. A forced
-// WebGPU still falls back to WebGL, as it always has; a forced WebGL tries WebGL alone.
-export function backendPlan(override, hasWebGpu) {
+// `override` is the `?backend=` value, or null or "" when the page should choose. The page
+// chooses WebGL. WebGPU is opt-in until it draws on hardware: in headless Chrome its canvas stayed
+// blank. A forced WebGPU still falls back to WebGL, as it always has; a forced WebGL tries WebGL
+// alone.
+export function backendPlan(override) {
   if (override) {
     if (!BACKENDS.includes(override)) {
       throw new Error(`unknown backend "${override}": use webgpu or webgl`);
     }
     return override === "webgpu" ? ["webgpu", "webgl"] : ["webgl"];
   }
-  return hasWebGpu ? ["webgpu", "webgl"] : ["webgl"];
+  return ["webgl"];
 }
 
 // Tries each backend in `plan` until one builds. `create(canvas, backend)` builds the renderer

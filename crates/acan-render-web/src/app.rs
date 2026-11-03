@@ -47,6 +47,21 @@ const ORBIT_DEG_PER_PX: f32 = 0.4;
 const TILT_DEG_PER_PX: f32 = 0.25;
 /// Duration of a Q or E turn, in milliseconds.
 const TURN_MS: f32 = 180.0;
+/// The gap between frames, in ms, while only the idle bob runs: about 20 frames a second. The bob
+/// moves a few hundredths of a pixel in that time, so the lower rate does not show.
+const CALM_FRAME_MS: f32 = 50.0;
+/// How far a drone reaches from its centre, its waiting ring included, in world units. A close-up
+/// keeps this much of each drone clear of the page's side panels.
+const FOCUS_REACH: f32 = 1.4 * acan_iso::BODY_RADIUS;
+
+/// A close-up's hold: the CSS band its drones keep within, the world point it centres on, and
+/// the camera as it left it, so a move by the reader ends the hold.
+#[derive(Debug, Clone, Copy)]
+struct FocusHold {
+    band: [f32; 2],
+    centre: [f32; 3],
+    camera: Camera,
+}
 
 #[wasm_bindgen]
 pub struct App {
@@ -73,13 +88,17 @@ pub struct App {
     slots: AgentSlots,
     /// Whether the marks' eases were moving on the last frame.
     moving: bool,
+    /// Whether the last frame ran only for the idle bob, see [`App::frame_gap_ms`].
+    calm: bool,
     /// Whether the marks hold still, as `?freeze=1` asks. Set once before a plant loads.
     still: bool,
     /// The index of the clash whose card is open, if any.
     card_clash: Option<usize>,
-    /// An agent to close up on, and the zoom as a share of the fit zoom. It applies once the view
-    /// places the agent's drone, then clears.
-    focus: Option<(String, f32)>,
+    /// An agent to close up on, the zoom as a share of the fit zoom, and the CSS band the page's
+    /// panels leave free. It applies once the view places the agent's drone, then clears.
+    focus: Option<(String, f32, Option<[f32; 2]>)>,
+    /// A close-up that keeps its drones clear of the side panels until the reader moves it.
+    focus_hold: Option<FocusHold>,
     /// The ride, while the page shows one agent's drone from inside.
     ride: Option<Ride>,
     /// Whether the fit runs once the ride has eased back, as the `0` key asks.
@@ -191,9 +210,11 @@ impl App {
             motion: Motion::default(),
             slots: AgentSlots::default(),
             moving: false,
+            calm: false,
             still: false,
             card_clash: None,
             focus: None,
+            focus_hold: None,
             ride: None,
             fit_after_leave: false,
             bob_enabled: true,
@@ -565,7 +586,14 @@ impl App {
         }
         self.moving = moving;
         let riding = self.advance_ride(dt_ms);
+        self.calm = moving && self.motion.calm() && !(turning || touring || riding);
         turning || touring || moving || riding
+    }
+
+    /// How long the page may wait before the next frame, in ms, after [`App::advance`] asked for
+    /// one: zero for the next display frame, or [`CALM_FRAME_MS`] while only the idle bob runs.
+    pub fn frame_gap_ms(&self) -> f32 {
+        if self.calm { CALM_FRAME_MS } else { 0.0 }
     }
 
     /// Follows the ride's drone, moves the ride's ease on, and leaves the ride once its drone has
@@ -858,16 +886,23 @@ impl App {
     }
 
     /// Closes up on agent `name`'s drone: the drone sits at the screen centre, and the zoom is
-    /// `ratio` times the fit zoom. The page asks for it with `?focus=`. It waits until the view
-    /// places the drone, so it may be called before the log loads.
-    pub fn focus_agent(&mut self, name: &str, ratio: f32) {
-        self.focus = Some((name.to_owned(), ratio));
+    /// `ratio` times the fit zoom. `band` is the CSS x range `[left, right]` the page's panels
+    /// leave free: when a drone on screen would sit under a panel past it, the view slides left
+    /// just enough to clear it, as long as that does not push a drone off the band's left edge.
+    /// The page asks for it with `?focus=`. It waits until the view places the drone, so it may
+    /// be called before the log loads.
+    pub fn focus_agent(&mut self, name: &str, ratio: f32, band: &[f32]) {
+        let band = match band {
+            [left, right] if left < right => Some([*left, *right]),
+            _ => None,
+        };
+        self.focus = Some((name.to_owned(), ratio, band));
         self.apply_focus();
     }
 
     /// Applies a pending focus once the agent's drone is placed, then clears it.
     fn apply_focus(&mut self) {
-        let Some((name, ratio)) = self.focus.as_ref() else {
+        let Some((name, ratio, band)) = self.focus.as_ref() else {
             return;
         };
         let Some(body) = self.marks.bodies.iter().find(|body| &body.agent == name) else {
@@ -875,9 +910,91 @@ impl App {
         };
         let at = self.motion.body_at(&body.agent).unwrap_or(body.at);
         let zoom = ratio * self.fit_zoom();
+        let band = *band;
         self.camera.centre_on(at);
         self.camera.set_zoom(zoom);
         self.focus = None;
+        self.focus_hold = band.map(|band| FocusHold {
+            band,
+            centre: at,
+            camera: self.camera,
+        });
+        self.hold_clear();
+    }
+
+    /// Slides a close-up the reader has not moved so its drones keep clear of the side panels.
+    /// The log may place a drone after the close-up, so each view rebuild checks again.
+    fn hold_clear(&mut self) {
+        let Some(hold) = self.focus_hold else {
+            return;
+        };
+        if self.camera != hold.camera {
+            self.focus_hold = None;
+            return;
+        }
+        let slide = self.slide_clear(hold.band);
+        if slide == 0.0 {
+            return;
+        }
+        let centre = self.slid_centre(hold.centre, slide);
+        self.camera.centre_on(centre);
+        self.focus_hold = Some(FocusHold {
+            centre,
+            camera: self.camera,
+            ..hold
+        });
+    }
+
+    /// The point to centre on so the scene at `centre`'s depth moves `slide` CSS px across the
+    /// screen. It is worked out at that depth, since a ground pan moves the drones, nearer the
+    /// eye, further than the ground under a low perspective camera.
+    fn slid_centre(&self, centre: [f32; 3], slide: f32) -> [f32; 3] {
+        let at = self.camera.world_to_screen(centre);
+        let step = |axis: usize| {
+            let mut moved = centre;
+            moved[axis] += 1.0;
+            let [x, y] = self.camera.world_to_screen(moved);
+            [x - at[0], y - at[1]]
+        };
+        let (sx, sy) = (step(0), step(1));
+        let det = sx[0] * sy[1] - sy[0] * sx[1];
+        if det.abs() < 1e-6 {
+            return centre;
+        }
+        // The plan step d with J d = (-slide, 0) in device px, so the point now at the screen
+        // centre less the slide takes the centre.
+        let b = -slide * self.dpr;
+        [
+            centre[0] + b * sy[1] / det,
+            centre[1] - b * sx[1] / det,
+            centre[2],
+        ]
+    }
+
+    /// How far, in CSS px, to slide the view sideways so every drone on screen keeps out past
+    /// `band[1]` without one leaving past `band[0]`. Zero when none sits past the right edge.
+    fn slide_clear(&self, band: [f32; 2]) -> f32 {
+        // A drone's reach from its centre, ring and ears included, in CSS px.
+        let reach = FOCUS_REACH * self.camera.zoom() / self.dpr;
+        let xs: Vec<f32> = self
+            .marks
+            .bodies
+            .iter()
+            .filter_map(|body| self.motion.body_at(&body.agent))
+            .filter_map(|at| pov::target_on_screen(&self.camera, at, self.dpr))
+            .map(|[x, _]| x)
+            .collect();
+        let (lo, hi) = xs
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &x| {
+                (lo.min(x), hi.max(x))
+            });
+        let over = hi + reach - band[1];
+        if xs.is_empty() || over <= 0.0 {
+            return 0.0;
+        }
+        let room = (lo - reach - band[0]).max(0.0);
+        -over.min(room)
     }
 
     /// Level of detail now: 0 far, 1 near, 2 close.
@@ -1320,6 +1437,7 @@ impl App {
         self.marks = marks;
         self.view = Some(view);
         self.apply_focus();
+        self.hold_clear();
         self.sync_scene();
         Ok(())
     }
