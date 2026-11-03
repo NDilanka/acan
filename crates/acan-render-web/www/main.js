@@ -64,6 +64,10 @@ import { installFirstRun, paintFirstRun } from "./firstrun-panel.js";
 import { onWorkers, refreshWorkers, workersAnswer } from "./workers.js";
 import { nextFrame } from "./frames.js";
 import { closeViewer, installVision, placeVisionPins, syncVision, viewerOpen, viewerTakesEscape } from "./vision-pins.js";
+import { installMulti, nameOf } from "./multi.js";
+import { placePlates } from "./nameplates.js";
+import { placeParked } from "./parked.js";
+import { canvasState } from "./projects.js";
 
 const ZOOM_KEY = 1.25;
 
@@ -136,6 +140,8 @@ function drawFrame(now = performance.now()) {
     paintRide();
     placeLabels();
     placeVisionPins();
+    placePlates();
+    placeParked();
     const next = nextFrame({ moving: turning, hidden: document.hidden, gapMs: state.app.frame_gap_ms() });
     if (next === "stop") {
       state.lastFrame = null;
@@ -523,7 +529,7 @@ async function loadPlant() {
       setLink("failed");
     }
   }
-  repoEl.textContent = state.app.repo_name();
+  repoEl.textContent = canvasState.multi ? nameOf(canvasState.active) : state.app.repo_name();
 }
 
 function followReducedMotion() {
@@ -567,6 +573,7 @@ async function boot() {
   installInbox(kit);
   installHistory(kit);
   installScrub(kit);
+  installMulti(kit);
   window.addEventListener("resize", sizeCanvas);
   state.app.set_still(freeze);
   // Reduced motion turns the hover bob off, and the page follows the setting as it changes.

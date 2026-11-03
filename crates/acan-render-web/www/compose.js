@@ -17,6 +17,7 @@ import { closeViewer } from "./vision-pins.js";
 import { $, canvas, freeBand, freeze, replay, state } from "./state.js";
 import { historyBlock } from "./guard.js";
 import { forgetToken, hold } from "./stream.js";
+import { apiPath, target } from "./projects.js";
 
 // An accepted order's panel shows its line this long, then closes.
 const SENT_HOLD_MS = 2000;
@@ -140,6 +141,7 @@ function bind() {
 function paintCompose() {
   if (compose === null) return;
   $("compose-title").textContent = `Order on ${compose.machine}`;
+  paintProject();
   $("compose-context").textContent = machineContext(state.view, compose.machine);
   $("compose-send").textContent = compose.sending ? "Sending…" : "Send";
   const blocked = historyBlock("send", hold.on);
@@ -148,6 +150,25 @@ function paintCompose() {
   $("compose-sentence").readOnly = compose.sending;
   $("compose-note").textContent = blocked ?? compose.note;
   $("compose-note").classList.toggle("bad", blocked === null && compose.bad);
+}
+
+// On a canvas of several, one quiet line says which project the order goes to. A page with one
+// plant never makes it.
+function paintProject() {
+  const where = target();
+  let line = $("compose-project");
+  if (where === null) {
+    if (line !== null) line.hidden = true;
+    return;
+  }
+  if (line === null) {
+    line = document.createElement("span");
+    line.id = "compose-project";
+    line.className = "muted project";
+    $("compose-send").after(line);
+  }
+  line.hidden = false;
+  line.textContent = `in ${where}`;
 }
 
 async function send() {
@@ -185,7 +206,7 @@ async function send() {
   let line;
   let accepted = false;
   try {
-    const res = await fetch("/api/commands", {
+    const res = await fetch(apiPath(target(), "/api/commands"), {
       method: "POST",
       headers: { Authorization: `Bearer ${state.token}`, "Content-Type": "application/json" },
       body: JSON.stringify(built.command),

@@ -6,6 +6,7 @@
 import { $, gate, params, replay, state } from "./state.js";
 import { DONE, FIRSTRUN_KEY, UNAVAILABLE, UNKNOWN, allDone, contractOf, progressShort, shouldShow, steps } from "./firstrun.js";
 import { isLive } from "./stream.js";
+import { apiPath, target } from "./projects.js";
 import { loadWorkers, onWorkers, refreshWorkers, workersAnswer } from "./workers.js";
 
 const panel = $("firstrun");
@@ -59,7 +60,7 @@ async function loadSetup() {
     setup = null;
   } else {
     try {
-      const res = await fetch("/api/setup", { headers: { Authorization: `Bearer ${state.token}` } });
+      const res = await fetch(apiPath(target(), "/api/setup"), { headers: { Authorization: `Bearer ${state.token}` } });
       setup = { status: res.status, body: res.ok ? await res.json().catch(() => null) : null };
     } catch {
       setup = { status: 0, body: null };
@@ -76,7 +77,7 @@ async function checkContract() {
   checking = true;
   paintFirstRun();
   try {
-    const res = await fetch("/api/plant", { headers: { Authorization: `Bearer ${state.token}` } });
+    const res = await fetch(apiPath(target(), "/api/plant"), { headers: { Authorization: `Bearer ${state.token}` } });
     contract = res.ok ? contractOf(await res.json()) : null;
   } catch {
     contract = null;

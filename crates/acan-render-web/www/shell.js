@@ -4,6 +4,7 @@
 // in release.js and setup.js. These calls do not use stream.js's `get`, because a refused report,
 // key or pick (403 for an agent token) must not sign the tester out.
 import { $, state } from "./state.js";
+import { apiPath, target } from "./projects.js";
 import { alphaShown } from "./chrome.js";
 import { bugReportOutcome, stillChecking, updateNotice, versionLabel, versionLine } from "./release.js";
 import {
@@ -97,7 +98,7 @@ async function checkUpdate(run, attempt) {
   }
   let update = null;
   try {
-    const res = await fetch("/api/update", { headers: { Authorization: `Bearer ${state.token}` } });
+    const res = await fetch(apiPath(target(), "/api/update"), { headers: { Authorization: `Bearer ${state.token}` } });
     if (res.ok) update = await res.json();
   } catch {
     update = null;
@@ -133,7 +134,7 @@ async function reportBug() {
   showNote("Preparing the bug report...");
   let outcome;
   try {
-    const res = await fetch("/api/bug-report", {
+    const res = await fetch(apiPath(target(), "/api/bug-report"), {
       headers: { Authorization: `Bearer ${state.token}` },
     });
     const payload = res.status === 200 ? await res.json() : null;
@@ -190,7 +191,7 @@ async function loadSetup() {
   setupStatus = null;
   if (state.token) {
     try {
-      const res = await fetch("/api/setup", { headers: { Authorization: `Bearer ${state.token}` } });
+      const res = await fetch(apiPath(target(), "/api/setup"), { headers: { Authorization: `Bearer ${state.token}` } });
       if (res.ok) setupStatus = await res.json();
     } catch {
       setupStatus = null;
@@ -397,7 +398,7 @@ async function saveKey(event) {
   let outcome;
   let saved = false;
   try {
-    const res = await fetch("/api/setup/keys", {
+    const res = await fetch(apiPath(target(), "/api/setup/keys"), {
       method: "POST",
       headers: { Authorization: `Bearer ${state.token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ provider, key }),
@@ -423,7 +424,7 @@ async function pickRole(role, value) {
   setChanges(`Changing ${role}...`, "");
   let outcome;
   try {
-    const res = await fetch(`/api/setup/roles/${encodeURIComponent(role)}`, {
+    const res = await fetch(apiPath(target(), `/api/setup/roles/${encodeURIComponent(role)}`), {
       method: "PUT",
       headers: { Authorization: `Bearer ${state.token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ provider }),
@@ -449,7 +450,7 @@ async function removeKey(provider) {
   let outcome;
   let target = null;
   try {
-    const res = await fetch(`/api/setup/keys/${encodeURIComponent(provider)}`, {
+    const res = await fetch(apiPath(target(), `/api/setup/keys/${encodeURIComponent(provider)}`), {
       method: "DELETE",
       headers: { Authorization: `Bearer ${state.token}` },
     });

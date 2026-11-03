@@ -6,6 +6,8 @@ import { announce, noteMachine, openCompose, orderHere, pulse } from "./compose.
 import { VERB_WORDS, emptyNote, receiptItems, search } from "./command.js";
 import { requestRender } from "./main.js";
 import { shownOrder } from "./panels.js";
+import { flyProject } from "./multi.js";
+import { canvasState } from "./projects.js";
 import { $, canvas, state } from "./state.js";
 
 // A go asked during a ride waits for the ride to ease back, checking this often, this many times.
@@ -108,6 +110,7 @@ function refresh() {
     : search(state.view, text, {
       receipts: receiptItems(state.plantViews),
       shownOrder: shownOrder(state.view)?.id ?? null,
+      projects: canvasState.multi ? canvasState.list : undefined,
     });
   bar.active = 0;
   $("command-note").textContent = bar.results.length === 0 && state.view !== null ? emptyNote(state.view, text) : "";
@@ -173,6 +176,11 @@ function run(result) {
       closeCommand();
       flyTo(result.target.machine);
       announce(`Going to ${result.target.machine}.`);
+      return;
+    case "project":
+      closeCommand();
+      flyProject(result.target.project);
+      announce(`Going to ${result.label}.`);
       return;
     case "ride":
       if (state.app.ride(result.target.agent)) {

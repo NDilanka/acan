@@ -6,6 +6,7 @@
 import { closeQuestionCard } from "./cards.js";
 import { closeCompose } from "./compose.js";
 import { requestRender } from "./main.js";
+import { apiPath, target } from "./projects.js";
 import { $, canvas, freeBand, params, state } from "./state.js";
 import {
   ADVISORY,
@@ -121,7 +122,7 @@ async function fetchRecord(entry, tries) {
   inFlight.add(entry.task);
   let record = null;
   try {
-    const res = await authed(`/api/tasks/${encodeURIComponent(entry.task)}/vision`);
+    const res = await authed(apiPath(target(), `/api/tasks/${encodeURIComponent(entry.task)}/vision`));
     if (res.ok) record = await res.json();
     else if (res.status !== 404) console.error(`the vision record of ${entry.task} answered ${res.status}`);
   } catch (err) {
