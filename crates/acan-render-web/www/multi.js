@@ -21,6 +21,8 @@ import {
   worldBounds,
 } from "./projects.js";
 import { installPlates, paintPlates } from "./nameplates.js";
+import { parkedClick, pinNear } from "./overlays.js";
+import { installParked } from "./parked.js";
 import { applyStreamed, feed, forgetToken, get, hold, setLink } from "./stream.js";
 import { canvas, freeze, repoEl, state } from "./state.js";
 
@@ -37,6 +39,9 @@ const FLY_RETRY_MS = 100;
 const FLY_TRIES = 12;
 
 const CLICK_PX = 4;
+
+// How near a parked plant's clash pin a click must land, as marks.js picks the pins on screen.
+const PIN_PICK_PX = 18;
 
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
@@ -142,8 +147,10 @@ export async function startMulti(list) {
   });
   repoEl.textContent = nameOf(canvasState.active);
   installPlates({ boundsOf, select: selectProject, fly: flyProject, move: moveProject, moved: savePlaces });
+  installParked({ select: selectProject, fly: flyProject });
   paintPlates();
   bindSettle();
+  bindParkedClick();
   setInterval(refreshList, LIST_MS);
   requestRender();
   if (freeze) {
@@ -296,6 +303,10 @@ export function selectProject(id) {
   feed.load(multi.events.get(id) ?? []);
   multi.events.delete(id);
   swapState(state, multi.stash, from, id);
+  // The machine names are kept by index and made with their words, so the last project's names
+  // would stand on this plant's machines of the same index.
+  for (const el of state.labels.values()) el.remove();
+  state.labels.clear();
   state.usageDirty = true;
   canvasState.active = id;
   repoEl.textContent = nameOf(id);
@@ -335,6 +346,37 @@ function savePlaces() {
   const saved = placesFrom(localStorage.getItem(PLACES_KEY));
   for (const [id, place] of multi.places) saved[id] = place;
   localStorage.setItem(PLACES_KEY, JSON.stringify(saved));
+}
+
+// A click on a parked plant's pin or drone puts that project on screen before the page's own
+// click handler runs, which then acts on it as on any project on screen: a pin flies the camera to
+// the plant and opens the clash card, a drone is ridden, and the ride flies the camera. This runs
+// in the capture phase so it comes before that handler on the same pointerup.
+function bindParkedClick() {
+  let down = null;
+  canvas.addEventListener("pointerdown", (event) => {
+    down = event.button === 0 && !event.altKey ? { x: event.clientX, y: event.clientY } : null;
+  }, { capture: true });
+  canvas.addEventListener("pointerup", (event) => {
+    const pressed = down;
+    down = null;
+    if (pressed === null || Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) >= CLICK_PX) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const order = JSON.parse(state.app.canvas_order());
+    const skip = order.indexOf(canvasState.active);
+    const drone = state.app.all_drone_at(x, y);
+    const hit = parkedClick(
+      pinNear(state.app.all_pin_layout(), x, y, skip, PIN_PICK_PX),
+      drone === "" ? null : JSON.parse(drone),
+      order,
+      canvasState.active,
+    );
+    if (hit === null || !multi.loaded.has(hit.id)) return;
+    if (hit.kind === "pin") flyProject(hit.id);
+    else selectProject(hit.id);
+  }, { capture: true });
 }
 
 // After the user moves the camera, the project under the screen centre goes on screen.

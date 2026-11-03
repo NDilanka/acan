@@ -64,6 +64,7 @@ import { onWorkers, refreshWorkers, workersAnswer } from "./workers.js";
 import { closeViewer, installVision, placeVisionPins, syncVision, viewerOpen, viewerTakesEscape } from "./vision-pins.js";
 import { installMulti, nameOf } from "./multi.js";
 import { placePlates } from "./nameplates.js";
+import { placeParked } from "./parked.js";
 import { canvasState } from "./projects.js";
 
 const ZOOM_KEY = 1.25;
@@ -133,6 +134,7 @@ function drawFrame(now = performance.now()) {
     placeLabels();
     placeVisionPins();
     placePlates();
+    placeParked();
     if (turning) {
       requestRender();
     } else {
