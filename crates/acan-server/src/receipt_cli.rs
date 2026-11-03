@@ -214,7 +214,7 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
         detail: "--base must be a local branch; create one with `git branch <name> <sha>`"
             .to_owned(),
     })?;
-    let base_commit = commit_sha(&base_head.to_string())?;
+    let base_read = commit_sha(&base_head.to_string())?;
     let head_commit = resolve_commit(repo.root(), &args.head)
         .await
         .ok_or_else(|| ShadowError::Ref {
@@ -228,7 +228,10 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
         .check_environment()
         .map_err(|err| ShadowError::Observe(format!("the container policy is invalid: {err}")))?;
     let protected = observe::protected_paths(&policy);
-    let base = prepare(&repo, &base_commit, &protected, "the base").await?;
+    let base = prepare(&repo, &base_read, &protected, "the base").await?;
+    // Every run names the commit the base was prepared on, so the envelope names what was tested.
+    ensure_unmoved(base.protected_head(), &base_read, &args.base)?;
+    let base_commit = base.protected_head().clone();
 
     // The contract is read from the base's protected paths, never from the head, so a head
     // cannot change the contract it is judged by.
@@ -242,6 +245,7 @@ async fn run_with(args: &ShadowArgs, docker: &Path) -> Result<ShadowReceipt, Sha
         observe::read_protected(&snapshot).map_err(|err| ShadowError::Contract(err.to_string()))?;
 
     let candidate = prepare(&repo, &head_commit, &protected, "the head").await?;
+    ensure_unmoved(candidate.protected_head(), &base_commit, &args.base)?;
     preflight(docker, &policy.image.name).await?;
 
     let scope = shadow_scope(&base_commit)?;
@@ -340,6 +344,19 @@ async fn resolve_commit(root: &Path, spec: &str) -> Option<CommitSha> {
 fn commit_sha(text: &str) -> Result<CommitSha, ShadowError> {
     CommitSha::from_str(text)
         .map_err(|err| ShadowError::Observe(format!("{text} is not a commit: {err}")))
+}
+
+/// Refuses when the protected head is not the commit a run was pinned to. A branch that moved
+/// between reading it and preparing on it would otherwise be tested under the old name.
+fn ensure_unmoved(now: &CommitSha, pinned: &CommitSha, base: &str) -> Result<(), ShadowError> {
+    if now == pinned {
+        return Ok(());
+    }
+    Err(ShadowError::Ref {
+        flag: "--base",
+        name: base.to_owned(),
+        detail: "the branch moved while the receipt was prepared; run it again".to_owned(),
+    })
 }
 
 /// Prepares `commit` on the protected head. A conflict is a refusal: there is no merged commit
@@ -934,6 +951,44 @@ mod tests {
             matches!(error, ShadowError::Docker(_)),
             "no docker: {error}"
         );
+    }
+
+    fn head_of(dir: &Path) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git runs");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    #[tokio::test]
+    async fn a_base_that_moves_after_it_is_read_is_refused() {
+        let repo_dir = clone_with(&contract_files());
+        let read = commit_sha(&head_of(repo_dir.path())).expect("the head is a commit");
+        git(
+            repo_dir.path(),
+            &["commit", "-q", "--allow-empty", "-m", "moved"],
+        );
+        let repo = Repo::open_with_protected(repo_dir.path(), "main")
+            .await
+            .expect("the clone opens");
+        let protected = observe::protected_paths(&observe::runner_policy());
+        let PrepareOutcome::Prepared(base) = repo
+            .prepare(&read, &protected)
+            .await
+            .expect("the base prepares")
+        else {
+            panic!("the base merges cleanly onto itself");
+        };
+        let error = ensure_unmoved(base.protected_head(), &read, "main")
+            .expect_err("a base that moved is refused");
+        assert!(
+            matches!(&error, ShadowError::Ref { flag: "--base", .. }),
+            "moved base: {error}"
+        );
+        ensure_unmoved(&read, &read, "main").expect("an unmoved base is kept");
     }
 
     #[test]
