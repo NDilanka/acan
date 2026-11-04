@@ -687,9 +687,15 @@ impl App {
         self.turn = None;
         self.tour_move = None;
         self.cancel_top_move();
-        self.camera
-            .orbit(dx * ORBIT_DEG_PER_PX, -dy * TILT_DEG_PER_PX);
-        // A tilt away from the top ends the top-down view, so the page's button tells the truth.
+        // From the top there is no higher tilt, so a vertical drag there tilts away from the top
+        // whichever way it goes. A tilt away from the top ends the top-down view, so the page's
+        // button tells the truth.
+        let tilt = if self.top_down {
+            -dy.abs() * TILT_DEG_PER_PX
+        } else {
+            -dy * TILT_DEG_PER_PX
+        };
+        self.camera.orbit(dx * ORBIT_DEG_PER_PX, tilt);
         self.top_down = self.top_down && topdown::is_top_down(self.camera.elevation());
     }
 
