@@ -192,6 +192,7 @@ fn model_of(mesh: Mesh) -> Model {
         lines: Vec::new(),
         dots: Vec::new(),
         bounds,
+        solids: 0,
     }
 }
 

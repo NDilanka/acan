@@ -86,7 +86,7 @@ fn build(files: &[SourceFile], grouping: &Grouping) -> (Vec<Machine>, Vec<Belt>)
         }
         let dir = common_directory(members.iter().map(|file| file.path.as_str()));
         let paths: Vec<&str> = members.iter().map(|file| file.path.as_str()).collect();
-        let decision = kind::decide(&name, &dir, &paths);
+        let decision = acan_iso::classify(&name, &dir, &paths);
         machines.push(Machine {
             id,
             name,

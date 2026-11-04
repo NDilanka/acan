@@ -49,9 +49,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn footprints_match_the_brief() {
-        assert_eq!(Kind::Assembler.footprint(), (96.0, 86.0));
-        assert_eq!(Kind::Crate.footprint(), (40.0, 40.0));
+    fn footprints_match_the_spec() {
+        assert_eq!(Kind::Intake.footprint(), (72.0, 88.0));
+        assert_eq!(Kind::Gate.footprint(), (56.0, 72.0));
+        assert_eq!(Kind::Assembler.footprint(), (64.0, 64.0));
+        assert_eq!(Kind::Tank.footprint(), (80.0, 80.0));
+        assert_eq!(Kind::Splitter.footprint(), (80.0, 80.0));
+        assert_eq!(Kind::Valve.footprint(), (40.0, 40.0));
+        assert_eq!(Kind::Crate.footprint(), (48.0, 48.0));
     }
 
     #[test]

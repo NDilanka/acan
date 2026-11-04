@@ -3,7 +3,7 @@
 // and moves the camera. This file shows what the payload says and never a model's words. Every
 // item is listed in view order whatever the tour does, so a tour cannot hide a failure.
 import { shownOrder } from "./panels.js";
-import { requestRender } from "./main.js";
+import { refitForPanels, requestRender } from "./main.js";
 import { paintMarks } from "./marks.js";
 import { REPLAY_PLATE_LINE } from "./plant.js";
 import {
@@ -151,7 +151,10 @@ function element(tag, text, className) {
 // Paints the plate from the held plays. Hidden until a receipt has a view or an error to show.
 export function paintPlate() {
   const entry = plateEntry();
+  const wasHidden = plateEl.hidden;
   plateEl.hidden = entry === null;
+  // A plate that shows or hides moves the room the top-down fit keeps clear, so the view refits.
+  if (wasHidden !== plateEl.hidden && state.app) refitForPanels();
   if (entry === null) return;
   syncOrder(entry.order);
   const { play } = entry;

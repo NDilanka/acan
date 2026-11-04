@@ -1409,6 +1409,45 @@ async fn an_export_with_no_recorded_run_is_a_conflict_and_receipts_still_answer(
 }
 
 #[tokio::test]
+async fn the_update_routes_are_for_the_owner_alone() {
+    let repo = temp_repo();
+    let running = boot(repo.path(), models(repo.path(), &[])).await;
+    // Only the owner gets past the check, so the owner's own calls are not made here: they would
+    // reach GitHub.
+    let check = "/api/settings/update/check";
+    let install = "/api/settings/update";
+
+    assert_eq!(
+        get_path(&running, check, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        get_path(&running, check, Some(MEMBER_TOKEN)).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        get_path(&running, check, Some(AGENT_TOKEN)).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        post_to(&running, install, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        post_to(&running, install, Some(MEMBER_TOKEN))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        post_to(&running, install, Some(AGENT_TOKEN)).await.status(),
+        StatusCode::FORBIDDEN
+    );
+
+    running.stop().await.expect("the server stops");
+}
+
+#[tokio::test]
 async fn a_fresh_repository_has_no_recorded_run_so_its_replay_is_a_conflict() {
     let repo = temp_repo();
     let running = boot(repo.path(), models(repo.path(), &[])).await;

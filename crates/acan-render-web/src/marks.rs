@@ -16,8 +16,8 @@ use acan_iso::{
     shadow_at,
 };
 use acan_render::theme::{
-    AGENT_SLOTS, TINT_BODY0, TINT_CLASH, TINT_DIM0, TINT_GHOST, TINT_SCOPE0, TINT_SHADOW,
-    TINT_STALE,
+    AGENT_SLOTS, TINT_BODY0, TINT_CLASH, TINT_DIM0, TINT_GHOST, TINT_OUTLINE_AMBER,
+    TINT_OUTLINE_BRASS, TINT_SCOPE0, TINT_SHADOW, TINT_STALE,
 };
 use acan_render::{Beam, Instance};
 use serde::Serialize;
@@ -164,6 +164,8 @@ const GHOST_OFFSET: f32 = 3.0;
 /// A ghost's opacity, and its width in CSS px.
 const GHOST_ALPHA: f32 = 0.8;
 const GHOST_PX: f32 = 1.75;
+/// A scope outline's width in CSS px, which the kit draws at 1.2 plan units.
+const SCOPE_PX: f32 = 1.2;
 /// Milliseconds a ghost takes to fade out once it clears.
 pub const GHOST_FADE_MS: f32 = 400.0;
 /// The dot of a declaration whose task has no agent.
@@ -656,12 +658,28 @@ pub struct Marks {
     /// abnormal machine takes a colour from the live work. A working, waiting or stale agent
     /// leaves its machine grey, and the drone carries the state.
     pub abnormal: Vec<bool>,
+    /// For each plan machine, whether a task on it failed its latest decided gate run and has not
+    /// passed since. Its failed tick stands on the plinth until a later run passes.
+    pub failed: Vec<bool>,
     /// For each plan machine, the scope tint its footprint takes when it is not abnormal.
     pub scope_tints: Vec<Option<ScopeTint>>,
+    /// The scope outlines: one for each machine a lane covers, drafts and confirmed alike.
+    pub outlines: Vec<Outline>,
     /// Scope machine names the plan does not have, so the page can say they are not drawn.
     pub unplaced: Vec<String>,
     /// The machines where work landed while the reader was away, latest first.
     pub ghosts: Vec<Ghost>,
+}
+
+/// A scope outline round a machine's plinth: the amber of a plot or the brass of a keep.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Outline {
+    /// The plan machine.
+    pub machine: usize,
+    /// The lane the outline shows. A draft and a confirmed lane outline alike.
+    pub scope: ScopeTint,
+    /// The outline, as `[x, y, w, h]` in world units on the plinth top.
+    pub rect: [f32; 4],
 }
 
 /// A machine where work landed while the reader was away, drawn as a grey outline round its
@@ -716,7 +734,26 @@ impl Marks {
         let abnormal = (0..plan.machines.len())
             .map(|i| view.machines.get(i).is_some_and(|machine| machine.abnormal))
             .collect();
+        let failed = (0..plan.machines.len())
+            .map(|i| view.machines.get(i).is_some_and(|machine| machine.failed))
+            .collect();
         let scope = slice_layout(&view.lanes, plan);
+        let outlines = plan
+            .machines
+            .iter()
+            .zip(&scope.tints)
+            .enumerate()
+            .filter_map(|(machine, (plan_machine, lane))| {
+                let scope = (*lane)?;
+                let [x, y] = plan_machine.min;
+                let [w, h] = plan_machine.size;
+                Some(Outline {
+                    machine,
+                    scope,
+                    rect: [x, y, w, h],
+                })
+            })
+            .collect();
         let mut flags = flags(view, plan, stands, &bodies, &pins, clock);
         flags.extend(away_flags(view, plan, slots, &waiting, clock));
         flags.extend(
@@ -730,25 +767,101 @@ impl Marks {
             pins,
             flags,
             abnormal,
+            failed,
             scope_tints: scope.tints,
+            outlines,
             unplaced: scope.unplaced,
             ghosts: ghosts(view, plan, clock),
         }
     }
 
     /// The tint slot of a plan machine's footprint: the faint clash red when it is abnormal,
-    /// otherwise its scope tint or none. An open clash outranks the scope underneath it.
+    /// otherwise its confirmed scope's tint or none. A draft lane tints nothing, and an open clash
+    /// outranks the scope underneath it.
     #[must_use]
     pub fn footprint_tint(&self, machine: usize) -> u8 {
         let tint = if self.abnormal.get(machine).copied().unwrap_or(false) {
             TINT_CLASH
         } else {
-            match self.scope_tints.get(machine).copied().flatten() {
-                Some(scope) => TINT_SCOPE0 + scope as u32,
+            match self
+                .scope_tints
+                .get(machine)
+                .copied()
+                .flatten()
+                .and_then(scope_body)
+            {
+                Some(slot) => TINT_SCOPE0 + slot,
                 None => 0,
             }
         };
         u8::try_from(tint).expect("tint slots fit in a byte")
+    }
+}
+
+/// The body slot a lane gives its machine, as an index into [`acan_render::theme::SCOPE_TINTS`]:
+/// a confirmed plot is amber and a confirmed keep is brass. A draft gives none.
+fn scope_body(scope: ScopeTint) -> Option<u32> {
+    match scope {
+        ScopeTint::Plot => Some(0),
+        ScopeTint::Keep => Some(1),
+        ScopeTint::PlotDraft | ScopeTint::KeepDraft => None,
+    }
+}
+
+/// The outline slot of a lane: amber for a plot and brass for a keep, drafts too.
+fn scope_outline(scope: ScopeTint) -> u32 {
+    match scope {
+        ScopeTint::Plot | ScopeTint::PlotDraft => TINT_OUTLINE_AMBER,
+        ScopeTint::Keep | ScopeTint::KeepDraft => TINT_OUTLINE_BRASS,
+    }
+}
+
+/// The scope outlines now, each a loop of four strokes round its machine's plinth in its lane's
+/// colour. A staged step dims the outlines of the machines it does not name, as it dims their
+/// bodies.
+#[must_use]
+pub fn outline_beams(marks: &Marks, dpr: f32, staged: Option<&[bool]>) -> Vec<Beam> {
+    marks
+        .outlines
+        .iter()
+        .flat_map(|outline| {
+            let [x, y, w, h] = outline.rect;
+            let corners = [
+                [x, y, PLINTH_TOP],
+                [x + w, y, PLINTH_TOP],
+                [x + w, y + h, PLINTH_TOP],
+                [x, y + h, PLINTH_TOP],
+            ];
+            let slot =
+                u8::try_from(scope_outline(outline.scope)).expect("tint slots fit in a byte");
+            let tint = match staged {
+                None => slot,
+                Some(staged) => {
+                    emphasised(slot, staged.get(outline.machine).copied().unwrap_or(true))
+                }
+            };
+            (0..4).map(move |i| Beam {
+                from: corners[i],
+                to: corners[(i + 1) % 4],
+                origin: [0.0; 3],
+                grow: [0.0; 2],
+                turn: 0.0,
+                tint,
+                alpha: 1.0,
+                width_px: SCOPE_PX * dpr,
+                spot: 0.0,
+            })
+        })
+        .collect()
+}
+
+/// The tint slot a plan machine's overlays take: plain, or dimmed while a step is staged and the
+/// machine is not one of its marks. `staged` is as in [`machine_tint`].
+#[must_use]
+pub fn overlay_tint(plan_index: usize, staged: Option<&[bool]>) -> u8 {
+    match staged {
+        None => 0,
+        Some(staged) => emphasised(0, staged.get(plan_index).copied().unwrap_or(true)),
     }
 }
 
@@ -2792,10 +2905,56 @@ mod tests {
         };
         assert_eq!(
             u32::from(marks.footprint_tint(0)),
-            TINT_SCOPE0 + ScopeTint::Keep as u32
+            TINT_SCOPE0 + 1,
+            "a confirmed keep takes its brass"
         );
         assert_eq!(u32::from(marks.footprint_tint(1)), TINT_CLASH);
         assert_eq!(marks.footprint_tint(2), 0);
+    }
+
+    #[test]
+    fn a_draft_lane_outlines_its_machine_and_tints_nothing() {
+        let marks = Marks {
+            scope_tints: vec![Some(ScopeTint::PlotDraft), Some(ScopeTint::Plot)],
+            outlines: vec![
+                Outline {
+                    machine: 0,
+                    scope: ScopeTint::PlotDraft,
+                    rect: [0.0, 0.0, 10.0, 10.0],
+                },
+                Outline {
+                    machine: 1,
+                    scope: ScopeTint::Plot,
+                    rect: [20.0, 0.0, 10.0, 10.0],
+                },
+            ],
+            ..Marks::default()
+        };
+        assert_eq!(marks.footprint_tint(0), 0, "a draft shows its outline only");
+        assert_eq!(u32::from(marks.footprint_tint(1)), TINT_SCOPE0);
+
+        let beams = outline_beams(&marks, 2.0, None);
+        assert_eq!(beams.len(), 8, "a loop of four strokes for each outline");
+        let amber = u8::try_from(TINT_OUTLINE_AMBER).expect("fits");
+        assert!(beams[..4].iter().all(|beam| beam.tint == amber));
+        assert!(beams[4..].iter().all(|beam| beam.tint == amber));
+        assert!(beams.iter().all(|beam| beam.from[2] == PLINTH_TOP));
+        assert!(beams.iter().all(|beam| beam.width_px == SCOPE_PX * 2.0));
+        assert_eq!(beams[0].from, [0.0, 0.0, PLINTH_TOP]);
+        assert_eq!(beams[0].to, [10.0, 0.0, PLINTH_TOP]);
+
+        let staged = [false, true];
+        let dim = u8::try_from(TINT_DIM0).expect("fits");
+        let dimmed = outline_beams(&marks, 2.0, Some(&staged));
+        assert!(
+            dimmed[..4].iter().all(|beam| beam.tint == dim + amber),
+            "an unstaged outline dims with its machine"
+        );
+        assert!(
+            dimmed[4..]
+                .iter()
+                .all(|beam| beam.tint == u8::try_from(TINT_OUTLINE_AMBER).expect("fits"))
+        );
     }
 
     fn flag(kind: FlagKind) -> Flag {
