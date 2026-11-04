@@ -64,7 +64,7 @@ jobs:
           repository: NDilanka/acan-demo
           # The commit the e2e tests pin the protected branch to. The checkout is depth 1, so it
           # must be this commit, not whatever the demo's default branch points at later.
-          ref: f91962156841332d5753d869554839f7c4cdea79
+          ref: 97f6a0102dbda9ea01f283505d2c18fed0236c81
           path: acan-demo
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
