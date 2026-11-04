@@ -39,19 +39,23 @@ export function installPlates(given) {
   layer = element("div");
   layer.id = "nameplates";
   document.getElementById("labels").after(layer);
-  for (const project of canvasState.list) {
-    const el = element("div", "nameplate");
-    el.dataset.project = project.id;
-    el.tabIndex = 0;
-    el.setAttribute("role", "button");
-    const name = element("span", "name");
-    const badge = element("span", "badge");
-    const status = element("span", "status");
-    el.append(name, badge, status);
-    bindPlate(el, project.id);
-    layer.append(el);
-    plates.set(project.id, { el, name, badge, status });
-  }
+  for (const project of canvasState.list) addPlate(project);
+}
+
+// Adds the plate of a codebase that joins the canvas after install. A plate already made is kept.
+export function addPlate(project) {
+  if (layer === null || plates.has(project.id)) return;
+  const el = element("div", "nameplate");
+  el.dataset.project = project.id;
+  el.tabIndex = 0;
+  el.setAttribute("role", "button");
+  const name = element("span", "name");
+  const badge = element("span", "badge");
+  const status = element("span", "status");
+  el.append(name, badge, status);
+  bindPlate(el, project.id);
+  layer.append(el);
+  plates.set(project.id, { el, name, badge, status });
 }
 
 function bindPlate(el, id) {

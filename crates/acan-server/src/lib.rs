@@ -2,12 +2,14 @@
 //! WebSocket surface around them.
 //!
 //! [`start`] opens one repository's world in `.acan/world.db`, scans the code, and serves the API.
-//! [`start_projects`] does the same for several projects behind one listener. Each project has
+//! [`start_projects`] does the same for several projects behind one listener. [`start_open`] serves
+//! the user's own folder, and may start with no project at all until one is added. Each project has
 //! its own host: one writer task owns its origin and its current scan; HTTP handlers and the job
 //! loop send it commands and await a reply, and readers use the snapshot it publishes after each
 //! persisted batch. [`Running::stop`] is a barrier: it returns only when no write can still happen
 //! in any project.
 
+mod add;
 mod auth;
 pub mod deps;
 #[cfg(test)]
@@ -36,6 +38,7 @@ mod models;
 mod observations;
 mod observe;
 mod offline;
+pub mod open;
 mod plant_view;
 pub mod projects;
 mod public;
@@ -57,6 +60,7 @@ mod ruling;
 mod scan_feed;
 mod settings;
 mod setup;
+mod signin;
 mod statemap;
 mod store;
 mod stream;
@@ -72,8 +76,8 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use acan_core::{Command, HumanCmd, MemberId, Origin, Seq, WorldId, WorldRef};
 use acan_llm::{KeyFile, ModelClient, UsageLedger};
@@ -82,6 +86,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
+pub use add::ClientFactory;
 pub use auth::{Principal, Token, Tokens};
 pub use host::{Host, HostParts, LIVE_BUFFER, SubmitError};
 pub use index::{IndexError, Scan, code_index, scan};
@@ -96,10 +101,12 @@ pub use vision::{
 };
 pub use workers::{State as WorkerState, Status as WorkerStatus, WorkersView};
 
+use crate::add::LiveContext;
 use crate::projects::{ProjectSet, ProjectSpec};
 use crate::public::PublicRoot;
-use crate::registry::{Entry, Registry};
+use crate::registry::{Entry, HomeTokens, Registry};
 use crate::settings::Settings;
+use crate::signin::SignIns;
 use crate::writer::Writer;
 
 const STATE_DIR: &str = ".acan";
@@ -200,6 +207,18 @@ impl From<ServerConfig> for ServeConfig {
     }
 }
 
+/// The user's own folder, which a server opened with [`start_open`] holds. It is not any project's
+/// folder, so the server can run with no codebase.
+#[derive(Debug, Clone)]
+pub struct UserFolder<C> {
+    /// The user's folder. It holds `settings.json` and `tokens.json`, with the model keys beside
+    /// them. Its tokens file holds the owner's token, which every project then shares.
+    pub dir: PathBuf,
+    /// The model client that holds the user's keys. The settings read and change the keys through
+    /// it while no project runs.
+    pub keys: C,
+}
+
 /// A project's mapping state as its watch channel holds it: `None` while the codebase maps, then
 /// `Some(Ok)` once it is open or `Some(Err)` when mapping failed.
 type MappingState = watch::Receiver<Option<Result<(), String>>>;
@@ -219,8 +238,12 @@ pub struct Running {
     mapping: Vec<JoinHandle<()>>,
     /// Each project's mapping state, by project id, for [`Running::wait_mapped`].
     mapped: Vec<(String, MappingState)>,
+    /// The runtimes of projects added while the server runs. Stop tears them down after the rest.
+    live_runtimes: Arc<Mutex<Vec<Runtime>>>,
     /// The multiplexed streams, which span projects, so shutdown waits for them first.
     streams: Arc<Mutex<JoinSet<()>>>,
+    /// The sign-in codes the server's routes redeem. Shared with the registry.
+    signins: Arc<SignIns>,
     /// The default project's stream and ruling holds, which the tests park to hold a write.
     #[cfg(test)]
     pub(crate) stream_hold: stream::Hold,
@@ -230,12 +253,15 @@ pub struct Running {
 
 /// One project's background work: its job loop, its writer, and the streams open on it.
 #[derive(Debug)]
-struct Runtime {
+pub(crate) struct Runtime {
     id: String,
     jobs: JoinHandle<()>,
     worker_loops: Vec<JoinHandle<()>>,
     writer: Writer,
     streams: Arc<Mutex<JoinSet<()>>>,
+    /// The codebase mapping task of a project added while the server runs. Startup keeps its
+    /// mapping tasks in [`Running`] instead.
+    mapping: Option<JoinHandle<()>>,
 }
 
 impl Running {
@@ -276,6 +302,14 @@ impl Running {
             }
         }
         Ok(())
+    }
+
+    /// A new sign-in code, which `POST /api/signin/exchange` trades once for the owner's token. It
+    /// is valid for one minute and works once. Only a server started with a user folder, through
+    /// [`start_open`], answers the exchange; any other server refuses every code.
+    #[must_use]
+    pub fn sign_in_code(&self) -> String {
+        self.signins.mint(Instant::now())
     }
 
     /// The ids of the projects this server serves, in the order they were given.
@@ -333,6 +367,26 @@ impl Running {
         drain_streams(&self.streams, "every project").await;
         let mut written: anyhow::Result<()> = Ok(());
         for runtime in std::mem::take(&mut self.runtimes) {
+            runtime.jobs.abort();
+            let _ = runtime.jobs.await;
+            drain_streams(&runtime.streams, &runtime.id).await;
+            written = written.and(runtime.writer.shutdown().await);
+        }
+        let live = std::mem::take(
+            &mut *self
+                .live_runtimes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for mut runtime in live {
+            if let Some(mapping) = runtime.mapping.take() {
+                mapping.abort();
+                let _ = mapping.await;
+            }
+            for worker in std::mem::take(&mut runtime.worker_loops) {
+                worker.abort();
+                let _ = worker.await;
+            }
             runtime.jobs.abort();
             let _ = runtime.jobs.await;
             drain_streams(&runtime.streams, &runtime.id).await;
@@ -455,6 +509,59 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
     clients: Vec<(C, UsageLedger)>,
     settings_file: Option<PathBuf>,
 ) -> anyhow::Result<Running> {
+    start_listening(config, clients, settings_file, None, None).await
+}
+
+/// As [`start_projects_serving`], and a project added while the server runs is opened with
+/// `opener`. The settings' add endpoint then serves a new folder at once, with no restart, and
+/// starts its first scan. Without an opener, such adds are refused.
+///
+/// # Errors
+///
+/// Returns the errors [`start_projects_serving`] returns.
+pub async fn start_projects_adding<C: ModelClient + 'static>(
+    config: ServeConfig,
+    clients: Vec<(C, UsageLedger)>,
+    settings_file: Option<PathBuf>,
+    opener: ClientFactory<C>,
+) -> anyhow::Result<Running> {
+    start_listening(config, clients, settings_file, Some(opener), None).await
+}
+
+/// As [`start_projects_adding`], for a server that belongs to the user's `folder` rather than to a
+/// project. `config.projects` may be empty: the server then answers with no codebase, and the first
+/// folder added becomes the default project. The settings are kept in `settings.json` in the
+/// folder, and its tokens file holds the owner's token, which every project shares. Sign-in codes
+/// work only on a server started this way.
+///
+/// # Errors
+///
+/// Returns the errors [`start_projects_serving`] returns, plus an error when the user's folder
+/// cannot be created or overlaps the public folder.
+pub async fn start_open<C: ModelClient + 'static>(
+    config: ServeConfig,
+    clients: Vec<(C, UsageLedger)>,
+    folder: UserFolder<C>,
+    opener: ClientFactory<C>,
+) -> anyhow::Result<Running> {
+    let settings_file = folder.dir.join(settings::FILE);
+    start_listening(
+        config,
+        clients,
+        Some(settings_file),
+        Some(opener),
+        Some(folder),
+    )
+    .await
+}
+
+async fn start_listening<C: ModelClient + 'static>(
+    config: ServeConfig,
+    clients: Vec<(C, UsageLedger)>,
+    settings_file: Option<PathBuf>,
+    opener: Option<ClientFactory<C>>,
+    folder: Option<UserFolder<C>>,
+) -> anyhow::Result<Running> {
     if !config.addr.ip().is_loopback() && !config.team {
         bail!(
             "refusing to bind {} without --team, since that exposes this world to the network",
@@ -472,26 +579,41 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
         specs.len(),
         clients.len()
     );
-
-    // Every repository is checked against the public root, so no project's files can be served.
-    let mut web = None;
-    for spec in &specs {
-        let root = config
-            .web
-            .as_deref()
-            .map(|dir| PublicRoot::new(dir, &spec.repo))
-            .transpose()?;
-        if web.is_none() {
-            web = root;
-        }
+    ensure!(
+        folder.is_some() || !specs.is_empty(),
+        "there is nothing to serve: give at least one project, or start with the user's folder"
+    );
+    if let Some(folder) = &folder {
+        prepare_state_dir(&folder.dir)?;
     }
+
+    // Every repository, and the user's folder, is checked against the public root, so no private
+    // file can be served.
+    let web = match config.web.as_deref() {
+        Some(dir) => {
+            let root = PublicRoot::open(dir)?;
+            for spec in &specs {
+                PublicRoot::new(dir, &spec.repo)?;
+            }
+            if let Some(folder) = &folder {
+                root.keep_out(&folder.dir)?;
+            }
+            Some(root)
+        }
+        None => None,
+    };
     let states: Vec<PathBuf> = specs.iter().map(|spec| spec.repo.join(STATE_DIR)).collect();
     for state in &states {
         prepare_state_dir(state)?;
     }
-    // The validated projects are never empty, so the first one's state directory exists.
-    let settings_file = settings_file.unwrap_or_else(|| states[0].join(settings::FILE));
+    let settings_file = match (settings_file, &folder, states.first()) {
+        (Some(file), _, _) => file,
+        (None, Some(folder), _) => folder.dir.join(settings::FILE),
+        (None, None, Some(state)) => state.join(settings::FILE),
+        (None, None, None) => bail!("there is no folder to keep the settings in"),
+    };
     let stored = settings::load(&settings_file)?;
+    settings::warn_unknown_keys(&stored);
     let mut visions = Vec::with_capacity(specs.len());
     for spec in &specs {
         visions.push(
@@ -503,8 +625,24 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
         );
     }
     let founder = MemberId::from_str(OWNER)?;
-    let dirs: Vec<&Path> = states.iter().map(PathBuf::as_path).collect();
-    let (tokens, owner_token) = Tokens::load_shared(&dirs, &founder)?;
+    // The user's folder is listed first, so its owner token is the one every project takes.
+    let mut dirs: Vec<&Path> = folder.iter().map(|folder| folder.dir.as_path()).collect();
+    dirs.extend(states.iter().map(PathBuf::as_path));
+    let (mut tokens, owner_token) = Tokens::load_shared(&dirs, &founder)?;
+    let (home, own_keys) = match folder {
+        Some(UserFolder { dir, keys }) => {
+            // One table per directory, in order, so the first is the user's folder's.
+            let table = tokens.remove(0);
+            let home = HomeTokens {
+                tokens: table,
+                dir,
+                owner: founder.clone(),
+            };
+            (Some(home), Some(Arc::new(keys)))
+        }
+        None => (None, None),
+    };
+    let home_dir = home.as_ref().map(|home| home.dir.clone());
 
     let mut openings = Vec::with_capacity(specs.len());
     let inputs = specs.into_iter().zip(clients).zip(tokens).zip(visions);
@@ -605,6 +743,8 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
             host,
             board: workers::Board::new(worker_tokens.len()),
             head: tokio::sync::Mutex::new(None),
+            router: None,
+            plain: None,
         });
         project_workers.push(worker_tokens);
     }
@@ -641,23 +781,48 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
             worker_loops,
             writer: entry.host.writer(),
             streams: Arc::clone(entry.host.streams()),
+            mapping: None,
         });
     }
     #[cfg(test)]
-    let stream_hold = entries[0].host.stream_hold().clone();
+    let stream_hold = entries.first().map_or_else(stream::Hold::default, |entry| {
+        entry.host.stream_hold().clone()
+    });
     #[cfg(test)]
-    let ruling_hold = entries[0].host.ruling_hold().clone();
+    let ruling_hold = entries.first().map_or_else(stream::Hold::default, |entry| {
+        entry.host.ruling_hold().clone()
+    });
     let streams = Arc::new(Mutex::new(JoinSet::new()));
+    let live_runtimes = Arc::new(Mutex::new(Vec::new()));
+    let live = opener.map(|open_client| LiveContext {
+        founder: founder.clone(),
+        local_addr,
+        shutdown: shutdown_rx.clone(),
+        slots: Arc::clone(&slots),
+        witness_concurrency: config.witness_concurrency,
+        local_workers: config.local_workers,
+        vision: config.vision.clone(),
+        settings_file: settings_file.clone(),
+        web: config.web.clone(),
+        open_client,
+        runtimes: Arc::clone(&live_runtimes),
+        home: home_dir,
+    });
     let registry = Arc::new(Registry::new(
         config.projects.default.clone(),
         entries,
         Arc::clone(&streams),
+        live,
+        shutdown_rx.clone(),
+        home,
     ));
+    let signins = Arc::clone(registry.signins());
     let shared_settings = Arc::new(Settings::new(
         settings_file,
         stored,
         Arc::clone(&registry),
         founder.clone(),
+        own_keys,
     ));
     let app = http::router(registry, web, shared_settings, founder);
     let mut shutdown_seen = shutdown.subscribe();
@@ -676,7 +841,9 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
         runtimes,
         mapping,
         mapped,
+        live_runtimes,
         streams,
+        signins,
         #[cfg(test)]
         stream_hold,
         #[cfg(test)]
@@ -688,7 +855,7 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
 /// workers, and opens it to writes. A failure is recorded on the project, which then takes no
 /// writes, and the server keeps running so the page can show why. With `on_view`, the scan starts
 /// only once a page has connected to the project.
-async fn map_project<C: ModelClient + 'static>(
+pub(crate) async fn map_project<C: ModelClient + 'static>(
     host: Host<C>,
     founder: MemberId,
     workers: usize,
@@ -794,7 +961,7 @@ struct Opening<C> {
 /// Opens a project's git state for worktrees, witnesses and landing. A directory that is not a
 /// usable repository still serves its world. The jobs that need git then report that they cannot
 /// run, so the gate records the failure instead of hanging.
-async fn open_git(project: &ProjectSpec) -> Option<acan_git::Repo> {
+pub(crate) async fn open_git(project: &ProjectSpec) -> Option<acan_git::Repo> {
     let opened = match &project.protected_branch {
         Some(branch) => acan_git::Repo::open_with_protected(&project.repo, branch).await,
         None => acan_git::Repo::open(&project.repo).await,
@@ -823,7 +990,7 @@ async fn open_git(project: &ProjectSpec) -> Option<acan_git::Repo> {
 }
 
 /// Creates the state directory. Its own `.gitignore` keeps the tokens and database out of git.
-fn prepare_state_dir(dir: &Path) -> anyhow::Result<()> {
+pub(crate) fn prepare_state_dir(dir: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let ignore = dir.join(".gitignore");
     if !ignore.exists() {
@@ -832,7 +999,7 @@ fn prepare_state_dir(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn world_ref(repo: &Path) -> anyhow::Result<WorldRef> {
+pub(crate) fn world_ref(repo: &Path) -> anyhow::Result<WorldRef> {
     let name = repo
         .file_name()
         .and_then(|name| name.to_str())

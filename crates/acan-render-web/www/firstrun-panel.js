@@ -55,8 +55,13 @@ export function installFirstRun() {
   loadSetup();
 }
 
+// Reads the setup status again, as the first codebase added to an empty origin needs.
+export function refreshSetup() {
+  return loadSetup();
+}
+
 async function loadSetup() {
-  if (!state.token) {
+  if (!state.token || state.empty) {
     setup = null;
   } else {
     try {
@@ -73,7 +78,7 @@ async function loadSetup() {
 
 // Asks the plant for its contract field. A read only: it changes nothing on the server.
 async function checkContract() {
-  if (!state.token || checking) return;
+  if (!state.token || state.empty || checking) return;
   checking = true;
   paintFirstRun();
   try {

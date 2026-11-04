@@ -6,6 +6,7 @@ mod group;
 mod hash;
 mod kind;
 mod lang;
+mod manifest;
 mod model;
 mod progress;
 mod resolve;
@@ -105,6 +106,7 @@ pub fn scan_with(
         .collect();
 
     let index = resolve::PathIndex::from_paths(sources.iter().map(|source| source.rel.as_str()));
+    let crates = manifest::RustCrates::discover(root);
     let mut extractor = extract::Extractor::new()?;
 
     let mut files = Vec::with_capacity(sources.len());
@@ -118,7 +120,7 @@ pub fn scan_with(
         let imports = extracted
             .imports
             .into_iter()
-            .map(|raw| resolve::resolve_import(&source.rel, raw, &index))
+            .map(|raw| resolve::resolve_import(&source.rel, raw, &index, &crates))
             .collect();
         files.push(SourceFile {
             id: FileId(position as u32),

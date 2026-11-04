@@ -999,6 +999,25 @@ mod tests {
     }
 
     #[test]
+    fn a_change_keeps_the_keys_this_version_does_not_use() {
+        let mut current = Stored::default();
+        current
+            .projects
+            .unknown
+            .insert("live".to_owned(), json!(["/some/folder"]));
+        let next = check(
+            &patch(json!({"look": {"motion": false}})),
+            &current,
+            &[],
+            DEFAULT,
+        )
+        .expect("the change is accepted")
+        .next;
+        assert!(!next.look.motion);
+        assert_eq!(next.unknown_keys(), vec!["projects.live".to_owned()]);
+    }
+
+    #[test]
     fn project_ids_and_worker_counts_are_bounded() {
         assert!(names(
             &refused(json!({"projects": {"remove": ["Bad_Id"]}})),

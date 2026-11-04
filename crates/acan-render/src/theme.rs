@@ -5,7 +5,7 @@
 use crate::model::{Ink, Surface};
 
 /// Palette slots on the GPU.
-pub const PALETTE_LEN: usize = 21;
+pub const PALETTE_LEN: usize = 23;
 /// Tint slots. Slot 0 is the identity; instances pick a slot to tint what they draw. The slots from
 /// [`TINT_DIM0`] up are dimmed copies of the plain ones below it.
 pub const TINT_LEN: usize = 40;
@@ -81,6 +81,13 @@ pub const SLOT_BELT_EDGE: u32 = 18;
 pub const SLOT_LINE: u32 = 19;
 /// A seam: the light painted line of `Ink::Edge`.
 pub const SLOT_EDGE: u32 = 20;
+/// A district's ground pad, at its alpha, and the fine line round it. Both are a faint step off
+/// the desk in the look's own neutral, never a signal hue: a district is a place, not a state.
+pub const SLOT_PAD: u32 = 21;
+pub const SLOT_PAD_EDGE: u32 = 22;
+/// The pad's outline width in device pixels, and its corner radius in plan units.
+pub const PAD_EDGE_PX: f32 = 1.0;
+pub const PAD_RADIUS: f32 = 16.0;
 /// Width of a contour or crease in device pixels, at every zoom.
 pub const LINE_PX: f32 = 0.9;
 /// The line ink eases in as a machine grows on screen, from its size at `LINE_FADE_PX.0` to
@@ -176,10 +183,12 @@ const PALETTE: [[f32; 4]; PALETTE_LEN] = [
     rgb(AGENT_HUES[1], 1.0),
     rgb(AGENT_HUES[2], 1.0),
     rgb(AGENT_HUES[3], 1.0),
-    rgb(0xe9e9e9, 1.0), // belt
-    rgb(0xb8b8b8, 1.0), // belt edge
-    rgb(0x767676, 1.0), // contour and crease
-    rgb(0xa8a8a8, 1.0), // seam
+    rgb(0xe9e9e9, 1.0),  // belt
+    rgb(0xb8b8b8, 1.0),  // belt edge
+    rgb(0x767676, 1.0),  // contour and crease
+    rgb(0xa8a8a8, 1.0),  // seam
+    rgb(0x000000, 0.03), // district pad, at its alpha
+    rgb(0x000000, 0.13), // district pad edge, at its alpha
 ];
 
 /// A look the page shows. Only the desk changes: the grid, the shadow and the page colour. The
@@ -267,10 +276,12 @@ const DARK: [[f32; 4]; PALETTE_LEN] = [
     rgb(AGENT_HUES[1], 1.0),
     rgb(AGENT_HUES[2], 1.0),
     rgb(AGENT_HUES[3], 1.0),
-    rgb(0x6b6b70, 1.0), // belt
-    rgb(0x4e4e53, 1.0), // belt edge
-    rgb(0x767676, 1.0), // contour and crease
-    rgb(0xa8a8a8, 1.0), // seam
+    rgb(0x6b6b70, 1.0),  // belt
+    rgb(0x4e4e53, 1.0),  // belt edge
+    rgb(0x767676, 1.0),  // contour and crease
+    rgb(0xa8a8a8, 1.0),  // seam
+    rgb(0xffffff, 0.04), // district pad, at its alpha
+    rgb(0xffffff, 0.16), // district pad edge, at its alpha
 ];
 
 /// Blueprint: a blue desk with a light grid.
@@ -292,10 +303,12 @@ const BLUEPRINT: [[f32; 4]; PALETTE_LEN] = [
     rgb(AGENT_HUES[1], 1.0),
     rgb(AGENT_HUES[2], 1.0),
     rgb(AGENT_HUES[3], 1.0),
-    rgb(0xe9e9e9, 1.0), // belt
-    rgb(0xb8b8b8, 1.0), // belt edge
-    rgb(0x76829c, 1.0), // contour and crease
-    rgb(0xa8b0c8, 1.0), // seam
+    rgb(0xe9e9e9, 1.0),  // belt
+    rgb(0xb8b8b8, 1.0),  // belt edge
+    rgb(0x76829c, 1.0),  // contour and crease
+    rgb(0xa8b0c8, 1.0),  // seam
+    rgb(0x8cbef0, 0.07), // district pad, at its alpha
+    rgb(0x8cbef0, 0.3),  // district pad edge, at its alpha
 ];
 
 /// High contrast: a white desk with a black grid and darker line art.
@@ -317,10 +330,12 @@ const HIGH_CONTRAST: [[f32; 4]; PALETTE_LEN] = [
     rgb(AGENT_HUES[1], 1.0),
     rgb(AGENT_HUES[2], 1.0),
     rgb(AGENT_HUES[3], 1.0),
-    rgb(0xe6e6e6, 1.0), // belt
-    rgb(0x6b6b6b, 1.0), // belt edge
-    rgb(0x505050, 1.0), // contour and crease
-    rgb(0x707070, 1.0), // seam
+    rgb(0xe6e6e6, 1.0),  // belt
+    rgb(0x6b6b6b, 1.0),  // belt edge
+    rgb(0x505050, 1.0),  // contour and crease
+    rgb(0x707070, 1.0),  // seam
+    rgb(0x000000, 0.04), // district pad, at its alpha
+    rgb(0x000000, 0.35), // district pad edge, at its alpha
 ];
 
 /// Palette slot of an ink used by a line.
@@ -453,6 +468,10 @@ pub fn wgsl_consts() -> String {
         u("SLOT_BELT", SLOT_BELT),
         u("SLOT_BELT_EDGE", SLOT_BELT_EDGE),
         u("SLOT_LINE", SLOT_LINE),
+        u("SLOT_PAD", SLOT_PAD),
+        u("SLOT_PAD_EDGE", SLOT_PAD_EDGE),
+        f("PAD_EDGE_PX", PAD_EDGE_PX),
+        f("PAD_RADIUS", PAD_RADIUS),
         f("LINE_PX", LINE_PX),
         pair("LINE_FADE_PX", LINE_FADE_PX),
         f("CONTOUR_FAR_ALPHA", CONTOUR_FAR_ALPHA),
@@ -645,6 +664,46 @@ mod tests {
     }
 
     #[test]
+    fn a_district_pad_is_a_faint_neutral_step_off_the_desk() {
+        for look in LOOKS {
+            let palette = look.colours();
+            let page = palette[SLOT_PAGE as usize];
+            let pad = palette[SLOT_PAD as usize];
+            let edge = palette[SLOT_PAD_EDGE as usize];
+            // The pad tints the desk only faintly, and its outline is stronger than its fill but
+            // still a quiet line.
+            assert!(
+                pad[3] > 0.0 && pad[3] <= 0.08,
+                "{look:?} pad alpha {}",
+                pad[3]
+            );
+            assert!(
+                edge[3] > pad[3] && edge[3] <= 0.4,
+                "{look:?} pad edge alpha"
+            );
+            for colour in [pad, edge] {
+                let [r, g, b, _] = colour;
+                let spread = r.max(g).max(b) - r.min(g).min(b);
+                // Grey on the paper looks and the dark desk; the blueprint's own pale blue.
+                let limit = if look == Look::Blueprint {
+                    0.5
+                } else {
+                    1.0 / 255.0
+                };
+                assert!(spread <= limit, "{look:?} pad is tinted by {spread}");
+                assert!(!(r > g + 0.2 && r > b + 0.2), "{look:?} a pad is never red");
+            }
+            // On a dark desk the pad lightens it; on a light desk it darkens it.
+            let lighter = pad[0] > page[0];
+            assert_eq!(
+                lighter,
+                page[0] < 0.5,
+                "{look:?} pad steps away from the desk"
+            );
+        }
+    }
+
+    #[test]
     fn every_look_keeps_the_agent_hues_and_the_clash_red() {
         for look in LOOKS {
             let palette = look.colours();
@@ -796,6 +855,8 @@ mod tests {
             "SLOT_BELT",
             "SLOT_BELT_EDGE",
             "SLOT_LINE",
+            "SLOT_PAD",
+            "SLOT_PAD_EDGE",
         ] {
             assert!(consts.contains(&format!("const {name}: u32")), "{name}");
         }

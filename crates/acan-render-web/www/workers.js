@@ -25,7 +25,8 @@ export function onWorkers(listener) {
 }
 
 export async function loadWorkers() {
-  if (!state.token || inFlight) return;
+  // An origin with no codebase has no workers to read.
+  if (!state.token || state.empty || inFlight) return;
   inFlight = true;
   askedAt = Date.now();
   const project = target();
@@ -48,7 +49,7 @@ export async function loadWorkers() {
 // is read again now and then as the view moves. A running answer, or a server without the route,
 // is not asked again.
 export function refreshWorkers() {
-  if (!state.token) return;
+  if (!state.token || state.empty) return;
   // Each project has its own workers, so a project going on screen reads its own at once.
   if (answer === null || answer.project !== target()) {
     loadWorkers();

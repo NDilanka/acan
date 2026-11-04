@@ -312,7 +312,10 @@ function placeNames(placed, skip, width, height) {
       if (el === undefined) {
         el = document.createElement("div");
         el.className = "label";
-        el.textContent = state.app.project_machine_name(id, machine);
+        const name = state.app.project_machine_name(id, machine);
+        el.textContent = state.app.project_machine_label(id, machine) || name;
+        el.title = name;
+        el.setAttribute("aria-label", name);
         parked.labelsEl.append(el);
         parked.labels.set(key, el);
       }

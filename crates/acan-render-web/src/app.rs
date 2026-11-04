@@ -45,6 +45,10 @@ const FIT_FLAG_RIGHT_CSS: f32 = 60.0;
 /// about 30 pixels, and four rows stack above a machine in a clash. Measured against the shots:
 /// three rows leave about 70 pixels of margin, four about 40.
 const FIT_FLAG_TOP_CSS: f32 = 100.0;
+/// Room a fly to a project leaves under its plant, in CSS pixels: the nameplate hangs 30 px under
+/// the plant's lowest ground corner and is about 26 px tall, and the bottom island, such as the
+/// notice that no model key is set, takes about 92 px under it with its margin, plus a 12 px gap.
+const FIT_PLATE_CSS: f32 = 160.0;
 /// Degrees of orbit per CSS pixel of drag.
 const ORBIT_DEG_PER_PX: f32 = 0.4;
 /// Degrees of tilt per CSS pixel of drag.
@@ -258,8 +262,14 @@ struct Loaded {
     framing: Vec<Aabb>,
     /// The solid box of every machine, each with its machine index, for label occlusion.
     occluders: Vec<(usize, Aabb)>,
-    /// Each machine's label half width in CSS pixels, estimated from its name.
+    /// Each machine's label half width in CSS pixels, estimated from its label.
     label_half_px: Vec<f32>,
+    /// Each machine's short name, which its label shows. See `Plant::machine_labels`.
+    labels: Vec<String>,
+    /// Each district's sign name, by district. See `Plant::district_labels`.
+    district_labels: Vec<String>,
+    /// Each machine's district, in the layout's machine order. See `Plant::districts`.
+    districts: Vec<u32>,
     /// Whether each machine carries a name at rest once it is large enough on screen.
     rest: Vec<bool>,
     /// The machines and belts as the layout places them, before any mark is added.
@@ -411,6 +421,22 @@ impl App {
     pub fn set_plant(&mut self, json: &str) -> Result<u32, JsError> {
         let plant = from_scan_json(json).map_err(js_err)?;
         Ok(self.load(plant))
+    }
+
+    /// Sets the plant on screen as `set_plant` does, with its layout moved to `(x, y)`, the place
+    /// the canvas gives the project. A canvas of several plants reads the plant on screen again
+    /// with this, so the plant stays where it was placed. Returns the machine count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON is not the plant's shape.
+    pub fn set_plant_at(&mut self, json: &str, x: f32, y: f32) -> Result<u32, JsError> {
+        let plant = from_scan_json(json).map_err(js_err)?;
+        let (kinds, edges) = plant.layout_input();
+        let laid = layout(&kinds, &edges);
+        let count = plant.machines.len() as u32;
+        self.show(plant, laid, [x, y], true);
+        Ok(count)
     }
 
     /// Checks one `plant-view/1` view, as `GET /api/orders/{order}/plant-view` answers it, and
@@ -1762,6 +1788,57 @@ impl App {
             .map_or_else(String::new, |machine| machine.name.clone())
     }
 
+    /// The short name machine `index`'s label shows, such as `src` for
+    /// `crates/acan-server/src`, or an empty string. Its full name is `machine_name`.
+    pub fn machine_label(&self, index: u32) -> String {
+        self.plant
+            .as_ref()
+            .and_then(|loaded| loaded.labels.get(index as usize))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Where each district sign may stand on screen, as flat `[sign index, css x, css y]`
+    /// triples, best first for each sign: just inside the front edges of the district's pad,
+    /// level with its machines, the one lowest on screen first (see `layout::sign_spots`). The
+    /// page shows a sign at its first spot clear of the machine names. Empty when the plant has
+    /// no pads. See `district_sign`.
+    pub fn district_layout(&self) -> Vec<f32> {
+        let Some(loaded) = &self.plant else {
+            return Vec::new();
+        };
+        let camera = self.drawn_camera();
+        let depth = |[x, y]: [f32; 2]| camera.world_to_screen([x, y, 0.0])[1];
+        let mut out = Vec::new();
+        for (i, pad) in loaded.layout.districts.iter().enumerate() {
+            let machines: Vec<[f32; 4]> = loaded
+                .layout
+                .machines
+                .iter()
+                .zip(&loaded.districts)
+                .filter(|(_, district)| **district == pad.district)
+                .map(|(placed, _)| placed.footprint())
+                .collect();
+            for [x, y] in crate::layout::sign_spots(pad.rect, &machines, depth) {
+                let [sx, sy] = camera.world_to_screen([x, y, 0.0]);
+                out.extend([i as f32, sx / self.dpr, sy / self.dpr]);
+            }
+        }
+        out
+    }
+
+    /// The name district sign `index` shows, such as `acan-server`, as `district_layout`
+    /// numbers the signs, or an empty string.
+    pub fn district_sign(&self, index: u32) -> String {
+        self.plant
+            .as_ref()
+            .and_then(|loaded| {
+                let pad = loaded.layout.districts.get(index as usize)?;
+                loaded.district_labels.get(pad.district as usize).cloned()
+            })
+            .unwrap_or_default()
+    }
+
     /// The wire name of machine `name`'s kind, such as `gate`, or an empty string when the plant
     /// has no such machine. The Set kind menu marks the kind a machine has now.
     pub fn machine_kind(&self, name: &str) -> String {
@@ -1827,31 +1904,54 @@ impl App {
 impl App {
     /// Puts `plant` on screen, with the plan placing its machines where the layout puts them.
     fn load(&mut self, plant: Plant) -> u32 {
-        let (kinds, edges) = plant.layout_input();
-        let laid = layout(&kinds, &edges);
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
         let count = plant.machines.len() as u32;
-        self.show(plant, laid, [0.0; 2]);
+        self.show(plant, laid, [0.0; 2], true);
         count
     }
 
-    /// Puts `plant` on screen with its layout from the origin moved to `offset`, and fits it.
-    fn show(&mut self, plant: Plant, at_origin: Layout, offset: [f32; 2]) {
+    /// Puts `plant` on screen with its layout from the origin moved to `offset`, and fits it when
+    /// `fit`. The log is kept either way, and the view folds from it again on the next frame. A
+    /// plant that replaces the one on screen in place keeps the camera and the drones' eases, cut,
+    /// so the drones land where the new plant puts them instead of dropping in again.
+    fn show(&mut self, plant: Plant, at_origin: Layout, offset: [f32; 2], fit: bool) {
+        // A fly to this plant aimed at its old framing; it lands on the new one instead.
+        let flying_here = !fit
+            && self.tour_move.as_ref().is_some_and(|movement| {
+                let old = self.plant.as_ref().map(|loaded| self.fly_pose(loaded));
+                old.is_some_and(|old| same_pose(old, movement.to))
+            });
         let (loaded, plan) = self.build(plant, at_origin, offset);
         self.scan.load(loaded.machines.len());
         self.plan = Some(plan);
         self.view = None;
         self.marks = Marks::default();
-        self.motion = self.new_motion();
+        if fit {
+            self.motion = self.new_motion();
+        } else {
+            self.motion.cut();
+        }
         self.card_clash = None;
-        self.tour_move = None;
-        self.top_move = None;
+        if fit {
+            self.tour_move = None;
+            self.top_move = None;
+        }
         self.ride = None;
         self.fit_after_leave = false;
         self.dirty = true;
+        if flying_here {
+            let to = self.fly_pose(&loaded);
+            if let Some(movement) = self.tour_move.as_mut() {
+                movement.to = to;
+            }
+        }
         self.plant = Some(loaded);
         self.refresh_fog();
-        // A new plant keeps the view it had, top-down or not.
-        self.fit_view();
+        if fit {
+            // A new plant keeps the view it had, top-down or not.
+            self.fit_view();
+        }
         self.sync_scene();
     }
 
@@ -1923,6 +2023,9 @@ impl App {
         let drone_reach = stand::reach(&self.models[usize::from(scene::mark_kinds().body)]);
         let framing = scene::fit_boxes(&laid, &self.models, &self.kind_spots, drone_reach);
         let machine_bounds = scene::machine_model_boxes(&laid, &self.models);
+        let labels = plant.machine_labels();
+        let district_labels = plant.district_labels();
+        let districts = plant.districts();
         let loaded = Loaded {
             machine_bounds,
             repo: plant.repo,
@@ -1933,11 +2036,13 @@ impl App {
                 }
                 named
             },
-            label_half_px: plant
-                .machines
+            label_half_px: labels
                 .iter()
-                .map(|m| m.name.chars().count() as f32 * labels::CHAR_CSS_PX * 0.5)
+                .map(|label| label.chars().count() as f32 * labels::CHAR_CSS_PX * 0.5)
                 .collect(),
+            labels,
+            district_labels,
+            districts,
             machines: plant.machines,
             layout: laid,
             framing,
@@ -2036,6 +2141,7 @@ impl App {
         for parked in &mut self.parked {
             let base = &parked.loaded.base;
             let start = scene.instances.len();
+            scene.pads.extend(base.pads.iter().copied());
             scene.ribbons.extend(base.ribbons.iter().cloned());
             scene.instances.extend(base.instances.iter().copied());
             let own = &mut parked.marks;
@@ -2187,19 +2293,13 @@ impl App {
         self.camera.set_fog_bounds(bounds);
     }
 
-    /// The pivot and zoom that fit `framing` at the framing angles.
-    fn pose_of(&self, framing: &[Aabb]) -> tour::Pose {
+    /// The pivot and zoom that fit `framing` at the framing angles, keeping `room`.
+    fn pose_of(&self, framing: &[Aabb], room: FitRoom) -> tour::Pose {
         let mut probe = self.camera;
         let (azimuth, elevation) = self.framing_angles();
         probe.set_angles(azimuth, elevation);
         let clear = self.clear_for(elevation);
-        fit_clear(
-            &mut probe,
-            framing,
-            FIT_MARGIN_CSS * self.dpr,
-            self.fit_room(),
-            clear,
-        );
+        fit_clear(&mut probe, framing, FIT_MARGIN_CSS * self.dpr, room, clear);
         (probe.pivot(), probe.zoom())
     }
 
@@ -2210,8 +2310,8 @@ impl App {
         if let Some(laid) = self.layouts.get(&key) {
             return laid.clone();
         }
-        let (kinds, edges) = plant.layout_input();
-        let laid = layout(&kinds, &edges);
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
         self.layouts.insert(key, laid.clone());
         laid
     }
@@ -2320,8 +2420,9 @@ impl App {
     }
 
     /// Puts project `id`'s plant on the canvas with its layout's origin at `(x, y)`. The first
-    /// project goes on screen and is fitted; a later one is parked beside it. A project the canvas
-    /// holds already takes the new plant in place and keeps its log. Returns the machine count.
+    /// project on an empty canvas goes on screen and is fitted; a later one is parked beside it. A
+    /// project the canvas holds already takes the new plant in place and keeps its log, and the
+    /// camera stays where it is. Returns the machine count.
     ///
     /// # Errors
     ///
@@ -2330,12 +2431,15 @@ impl App {
         let plant = from_scan_json(json).map_err(js_err)?;
         let count = plant.machines.len() as u32;
         let at_origin = self.laid_out(&plant);
+        // A one-plant page that turns into a canvas has its plant on screen from `set_plant`,
+        // outside the order. The first project takes that plant's place.
+        let in_place = self.plant.is_some() && (self.project == id || self.order.is_empty());
         if !self.order.iter().any(|known| known == id) {
             self.order.push(id.to_owned());
         }
-        if self.plant.is_none() || self.project == id {
+        if self.plant.is_none() || in_place {
             self.project = id.to_owned();
-            self.show(plant, at_origin, [x, y]);
+            self.show(plant, at_origin, [x, y], !in_place);
             return Ok(count);
         }
         let (loaded, plan) = self.build(plant, at_origin, [x, y]);
@@ -2535,21 +2639,37 @@ impl App {
         if self.ride.is_some() {
             return false;
         }
-        let framing = if id == self.project {
-            self.plant.as_ref().map(|loaded| loaded.framing.clone())
+        let loaded = if id == self.project {
+            self.plant.as_ref()
         } else {
             self.parked
                 .iter()
                 .find(|parked| parked.id == id)
-                .map(|parked| parked.loaded.framing.clone())
+                .map(|parked| &parked.loaded)
         };
-        let Some(framing) = framing else {
+        let Some(loaded) = loaded else {
             return false;
         };
+        let to = self.fly_pose(loaded);
         self.turn = None;
-        let to = self.pose_of(&framing);
         self.ease_to(to, reduced);
         true
+    }
+
+    /// The pose a fly to a plant ends at: the plant fitted with its nameplate in view. The plate
+    /// hangs under the ground box the page's `boundsOf` gives, which the framing leaves out, so that
+    /// box joins the framing, and the bottom keeps the plate's room.
+    fn fly_pose(&self, loaded: &Loaded) -> tour::Pose {
+        let [x0, y0, x1, y1] = loaded.layout.bounds;
+        let base = loaded.base.bounds;
+        let mut framing = loaded.framing.clone();
+        framing.push(Aabb {
+            min: [x0.min(base.min[0]), y0.min(base.min[1]), 0.0],
+            max: [x1.max(base.max[0]), y1.max(base.max[1]), 0.0],
+        });
+        let mut room = self.fit_room();
+        room.bottom = room.bottom.max(FIT_PLATE_CSS * self.dpr);
+        self.pose_of(&framing, room)
     }
 
     /// The project whose plant holds the ground under the CSS point, or the nearest one. Empty
@@ -2789,6 +2909,85 @@ impl App {
             .and_then(|loaded| loaded.machines.get(index as usize))
             .map_or_else(String::new, |machine| machine.name.clone())
     }
+
+    /// The short name machine `index` on project `id`'s plant shows on its label, or an empty
+    /// string. See `machine_label`.
+    pub fn project_machine_label(&self, id: &str, index: u32) -> String {
+        let loaded = if id == self.project {
+            self.plant.as_ref()
+        } else {
+            self.parked
+                .iter()
+                .find(|parked| parked.id == id)
+                .map(|parked| &parked.loaded)
+        };
+        loaded
+            .and_then(|loaded| loaded.labels.get(index as usize))
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+/// The projects map in the corner of a canvas of several projects. See [`crate::minimap`].
+#[wasm_bindgen]
+impl App {
+    /// Each project's plant box and its built share, as flat `[min x, min y, max x, max y, built]`
+    /// quints in `canvas_order` order. The box is the layout's, the one `project_under` picks
+    /// from. `built` is the share of the plant on screen whose machines the scan has filled, and 1
+    /// for a parked plant. A project with no plant gives five NaNs, so the places stay aligned.
+    /// Empty on a page with one plant.
+    pub fn canvas_boxes(&self) -> Vec<f32> {
+        let mut out = Vec::with_capacity(self.order.len() * 5);
+        for id in &self.order {
+            let entry = if *id == self.project {
+                self.plant.as_ref().map(|loaded| {
+                    let built = crate::minimap::built_share(loaded.machines.len(), |index| {
+                        self.scan.hidden(index)
+                    });
+                    (loaded.layout.bounds, built)
+                })
+            } else {
+                self.parked
+                    .iter()
+                    .find(|parked| parked.id == *id)
+                    .map(|parked| (parked.loaded.layout.bounds, 1.0))
+            };
+            match entry {
+                Some((bounds, built)) => {
+                    out.extend(bounds);
+                    out.push(built);
+                }
+                None => out.extend([f32::NAN; 5]),
+            }
+        }
+        out
+    }
+
+    /// The ground the screen shows, as `[TL x, y, TR x, y, BR x, y, BL x, y, cut, pivot x, pivot
+    /// y]` in plan units, corners in screen order, `cut` 1 when the top edge came down short of
+    /// the top of the screen. The stored camera, so a ride's bob does not move it. Empty with no
+    /// plant, or when the bottom of the screen sees no ground. See [`crate::minimap::view_quad`].
+    pub fn minimap_view(&self) -> Vec<f32> {
+        if self.plant.is_none() {
+            return Vec::new();
+        }
+        crate::minimap::view_floats(&self.camera)
+    }
+
+    /// Eases the camera's pivot to the plan point `(x, y)` at the same zoom, as a tour step moves,
+    /// or jumps there with `reduced`. A top-down turn in progress stops where it is; a Q or E turn
+    /// runs on. Returns false while riding, with no plant, or for a point that is not finite.
+    pub fn pan_to(&mut self, x: f32, y: f32, reduced: bool) -> bool {
+        if self.ride.is_some() || self.plant.is_none() {
+            return false;
+        }
+        let Some(to) = crate::minimap::pan_pose(&self.camera, [x, y]) else {
+            return false;
+        };
+        self.cancel_top_move();
+        self.ease_to(to, reduced);
+        true
+    }
 }
 
 /// The box `[min x, min y, max x, max y]` in CSS px that a plan box covers on the ground.
@@ -2812,6 +3011,12 @@ fn screen_box(camera: &Camera, b: [f32; 4], dpr: f32) -> [f32; 4] {
         },
     )
 }
+/// Whether two poses are the same up to float noise, as the same framing fitted twice gives.
+fn same_pose(a: tour::Pose, b: tour::Pose) -> bool {
+    let near = |x: f32, y: f32| (x - y).abs() <= 1e-3 * x.abs().max(y.abs()).max(1.0);
+    near(a.0[0], b.0[0]) && near(a.0[1], b.0[1]) && near(a.1, b.1)
+}
+
 /// The box round two boxes. An empty box adds nothing.
 fn joined(a: Aabb, b: Aabb) -> Aabb {
     let mut out = a;

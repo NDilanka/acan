@@ -45,6 +45,10 @@
     box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.05); }
   #labels .label .count { display: none; margin-left: 6px; color: var(--leader); }
   #labels.alt .count { display: inline; }
+  /* A district's sign: its name in small capitals, quieter than a machine's name. */
+  #labels .sign { position: absolute; left: 0; top: 0; white-space: nowrap;
+    font: 600 10px/1.2 system-ui, sans-serif; letter-spacing: 0.08em; text-transform: uppercase; color: var(--leader);
+    text-shadow: 1px 0 0 var(--halo), -1px 0 0 var(--halo), 0 1px 0 var(--halo), 0 -1px 0 var(--halo), 0 0 3px var(--halo); }
   /* A canvas of several projects: one plate under each plant. The page makes them only then. */
   #nameplates { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
   #nameplates .nameplate { position: absolute; left: 0; top: 0; display: inline-flex; align-items: baseline; gap: 6px;
@@ -113,6 +117,21 @@
   .island { position: fixed; background: var(--face); border: 1px solid var(--rule); border-radius: var(--radius);
     box-shadow: var(--shadow); padding: 6px 12px; }
   #shell { top: 12px; left: 12px; display: flex; gap: 10px; align-items: baseline; }
+  #add-form { top: 52px; left: 12px; z-index: 3; width: 320px; box-sizing: border-box; display: grid; gap: 6px; padding: 10px 12px; }
+  #add-form[hidden] { display: none; }
+  #add-form label { font: 600 12px/1.3 var(--sans); }
+  #add-form input { font: 12px var(--mono); padding: 4px 6px; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--face); color: var(--ink); }
+  #add-form .row { display: flex; gap: 8px; align-items: center; }
+  #add-form .row input { flex: 1 1 auto; min-width: 0; }
+  #add-note { margin: 0; font-size: 12px; color: var(--muted); min-height: 1em; }
+  /* The empty origin's hint: centred, not in the way (no pointer), with a line to the "+". */
+  #empty-hint { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; z-index: 1; }
+  #empty-hint[hidden] { display: none; }
+  #empty-hint p { margin: 0; font: 600 15px/1.3 var(--sans); color: var(--soft); }
+  #empty-hint kbd { display: inline-block; min-width: 20px; height: 20px; padding: 0 5px; box-sizing: border-box; font: 11px/18px var(--mono);
+    text-align: center; vertical-align: 1px; color: var(--ink); background: var(--card); border: 1px solid var(--rule); border-radius: 4px; }
+  /* While the empty hint shows, the + it names is lit, as a pressed key is. */
+  #shell #add-plant.beckon { border-color: var(--ink); background: var(--ink); color: var(--on-ink); }
   /* At rest the shell is the brand and two keys; the repo and a healthy link show with the key bar. */
   #shell .repo:not(:empty), #shell #link { display: none; }
   #shell.open .repo:not(:empty), #shell.open #link, #shell #link:not(.quiet) { display: inline; }
@@ -436,7 +455,7 @@
      overlap; the lists scroll when the window is short. A row that changed glows once. */
   /* The rail scrolls as one column, so each panel keeps its own height and its body: no panel
      shrinks to its head when the window is short. Long lists still cap and scroll inside. */
-  #watch { position: fixed; top: 12px; right: 12px; width: 300px; max-height: calc(100vh - 24px);
+  #watch { position: fixed; top: 12px; right: 12px; width: 300px; max-height: calc(100vh - 24px - var(--minimap-room, 0px));
     display: flex; flex-direction: column; gap: 8px; pointer-events: none; overflow-y: auto;
     overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--rule) transparent; }
   #watch > .island { position: static; flex: none; pointer-events: auto; padding: 10px 12px;
@@ -452,6 +471,7 @@
   #watch .empty { margin: 0; font: 12px/1.4 var(--sans); color: var(--muted); }
   #watch .empty code { display: block; margin-top: 4px; font: 11px/1.4 var(--mono); color: var(--ink);
     overflow-wrap: anywhere; user-select: all; }
+  #lanes .empty > span code { display: inline; margin-top: 0; }
   #watch li.moved { animation: watch-glow 1200ms ease-out; }
   @keyframes watch-glow { from { background: #e6e6e1; } to { background: transparent; } }
   @media (prefers-reduced-motion: reduce) { #watch li.moved { animation: none; } }
@@ -551,6 +571,7 @@
 </style>
 <link rel="stylesheet" href="review.css">
 <link rel="stylesheet" href="settings.css">
+<link rel="stylesheet" href="minimap.css">
 </head>
 <body>
 <canvas id="plant" tabindex="0"></canvas>
@@ -562,7 +583,9 @@
 <div id="pov-frame" hidden></div>
 <svg id="pov-reticle" hidden aria-hidden="true"><path id="pov-bracket" d=""></path></svg>
 <div class="island" id="pov-chip" hidden><span class="dot" id="pov-dot"></span><span class="inside">inside</span><b id="pov-agent"></b><span class="line" id="pov-line"></span><kbd>Esc</kbd><span class="alt" id="pov-alt" hidden></span></div>
-<div class="island" id="shell"><span class="brand">Acan</span><span class="repo" id="repo"></span><span id="link" class="muted quiet">starting</span><span id="stale" class="stale" hidden></span><span id="version" class="version" hidden></span><button type="button" id="command-open" class="key" aria-label="Command bar" title="Command bar (/)">/</button><button type="button" id="topdown-toggle" class="key" aria-pressed="false" aria-label="Top-down view" title="Top-down view (V)">top</button><button type="button" id="help-toggle" class="key" aria-expanded="false" aria-controls="hint" aria-label="Keys" title="Keys (?)">?</button></div>
+<div class="island" id="shell"><span class="brand">Acan</span><span class="repo" id="repo"></span><span id="link" class="muted quiet">starting</span><span id="stale" class="stale" hidden></span><span id="version" class="version" hidden></span><button type="button" id="command-open" class="key" aria-label="Command bar" title="Command bar (/)">/</button><button type="button" id="topdown-toggle" class="key" aria-pressed="false" aria-label="Top-down view" title="Top-down view (V)">top</button><button type="button" id="help-toggle" class="key" aria-expanded="false" aria-controls="hint" aria-label="Keys" title="Keys (?)">?</button><button type="button" id="add-plant" class="key" aria-expanded="false" aria-controls="add-form" aria-label="Add a codebase" title="Add a codebase">+</button></div>
+<div id="empty-hint" hidden aria-hidden="true"><p id="empty-hint-text">Add a codebase with <kbd>+</kbd></p></div>
+<form class="island" id="add-form" aria-label="Add a codebase" hidden><label for="add-path">Folder path on this machine</label><div class="row"><input id="add-path" type="text" spellcheck="false" autocomplete="off" placeholder="/path/to/repo"><button type="submit" class="key">Add</button></div><p id="add-note" role="status"></p></form>
 <div class="island" id="mapping" role="status" hidden></div>
 <div class="island" id="alpha" hidden><span id="setup-banner" hidden><span id="setup-banner-text"></span><button id="setup-open" type="button">Set a key</button></span><span id="update" class="update" hidden><span id="update-text"></span> <a id="update-link" target="_blank" rel="noopener">open release</a></span><span class="alpha-actions"><button id="setup-manage" type="button" hidden>Model setup</button></span><span id="bug-note" class="muted" hidden></span></div>
 <dialog id="bug-dialog" aria-labelledby="bug-heading">
@@ -618,6 +641,12 @@
   <aside id="history" class="island" aria-label="orders" hidden></aside>
   <aside id="scrub" class="island" aria-label="timeline" hidden></aside>
 </div>
+<aside id="minimap" class="island" aria-label="Projects map" hidden>
+  <div class="head"><button type="button" id="minimap-toggle" aria-expanded="true" aria-controls="minimap-map" title="Projects map (G M)">map</button><span id="minimap-name" aria-hidden="true"></span></div>
+  <div id="minimap-map" role="group" aria-label="Projects, by place">
+    <svg id="minimap-view" aria-hidden="true"><polygon class="fill"></polygon><polyline class="edge"></polyline><line class="top"></line><path class="tick"></path><path class="off"></path></svg>
+  </div>
+</aside>
 <div id="pulses" aria-hidden="true"><div class="pulse target" id="compose-target" hidden></div></div>
 <aside id="compose" class="island" role="dialog" aria-labelledby="compose-title" hidden>
   <form id="compose-form" autocomplete="off">
@@ -676,6 +705,7 @@
       <button type="submit">open</button>
     </div>
     <p id="token-hint" class="gate-hint">The first <code>acan serve</code> in a repo saves this token in that repo's <code>.acan/tokens.json</code>, and prints it to the terminal.</p>
+    <p id="gate-note" class="gate-hint" role="alert" hidden></p>
   </form>
 </div>
 <div class="island" id="usage" hidden>

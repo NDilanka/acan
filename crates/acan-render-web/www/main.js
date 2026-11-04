@@ -62,12 +62,14 @@ import { installRailTabs } from "./rail.js";
 import { installInbox } from "./inbox.js";
 import { installHistory } from "./history.js";
 import { installScrub } from "./scrub.js";
-import { installFirstRun, paintFirstRun } from "./firstrun-panel.js";
+import { installFirstRun, paintFirstRun, refreshSetup } from "./firstrun-panel.js";
+import { exchangeSignIn, showSignInExpired, signInCodeOf, addressWithout } from "./emptystart.js";
 import { onWorkers, refreshWorkers, workersAnswer } from "./workers.js";
 import { nextFrame } from "./frames.js";
 import { closeViewer, installVision, paintViewer, placeVisionPins, syncVision, viewerOpen, viewerTakesEscape } from "./vision-pins.js";
 import { installMulti, nameOf, zoomAround } from "./multi.js";
 import { placePlates } from "./nameplates.js";
+import { placeMinimap } from "./minimap.js";
 import { placeParked } from "./parked.js";
 import { canvasState } from "./projects.js";
 import { placeStateMaps, readFootprints } from "./statemachine-paint.js";
@@ -154,6 +156,7 @@ function drawFrame(now = performance.now()) {
     // The parked names are placed before the plates, which move clear of them.
     placeParked();
     placePlates();
+    placeMinimap();
     // A fading belt is redrawn each frame until it is gone. A replay's light waits for its entries.
     if (placeStateMaps() && isLive()) requestRender();
     const next = nextFrame({ moving: turning, hidden: document.hidden, gapMs: state.app.frame_gap_ms() });
@@ -556,12 +559,23 @@ function bindKeys() {
     sessionStorage.setItem(TOKEN_KEY, value);
     state.token = value;
     gate.hidden = true;
-    startShell();
-    start().catch((err) => {
-      console.error(err);
-      setLink("failed");
-    });
+    // The shell's checks run after the start, which knows whether the origin has a codebase.
+    start()
+      .catch((err) => {
+        console.error(err);
+        setLink("failed");
+      })
+      .then(() => startShell());
   });
+}
+
+// The sign-in link's fragment, `#signin=<code>`, is read once and taken out of the address bar at
+// once, so the code never stays there. Returns the code, or null when the fragment is another one.
+function takeSignInCode() {
+  const code = signInCodeOf(location.hash);
+  if (code === null) return null;
+  history.replaceState(null, "", addressWithout(location.pathname, location.search));
+  return code;
 }
 
 // The owner token arrives as `#token=` from `acan serve`. It is kept for the session only, then
@@ -608,7 +622,19 @@ async function createApp() {
 // with no server, and holds no token. `?plant=stress&machines=N` builds a generated plant for the
 // benchmark. `?plant=fixture` loads the demo plant with no log. Otherwise the page reads the live
 // origin, which needs the owner token.
-async function loadPlant() {
+async function loadPlant(signInCode) {
+  // A sign-in link's code is traded for the owner token first. When the code is refused, the gate
+  // shows the expired-link line and the page does not go on.
+  if (signInCode !== null) {
+    const answer = await exchangeSignIn(signInCode, {
+      store: (token) => sessionStorage.setItem(TOKEN_KEY, token),
+    });
+    if (!answer.ok) {
+      showSignInExpired(document);
+      setLink("sign in");
+      return;
+    }
+  }
   // The token is adopted in every other mode, so the shell's calls can use it, even over a fixture.
   state.token = replay ? null : adoptToken();
   const source = params.get("plant");
@@ -640,7 +666,8 @@ async function loadPlant() {
     }
   }
   if (fixtureMachines !== null) setStateMachines(fixtureMachines);
-  repoEl.textContent = canvasState.multi ? nameOf(canvasState.active) : state.app.repo_name();
+  // An empty origin has no repo to name.
+  if (!state.empty) repoEl.textContent = canvasState.multi ? nameOf(canvasState.active) : state.app.repo_name();
 }
 
 function followReducedMotion() {
@@ -676,6 +703,8 @@ async function loadPlateFixture(name) {
 }
 
 async function boot() {
+  // The sign-in fragment leaves the address bar before anything else runs. Not in replay, which has no origin.
+  const signInCode = replay ? null : takeSignInCode();
   const started = performance.now();
   await init();
   timing.init = performance.now() - started;
@@ -703,7 +732,7 @@ async function boot() {
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) requestRender();
   });
-  await loadPlant();
+  await loadPlant(signInCode);
   bindPlate();
   await installVision();
   // The replay page makes no API call, so the shell (version, update, bug report, setup) stays off.
@@ -711,6 +740,12 @@ async function boot() {
     bindShell();
     startShell();
     installFirstRun();
+    // The first codebase added to an empty origin: the shell's checks and the setup read it now.
+    window.addEventListener("acan:attached", () => {
+      startShell();
+      refreshSetup();
+      refreshWorkers();
+    });
     installSettings({ app: state.app, requestRender, token: () => state.token, onToken: rotateToken,
       syncFit: syncFitInset, fixture: params.get("settings") === "fixture" });
   }

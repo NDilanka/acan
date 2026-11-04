@@ -650,6 +650,51 @@ async fn a_settings_file_that_does_not_parse_stops_the_start_and_is_kept() {
     );
 }
 
+#[tokio::test]
+async fn keys_this_version_does_not_use_are_kept_and_never_shown() {
+    let repo = temp_repo();
+    fs::create_dir_all(repo.path().join(".acan")).expect("the state dir");
+    fs::write(
+        settings_file(repo.path()),
+        json!({
+            "projects": {"live": ["/some/folder"]},
+            "budgets": {"call_limits": {"planner": 7}},
+            "look": {"theme": "dark", "glow": "unshown-value"},
+        })
+        .to_string(),
+    )
+    .expect("the file is written");
+    let running = boot(repo.path(), models(repo.path(), &[])).await;
+
+    let doc = owner_doc(&running).await;
+    let text = doc.to_string();
+    for hidden in ["planner", "glow", "unshown-value", "/some/folder"] {
+        assert!(!text.contains(hidden), "{hidden} is shown: {text}");
+    }
+    assert_eq!(doc["look"]["theme"], "dark");
+
+    // The page sends a look change as the whole section it read, with the one field changed.
+    let mut look = doc["look"].clone();
+    look["motion"] = json!(false);
+    let response = put(&running, Some(OWNER_TOKEN), &json!({ "look": look })).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    assert!(
+        !body["settings"].to_string().contains("glow"),
+        "the change response shows no unknown key"
+    );
+
+    let saved: Value = serde_json::from_str(
+        &fs::read_to_string(settings_file(repo.path())).expect("the file is written"),
+    )
+    .expect("the file is JSON");
+    assert_eq!(saved["look"]["motion"], false);
+    assert_eq!(saved["look"]["glow"], "unshown-value");
+    assert_eq!(saved["budgets"]["call_limits"]["planner"], 7);
+    assert_eq!(saved["projects"]["live"][0], "/some/folder");
+    running.stop().await.expect("the server stops");
+}
+
 /// A POST to `path` with `token` as the bearer, and no body.
 async fn post_to(running: &Running, path: &str, token: Option<&str>) -> reqwest::Response {
     let mut request = reqwest::Client::new().post(format!("http://{}{path}", running.local_addr));

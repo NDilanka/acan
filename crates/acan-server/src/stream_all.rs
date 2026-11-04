@@ -163,7 +163,7 @@ async fn pump<C: ModelClient + 'static>(
 
     // Cleared when the revocation channel closes, so the loop stops polling it.
     let mut watching = true;
-    let mut members = members_of(projects.entries(), &token);
+    let mut members = members_of(&projects.entries(), &token);
     if members.is_empty() {
         close(&mut socket, CLOSE_UNAUTHORIZED, "unauthorized".to_owned()).await;
         return;
@@ -337,7 +337,7 @@ async fn pump<C: ModelClient + 'static>(
 
 /// The projects `token` is a member of, each with what that token may read. The subscription
 /// fills in where each one starts.
-fn members_of<C: ModelClient>(entries: &[Entry<C>], token: &str) -> Vec<Member<C>> {
+fn members_of<C: ModelClient>(entries: &[Arc<Entry<C>>], token: &str) -> Vec<Member<C>> {
     entries
         .iter()
         .filter_map(|entry| {

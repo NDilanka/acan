@@ -1,19 +1,21 @@
 //! The `acan` command line: serves one or more repositories' worlds.
 
+use std::ffi::OsString;
 use std::io::{self, IsTerminal};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use acan_llm::{KeyFile, ModelClient};
 use acan_server::init_cli::{self, InitArgs};
-use acan_server::projects::ProjectSet;
+use acan_server::open::{self, Browser, RunDir};
+use acan_server::projects::{ProjectSet, ProjectSpec};
 use acan_server::receipt_cli::{self, Format, ShadowArgs};
 use acan_server::release::{self, Redaction};
 use acan_server::replay;
 use acan_server::{
-    DEFAULT_WITNESS_CONCURRENCY, Models, ServeConfig, VisionConfig, apply_project_changes,
-    default_browser, default_data_dir, default_settings_file, settings_file_beside,
-    start_projects_serving, start_projects_with_settings, tokens_file,
+    ClientFactory, DEFAULT_WITNESS_CONCURRENCY, Models, ServeConfig, UserFolder, VisionConfig,
+    apply_project_changes, default_browser, default_data_dir, default_settings_file,
+    settings_file_beside, start_open, start_projects_adding, tokens_file,
 };
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -49,6 +51,67 @@ enum Command {
     /// checkout is not touched unless --working-tree is given. Nothing is written until you
     /// type yes at the prompt.
     Init(InitArgs),
+    /// Opens acan in the browser, signed in. The server runs in the background, one per user, and
+    /// is started when none runs. It keeps running after this command returns.
+    ///
+    /// Exit status: 0 when the server answers; 1 when it does not, with the details in open.log in
+    /// the run folder.
+    Open(OpenArgs),
+    /// Runs the background server that `acan open` starts.
+    #[command(name = "open-server", hide = true)]
+    OpenServer(OpenServerArgs),
+}
+
+#[derive(Debug, Args)]
+struct OpenArgs {
+    /// The port a new server listens on. Defaults to 7311. A server already running keeps its port.
+    #[arg(long)]
+    port: Option<u16>,
+    /// Starts or finds the server, but opens no browser.
+    #[arg(long)]
+    no_browser: bool,
+    #[command(flatten)]
+    server: OpenServerOptions,
+}
+
+#[derive(Debug, Args)]
+struct OpenServerArgs {
+    /// The port to listen on, on 127.0.0.1.
+    #[arg(long, default_value_t = open::DEFAULT_PORT)]
+    port: u16,
+    #[command(flatten)]
+    server: OpenServerOptions,
+}
+
+/// The options `acan open` passes on to the server it starts.
+#[derive(Debug, Args)]
+struct OpenServerOptions {
+    /// How many workers the server runs in its own process for each project. Zero runs none.
+    #[arg(long, default_value_t = 1)]
+    workers: usize,
+    /// Runs no advisory vision checks.
+    #[arg(long)]
+    no_vision: bool,
+    /// A directory served at `/`, such as the renderer page. Without it, the `web` folder beside
+    /// the binary is served, when there is one.
+    #[arg(long)]
+    web: Option<PathBuf>,
+}
+
+impl OpenServerOptions {
+    /// These options as the server's arguments. The server runs in the run folder, so a relative
+    /// web folder is made absolute first.
+    fn to_args(&self) -> Result<Vec<OsString>> {
+        let mut args: Vec<OsString> = vec!["--workers".into(), self.workers.to_string().into()];
+        if self.no_vision {
+            args.push("--no-vision".into());
+        }
+        if let Some(web) = &self.web {
+            args.push("--web".into());
+            args.push(std::path::absolute(web).context("resolving --web")?.into());
+        }
+        Ok(args)
+    }
 }
 
 #[derive(Debug, Args)]
@@ -147,12 +210,18 @@ struct ServeArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    // The background server writes to a log file, where colour codes are only noise.
+    let ansi = !matches!(cli.command, Command::OpenServer(_));
     tracing_subscriber::fmt()
         .with_writer(release::LogTee)
         .with_max_level(tracing::Level::INFO)
+        .with_ansi(ansi)
         .init();
-    match Cli::parse().command {
+    match cli.command {
         Command::Serve(args) => serve(args).await,
+        Command::Open(args) => open(args).await,
+        Command::OpenServer(args) => open_server(args).await,
         Command::ExportReplay(args) => export_replay(args).await,
         Command::Receipt(args) => receipt(args).await,
         Command::Init(args) => {
@@ -300,13 +369,24 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .unwrap_or_else(|| tokens_file(Path::new(".")));
     let tokens = std::path::absolute(&tokens).unwrap_or(tokens);
     let map_on_view = args.map_on_first_view;
+    // A project added while the server runs is opened from its routing file, as a project at start
+    // is, so the settings can serve a new folder with no restart.
+    let opener: ClientFactory<Models> = Box::new(|project: &ProjectSpec| {
+        let llm = project
+            .llm
+            .clone()
+            .unwrap_or_else(|| project.repo.join(".acan").join("llm.toml"));
+        let models = Models::open(&llm, KeyFile::for_user())?;
+        let ledger = models.ledger();
+        Ok::<_, anyhow::Error>((models, ledger))
+    });
     // A server that maps on first view is listening before its codebases map, so it does not wait
-    // for them: the first page is what starts each map.
-    let mut running = if map_on_view {
-        start_projects_serving(config, clients, Some(settings)).await?
-    } else {
-        start_projects_with_settings(config, clients, Some(settings)).await?
-    };
+    // for them: the first page is what starts each map. Otherwise the start waits for every map.
+    let mut running = start_projects_adding(config, clients, Some(settings), opener).await?;
+    if !map_on_view && let Err(err) = running.wait_mapped().await {
+        let _ = running.stop().await;
+        return Err(err);
+    }
     let terminal = io::stdout().is_terminal();
     if let Some(token) = &running.owner_token {
         for line in owner_token_lines(running.local_addr, token.as_str(), &tokens, terminal) {
@@ -336,6 +416,182 @@ async fn serve(args: ServeArgs) -> Result<()> {
     };
     let stopped = running.stop().await;
     outcome.and(stopped)
+}
+
+/// Finds or starts the user's server and opens the browser on it. A failure prints one line to
+/// stderr and exits 1; the line names open.log when it was written.
+async fn open(args: OpenArgs) -> Result<()> {
+    let request = open::Request {
+        port: args.port,
+        browser: !args.no_browser,
+        server_args: args.server.to_args()?,
+    };
+    match open::open(&request).await {
+        Ok(opened) => {
+            if opened.reused
+                && let Some(asked) = args.port
+                && asked != opened.port
+            {
+                println!(
+                    "acan is already running on port {}, so that server is used rather than port {asked}",
+                    opened.port
+                );
+            }
+            println!("acan is open at http://127.0.0.1:{}/", opened.port);
+            if let Browser::Failed(reason) = &opened.browser {
+                println!("the browser did not open: {reason}");
+            }
+            Ok(())
+        }
+        Err(failed) => {
+            let what = failed.what.replace(['\r', '\n'], " ");
+            match &failed.log {
+                Some(log) => eprintln!(
+                    "acan did not open: {what}. The details are in {}",
+                    log.display()
+                ),
+                None => eprintln!("acan did not open: {what}"),
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+/// The background server `acan open` starts. It serves the user's folder, with the projects its
+/// settings added, on 127.0.0.1 only. It holds the run folder's lock while it runs, so it is the
+/// only one, and never prints the owner's token, since its output goes to a log file.
+async fn open_server(args: OpenServerArgs) -> Result<()> {
+    let run = open::run_dir().context(
+        "there is no run folder; set HOME or XDG_STATE_HOME, or LOCALAPPDATA on Windows",
+    )?;
+    let run = RunDir::create(run).context("creating the run folder")?;
+    let Some(_lock) = run
+        .lock_for_server()
+        .await
+        .context("opening the server lock")?
+    else {
+        bail!(
+            "another acan server is running: it holds {}",
+            run.lock_file().display()
+        );
+    };
+    // Files left by a server that did not stop cleanly name a port nothing answers on.
+    run.remove_live_files();
+    let keys = KeyFile::for_user().context(
+        "there is no user folder for the settings and keys; set HOME, or APPDATA on Windows",
+    )?;
+    let folder = keys
+        .path()
+        .parent()
+        .context("the keys file has no folder")?
+        .to_path_buf();
+    let settings = settings_file_beside(&keys);
+    let mut projects = ProjectSet::from_repos(&[]);
+    for line in apply_project_changes(&mut projects, &settings)? {
+        println!("acan did not add a project: {line}");
+    }
+    for project in &projects.projects {
+        load_dotenv(&project.repo)?;
+    }
+    release::configure(projects.redaction());
+    tracing::info!(
+        version = release::version(),
+        commit = release::commit(),
+        "acan starting in the background"
+    );
+    if update_check_enabled(false) {
+        release::spawn_update_check();
+    }
+
+    let mut clients = Vec::with_capacity(projects.projects.len());
+    for project in &projects.projects {
+        let models = Models::open(&routing_file(project), KeyFile::for_user())?;
+        let ledger = models.ledger();
+        clients.push((models, ledger));
+    }
+    // The user's folder has no routing file, so its client always reads the saved keys. An empty
+    // path never exists.
+    let user_keys = Models::open(Path::new(""), Some(keys))?;
+    let opener: ClientFactory<Models> = Box::new(|project: &ProjectSpec| {
+        let models = Models::open(&routing_file(project), KeyFile::for_user())?;
+        let ledger = models.ledger();
+        Ok::<_, anyhow::Error>((models, ledger))
+    });
+    let config = ServeConfig {
+        projects,
+        addr: SocketAddr::from((Ipv4Addr::LOCALHOST, args.port)),
+        team: false,
+        web: args.server.web.or_else(bundled_web),
+        witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
+        vision: (!args.server.no_vision).then(|| VisionConfig {
+            browser: default_browser(),
+            data_dir: default_data_dir(),
+        }),
+        local_workers: args.server.workers,
+        map_on_first_view: false,
+    };
+    let user = UserFolder {
+        dir: folder,
+        keys: user_keys,
+    };
+    // The codebases map while the server already answers, so the launcher's wait stays short.
+    let mut running = start_open(config, clients, user, opener).await?;
+    let written = run
+        .write_pid(std::process::id())
+        .and_then(|()| run.write_port(running.local_addr.port()));
+    if let Err(err) = written {
+        let _ = running.stop().await;
+        run.remove_live_files();
+        return Err(err).context("writing the server's port and pid files");
+    }
+    println!(
+        "acan serving projects [{}] at http://{}/ in the background",
+        running.project_ids().join(", "),
+        running.local_addr
+    );
+    let outcome = tokio::select! {
+        result = running.wait() => result,
+        () = interrupted() => {
+            tracing::info!("shutting down");
+            Ok(())
+        }
+        () = terminated() => {
+            tracing::info!("shutting down");
+            Ok(())
+        }
+    };
+    let stopped = running.stop().await;
+    run.remove_live_files();
+    outcome.and(stopped)
+}
+
+/// The routing file of `project`: its own, or `.acan/llm.toml` in its repository.
+fn routing_file(project: &ProjectSpec) -> PathBuf {
+    project
+        .llm
+        .clone()
+        .unwrap_or_else(|| project.repo.join(".acan").join("llm.toml"))
+}
+
+/// Completes on Ctrl-C. A process with no console may be unable to listen for it, and then this
+/// never completes, rather than stopping the server at once.
+async fn interrupted() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Completes on SIGTERM. Never completes where there is no such signal.
+async fn terminated() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            term.recv().await;
+            return;
+        }
+    }
+    std::future::pending::<()>().await;
 }
 
 /// The lines `acan serve` prints about the owner token on its first start. On a terminal the token
