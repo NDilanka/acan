@@ -30,6 +30,9 @@ pub(crate) enum Base {
     },
     /// A convex polygon, counter-clockwise in plan. Growing it offsets each side, with mitred corners.
     Polygon(Vec<Point>),
+    /// A test-only outline that gains a vertex once grown, which breaks the invariant `sweep` checks.
+    #[cfg(test)]
+    Ragged(Vec<Point>),
 }
 
 impl Base {
@@ -52,6 +55,14 @@ impl Base {
                 steps,
             } => circle_ring(center[0], center[1], radius + grow, *steps),
             Self::Polygon(points) => offset(points, grow),
+            #[cfg(test)]
+            Self::Ragged(points) => {
+                let mut ring = points.clone();
+                if grow > 0.0 {
+                    ring.push(points[0]);
+                }
+                ring
+            }
         }
     }
 }
@@ -240,6 +251,11 @@ impl Part {
         );
         let rings: Vec<Vec<Point>> = stations.iter().map(|s| base.ring(s.grow)).collect();
         let count = rings[0].len();
+        debug_assert!(
+            rings.iter().all(|ring| ring.len() == count),
+            "every station of a sweep needs {count} vertices, got {:?}",
+            rings.iter().map(Vec::len).collect::<Vec<_>>()
+        );
         let plan = PlanNormals::new(&base.ring(0.0));
         let mesh = &mut self.meshes[finish.level as usize];
 
@@ -864,5 +880,23 @@ pub(crate) mod tests {
         let model = part.finish();
         assert_eq!(model.bounds.min, [-4.0, -0.5, 0.5]);
         assert_eq!(model.bounds.max, [1.0, 2.0, 3.0]);
+    }
+
+    const SQUARE: [Point; 4] = [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]];
+
+    #[test]
+    fn a_sweep_whose_stations_have_equal_rings_passes_the_check() {
+        let mut part = Part::new();
+        let stations = [Station::at(0.0, 0.0), Station::at(0.5, 2.0)];
+        part.sweep(&Base::Polygon(SQUARE.to_vec()), &stations, Finish::paper());
+        assert_eq!(part.finish().solids, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "every station of a sweep needs 4 vertices, got [4, 5]")]
+    fn a_station_ring_with_an_extra_vertex_fails_loudly() {
+        let mut part = Part::new();
+        let stations = [Station::at(0.0, 0.0), Station::at(0.5, 2.0)];
+        part.sweep(&Base::Ragged(SQUARE.to_vec()), &stations, Finish::paper());
     }
 }
