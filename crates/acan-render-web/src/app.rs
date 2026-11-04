@@ -71,32 +71,32 @@ const CLEAR_STEPS: usize = 12;
 
 /// Fits `boxes` on `camera` at its angles, with `room`, as `Camera::fit_boxes_room` does. With
 /// `clear`, the top-down fit, the corners must also stay inside the screen edges it names, as
-/// `[top, right]` in device pixels. The kit's fit shifts the picture to clear the usage panel, which
-/// can push the plant under the shell bar or past the left edge. A plant too big for the room the
-/// edges leave zooms out to fit it. Otherwise a corner past an edge pans the picture back by its
-/// reach.
+/// `[top, right, left]` in device pixels. The kit's fit shifts the picture to clear the usage panel,
+/// which can push the plant under the shell bar, past the left edge or under the receipt plate. A
+/// plant too big for the room the edges leave zooms out to fit it. Otherwise a corner past an edge
+/// pans the picture back by its reach.
 fn fit_clear(
     camera: &mut Camera,
     boxes: &[Aabb],
     margin: f32,
     room: FitRoom,
-    clear: Option<[f32; 2]>,
+    clear: Option<[f32; 3]>,
 ) {
     camera.fit_boxes_room(boxes, margin, room);
-    let Some([top, right]) = clear else {
+    let Some([top, right, edge_left]) = clear else {
         return;
     };
     let corners: Vec<[f32; 3]> = boxes.iter().flat_map(|bounds| bounds.corners()).collect();
     let [width, height] = camera.viewport();
     let centre = [width * 0.5, height * 0.5];
-    let room_x = right.max(1.0);
+    let room_x = (right - edge_left).max(1.0);
     let room_y = (height - top).max(1.0);
     for _ in 0..CLEAR_STEPS {
         let screen: Vec<[f32; 2]> = corners
             .iter()
             .map(|&corner| camera.world_to_screen(corner))
             .collect();
-        let [above, beyond, left] = topdown::overlap(&screen, top, right);
+        let [above, beyond, left] = topdown::overlap(&screen, top, right, edge_left);
         if above == 0.0 && beyond == 0.0 && left == 0.0 {
             break;
         }
@@ -145,9 +145,9 @@ pub struct App {
     top_move: Option<TopMove>,
     /// Whether the top-down view is set once the ride has eased back, as `V` asks while riding.
     top_after_leave: Option<bool>,
-    /// The room the top-down fit keeps clear of the shell bar at the top and of the right column,
-    /// as `[top, right]` in CSS pixels. See [`App::set_fit_inset`].
-    fit_inset: [f32; 2],
+    /// The room the top-down fit keeps clear of the shell bar at the top, the right column and the
+    /// receipt plate at the left, as `[top, right, left]` in CSS pixels. See [`App::set_fit_inset`].
+    fit_inset: [f32; 3],
     /// The machines the shown tour step stages, with the chip labels on each. Empty when no step
     /// is shown, so every machine keeps its normal tint.
     stage: Vec<tour::Spot>,
@@ -321,7 +321,7 @@ impl App {
             tilt_before_top: DEFAULT_ELEVATION,
             top_move: None,
             top_after_leave: None,
-            fit_inset: [0.0; 2],
+            fit_inset: [0.0; 3],
             stage: Vec::new(),
             plant: None,
             plan: None,
@@ -1027,10 +1027,24 @@ impl App {
     }
 
     /// Sets the room the top-down fit keeps clear of the page's shell bar, which hangs at the top,
-    /// and of the right column, in CSS pixels from the canvas edges. The next fit uses it; the
-    /// view does not move until then.
-    pub fn set_fit_inset(&mut self, top_css: f32, right_css: f32) {
-        self.fit_inset = [top_css.max(0.0), right_css.max(0.0)];
+    /// of the right column, and of the receipt plate at the left, in CSS pixels from the canvas
+    /// edges. The next fit uses it; the view does not move until then.
+    pub fn set_fit_inset(&mut self, top_css: f32, right_css: f32, left_css: f32) {
+        self.fit_inset = [top_css.max(0.0), right_css.max(0.0), left_css.max(0.0)];
+    }
+
+    /// Refits the top-down view to the room the page's panels leave now, as a receipt plate that
+    /// shows or hides moves them. Does nothing off the top-down view, or while a turn or a ride
+    /// runs. With `reduced`, or on a still page, the view jumps.
+    pub fn refit_top_down(&mut self, reduced: bool) {
+        if !self.top_down || self.top_move.is_some() || self.ride.is_some() {
+            return;
+        }
+        self.move_top(
+            topdown::snap(self.camera.azimuth()),
+            topdown::ELEVATION,
+            reduced,
+        );
     }
 
     /// Rides the drone of agent `agent` from inside. A ride already on switches to it, and a
@@ -1952,9 +1966,10 @@ impl App {
     }
 
     /// The screen edges the top-down fit keeps every corner inside, in device pixels as
-    /// `[top, right]`: the bottom of the shell bar and the left edge of the right column. `None`
-    /// off the top-down view, where the fit keeps only its own room.
-    fn clear_for(&self, elevation: f32) -> Option<[f32; 2]> {
+    /// `[top, right, left]`: the bottom of the shell bar, the left edge of the right column, and
+    /// the right edge of the receipt plate. `None` off the top-down view, where the fit keeps only
+    /// its own room.
+    fn clear_for(&self, elevation: f32) -> Option<[f32; 3]> {
         if !topdown::is_top_down(elevation) {
             return None;
         }
@@ -1962,6 +1977,7 @@ impl App {
         Some([
             self.fit_inset[0] * self.dpr,
             width - self.fit_inset[1] * self.dpr,
+            self.fit_inset[2] * self.dpr,
         ])
     }
 

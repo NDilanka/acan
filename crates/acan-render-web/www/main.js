@@ -211,16 +211,28 @@ function sizeCanvas() {
   }
 }
 
-// Tells the top-down fit where the shell bar's bottom and the right column's left edge are, so the
-// plant is framed clear of both. Read on a resize, at startup and on each turn to top-down.
+// Tells the top-down fit where the shell bar's bottom, the right column's left edge and the receipt
+// plate's right edge are, so the plant is framed clear of all three. Read on a resize, at startup,
+// on each turn to top-down, and when the receipt plate shows or hides.
 export function syncFitInset() {
   if (state.app === null) return;
   const canvasRect = canvas.getBoundingClientRect();
   const shell = document.getElementById("shell").getBoundingClientRect();
   const watch = document.getElementById("watch").getBoundingClientRect();
+  const receipt = document.getElementById("receipt");
+  const plate = receipt.hidden ? null : receipt.getBoundingClientRect();
   const top = shell.height > 0 ? shell.bottom - canvasRect.top + FIT_GAP_PX : 0;
   const right = watch.width > 0 ? canvasRect.right - watch.left + FIT_GAP_PX : 0;
-  state.app.set_fit_inset(top, right);
+  const left = plate !== null && plate.width > 0 ? Math.max(0, plate.right - canvasRect.left + FIT_GAP_PX) : 0;
+  state.app.set_fit_inset(top, right, left);
+}
+
+// Moves a top-down view clear of a panel at the edge that has just shown or hidden.
+export function refitForPanels() {
+  if (state.app === null) return;
+  syncFitInset();
+  state.app.refit_top_down(reducedNow());
+  requestRender();
 }
 
 function showNotice(text) {
