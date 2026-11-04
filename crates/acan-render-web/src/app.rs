@@ -1698,6 +1698,15 @@ impl App {
             .map_or_else(String::new, |machine| machine.name.clone())
     }
 
+    /// The wire name of machine `name`'s kind, such as `gate`, or an empty string when the plant
+    /// has no such machine. The Set kind menu marks the kind a machine has now.
+    pub fn machine_kind(&self, name: &str) -> String {
+        self.plant
+            .as_ref()
+            .and_then(|loaded| loaded.machines.iter().find(|machine| machine.name == name))
+            .map_or_else(String::new, |machine| crate::kind::wire_name(machine.kind))
+    }
+
     pub fn machine_files(&self, index: u32) -> u32 {
         self.plant
             .as_ref()
