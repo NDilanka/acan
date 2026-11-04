@@ -12,6 +12,7 @@ pub mod labels;
 pub mod lanes;
 pub mod layout;
 pub mod marks;
+pub mod minimap;
 pub mod mirror;
 pub mod plan;
 pub mod plant;
