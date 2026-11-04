@@ -1,224 +1,288 @@
-//! Parts that recur across machines: the plinth, screws, lamps, dials, knurls, and the lines and bars they are made of.
-
-use std::f32::consts::TAU;
+//! Parts that recur across the figures: the plinth, the frame each figure is drawn in, and the bolts, knurls, lines and
+//! flat faces they are built from.
+//!
+//! A figure is laid out in design units: its plinth's low corner is the origin, x runs right, y runs toward the viewer
+//! and z runs up. [`Frame`] moves those positions onto the kit's centred plan, so a figure reads the way its parts list
+//! reads.
 
 use crate::mesh::{Base, Finish, LIFT, Part, Stroke};
-use crate::model::Ink;
-use crate::plan::{Plan, Point, circle_ring};
+use crate::model::{Ink, Surface};
+use crate::models::Footprint;
+use crate::plan::{Plan, Point};
 
-/// Radius of a screw head, in plan units.
-const SCREW: f32 = 0.5;
+/// The plinth's height. The groove and the drone's shadow lie on its top.
+pub(crate) const PLINTH: f32 = 3.0;
+/// Radius of a bolt head, in plan units.
+const BOLT: f32 = 0.5;
 /// How far a knurl ridge stops short of the rings above and below, so the ridges do not touch them.
 const KNURL_INSET: f32 = 0.4;
-/// The plinth's height.
-pub(crate) const PLINTH: f32 = 3.0;
 
-/// Ticks around a dial lying on the plane at `z`. Each tick runs from `radius - length` to `radius`, and every
-/// `every`-th tick is major.
+/// A figure's frame: its footprint, for moving design positions onto the centred plan.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Dial {
-    pub(crate) center: Point,
-    pub(crate) radius: f32,
-    pub(crate) z: f32,
-    pub(crate) count: usize,
-    pub(crate) every: usize,
-    /// Minor and major tick lengths.
-    pub(crate) lengths: [f32; 2],
-    /// The angle of the first tick and the arc the ticks cover, in radians. A full turn goes all the way round.
-    pub(crate) from: f32,
-    pub(crate) span: f32,
+pub(crate) struct Frame {
+    pub(crate) w: f32,
+    pub(crate) d: f32,
 }
 
-impl Dial {
-    /// Ticks all the way round a dial.
-    pub(crate) fn full(
-        center: Point,
+impl Frame {
+    /// The frame of a figure with `footprint`.
+    pub(crate) const fn of(footprint: Footprint) -> Self {
+        Self {
+            w: footprint.w,
+            d: footprint.d,
+        }
+    }
+
+    /// The centred plan point of the design point `(x, y)`.
+    pub(crate) fn at(self, x: f32, y: f32) -> Point {
+        [x - self.w / 2.0, y - self.d / 2.0]
+    }
+
+    /// The centred point of the design point `(x, y)` at height `z`.
+    pub(crate) fn at3(self, x: f32, y: f32, z: f32) -> [f32; 3] {
+        up(self.at(x, y), z)
+    }
+
+    /// The plan rectangle `[x0, y0, x1, y1]`, with its corners rounded by `r`.
+    fn plan(self, [x0, y0, x1, y1]: [f32; 4], r: f32) -> Plan {
+        let [x, y] = self.at(x0, y0);
+        Plan {
+            x,
+            y,
+            w: x1 - x0,
+            d: y1 - y0,
+            r,
+        }
+    }
+
+    /// The base of the plan rectangle `[x0, y0, x1, y1]`, with rounded corners when `r` is positive.
+    pub(crate) fn rect(self, at: [f32; 4], r: f32) -> Base {
+        let steps = if r > 0.0 { 2 } else { 1 };
+        Base::Plan(self.plan(at, r), steps)
+    }
+
+    /// The base of a circle at the design point `centre`.
+    pub(crate) fn circle(self, centre: Point, radius: f32, steps: usize) -> Base {
+        Base::Circle {
+            center: self.at(centre[0], centre[1]),
+            radius,
+            steps,
+        }
+    }
+
+    /// The base of the polygon with the design points `points`, whichever way they wind.
+    pub(crate) fn poly(self, points: &[Point]) -> Base {
+        let mapped: Vec<Point> = points.iter().map(|p| self.at(p[0], p[1])).collect();
+        Base::polygon(&mapped)
+    }
+
+    /// A block over the design rectangle `at`, from `z[0]` to `z[1]`, with rounded corners `r` and edges bevelled `bevel`.
+    pub(crate) fn block(
+        self,
+        part: &mut Part,
+        at: [f32; 4],
+        z: [f32; 2],
+        r: f32,
+        bevel: f32,
+        finish: Finish,
+    ) {
+        part.slab(&self.rect(at, r), z[0], z[1], bevel, finish);
+    }
+
+    /// A solid over `base` from `z[0]` to `z[1]`, with its edges bevelled by `bevel`.
+    pub(crate) fn solid(
+        self,
+        part: &mut Part,
+        base: &Base,
+        z: [f32; 2],
+        bevel: f32,
+        finish: Finish,
+    ) {
+        part.slab(base, z[0], z[1], bevel, finish);
+    }
+
+    /// A polyline on the surface at height `z`, through the design points `points`.
+    pub(crate) fn line(
+        self,
+        part: &mut Part,
+        points: &[Point],
+        z: f32,
+        closed: bool,
+        stroke: Stroke,
+    ) {
+        let lifted: Vec<[f32; 3]> = points
+            .iter()
+            .map(|p| self.at3(p[0], p[1], z + LIFT))
+            .collect();
+        part.line(&lifted, closed, stroke);
+    }
+
+    /// A polyline through design points that each carry their own height.
+    pub(crate) fn line3(self, part: &mut Part, points: &[[f32; 3]], stroke: Stroke) {
+        let mapped: Vec<[f32; 3]> = points.iter().map(|p| self.at3(p[0], p[1], p[2])).collect();
+        part.line(&mapped, false, stroke);
+    }
+
+    /// A disc of radius `radius` on the surface at the design point `p` and height `z`, facing `normal`.
+    pub(crate) fn dot(
+        self,
+        part: &mut Part,
+        p: Point,
+        z: f32,
+        normal: [f32; 3],
+        radius: f32,
+        stroke: Stroke,
+    ) {
+        let at = self.at3(p[0], p[1], z);
+        let proud = std::array::from_fn(|axis| at[axis] + normal[axis] * LIFT);
+        part.dot(proud, normal, radius, stroke);
+    }
+
+    /// A bolt head at the design point `p` on the surface at height `z`, facing `normal`.
+    pub(crate) fn bolt(self, part: &mut Part, p: Point, z: f32, normal: [f32; 3]) {
+        bolt(part, self.at3(p[0], p[1], z), normal);
+    }
+
+    /// A flat quad in design coordinates, facing the side `facing` points to.
+    pub(crate) fn quad(
+        self,
+        part: &mut Part,
+        corners: [[f32; 3]; 4],
+        facing: [f32; 3],
+        finish: Finish,
+    ) {
+        let mapped = corners.map(|[x, y, z]| self.at3(x, y, z));
+        part.quad(mapped, facing, finish);
+    }
+
+    /// A closed ring round the design point `centre`, of radius `radius`, on the surface at height `z`.
+    pub(crate) fn circle_line(
+        self,
+        part: &mut Part,
+        centre: Point,
         radius: f32,
         z: f32,
+        steps: usize,
+        stroke: Stroke,
+    ) {
+        topline(part, &self.circle(centre, radius, steps), z, stroke);
+    }
+
+    /// Ridges up a cylinder centred on the design point `centre`, of radius `radius`, between `z[0]` and `z[1]`.
+    pub(crate) fn knurl(
+        self,
+        part: &mut Part,
+        centre: Point,
+        radius: f32,
+        z: [f32; 2],
         count: usize,
-        every: usize,
-        lengths: [f32; 2],
-    ) -> Self {
-        Self {
-            center,
+        stroke: Stroke,
+    ) {
+        knurl(
+            part,
+            self.at(centre[0], centre[1]),
             radius,
             z,
             count,
-            every,
-            lengths,
-            from: 0.0,
-            span: TAU,
-        }
-    }
-}
-
-/// A base plate `w` by `d` on the ground, bevelled, with a groove inset along its top and a screw at each corner.
-pub(crate) fn plinth(part: &mut Part, w: f32, d: f32) {
-    let plan = Plan {
-        x: -w / 2.0,
-        y: -d / 2.0,
-        w,
-        d,
-        r: 3.0,
-    };
-    part.slab(&Base::Plan(plan, 4), 0.0, PLINTH, 0.6, Finish::paper());
-    plan_line(part, plan.inset(3.0), PLINTH, 3, Stroke::new(Ink::Faint));
-    screws(part, plan, 5.0, PLINTH);
-}
-
-/// Screw heads at the four corners of `plan`, inset by `inset`, on the plane at `z`.
-pub(crate) fn screws(part: &mut Part, plan: Plan, inset: f32, z: f32) {
-    for [x, y] in plan.corners(inset) {
-        part.dot(
-            [x, y, z + LIFT],
-            [0.0, 0.0, 1.0],
-            SCREW,
-            Stroke::new(Ink::Mid).near(),
+            stroke,
         );
     }
 }
 
-/// A lamp: a short cylinder with a lens on its top.
-pub(crate) fn lamp(part: &mut Part, center: Point, z: f32) {
-    let height = 1.8;
-    part.slab(
-        &Base::Circle {
-            center,
-            radius: 2.4,
-            steps: 16,
-        },
-        z,
-        z + height,
-        0.0,
+/// The bevelled base every figure stands on. Its groove is an overlay, so the plinth itself is plain.
+pub(crate) fn plinth(part: &mut Part, frame: Frame) {
+    frame.block(
+        part,
+        [0.0, 0.0, frame.w, frame.d],
+        [0.0, PLINTH],
+        2.0,
+        0.8,
         Finish::paper(),
     );
-    part.dot(
-        [center[0], center[1], z + height + LIFT],
-        [0.0, 0.0, 1.0],
-        1.4,
-        Stroke::new(Ink::Mid),
-    );
 }
 
-/// Ticks on a dial. Minor ticks use the first stroke and major ticks the second.
-pub(crate) fn dial_ticks(part: &mut Part, dial: Dial, minor: Stroke, major: Stroke) {
-    let closed = (dial.span - TAU).abs() < 1e-6;
-    let steps = if closed { dial.count } else { dial.count + 1 };
-    let [cx, cy] = dial.center;
-    let z = dial.z + LIFT;
-    for index in 0..steps {
-        let angle = dial.from + index as f32 / dial.count as f32 * dial.span;
-        let major_tick = index % dial.every == 0;
-        let length = if major_tick {
-            dial.lengths[1]
-        } else {
-            dial.lengths[0]
-        };
-        let inner = dial.radius - length;
-        let (sin, cos) = angle.sin_cos();
-        let points = [
-            [cx + sin * inner, cy - cos * inner, z],
-            [cx + sin * dial.radius, cy - cos * dial.radius, z],
-        ];
-        let stroke = if major_tick { major } else { minor };
-        part.line(&points, false, stroke);
-    }
+/// A bolt head: a small disc set just proud of the face whose outward normal is `normal`.
+pub(crate) fn bolt(part: &mut Part, at: [f32; 3], normal: [f32; 3]) {
+    let proud = std::array::from_fn(|axis| at[axis] + normal[axis] * LIFT);
+    part.dot(proud, normal, BOLT, Stroke::new(Ink::Lo).close());
 }
 
-/// A closed plan outline lying on the plane at `z`.
-pub(crate) fn plan_line(part: &mut Part, plan: Plan, z: f32, steps: usize, stroke: Stroke) {
-    let points: Vec<[f32; 3]> = plan
-        .ring(steps)
-        .into_iter()
-        .map(|[x, y]| [x, y, z + LIFT])
-        .collect();
-    part.line(&points, true, stroke);
+/// The point `p` lifted to height `z`.
+pub(crate) fn up(p: Point, z: f32) -> [f32; 3] {
+    [p[0], p[1], z]
 }
 
-/// A closed plan outline running around the side of a box at height `z`, just outside its wall.
-pub(crate) fn plan_band(part: &mut Part, plan: Plan, z: f32, steps: usize, stroke: Stroke) {
-    let points: Vec<[f32; 3]> = Base::Plan(plan, steps)
-        .ring(LIFT)
-        .into_iter()
-        .map(|[x, y]| [x, y, z])
-        .collect();
-    part.line(&points, true, stroke);
+/// The point `radius` from `centre` at `degrees`, counter-clockwise from +x.
+pub(crate) fn polar(centre: Point, radius: f32, degrees: f32) -> Point {
+    let (sin, cos) = degrees.to_radians().sin_cos();
+    [centre[0] + radius * cos, centre[1] + radius * sin]
 }
 
-/// A closed circle lying on the plane at `z`.
-pub(crate) fn circle_line(
-    part: &mut Part,
-    center: Point,
-    radius: f32,
-    z: f32,
-    steps: usize,
-    stroke: Stroke,
-) {
-    let points: Vec<[f32; 3]> = circle_ring(center[0], center[1], radius, steps)
-        .into_iter()
-        .map(|[x, y]| [x, y, z + LIFT])
-        .collect();
-    part.line(&points, true, stroke);
+/// The corners of a rectangle centred on `centre`, `half[0]` out along the unit vector `along` and `half[1]` out
+/// along `across`.
+pub(crate) fn rect_on(centre: Point, along: Point, across: Point, half: [f32; 2]) -> [Point; 4] {
+    let corner = |s: f32, t: f32| -> Point {
+        [
+            centre[0] + along[0] * s * half[0] + across[0] * t * half[1],
+            centre[1] + along[1] * s * half[0] + across[1] * t * half[1],
+        ]
+    };
+    [
+        corner(-1.0, -1.0),
+        corner(1.0, -1.0),
+        corner(1.0, 1.0),
+        corner(-1.0, 1.0),
+    ]
 }
 
-/// A closed ring around the side of a cylinder of `radius`, at height `z`.
-pub(crate) fn band(
-    part: &mut Part,
-    center: Point,
-    radius: f32,
-    z: f32,
-    steps: usize,
-    stroke: Stroke,
-) {
-    let points: Vec<[f32; 3]> = circle_ring(center[0], center[1], radius + LIFT, steps)
-        .into_iter()
-        .map(|[x, y]| [x, y, z])
-        .collect();
-    part.line(&points, true, stroke);
+/// The unit vector at `degrees` counter-clockwise from +x.
+pub(crate) fn unit(degrees: f32) -> Point {
+    polar([0.0, 0.0], 1.0, degrees)
 }
 
-/// Ridges running up a cylinder's side, all the way round.
-pub(crate) fn knurl(
-    part: &mut Part,
-    center: Point,
-    radius: f32,
-    z0: f32,
-    z1: f32,
-    count: usize,
-    stroke: Stroke,
-) {
+/// Ridges up a cylinder's side, all the way round, between `z[0]` and `z[1]`. `center` is in the centred plan.
+fn knurl(part: &mut Part, center: Point, radius: f32, z: [f32; 2], count: usize, stroke: Stroke) {
     for index in 0..count {
-        let angle = index as f32 / count as f32 * TAU;
-        let (sin, cos) = angle.sin_cos();
-        let reach = radius + LIFT;
-        let x = center[0] + reach * cos;
-        let y = center[1] + reach * sin;
+        let angle = polar(center, radius + LIFT, index as f32 / count as f32 * 360.0);
         part.line(
-            &[[x, y, z0 + KNURL_INSET], [x, y, z1 - KNURL_INSET]],
+            &[up(angle, z[0] + KNURL_INSET), up(angle, z[1] - KNURL_INSET)],
             false,
             stroke,
         );
     }
 }
 
-/// A square-ended bar from `a` to `b` in plan, `width` across, from `z0` to `z1`.
-pub(crate) fn bar(
-    part: &mut Part,
-    a: Point,
-    b: Point,
-    width: f32,
-    z0: f32,
-    z1: f32,
-    finish: Finish,
-) {
-    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-    let length = dx.hypot(dy);
-    let (side_x, side_y) = (-dy / length * width / 2.0, dx / length * width / 2.0);
-    let corners = [
-        [a[0] + side_x, a[1] + side_y],
-        [b[0] + side_x, b[1] + side_y],
-        [b[0] - side_x, b[1] - side_y],
-        [a[0] - side_x, a[1] - side_y],
-    ];
-    part.slab(&Base::polygon(&corners), z0, z1, 0.3, finish);
+/// A flat face in one ink: a floor, a mouth, or a plate. It takes no shading from its normal.
+pub(crate) fn flat(ink: Ink) -> Finish {
+    Finish::new(Surface::Ink(ink))
+}
+
+/// The model's one lit part: flat black, the ink that names the kind from above.
+pub(crate) fn lit() -> Finish {
+    flat(Ink::Hi)
+}
+
+/// A window of glass, drawn flat and light.
+pub(crate) fn glass() -> Finish {
+    Finish::new(Surface::Glass)
+}
+
+/// A closed outline on the plane at `z`, following `base`.
+pub(crate) fn topline(part: &mut Part, base: &Base, z: f32, stroke: Stroke) {
+    let points: Vec<[f32; 3]> = base
+        .ring(0.0)
+        .into_iter()
+        .map(|[x, y]| [x, y, z + LIFT])
+        .collect();
+    part.line(&points, true, stroke);
+}
+
+/// A closed outline running round the side of `base` at height `z`, just outside its wall.
+pub(crate) fn sideline(part: &mut Part, base: &Base, z: f32, stroke: Stroke) {
+    let points: Vec<[f32; 3]> = base
+        .ring(LIFT)
+        .into_iter()
+        .map(|[x, y]| [x, y, z])
+        .collect();
+    part.line(&points, true, stroke);
 }

@@ -23,17 +23,17 @@ use crate::model::Model;
 )]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
-    /// Entry points: servers, app bootstrap, main. A tall unit with a side panel of lights and four stacked trays.
+    /// Entry points: servers, app bootstrap, main. The tallest figure: a loading hopper over a roller dock.
     Intake,
-    /// Auth, sessions, permissions, guards. A tall auth post pair with a turnstile hub, a badge reader and a lintel lamp.
+    /// Auth, sessions, permissions, guards. Two tall piers under a lintel, with a turnstile hub in the gap.
     Gate,
-    /// Data access, persistence, caching, migrations. A relational database: a squat cylinder stack with banded seams, a gauge and pipe stubs.
+    /// Data access, persistence, caching, migrations. A round silo on a skirt, with a hatch and a ladder.
     Tank,
-    /// Middleware, proxies, gateways. A round hub with four chutes and a crown dial.
+    /// Middleware, proxies, gateways. An octagonal manifold: one inlet header, three outlet flanges.
     Splitter,
-    /// Rate limits, throttles, quotas. A small belt fitting: a body with a handwheel.
+    /// Rate limits, throttles, quotas. A gate valve in a pipe run, with a handwheel.
     Valve,
-    /// Generated code, vendored output, tests, and machines with no files. A plain box.
+    /// Generated code, vendored output, tests, and machines with no files. A strapped shipping crate.
     Crate,
     /// Routes, controllers, handlers, endpoints. An angled panel on a frame with a grid of jack sockets.
     Switchboard,
@@ -55,8 +55,9 @@ pub enum Kind {
     Antenna,
     /// Shared utilities, helpers, common, lib. A shop tool rack with a sloped tray and a pegboard back.
     Toolrack,
-    /// Services, business logic, and anything no other rule names: the fallback. A stack of boards with a
-    /// gauge, a knob, two dials and a lamp. It is last so that `serde(other)` can read unknown names as it.
+    /// Services, business logic, and anything no other rule names: the fallback. A low workbench on four legs,
+    /// with a vice and parts bins. It is the plainest figure, so the common default does not dominate the map.
+    /// It is last so that `serde(other)` can read unknown names as it.
     #[default]
     #[serde(other)]
     Assembler,
@@ -126,41 +127,13 @@ pub fn model(kind: Kind) -> Model {
 #[must_use]
 pub fn footprint(kind: Kind) -> Footprint {
     match kind {
-        Kind::Intake => Footprint {
-            w: 50.0,
-            d: 96.0,
-            top: 30.0,
-        },
-        Kind::Gate => Footprint {
-            w: 44.0,
-            d: 74.0,
-            top: 40.0,
-        },
-        Kind::Assembler => Footprint {
-            w: 96.0,
-            d: 86.0,
-            top: 66.0,
-        },
-        Kind::Tank => Footprint {
-            w: 78.0,
-            d: 62.0,
-            top: 56.0,
-        },
-        Kind::Splitter => Footprint {
-            w: 86.0,
-            d: 86.0,
-            top: 34.0,
-        },
-        Kind::Valve => Footprint {
-            w: 18.0,
-            d: 18.0,
-            top: 16.0,
-        },
-        Kind::Crate => Footprint {
-            w: 40.0,
-            d: 40.0,
-            top: 30.0,
-        },
+        Kind::Intake => intake::FOOTPRINT,
+        Kind::Gate => gate::FOOTPRINT,
+        Kind::Assembler => assembler::FOOTPRINT,
+        Kind::Tank => tank::FOOTPRINT,
+        Kind::Splitter => splitter::FOOTPRINT,
+        Kind::Valve => valve::FOOTPRINT,
+        Kind::Crate => crate_box::FOOTPRINT,
         // Until their figures land, the new kinds take the assembler's footprint.
         Kind::Switchboard
         | Kind::Kiosk
@@ -171,13 +144,14 @@ pub fn footprint(kind: Kind) -> Footprint {
         | Kind::Gantry
         | Kind::Console
         | Kind::Antenna
-        | Kind::Toolrack => footprint(Kind::Assembler),
+        | Kind::Toolrack => assembler::FOOTPRINT,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mesh::LIFT;
     use crate::mesh::tests::{check_closed, check_outward};
     use crate::model::{Detail, Ink, Surface};
 
@@ -229,8 +203,9 @@ mod tests {
                 assert!(line.points.iter().all(|&p| inside(p)), "{kind:?}");
             }
             assert!(bounds.min[2] >= 0.0, "{kind:?} sits on the ground");
+            // Painted lines lie a lift above the surface they mark, so the top may exceed the footprint by one lift.
             assert!(
-                bounds.max[2] <= fp.top + 1e-3,
+                bounds.max[2] <= fp.top + LIFT + 1e-3,
                 "{kind:?} top {} above footprint {}",
                 bounds.max[2],
                 fp.top

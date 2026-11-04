@@ -1,108 +1,203 @@
-//! The splitter: a round hub with a crown and dial, and four chutes that fan out to the corners.
+//! The splitter: an octagonal manifold with one inlet header at the back, a T of channels across its top and three
+//! outlet flanges at the edges. The only octagon, so middleware, proxies and gateways read as one-in, three-out.
 
-use std::f32::consts::PI;
-
-use crate::mesh::{Base, Finish, LIFT, Part, Stroke};
+use crate::mesh::{Finish, Part, Stroke};
 use crate::model::{Ink, Model};
-use crate::parts::{self, Dial};
+use crate::models::Footprint;
+use crate::parts::{self, Frame, flat, lit, polar, rect_on, unit};
 
-/// The hub's radius and top. The crown sits on the top.
-const HUB_RADIUS: f32 = 14.0;
-const HUB_TOP: f32 = 26.0;
-/// The crown's top, where its dial and lamp stand.
-const CROWN_TOP: f32 = 29.0;
-/// The chutes' top.
-const CHUTE_TOP: f32 = 13.0;
+pub(crate) const FOOTPRINT: Footprint = Footprint {
+    w: 80.0,
+    d: 80.0,
+    top: 30.0,
+};
+
+/// The body's eight-sided outline, in design units, counter-clockwise.
+const OCTAGON: [[f32; 2]; 8] = [
+    [16.0, 8.0],
+    [64.0, 8.0],
+    [72.0, 16.0],
+    [72.0, 64.0],
+    [64.0, 72.0],
+    [16.0, 72.0],
+    [8.0, 64.0],
+    [8.0, 16.0],
+];
+
+/// The centre of the boss where the channels meet.
+const CENTRE: [f32; 2] = [40.0, 40.0];
 
 pub(crate) fn build() -> Model {
-    let mut part = Part::new();
-    parts::plinth(&mut part, 86.0, 86.0);
-    chute(&mut part, PI, 26.0, 6.0);
-    for angle in [-0.75, 0.0, 0.75] {
-        chute(&mut part, angle, 24.0, 5.0);
-    }
-    hub(&mut part);
-    crown(&mut part);
-    part.finish()
+    let f = Frame::of(FOOTPRINT);
+    let mut p = Part::new();
+    parts::plinth(&mut p, f);
+    body(&mut p, f);
+    header(&mut p, f);
+    troughs(&mut p, f);
+    flanges(&mut p, f);
+    boss(&mut p, f);
+    p.finish()
 }
 
-/// One chute: a bevelled prism from the hub's wall outward along `angle`, with a faint groove and a tip dot. It
-/// starts on the wall rather than inside the hub, so it does not sink into the drum.
-fn chute(part: &mut Part, angle: f32, length: f32, wide: f32) {
-    let (ux, uy) = (angle.cos(), angle.sin());
-    let (vx, vy) = (-uy, ux);
-    let (r0, r1) = (HUB_RADIUS, HUB_RADIUS + length);
-    let across = |along: f32, side: f32| [ux * along + vx * side, uy * along + vy * side];
-    let ring = [
-        across(r0, -wide),
-        across(r1, -wide),
-        across(r1, wide),
-        across(r0, wide),
+/// The octagonal body with its seam and the four lugs on its chamfers, and four screws at the corners.
+fn body(p: &mut Part, f: Frame) {
+    let octagon = f.poly(&OCTAGON);
+    f.solid(p, &octagon, [3.0, 18.0], 0.8, Finish::paper());
+    parts::sideline(p, &octagon, 10.0, Stroke::new(Ink::Faint).near());
+    // Each lug sits on a chamfer, its normal pointing out of the corner.
+    let lugs = [
+        ([12.0, 12.0], -45.0, 225.0),
+        ([68.0, 12.0], 45.0, 315.0),
+        ([68.0, 68.0], 135.0, 45.0),
+        ([12.0, 68.0], 225.0, 135.0),
     ];
-    part.slab(&Base::polygon(&ring), 3.0, CHUTE_TOP, 0.3, Finish::paper());
-    let tip = [ux * (r1 - 3.0), uy * (r1 - 3.0)];
-    part.line(
-        &[
-            [ux * (r0 + 2.0), uy * (r0 + 2.0), CHUTE_TOP + LIFT],
-            [tip[0], tip[1], CHUTE_TOP + LIFT],
-        ],
-        false,
-        Stroke::new(Ink::Faint),
-    );
-    part.dot(
-        [tip[0], tip[1], CHUTE_TOP + LIFT],
-        [0.0, 0.0, 1.0],
-        0.6,
-        Stroke::new(Ink::Hi),
-    );
+    for (centre, along, across) in lugs {
+        let lug = rect_on(centre, unit(along), unit(across), [2.0, 1.0]);
+        f.solid(p, &f.poly(&lug), [13.0, 15.0], 0.0, Finish::paper().near());
+    }
+    for at in [[12.0, 12.0], [68.0, 12.0], [12.0, 68.0], [68.0, 68.0]] {
+        f.bolt(p, at, 18.0, [0.0, 0.0, 1.0]);
+    }
 }
 
-/// The hub: a bevelled drum with a seam ring around its side.
-fn hub(part: &mut Part) {
-    part.slab(
-        &Base::Circle {
-            center: [0.0, 0.0],
-            radius: HUB_RADIUS,
-            steps: 40,
-        },
-        3.0,
-        HUB_TOP,
+/// The inlet header at the back, its bolts and its mouth on the back face.
+fn header(p: &mut Part, f: Frame) {
+    f.block(
+        p,
+        [28.0, 8.0, 52.0, 20.0],
+        [18.0, 24.0],
+        0.0,
         0.6,
         Finish::paper(),
     );
-    parts::band(part, [0.0, 0.0], HUB_RADIUS, 16.0, 40, Stroke::new(Ink::Lo));
+    for at in [[30.0, 10.0], [50.0, 10.0], [30.0, 18.0], [50.0, 18.0]] {
+        f.bolt(p, at, 24.0, [0.0, 0.0, 1.0]);
+    }
+    // The mouth is a dark plate on the back face, ten wide and four tall.
+    f.block(
+        p,
+        [35.0, 7.6, 45.0, 8.0],
+        [19.0, 23.0],
+        0.0,
+        0.0,
+        flat(Ink::Lo),
+    );
 }
 
-/// The crown: a short drum with a dial of ticks, a pointer, a centre pin and a lamp at its edge.
-fn crown(part: &mut Part) {
-    part.slab(
-        &Base::Circle {
-            center: [0.0, 0.0],
-            radius: 9.0,
-            steps: 32,
-        },
-        HUB_TOP,
-        CROWN_TOP,
+/// The T of troughs on the body top: the feed trough from the header and the cross trough between the outlets. It is
+/// one plate, so the two do not overlap.
+fn troughs(p: &mut Part, f: Frame) {
+    let t = [
+        [37.0, 20.0],
+        [43.0, 20.0],
+        [43.0, 37.0],
+        [71.0, 37.0],
+        [71.0, 43.0],
+        [43.0, 43.0],
+        [43.0, 72.0],
+        [37.0, 72.0],
+        [37.0, 43.0],
+        [9.0, 43.0],
+        [9.0, 37.0],
+        [37.0, 37.0],
+    ];
+    f.solid(p, &f.poly(&t), [18.0, 18.2], 0.0, flat(Ink::Lo));
+}
+
+/// Three outlet flanges, on the left, right and front ends of the troughs, each with four bolts and a dark mouth.
+fn flanges(p: &mut Part, f: Frame) {
+    f.block(
+        p,
+        [4.0, 37.0, 12.0, 43.0],
+        [12.0, 17.6],
+        0.0,
+        0.0,
+        Finish::paper().near(),
+    );
+    f.block(
+        p,
+        [68.0, 37.0, 76.0, 43.0],
+        [12.0, 17.6],
+        0.0,
+        0.0,
+        Finish::paper().near(),
+    );
+    f.block(
+        p,
+        [36.0, 69.0, 44.0, 75.0],
+        [12.0, 17.6],
+        0.0,
+        0.0,
+        Finish::paper().near(),
+    );
+    for y in [38.2, 41.8] {
+        for z in [13.2, 16.8] {
+            f.bolt(p, [4.0, y], z, [-1.0, 0.0, 0.0]);
+            f.bolt(p, [76.0, y], z, [1.0, 0.0, 0.0]);
+        }
+    }
+    for x in [37.2, 42.8] {
+        for z in [13.2, 16.8] {
+            f.bolt(p, [x, 75.0], z, [0.0, 1.0, 0.0]);
+        }
+    }
+    f.block(
+        p,
+        [3.6, 38.0, 4.0, 42.0],
+        [13.5, 16.5],
+        0.0,
+        0.0,
+        flat(Ink::Lo),
+    );
+    f.block(
+        p,
+        [76.0, 38.0, 76.4, 42.0],
+        [13.5, 16.5],
+        0.0,
+        0.0,
+        flat(Ink::Lo),
+    );
+    f.block(
+        p,
+        [38.0, 75.0, 42.0, 75.4],
+        [13.5, 16.5],
+        0.0,
+        0.0,
+        flat(Ink::Lo),
+    );
+}
+
+/// The boss where the channels meet, its cap with six bolts, and the lit crown nut on top.
+fn boss(p: &mut Part, f: Frame) {
+    f.solid(
+        p,
+        &f.circle(CENTRE, 8.0, 24),
+        [18.2, 26.0],
+        0.0,
+        Finish::paper().near(),
+    );
+    f.solid(
+        p,
+        &f.circle(CENTRE, 6.0, 24),
+        [26.0, 28.0],
         0.4,
-        Finish::paper(),
+        Finish::paper().near(),
     );
-    parts::dial_ticks(
-        part,
-        Dial::full([0.0, 0.0], 8.0, CROWN_TOP, 24, 6, [0.8, 1.8]),
+    for k in 0..6 {
+        f.bolt(
+            p,
+            polar(CENTRE, 4.8, 60.0 * k as f32),
+            28.0,
+            [0.0, 0.0, 1.0],
+        );
+    }
+    f.solid(p, &f.circle(CENTRE, 2.0, 16), [28.0, 30.0], 0.0, lit());
+    f.knurl(
+        p,
+        CENTRE,
+        2.0,
+        [28.0, 30.0],
+        12,
         Stroke::new(Ink::Lo).close(),
-        Stroke::new(Ink::Mid).near(),
     );
-    part.line(
-        &[[0.0, 0.0, CROWN_TOP + LIFT], [7.0, -3.0, CROWN_TOP + LIFT]],
-        false,
-        Stroke::new(Ink::Hi).width(1.1),
-    );
-    part.dot(
-        [0.0, 0.0, CROWN_TOP + LIFT],
-        [0.0, 0.0, 1.0],
-        0.8,
-        Stroke::new(Ink::Hi),
-    );
-    // Inside the crown's radius of 9, so the lamp does not overhang the edge.
-    parts::lamp(part, [-5.5, 3.0], CROWN_TOP);
 }

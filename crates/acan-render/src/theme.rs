@@ -44,17 +44,19 @@ pub const TINT_STALE: u32 = 13;
 pub const TINT_GHOST: u32 = 14;
 /// Tint slot of a machine with an open clash.
 pub const TINT_CLASH: u32 = 15;
-/// Tint slots of the scope lanes, in [`SCOPE_TINTS`] order: a draft plot, a confirmed plot, a
-/// draft keep and a confirmed keep. `TINT_SCOPE0 + i` is the i-th.
+/// Tint slot of a scope outline for a plot: amber at full strength. A draft and a confirmed plot
+/// both outline in it.
+pub const TINT_OUTLINE_AMBER: u32 = 8;
+/// Tint slot of a scope outline for a keep: brass at full strength. A draft and a confirmed keep
+/// both outline in it.
+pub const TINT_OUTLINE_BRASS: u32 = 9;
+/// Tint slots of a confirmed scope's body, in [`SCOPE_TINTS`] order: a plot, then a keep.
+/// `TINT_SCOPE0 + i` is the i-th.
 pub const TINT_SCOPE0: u32 = 16;
-/// The scope tints as a hue and the share of it mixed into white. A plot is amber and a keep is
-/// brass; a draft takes less of its hue than a confirmed lane, so it reads as not yet in force.
-pub const SCOPE_TINTS: [(u32, f32); 4] = [
-    (0xd99a1e, 0.12),
-    (0xd99a1e, 0.28),
-    (0x9c7f2e, 0.16),
-    (0x9c7f2e, 0.36),
-];
+/// The share of each confirmed lane's hue mixed into white for its machine's body: a plot takes
+/// 28 percent amber and a keep 36 percent brass. A draft takes no body tint; it shows its outline
+/// only, so it reads as not yet in force.
+pub const SCOPE_TINTS: [f32; 2] = [0.28, 0.36];
 
 pub const SLOT_PAGE: u32 = 0;
 pub const SLOT_LIT: u32 = 1;
@@ -222,6 +224,26 @@ impl Look {
             Look::HighContrast => 0x4a4a4f,
         }
     }
+
+    /// The scope amber: a plot's outline, and the hue of a confirmed plot's body.
+    fn scope_amber(self) -> u32 {
+        match self {
+            Look::Paper => 0xd99a1e,
+            Look::Dark => 0xf0ad28,
+            Look::Blueprint => 0xffbe3b,
+            Look::HighContrast => 0xb87400,
+        }
+    }
+
+    /// The scope brass: a keep's outline, and the hue of a confirmed keep's body.
+    fn scope_brass(self) -> u32 {
+        match self {
+            Look::Paper => 0x9c7f2e,
+            Look::Dark => 0xc9a64a,
+            Look::Blueprint => 0xd9c07a,
+            Look::HighContrast => 0x6b5418,
+        }
+    }
 }
 
 /// Dark: a dark desk with a light grid. The paper models stay white.
@@ -346,12 +368,12 @@ pub fn palette_of(look: Look, srgb_surface: bool) -> [[f32; 4]; PALETTE_LEN] {
 }
 
 /// The tint table in sRGB. Slot 0 is the identity, each agent has a body slot at full hue, and the
-/// shadow, stale, ghost, clash and scope slots follow.
+/// shadow, stale, ghost, clash, outline and scope slots follow.
 pub fn tints() -> [[f32; 4]; TINT_LEN] {
     tints_of(Look::Paper)
 }
 
-/// The tint table of a look, in sRGB. Only the ghost grey differs between looks.
+/// The tint table of a look, in sRGB. The ghost grey and the scope colours differ between looks.
 pub fn tints_of(look: Look) -> [[f32; 4]; TINT_LEN] {
     let mut table = [[1.0; 4]; TINT_LEN];
     for slot in 0..AGENT_SLOTS {
@@ -359,11 +381,14 @@ pub fn tints_of(look: Look) -> [[f32; 4]; TINT_LEN] {
         table[TINT_BODY0 as usize + slot] = hue;
     }
     table[TINT_SHADOW as usize] = rgb(0x000000, 1.0);
+    table[TINT_OUTLINE_AMBER as usize] = rgb(look.scope_amber(), 1.0);
+    table[TINT_OUTLINE_BRASS as usize] = rgb(look.scope_brass(), 1.0);
     table[TINT_STALE as usize] = rgb(STALE_GREY, 1.0);
     table[TINT_GHOST as usize] = rgb(look.ghost_grey(), 1.0);
     table[TINT_CLASH as usize] = mixed_into_white(rgb(CLASH_RED, 1.0), CLASH_MIX);
-    for (i, (hue, share)) in SCOPE_TINTS.into_iter().enumerate() {
-        table[TINT_SCOPE0 as usize + i] = mixed_into_white(rgb(hue, 1.0), share);
+    let hues = [look.scope_amber(), look.scope_brass()];
+    for (i, share) in SCOPE_TINTS.into_iter().enumerate() {
+        table[TINT_SCOPE0 as usize + i] = mixed_into_white(rgb(hues[i], 1.0), share);
     }
     add_dim_slots(&mut table);
     table
@@ -468,12 +493,14 @@ const _: () = assert!(
 );
 const _: () = assert!(
     TINT_BODY0 as usize + AGENT_SLOTS <= TINT_SHADOW as usize
-        && TINT_SHADOW < TINT_STALE
+        && TINT_SHADOW < TINT_OUTLINE_AMBER
+        && TINT_OUTLINE_AMBER < TINT_OUTLINE_BRASS
+        && TINT_OUTLINE_BRASS < TINT_STALE
         && TINT_STALE < TINT_GHOST
         && TINT_GHOST < TINT_CLASH
         && TINT_CLASH < TINT_SCOPE0
         && TINT_SCOPE0 as usize + SCOPE_TINTS.len() <= TINT_DIM0 as usize,
-    "body, shadow, stale, ghost, clash and scope tints do not overlap"
+    "body, shadow, outline, stale, ghost, clash and scope tints do not overlap"
 );
 const _: () = assert!(GRID_MINOR_ALPHA < GRID_MAJOR_ALPHA);
 const _: () = assert!(PAPER_TOP > 0.0, "a top never matches the page");
@@ -698,6 +725,34 @@ mod tests {
                 assert!(spread <= 6.0 / 255.0, "{look:?} slot {slot} is grey");
             }
         }
+    }
+
+    #[test]
+    fn scope_outlines_are_full_strength_and_a_confirmed_body_is_its_hue_mixed_into_white() {
+        for look in LOOKS {
+            let table = tints_of(look);
+            let amber = table[TINT_OUTLINE_AMBER as usize];
+            let brass = table[TINT_OUTLINE_BRASS as usize];
+            assert_eq!(amber, rgb(look.scope_amber(), 1.0), "{look:?} amber");
+            assert_eq!(brass, rgb(look.scope_brass(), 1.0), "{look:?} brass");
+            let plot = table[TINT_SCOPE0 as usize];
+            let keep = table[TINT_SCOPE0 as usize + 1];
+            assert_eq!(
+                plot,
+                mixed_into_white(rgb(look.scope_amber(), 1.0), SCOPE_TINTS[0])
+            );
+            assert_eq!(
+                keep,
+                mixed_into_white(rgb(look.scope_brass(), 1.0), SCOPE_TINTS[1])
+            );
+        }
+        let table = tints();
+        let amber = table[TINT_OUTLINE_AMBER as usize];
+        let plot = table[TINT_SCOPE0 as usize];
+        assert!(
+            plot[1] > amber[1] && plot[2] > amber[2],
+            "a body tint is the outline's hue mixed toward white"
+        );
     }
 
     #[test]

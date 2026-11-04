@@ -1,164 +1,211 @@
-//! The gate: two auth posts carrying a lintel, a three-arm turnstile hub between them, and a badge reader box.
-//!
-//! The turnstile arms are solid bars at hub height, each capped with a grip, so the hub reads as a solid rather
-//! than a set of lines.
+//! The gate: a turnstile checkpoint between two tall piers, with a lintel across the top, a three-arm hub in the gap and
+//! a reader box on the right pier. Auth, session and login modules are read by this two-pier shape.
 
-use std::f32::consts::TAU;
-
-use crate::mesh::{Base, Finish, LIFT, Part, Stroke};
+use crate::mesh::{Finish, Part, Stroke};
 use crate::model::{Ink, Model};
-use crate::parts;
-use crate::plan::Plan;
+use crate::models::Footprint;
+use crate::parts::{self, Frame, glass, lit, polar, rect_on, unit};
 
-/// The top of the posts, where the lintel rests.
-const POST_TOP: f32 = 34.0;
-/// The top of the lintel. The lamp stands on it and must stay under the kit's footprint top of 40.
-const LINTEL_TOP: f32 = 38.0;
-/// The bottom and top of the turnstile arms.
-const ARM: [f32; 2] = [12.0, 14.2];
+pub(crate) const FOOTPRINT: Footprint = Footprint {
+    w: 56.0,
+    d: 72.0,
+    top: 36.0,
+};
+
+/// The turnstile hub's centre, in design units.
+const HUB: [f32; 2] = [28.0, 40.0];
 
 pub(crate) fn build() -> Model {
-    let mut part = Part::new();
-    parts::plinth(&mut part, 44.0, 74.0);
-    for y in [-26.0, 26.0] {
-        post(&mut part, y);
-    }
-    turnstile(&mut part);
-    badge_reader(&mut part);
-    lintel(&mut part);
-    part.finish()
+    let f = Frame::of(FOOTPRINT);
+    let mut p = Part::new();
+    parts::plinth(&mut p, f);
+    base(&mut p, f);
+    piers(&mut p, f);
+    lintel(&mut p, f);
+    hub(&mut p, f);
+    reader(&mut p, f);
+    p.finish()
 }
 
-/// An auth post on a flange, with a cap under the lintel.
-fn post(part: &mut Part, y: f32) {
-    let centre = [0.0, y];
-    part.slab(
-        &Base::Circle {
-            center: centre,
-            radius: 5.2,
-            steps: 28,
-        },
-        3.0,
-        4.2,
-        0.3,
-        Finish::paper(),
-    );
-    part.slab(
-        &Base::Circle {
-            center: centre,
-            radius: 4.0,
-            steps: 28,
-        },
-        4.2,
-        33.6,
+/// The floor plate with its guide strips, and a pier base under each pier with four bolts.
+fn base(p: &mut Part, f: Frame) {
+    f.block(
+        p,
+        [16.0, 20.0, 40.0, 56.0],
+        [3.0, 4.0],
+        0.0,
         0.0,
         Finish::paper(),
     );
-    part.slab(
-        &Base::Circle {
-            center: centre,
-            radius: 4.5,
-            steps: 28,
-        },
-        33.6,
-        POST_TOP,
-        0.1,
-        Finish::paper(),
-    );
-}
-
-/// The hub column, its cap, and three arms at hub height with a grip on each tip.
-fn turnstile(part: &mut Part) {
-    let origin = [0.0, 0.0];
-    part.slab(
-        &Base::Circle {
-            center: origin,
-            radius: 3.2,
-            steps: 28,
-        },
-        3.0,
-        18.0,
-        0.0,
-        Finish::paper(),
-    );
-    part.slab(
-        &Base::Circle {
-            center: origin,
-            radius: 3.6,
-            steps: 28,
-        },
-        18.0,
-        18.8,
-        0.3,
-        Finish::paper(),
-    );
-    part.dot(
-        [0.0, 0.0, 18.8 + LIFT],
-        [0.0, 0.0, 1.0],
-        0.8,
-        Stroke::new(Ink::Hi),
-    );
-    for angle in [0.0, TAU / 3.0, 2.0 * TAU / 3.0] {
-        let (sin, cos) = angle.sin_cos();
-        let root = [sin * 2.2, -cos * 2.2];
-        let tip = [sin * 14.0, -cos * 14.0];
-        parts::bar(part, root, tip, 1.8, ARM[0], ARM[1], Finish::paper());
-        // The grips are fine parts, so they belong to the `Near` mesh.
-        part.slab(
-            &Base::Circle {
-                center: tip,
-                radius: 1.3,
-                steps: 16,
-            },
-            ARM[0],
-            ARM[1],
+    for x in [18.0, 37.0] {
+        f.block(
+            p,
+            [x - 0.5, 22.0, x + 0.5, 54.0],
+            [4.0, 4.6],
             0.0,
-            Finish::paper().near(),
+            0.0,
+            Finish::paper().close(),
         );
     }
+    for x0 in [4.0, 40.0] {
+        f.block(
+            p,
+            [x0, 20.0, x0 + 12.0, 52.0],
+            [3.0, 6.0],
+            0.0,
+            0.6,
+            Finish::paper(),
+        );
+        for x in [x0 + 2.0, x0 + 10.0] {
+            for y in [22.0, 50.0] {
+                f.bolt(p, [x, y], 6.0, [0.0, 0.0, 1.0]);
+            }
+        }
+    }
 }
 
-/// The badge reader: a bevelled box with a ring on its top and a green LED in the ring.
-fn badge_reader(part: &mut Part) {
-    let block = Plan {
-        x: 8.0,
-        y: 10.0,
-        w: 10.0,
-        d: 12.0,
-        r: 1.5,
-    };
-    part.slab(&Base::Plan(block, 2), 3.0, 18.0, 0.4, Finish::paper());
-    parts::circle_line(part, [13.0, 16.0], 2.4, 18.0, 16, Stroke::new(Ink::Hi));
-    part.dot(
-        [13.0, 16.0, 18.0 + LIFT],
-        [0.0, 0.0, 1.0],
-        0.8,
-        Stroke::new(Ink::Mid),
+/// The two piers, with kick plates and rubber stops on their inner faces.
+fn piers(p: &mut Part, f: Frame) {
+    for x0 in [5.0, 41.0] {
+        f.block(
+            p,
+            [x0, 21.0, x0 + 10.0, 51.0],
+            [6.0, 32.0],
+            0.0,
+            0.8,
+            Finish::paper(),
+        );
+    }
+    // The inner face of the left pier is x 15 and of the right pier is x 41.
+    f.block(
+        p,
+        [15.0, 21.5, 15.6, 51.5],
+        [6.0, 10.0],
+        0.0,
+        0.0,
+        Finish::paper().close(),
+    );
+    f.block(
+        p,
+        [40.4, 21.5, 41.0, 51.5],
+        [6.0, 10.0],
+        0.0,
+        0.0,
+        Finish::paper().close(),
+    );
+    f.block(
+        p,
+        [15.0, 46.0, 16.0, 50.0],
+        [17.0, 19.0],
+        0.0,
+        0.0,
+        Finish::paper().close(),
+    );
+    f.block(
+        p,
+        [40.0, 46.0, 41.0, 50.0],
+        [17.0, 19.0],
+        0.0,
+        0.0,
+        Finish::paper().close(),
     );
 }
 
-/// The lintel: a bevelled beam across the posts, with a groove along its top and a lamp.
-fn lintel(part: &mut Part) {
-    let beam = Plan {
-        x: -5.0,
-        y: -31.0,
-        w: 10.0,
-        d: 62.0,
-        r: 1.5,
-    };
-    part.slab(
-        &Base::Plan(beam, 3),
-        POST_TOP,
-        LINTEL_TOP,
-        0.5,
+/// The lintel across the top, its end plates, its bolts and the braces under it.
+fn lintel(p: &mut Part, f: Frame) {
+    f.block(
+        p,
+        [4.0, 20.0, 52.0, 32.0],
+        [32.0, 36.0],
+        1.0,
+        0.0,
         Finish::paper(),
     );
-    parts::plan_line(
-        part,
-        beam.inset(2.5),
-        LINTEL_TOP,
-        2,
-        Stroke::new(Ink::Faint),
+    f.block(
+        p,
+        [3.4, 22.0, 4.0, 34.0],
+        [32.0, 36.0],
+        0.0,
+        0.0,
+        Finish::paper().near(),
     );
-    parts::lamp(part, [0.0, -20.0], LINTEL_TOP);
+    f.block(
+        p,
+        [52.0, 22.0, 52.6, 34.0],
+        [32.0, 36.0],
+        0.0,
+        0.0,
+        Finish::paper().near(),
+    );
+    for at in [[7.0, 23.0], [49.0, 23.0], [7.0, 29.0], [49.0, 29.0]] {
+        f.bolt(p, at, 36.0, [0.0, 0.0, 1.0]);
+    }
+    f.block(
+        p,
+        [15.0, 26.0, 17.0, 28.0],
+        [28.0, 32.0],
+        0.0,
+        0.0,
+        Finish::paper(),
+    );
+    f.block(
+        p,
+        [39.0, 26.0, 41.0, 28.0],
+        [28.0, 32.0],
+        0.0,
+        0.0,
+        Finish::paper(),
+    );
+}
+
+/// The hub: a post, a collar, three arms with grips, and a lit cap on top.
+fn hub(p: &mut Part, f: Frame) {
+    f.solid(
+        p,
+        &f.circle(HUB, 3.0, 24),
+        [4.0, 24.0],
+        0.0,
+        Finish::paper().near(),
+    );
+    f.solid(
+        p,
+        &f.circle(HUB, 3.6, 24),
+        [18.0, 19.5],
+        0.0,
+        Finish::paper().near(),
+    );
+    for angle in [0.0, 120.0, 240.0] {
+        // Each arm runs from the hub's centre out to ten units.
+        let arm = rect_on(
+            polar(HUB, 5.0, angle),
+            unit(angle),
+            unit(angle + 90.0),
+            [5.0, 0.5],
+        );
+        let plate = f.poly(&arm);
+        f.solid(p, &plate, [19.5, 20.5], 0.0, Finish::paper().near());
+        let tip = polar(HUB, 9.5, angle);
+        f.bolt(p, tip, 20.5, [0.0, 0.0, 1.0]);
+    }
+    f.solid(p, &f.circle(HUB, 3.4, 24), [24.0, 25.0], 0.0, lit());
+}
+
+/// The badge reader on the right pier's inner face, with its glass window and two rules.
+fn reader(p: &mut Part, f: Frame) {
+    f.block(
+        p,
+        [39.4, 26.0, 41.0, 32.0],
+        [16.0, 24.0],
+        0.0,
+        0.0,
+        Finish::paper().near(),
+    );
+    f.block(p, [39.3, 27.0, 39.4, 31.0], [20.0, 23.5], 0.0, 0.0, glass());
+    for z in [17.0, 18.0, 19.0] {
+        f.line3(
+            p,
+            &[[39.4 - 0.01, 27.0, z], [39.4 - 0.01, 30.0, z]],
+            Stroke::new(Ink::Faint).close(),
+        );
+    }
 }

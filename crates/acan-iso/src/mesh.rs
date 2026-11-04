@@ -5,8 +5,6 @@
 //! it lies on. A joint between two plan edges is smooth when the surface turns by less than 60 degrees there, so
 //! a rounded corner shades as one curve. Joints in a profile are always creases, so bevels and steps stay crisp.
 
-use std::f32::consts::TAU;
-
 use crate::model::{Aabb, Detail, Dot3, Ink, Line3, Mesh, Model, Surface};
 use crate::plan::{Plan, Point, circle_ring};
 
@@ -97,6 +95,14 @@ impl Finish {
             ..self
         }
     }
+
+    /// The same finish, sent to the `Close` mesh.
+    pub(crate) const fn close(self) -> Self {
+        Self {
+            level: Detail::Close,
+            ..self
+        }
+    }
 }
 
 /// How a painted line is drawn: its ink, its weight and the level it needs.
@@ -128,10 +134,6 @@ impl Stroke {
             detail: Detail::Close,
             ..self
         }
-    }
-
-    pub(crate) const fn width(self, width: f32) -> Self {
-        Self { width, ..self }
     }
 
     pub(crate) fn tone(self) -> Ink {
@@ -251,70 +253,26 @@ impl Part {
         self.sweep(base, &stations, finish);
     }
 
-    /// A round tube from `a` to `b`, with flat ends.
-    pub(crate) fn tube(
-        &mut self,
-        a: [f32; 3],
-        b: [f32; 3],
-        radius: f32,
-        steps: usize,
-        finish: Finish,
-    ) {
-        let axis = unit3(sub3(b, a));
-        let helper = if axis[0].abs() < 0.9 {
-            [1.0, 0.0, 0.0]
+    /// A flat quad, flat-shaded, with its corners in order around its edge. Its normal points to the side `facing`
+    /// points to, so the corners may wind either way.
+    pub(crate) fn quad(&mut self, corners: [[f32; 3]; 4], facing: [f32; 3], finish: Finish) {
+        let mut normal = unit3(cross3(
+            sub3(corners[1], corners[0]),
+            sub3(corners[2], corners[0]),
+        ));
+        let order = if dot3(normal, facing) < 0.0 {
+            normal = scale3(normal, -1.0);
+            [0, 3, 2, 1]
         } else {
-            [0.0, 1.0, 0.0]
+            [0, 1, 2, 3]
         };
-        let u = unit3(cross3(helper, axis));
-        let v = cross3(axis, u);
-        let radial: Vec<[f32; 3]> = (0..steps)
-            .map(|i| {
-                let angle = i as f32 / steps as f32 * TAU;
-                let (sin, cos) = angle.sin_cos();
-                [
-                    cos * u[0] + sin * v[0],
-                    cos * u[1] + sin * v[1],
-                    cos * u[2] + sin * v[2],
-                ]
-            })
-            .collect();
         let mesh = &mut self.meshes[finish.level as usize];
-        let low: Vec<u32> = radial
+        let v: Vec<u32> = order
             .iter()
-            .map(|n| mesh.vertex(add3(a, scale3(*n, radius)), *n, finish.surface))
+            .map(|&i| mesh.vertex(corners[i], normal, finish.surface))
             .collect();
-        let high: Vec<u32> = radial
-            .iter()
-            .map(|n| mesh.vertex(add3(b, scale3(*n, radius)), *n, finish.surface))
-            .collect();
-        for i in 0..steps {
-            let j = (i + 1) % steps;
-            mesh.triangle(low[i], low[j], high[j]);
-            mesh.triangle(low[i], high[j], high[i]);
-        }
-        // The caps have their own rim vertices, so their normals point along the axis, not across the wall.
-        let low_cap: Vec<u32> = radial
-            .iter()
-            .map(|n| {
-                mesh.vertex(
-                    add3(a, scale3(*n, radius)),
-                    scale3(axis, -1.0),
-                    finish.surface,
-                )
-            })
-            .collect();
-        let high_cap: Vec<u32> = radial
-            .iter()
-            .map(|n| mesh.vertex(add3(b, scale3(*n, radius)), axis, finish.surface))
-            .collect();
-        let low_centre = mesh.vertex(a, scale3(axis, -1.0), finish.surface);
-        let high_centre = mesh.vertex(b, axis, finish.surface);
-        for i in 0..steps {
-            let j = (i + 1) % steps;
-            mesh.triangle(low_centre, low_cap[j], low_cap[i]);
-            mesh.triangle(high_centre, high_cap[i], high_cap[j]);
-        }
+        mesh.triangle(v[0], v[1], v[2]);
+        mesh.triangle(v[0], v[2], v[3]);
     }
 
     /// A polyline. It is painted on top of whatever it lies on, so the caller lifts it by [`LIFT`].
@@ -515,16 +473,16 @@ fn unit2(v: Point) -> Point {
     }
 }
 
-fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
 fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
 fn scale3(v: [f32; 3], by: f32) -> [f32; 3] {
     [v[0] * by, v[1] * by, v[2] * by]
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -588,10 +546,11 @@ pub(crate) mod tests {
         counts
     }
 
-    /// Checks a closed solid: every edge is shared by exactly two triangles.
+    /// Checks a union of closed solids: every edge is used by an even number of triangles, so no edge is left open.
+    /// Solids that stand on one another share a face, and their shared edges count twice for each solid.
     pub(crate) fn check_closed(mesh: &Mesh) -> Result<(), String> {
         for (edge, count) in edge_counts(mesh) {
-            if count != 2 {
+            if count % 2 != 0 {
                 return Err(format!("edge {edge:?} is used by {count} triangles"));
             }
         }
@@ -711,15 +670,6 @@ pub(crate) mod tests {
     fn a_prism_on_a_polygon_is_closed_and_outward_whichever_way_it_winds() {
         let clockwise = Base::polygon(&[[0.0, 0.0], [0.0, 2.0], [3.0, 2.0], [3.0, 0.0]]);
         let mesh = mesh_of(|part| part.slab(&clockwise, 0.0, 2.0, 0.3, Finish::paper()));
-        assert_closed(&mesh);
-        assert_outward(&mesh);
-    }
-
-    #[test]
-    fn a_tube_is_closed_and_outward_along_any_axis() {
-        let mesh = mesh_of(|part| {
-            part.tube([0.0, 0.0, 0.0], [3.0, 4.0, 1.0], 1.0, 12, Finish::paper());
-        });
         assert_closed(&mesh);
         assert_outward(&mesh);
     }
