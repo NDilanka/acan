@@ -64,6 +64,7 @@ async fn start(projects: &ProjectSet, local_workers: usize) -> Running {
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
         vision: None,
         local_workers,
+        map_on_first_view: false,
     };
     let settings = default_settings_file(projects);
     start_projects_with_settings(config, clients, Some(settings))

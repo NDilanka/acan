@@ -460,9 +460,11 @@ function Start-TakeServer {
     $script:Base = "http://127.0.0.1:$Port"
     $serverArgs = @('serve', '--repo', $Repo, '--port', "$Port", '--bind', '127.0.0.1',
         '--protected-branch', 'main', '--llm', $LlmPath)
+    # Start-Process joins the argument array without quotes, so a value with spaces is quoted here.
+    $quotedArgs = $serverArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }
     foreach ($name in $keys.Keys) { Set-Item -Path "Env:$name" -Value $keys[$name] }
     try {
-        $script:Proc = Start-Process -FilePath $AcanExe -ArgumentList $serverArgs `
+        $script:Proc = Start-Process -FilePath $AcanExe -ArgumentList $quotedArgs `
             -RedirectStandardOutput (Join-Path $Run "logs\server.$LogTag.out.log") `
             -RedirectStandardError (Join-Path $Run "logs\server.$LogTag.err.log") -PassThru -WindowStyle Hidden
     } finally {
@@ -476,7 +478,35 @@ function Start-TakeServer {
         try { $null = Invoke-RestMethod -Uri "$script:Base/health" -TimeoutSec 5; $up = $true } catch { Start-Sleep -Milliseconds 500 }
     }
     Add-Step -Name "start the server on the clone ($LogTag)" -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ port = $Port; pid = $script:Proc.Id }
+    # The server answers while its codebase maps, and it refuses writes with 503 until the scan commits.
+    # Nothing is written before the map is done.
+    $plant = Wait-TakeMapped
+    Add-Step -Name "the codebase maps ($LogTag)" -Actor 'script' -Provider 'none' -Result 'pass' -Evidence @{ modules = $plant.scan.modules_total }
     $script:Proc
+}
+
+function Wait-TakeMapped {
+    # Waits until the server's codebase has mapped, as demo/run.ps1 does, and returns the plant. Fails when
+    # the scan fails, when the owner token is refused, or when the scan does not finish in Seconds. Reads
+    # only, so a waiting project answers and no write is sent.
+    param([int]$Seconds = 300)
+    $end = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $end) {
+        if ($script:Proc.HasExited) { throw "the server exited with code $($script:Proc.ExitCode) while the codebase mapped" }
+        $plant = $null
+        try {
+            $plant = Invoke-RestMethod -Uri "$script:Base/api/plant" -Headers @{ Authorization = "Bearer $script:OwnerToken" } -TimeoutSec 30
+        } catch {
+            $status = $null
+            if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+            if ($status -eq 401) { throw 'the owner token was refused by acan serve' }
+            # Not answering yet; retry until the deadline.
+        }
+        if ($plant -and $plant.scan.stage -eq 'done') { return $plant }
+        if ($plant -and $plant.scan.stage -eq 'failed') { throw "the codebase did not map: $($plant.scan.error)" }
+        Start-Sleep -Milliseconds 300
+    }
+    throw "the codebase did not finish mapping within $Seconds s; see the server logs in logs\"
 }
 
 function Invoke-ScopeEdits {

@@ -174,6 +174,27 @@ wait_http_200() {
   return 1
 }
 
+# Waits until the server's codebase has mapped, then prints the plant. Fails when the scan fails or does
+# not finish in 300 seconds. A mapping project answers reads, and its writes get 503 until the scan commits.
+wait_mapped() {
+  wait_left=300
+  while [ "$wait_left" -gt 0 ]; do
+    wait_plant=$(api "$1" "$2" GET /api/plant 2> /dev/null) || wait_plant=
+    wait_stage=$(printf '%s\n' "$wait_plant" | jq -r '.scan.stage // empty' 2> /dev/null)
+    if [ "$wait_stage" = done ]; then
+      printf '%s\n' "$wait_plant"
+      return 0
+    fi
+    if [ "$wait_stage" = failed ]; then
+      printf 'the codebase did not map: %s\n' "$(printf '%s\n' "$wait_plant" | jq -r '.scan.error // "unknown"')" >&2
+      return 1
+    fi
+    sleep 1
+    wait_left=$((wait_left - 1))
+  done
+  return 1
+}
+
 # Calls the acan API and prints the response body. Fails on an HTTP error, so the caller can stop.
 # Arguments: port, token, method, path, and an optional JSON body.
 api() {

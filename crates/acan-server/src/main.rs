@@ -13,7 +13,7 @@ use acan_server::replay;
 use acan_server::{
     DEFAULT_WITNESS_CONCURRENCY, Models, ServeConfig, VisionConfig, apply_project_changes,
     default_browser, default_data_dir, default_settings_file, settings_file_beside,
-    start_projects_with_settings, tokens_file,
+    start_projects_serving, start_projects_with_settings, tokens_file,
 };
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -136,6 +136,13 @@ struct ServeArgs {
     /// until a key is set.
     #[arg(long, default_value_t = 1)]
     workers: usize,
+    /// Maps each project's codebase when its first page connects, not as the server starts.
+    ///
+    /// Until a page connects, the project's map stays blank, runs no scan and takes no writes. The
+    /// first page's stream starts the scan, so the map builds while that page watches. Without the
+    /// flag, the codebase maps as the server starts, which is the default.
+    #[arg(long)]
+    map_on_first_view: bool,
 }
 
 #[tokio::main]
@@ -283,6 +290,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
             data_dir: args.vision_dir.unwrap_or_else(default_data_dir),
         }),
         local_workers: args.workers,
+        map_on_first_view: args.map_on_first_view,
     };
     let tokens = config
         .projects
@@ -291,7 +299,14 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .map(|project| tokens_file(&project.repo))
         .unwrap_or_else(|| tokens_file(Path::new(".")));
     let tokens = std::path::absolute(&tokens).unwrap_or(tokens);
-    let mut running = start_projects_with_settings(config, clients, Some(settings)).await?;
+    let map_on_view = args.map_on_first_view;
+    // A server that maps on first view is listening before its codebases map, so it does not wait
+    // for them: the first page is what starts each map.
+    let mut running = if map_on_view {
+        start_projects_serving(config, clients, Some(settings)).await?
+    } else {
+        start_projects_with_settings(config, clients, Some(settings)).await?
+    };
     let terminal = io::stdout().is_terminal();
     if let Some(token) = &running.owner_token {
         for line in owner_token_lines(running.local_addr, token.as_str(), &tokens, terminal) {
@@ -303,6 +318,9 @@ async fn serve(args: ServeArgs) -> Result<()> {
         running.project_ids().join(", "),
         running.local_addr
     );
+    if map_on_view {
+        println!("the codebase maps when the first page connects");
+    }
     if needs_key {
         // Model jobs get built-in replies until a key is saved, so say where to save one.
         let token = running.owner_token.as_ref().map(|token| token.as_str());
@@ -378,6 +396,10 @@ mod tests {
     use std::net::SocketAddr;
     use std::path::Path;
 
+    use clap::Parser;
+
+    use super::{Cli, Command};
+
     use super::{key_line, owner_token_lines};
 
     const TOKEN: &str = "acan_0123456789abcdef0123456789abcdef";
@@ -411,6 +433,18 @@ mod tests {
             text.contains("http://127.0.0.1:7311/"),
             "the address is not named: {text}"
         );
+    }
+
+    #[test]
+    fn map_on_first_view_is_off_unless_the_flag_is_given() {
+        let serve = |args: &[&str]| match Cli::try_parse_from(args).expect("the arguments parse") {
+            Cli {
+                command: Command::Serve(args),
+            } => args,
+            other => panic!("expected serve, got {other:?}"),
+        };
+        assert!(!serve(&["acan", "serve"]).map_on_first_view);
+        assert!(serve(&["acan", "serve", "--map-on-first-view"]).map_on_first_view);
     }
 
     #[test]

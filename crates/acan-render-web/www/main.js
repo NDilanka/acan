@@ -260,7 +260,7 @@ function turnBy(dir) {
 }
 
 // Reduced motion, from the system or the Look setting, makes the top-down turn a jump.
-function reducedNow() {
+export function reducedNow() {
   return reducedMotion.matches || document.documentElement.classList.contains("reduce-motion");
 }
 

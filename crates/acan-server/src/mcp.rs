@@ -351,6 +351,7 @@ async fn submit<C: ModelClient>(
     .await
     .map_err(|err| match err {
         SubmitError::Rejected(rejection) => rejection.to_string(),
+        SubmitError::NotMapped => "the codebase is still being mapped".to_owned(),
         SubmitError::Internal(err) => {
             tracing::error!(error = ?err, "an agent command failed to persist");
             "internal error".to_owned()
@@ -654,6 +655,7 @@ fn api_message(err: ApiError) -> String {
         ApiError::Refused(err) => serde_json::to_string(&err)
             .unwrap_or_else(|_| "the refusal did not serialize".to_owned()),
         ApiError::ProjectUnavailable => "the project is unavailable".to_owned(),
+        ApiError::NotMapped => "the codebase is still being mapped".to_owned(),
         ApiError::Internal(err) => {
             tracing::error!(error = ?err, "an MCP tool failed");
             "internal error".to_owned()

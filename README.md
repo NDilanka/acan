@@ -115,6 +115,18 @@ This checks each receipt in `receipts/` against `receipts/SHA256SUMS`, then prin
 
 The UI and API use port 7311, and the demo app uses port 7312. Both are set with parameters, and the environment variables `ACAN_RUN_ROOT` and `ACAN_DEMO_REPO` change the run folder and the demo repo. The full list is in `demo/README.md`.
 
+`run.ps1` checks the tools and the keys before it starts anything. Then it waits for the codebase to map before it posts the order. `-CheckOnly` runs the checks alone, and `-Offline` runs a take with no keys and no model calls. `demo/README.md` has the details.
+
+### Map the codebase on first view
+
+By default, `acan serve` starts the codebase scan when the server starts. Pass `--map-on-first-view` to wait instead: the scan starts when the first authenticated page connects. Until then the map stays blank and the project takes no writes. The first page then sees the map fill in from blank.
+
+```
+acan serve --repo <path> --map-on-first-view
+```
+
+The default is unchanged without the flag. The demo take does not pass it, since `run.ps1` waits for the map itself.
+
 ## X01: 12-order replay
 
 In progress. No numbers are published before the run finishes.

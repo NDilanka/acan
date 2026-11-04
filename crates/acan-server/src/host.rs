@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use acan_core::{Command, Event, HumanCmd, Origin, Rejection, Stamped, Timestamp, World};
 use acan_intent::{CoreDerived, FoldedLedger, fold};
 use acan_llm::{ModelClient, UsageLedger};
+use acan_scan::Progress;
 use anyhow::Context as _;
 use tokio::sync::{Notify, Semaphore, broadcast, watch};
 use tokio::task::JoinSet;
@@ -17,6 +18,7 @@ use crate::auth::Tokens;
 use crate::git::Workspace;
 use crate::index::Scan;
 use crate::jobs;
+use crate::scan_feed::ScanFeed;
 use crate::store::EventStore;
 use crate::touches::{TouchSink, TransitionTouch};
 use crate::tour::TourCache;
@@ -38,6 +40,10 @@ pub enum SubmitError {
     /// Persisting the accepted events failed, or the writer is gone.
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
+    /// The code index is still being built, or its build failed, so the project takes no writes
+    /// yet. Nothing was stored.
+    #[error("the codebase is still being mapped")]
+    NotMapped,
 }
 
 /// Everything a [`Host`] owns at startup.
@@ -109,6 +115,16 @@ struct Inner<C> {
     tours: TourCache,
     #[cfg(test)]
     ruling_hold: crate::stream::Hold,
+    /// Each step of the current scan, as the streams and the plant route see it.
+    feed: Arc<ScanFeed>,
+    /// Whether the code index is committed, so the project takes writes. `None` while the
+    /// codebase maps, `Some(Ok)` once it is open, and `Some(Err)` when mapping failed.
+    mapped: watch::Sender<Option<Result<(), String>>>,
+    /// Whether a page has connected to the project. A project that maps on first view waits for
+    /// it before its scan starts.
+    viewed: watch::Sender<bool>,
+    #[cfg(test)]
+    mapping_hold: crate::stream::Hold,
 }
 
 impl<C> Clone for Host<C> {
@@ -155,6 +171,31 @@ impl<C: ModelClient> Host<C> {
         slots: Arc<Semaphore>,
         statemap: Option<crate::statemap::SettingsSource>,
     ) -> Self {
+        Self::build(parts, slots, statemap, false)
+    }
+
+    /// [`new_with_statemap`](Self::new_with_statemap) for a project that maps its codebase. The
+    /// scan in `parts` is the skeleton, and the project takes no writes until
+    /// [`Host::open_writes`] is called or [`Host::map_codebase`] fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a Tokio runtime, or when `probe_concurrency` is zero.
+    #[must_use]
+    pub(crate) fn new_mapping(
+        parts: HostParts<C>,
+        slots: Arc<Semaphore>,
+        statemap: Option<crate::statemap::SettingsSource>,
+    ) -> Self {
+        Self::build(parts, slots, statemap, true)
+    }
+
+    fn build(
+        parts: HostParts<C>,
+        slots: Arc<Semaphore>,
+        statemap: Option<crate::statemap::SettingsSource>,
+        mapping: bool,
+    ) -> Self {
         assert!(
             parts.probe_concurrency > 0,
             "probe_concurrency must allow at least one probe, got {}",
@@ -163,6 +204,10 @@ impl<C: ModelClient> Host<C> {
         let (events, _) = broadcast::channel(LIVE_BUFFER);
         let (touches, _) = broadcast::channel(LIVE_BUFFER);
         let wake = Arc::new(Notify::new());
+        let feed = Arc::new(ScanFeed::settled());
+        if mapping {
+            feed.observe(Progress::Skeleton(&parts.scan.plant));
+        }
         let scan = Arc::new(parts.scan);
         let (publish, snapshots) = watch::channel(Arc::new(Snapshot {
             world: parts.origin.world().clone(),
@@ -206,6 +251,11 @@ impl<C: ModelClient> Host<C> {
                 tours: TourCache::default(),
                 #[cfg(test)]
                 ruling_hold: crate::stream::Hold::default(),
+                feed,
+                mapped: watch::channel(if mapping { None } else { Some(Ok(())) }).0,
+                viewed: watch::channel(false).0,
+                #[cfg(test)]
+                mapping_hold: crate::stream::Hold::default(),
             }),
         }
     }
@@ -354,6 +404,7 @@ impl<C: ModelClient> Host<C> {
         command: Command,
         guard: Option<Guard>,
     ) -> Result<Vec<Stamped>, SubmitError> {
+        self.ensure_mapped()?;
         let _fence = if invalidates_landing(&command) {
             Some(self.inner.landing.lock().await)
         } else {
@@ -401,6 +452,7 @@ impl<C: ModelClient> Host<C> {
         &self,
         command: Command,
     ) -> Result<Vec<Stamped>, SubmitError> {
+        self.ensure_mapped()?;
         self.inner.writer.submit_advisory(command).await
     }
 
@@ -412,20 +464,111 @@ impl<C: ModelClient> Host<C> {
     }
 
     /// Scans the repository again and commits the new code index together with its
-    /// `IndexUpdated` batch. A failed persist keeps the previous scan.
+    /// `IndexUpdated` batch. A failed persist keeps the previous scan. Each step of the scan goes to
+    /// the live feed as it happens.
     ///
     /// # Errors
     ///
-    /// Returns an error when the scan fails, or when the `IndexUpdated` event cannot be stored.
+    /// Returns [`SubmitError::NotMapped`] while the codebase is still mapping, and an error when
+    /// the scan fails or the `IndexUpdated` event cannot be stored.
     pub async fn rescan(&self) -> Result<Vec<Stamped>, SubmitError> {
+        self.ensure_mapped()?;
+        let outcome = self.scan_and_commit().await;
+        // Whatever the outcome, the project is settled again: a failed rescan keeps its last index.
+        self.inner.feed.done();
+        outcome
+    }
+
+    /// Scans the repository, reports each step to the feed, refines the state machines, and commits
+    /// the index with its `IndexUpdated` batch. Does not mark the feed done, so the caller decides
+    /// when the project is settled.
+    pub(crate) async fn scan_and_commit(&self) -> Result<Vec<Stamped>, SubmitError> {
         let repo = self.inner.repo.clone();
-        let mut scan = tokio::task::spawn_blocking(move || crate::index::scan(&repo))
-            .await
-            .context("the scan task did not finish")??;
+        let feed = Arc::clone(&self.inner.feed);
+        let mut scan = tokio::task::spawn_blocking(move || {
+            crate::index::scan_observed(&repo, |progress| feed.observe(progress))
+        })
+        .await
+        .context("the scan task did not finish")??;
         if let Some(statemap) = &self.inner.statemap {
             crate::statemap::refine(&self.inner.client, &mut scan.plant, statemap.current()).await;
         }
+        #[cfg(test)]
+        self.inner.mapping_hold.wait().await;
         self.inner.writer.rescan(scan).await
+    }
+
+    /// The live feed of the current scan.
+    pub(crate) fn scan_feed(&self) -> Arc<ScanFeed> {
+        Arc::clone(&self.inner.feed)
+    }
+
+    /// Marks the project as waiting for its first page before the codebase maps. Called before the
+    /// mapping task starts, so the feed never reports a scan that has not begun.
+    pub(crate) fn hold_until_viewed(&self) {
+        self.inner.feed.wait();
+    }
+
+    /// Records that a page connected to the project, which starts a held scan.
+    pub(crate) fn note_view(&self) {
+        self.inner.viewed.send_replace(true);
+    }
+
+    /// Resolves once a page has connected to the project.
+    pub(crate) async fn wait_viewed(&self) {
+        let mut viewed = self.inner.viewed.subscribe();
+        // The sender lives as long as the host, so the wait ends only when the flag is set.
+        let _ = viewed.wait_for(|seen| *seen).await;
+    }
+
+    /// Whether the codebase is mapped, so the project takes writes.
+    #[must_use]
+    pub fn is_mapped(&self) -> bool {
+        matches!(*self.inner.mapped.borrow(), Some(Ok(())))
+    }
+
+    /// The codebase's mapping state: `None` while it maps, `Some(Ok)` once it is open, `Some(Err)`
+    /// when mapping failed.
+    pub(crate) fn mapping_state(&self) -> watch::Receiver<Option<Result<(), String>>> {
+        self.inner.mapped.subscribe()
+    }
+
+    /// Resolves once the codebase has mapped. `Err` says why it did not map.
+    pub(crate) async fn wait_mapped(&self) -> Result<(), String> {
+        let mut state = self.mapping_state();
+        match state.wait_for(Option::is_some).await {
+            Ok(settled) => (*settled).clone().unwrap_or(Ok(())),
+            Err(_) => Err("the project closed before its codebase mapped".to_owned()),
+        }
+    }
+
+    /// Opens the project to writes once its codebase is mapped and its workers are registered.
+    pub(crate) fn open_writes(&self) {
+        self.inner.mapped.send_replace(Some(Ok(())));
+        self.inner.feed.done();
+    }
+
+    /// Marks the codebase as failed to map. The project takes no writes, and the feed says why.
+    pub(crate) fn mapping_failed(&self, reason: String) {
+        self.inner.mapped.send_replace(Some(Err(reason.clone())));
+        self.inner.feed.failed(reason);
+    }
+
+    /// Sends `command` to the writer without the mapping gate. Only the mapping task uses it, to
+    /// register the local workers before the project opens to writes.
+    pub(crate) async fn submit_unmapped(
+        &self,
+        command: Command,
+    ) -> Result<Vec<Stamped>, SubmitError> {
+        self.inner.writer.submit(command).await
+    }
+
+    fn ensure_mapped(&self) -> Result<(), SubmitError> {
+        if self.is_mapped() {
+            Ok(())
+        } else {
+            Err(SubmitError::NotMapped)
+        }
     }
 
     /// Drains the writer and joins its task. After this returns, no write can still happen.
@@ -508,14 +651,15 @@ pub(crate) fn now() -> Timestamp {
 pub(crate) mod testing {
     use std::path::Path;
     use std::str::FromStr;
+    use std::sync::Arc;
 
     use acan_core::{MemberId, Origin, Timestamp, WorldId, WorldRef};
     use acan_llm::{ModelClient, UsageLedger};
-    use tokio::sync::watch;
+    use tokio::sync::{Semaphore, watch};
 
     use super::{Host, HostParts};
     use crate::auth::Tokens;
-    use crate::index::scan;
+    use crate::index::{scan, skeleton};
     use crate::store::EventStore;
     use crate::{DEFAULT_PROBE_CONCURRENCY, DEFAULT_WITNESS_CONCURRENCY};
 
@@ -530,6 +674,23 @@ pub(crate) mod testing {
     pub(crate) async fn host_signalled<C: ModelClient + 'static>(
         repo: &Path,
         client: C,
+    ) -> (Host<C>, watch::Sender<bool>) {
+        fixture(repo, client, false).await
+    }
+
+    /// A host over `repo` that is still mapping: its scan is the skeleton, and it takes no writes
+    /// until its scan commits and it opens.
+    pub(crate) async fn mapping_host<C: ModelClient + 'static>(
+        repo: &Path,
+        client: C,
+    ) -> (Host<C>, watch::Sender<bool>) {
+        fixture(repo, client, true).await
+    }
+
+    async fn fixture<C: ModelClient + 'static>(
+        repo: &Path,
+        client: C,
+        mapping: bool,
     ) -> (Host<C>, watch::Sender<bool>) {
         let state = repo.join(".acan");
         std::fs::create_dir_all(&state).expect("the state dir");
@@ -551,11 +712,15 @@ pub(crate) mod testing {
             .expect("the open event stores");
         let (tokens, _) = Tokens::load_or_create(&state, &owner).expect("the tokens");
         let (shutdown_tx, shutdown) = watch::channel(false);
-        let host = Host::new(HostParts {
+        let parts = HostParts {
             origin,
             store,
             tokens,
-            scan: scan(repo).expect("the scan"),
+            scan: if mapping {
+                skeleton(repo).expect("the skeleton")
+            } else {
+                scan(repo).expect("the scan")
+            },
             ledger: UsageLedger::default(),
             client,
             repo: repo.to_path_buf(),
@@ -565,7 +730,132 @@ pub(crate) mod testing {
             witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
             probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
             vision: None,
-        });
+        };
+        let host = if mapping {
+            let slots = Arc::new(Semaphore::new(DEFAULT_WITNESS_CONCURRENCY));
+            Host::new_mapping(parts, slots, None)
+        } else {
+            Host::new(parts)
+        };
         (host, shutdown_tx)
+    }
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use std::str::FromStr;
+    use std::time::Duration;
+
+    use acan_core::{Command, HumanCmd, MemberId, Role};
+    use acan_llm::Stub;
+    use tokio::time::timeout;
+
+    use super::SubmitError;
+    use super::testing::mapping_host;
+    use crate::scan_feed::Stage;
+
+    /// The most a test waits for the scan to reach its hold.
+    const WAIT: Duration = Duration::from_secs(10);
+
+    fn add_member(name: &str) -> Command {
+        Command::Human {
+            member: MemberId::from_str("owner").expect("a member id"),
+            cmd: HumanCmd::AddMember {
+                member: MemberId::from_str(name).expect("a member id"),
+                role: Role::Member,
+            },
+        }
+    }
+
+    /// A codebase takes no writes while it maps, and its scan reports every step it has taken.
+    /// Writes open once the scan commits and the project opens.
+    #[tokio::test]
+    async fn a_codebase_takes_no_writes_until_its_scan_commits() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = dir.path();
+        std::fs::create_dir_all(repo.join("model")).expect("model dir");
+        std::fs::write(
+            repo.join("model/store.ts"),
+            "export function load() {\n  return 1;\n}\n",
+        )
+        .expect("write fixture");
+        let (host, _shutdown) = mapping_host(repo, Stub::default()).await;
+        let hold = host.inner.mapping_hold.clone();
+        hold.hold();
+        let scanning = tokio::spawn({
+            let host = host.clone();
+            async move { host.scan_and_commit().await }
+        });
+        timeout(WAIT, hold.parked(1))
+            .await
+            .expect("the scan reaches the hold");
+
+        assert!(
+            !host.is_mapped(),
+            "a codebase whose scan has not committed takes no writes"
+        );
+        let status = host.scan_feed().status();
+        assert_eq!(
+            status.stage,
+            Stage::States,
+            "the scan has reported every module before its commit"
+        );
+        assert!(status.modules_total > 0, "the fixture has machines");
+        assert_eq!(
+            status.modules_done, status.modules_total,
+            "every module has filled"
+        );
+        assert!(
+            matches!(
+                host.submit(add_member("newcomer")).await,
+                Err(SubmitError::NotMapped)
+            ),
+            "a write is refused while the codebase maps"
+        );
+
+        hold.release();
+        let committed = scanning
+            .await
+            .expect("the scan task finishes")
+            .expect("the scan commits");
+        assert!(!committed.is_empty(), "the commit records the index");
+        assert!(
+            !host.is_mapped(),
+            "committing the index does not open the project by itself"
+        );
+        host.open_writes();
+        assert!(host.is_mapped(), "the project opens once mapping is done");
+        assert_eq!(host.scan_feed().status().stage, Stage::Done);
+        host.submit(add_member("newcomer"))
+            .await
+            .expect("writes are accepted once the project is open");
+    }
+
+    /// A project held for its first view reports `waiting` and resolves its view only once a
+    /// page has connected. Nothing else starts the scan.
+    #[tokio::test]
+    async fn a_held_codebase_waits_for_its_first_view() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = dir.path();
+        std::fs::create_dir_all(repo.join("model")).expect("model dir");
+        std::fs::write(
+            repo.join("model/store.ts"),
+            "export function load() {\n  return 1;\n}\n",
+        )
+        .expect("write fixture");
+        let (host, _shutdown) = mapping_host(repo, Stub::default()).await;
+        host.hold_until_viewed();
+        assert_eq!(host.scan_feed().status().stage, Stage::Waiting);
+        assert!(
+            timeout(Duration::from_millis(100), host.wait_viewed())
+                .await
+                .is_err(),
+            "no page has connected, so the scan has not started"
+        );
+
+        host.note_view();
+        timeout(WAIT, host.wait_viewed())
+            .await
+            .expect("a page's view starts the scan");
     }
 }

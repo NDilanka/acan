@@ -138,3 +138,81 @@ function Wait-Http200 {
     }
     $false
 }
+
+# The environment variable of each provider the routing file uses, in file order. A provider that no
+# routing row names is not needed, so its key is not asked for. A routing file with no rows names every
+# provider. Reads the file only; no key is read or printed.
+function Get-RoutedKeyNames {
+    param([string]$LlmFile)
+    $keyOf = @{}
+    $order = New-Object System.Collections.Generic.List[string]
+    $routed = New-Object System.Collections.Generic.List[string]
+    $name = $null
+    $section = ''
+    foreach ($raw in (Get-Content -LiteralPath $LlmFile)) {
+        $line = $raw.Trim()
+        if ($line -match '^\[\[providers\]\]') { $name = $null; $section = 'providers'; continue }
+        if ($line -match '^\[routing\.') { $section = 'routing'; continue }
+        if ($line -match '^\[') { $section = ''; continue }
+        if ($section -eq 'providers') {
+            if ($line -match '^name\s*=\s*"([^"]+)"') { $name = $Matches[1]; $order.Add($name) | Out-Null }
+            elseif ($line -match '^api_key_env\s*=\s*"([^"]+)"' -and $name) { $keyOf[$name] = $Matches[1] }
+        } elseif ($section -eq 'routing' -and $line -match '^provider\s*=\s*"([^"]+)"') {
+            $routed.Add($Matches[1]) | Out-Null
+        }
+    }
+    $providers = if ($routed.Count -gt 0) { @($routed | Select-Object -Unique) } else { @($order) }
+    foreach ($provider in $providers) {
+        if (-not $keyOf.ContainsKey($provider)) {
+            throw "the routing file names provider '$provider', which has no api_key_env in $LlmFile"
+        }
+    }
+    @($providers | ForEach-Object { $keyOf[$_] } | Select-Object -Unique)
+}
+
+# The KEY=value lines of a provider key file, as a hashtable. Values stay in memory only.
+function Get-EnvFileValues {
+    param([string]$EnvFile)
+    $values = @{}
+    if (-not (Test-Path -LiteralPath $EnvFile)) { return $values }
+    foreach ($raw in (Get-Content -LiteralPath $EnvFile)) {
+        $line = $raw.Trim()
+        if ($line -eq '' -or $line.StartsWith('#') -or -not $line.Contains('=')) { continue }
+        $key, $value = $line -split '=', 2
+        $values[$key.Trim()] = $value.Trim().Trim('"', "'")
+    }
+    $values
+}
+
+# Stops the take before anything costs money when a routed provider has no key, in the key file or the
+# environment. Names the variables that are missing, never their values.
+function Assert-KeysReady {
+    param([string[]]$RoutedKeys, [string]$EnvFile)
+    $fromFile = Get-EnvFileValues -EnvFile $EnvFile
+    $missing = @($RoutedKeys | Where-Object {
+        -not ($fromFile[$_] -or [Environment]::GetEnvironmentVariable($_))
+    })
+    if ($missing.Count -gt 0) {
+        throw "no key for $($missing -join ', ') in $EnvFile or the environment. Nothing was started and no model was called."
+    }
+}
+
+# Waits until the server's codebase has mapped, so the project takes writes. Returns the plant. Fails
+# when the scan fails or does not finish in time. A mapping project answers reads, and writes get 503.
+function Wait-Mapped {
+    param([int]$Port, [string]$Token, [int]$Seconds)
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        $plant = $null
+        try {
+            $plant = Invoke-Api -Port $Port -Token $Token -Method GET -Path '/api/plant'
+        } catch {
+            if ((Get-HttpStatus $_) -eq 401) { throw 'the owner token was refused by acan serve' }
+            # Not answering yet; retry until the deadline.
+        }
+        if ($plant -and $plant.scan.stage -eq 'done') { return $plant }
+        if ($plant -and $plant.scan.stage -eq 'failed') { throw "the codebase did not map: $($plant.scan.error)" }
+        Start-Sleep -Milliseconds 300
+    }
+    throw "the codebase did not finish mapping within $Seconds s; see the acan-serve log"
+}
