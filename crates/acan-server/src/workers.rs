@@ -203,6 +203,11 @@ async fn drive<C: ModelClient>(
     index: usize,
     mut config: WorkerConfig,
 ) {
+    // A worker takes its work from the mapped codebase, so it waits silently until the map is
+    // open. A project whose mapping failed runs no worker.
+    if host.wait_mapped().await.is_err() {
+        return;
+    }
     loop {
         if !host.client().key_status().configured {
             board.set_state(index, State::NoKey);

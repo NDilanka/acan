@@ -7,11 +7,13 @@ mod hash;
 mod kind;
 mod lang;
 mod model;
+mod progress;
 mod resolve;
 mod states;
 mod touch;
 mod walk;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use hash::Digest;
@@ -25,6 +27,7 @@ pub use model::{
     Belt, Confidence, FileId, ImportRef, ImportTarget, LineRange, Machine, MachineId, Plant,
     Source, SourceFile, State, StateCandidate, StateMachine, Symbol, SymbolKind, Transition,
 };
+pub use progress::{MAX_EXPORT_NAMES, ModuleFill, Progress};
 pub use touch::{Change, Touched, hunks, touched};
 
 /// Why a scan failed.
@@ -75,8 +78,32 @@ pub enum ScanError {
 ///
 /// Returns an error when the directory walk fails, a source file is not readable as UTF-8 text, or a tree-sitter grammar or query fails to load.
 pub fn scan(root: impl AsRef<Path>) -> Result<Plant, ScanError> {
+    scan_with(root, |_| {})
+}
+
+/// Scans the repo at `root` like [`scan`], and reports each step to `observe` as it happens: the
+/// [`Progress::Skeleton`] first, a [`Progress::Module`] when each module's files are all parsed, and
+/// [`Progress::States`] last. The returned plant is the same as [`scan`] returns.
+///
+/// # Errors
+///
+/// Returns the errors [`scan`] returns.
+pub fn scan_with(
+    root: impl AsRef<Path>,
+    mut observe: impl FnMut(Progress<'_>),
+) -> Result<Plant, ScanError> {
     let root = root.as_ref();
     let sources = walk::source_files(root)?;
+    let skeleton = skeleton_of(root, &sources, kind::read_overrides(root)?);
+    observe(Progress::Skeleton(&skeleton));
+    // The machine of each file, and how many of a machine's files are still to parse.
+    let owner = progress::owners(&skeleton);
+    let mut unparsed: Vec<usize> = skeleton
+        .machines
+        .iter()
+        .map(|machine| machine.files.len())
+        .collect();
+
     let index = resolve::PathIndex::from_paths(sources.iter().map(|source| source.rel.as_str()));
     let mut extractor = extract::Extractor::new()?;
 
@@ -102,10 +129,21 @@ pub fn scan(root: impl AsRef<Path>) -> Result<Plant, ScanError> {
             imports,
         });
         file_states.push(extracted.states);
+
+        let machine = owner[position].0 as usize;
+        unparsed[machine] -= 1;
+        if unparsed[machine] == 0 {
+            let fill = progress::module_fill(&skeleton.machines[machine], &files, &owner);
+            observe(Progress::Module(fill));
+        }
     }
 
     let revision = revision_of(&files);
     let (state_machines, state_candidates) = states::resolve_all(file_states);
+    observe(Progress::States {
+        machines: state_machines.len(),
+        candidates: state_candidates.len(),
+    });
     let mut plant = Plant {
         root: root.to_path_buf(),
         revision,
@@ -114,11 +152,57 @@ pub fn scan(root: impl AsRef<Path>) -> Result<Plant, ScanError> {
         files,
         state_machines,
         state_candidates,
-        kind_overrides: kind::read_overrides(root)?,
+        kind_overrides: skeleton.kind_overrides,
     };
     // Regrouping also sets each state machine's module.
     plant.regroup(&Grouping::default());
     Ok(plant)
+}
+
+/// The machines and kinds of the repo at `root`, from its file names and paths alone. Nothing is
+/// read or parsed, so this is the first thing a live map can show. Its files carry no symbols or
+/// imports, and no belts are drawn yet.
+///
+/// # Errors
+///
+/// Returns an error when the directory walk fails or the kinds file cannot be read.
+pub fn skeleton(root: impl AsRef<Path>) -> Result<Plant, ScanError> {
+    let root = root.as_ref();
+    let sources = walk::source_files(root)?;
+    Ok(skeleton_of(root, &sources, kind::read_overrides(root)?))
+}
+
+/// The plant the walk's sources make before any file is read: each file has its path and language
+/// and no content hash yet, so the machines and kinds are final.
+fn skeleton_of(
+    root: &Path,
+    sources: &[walk::SourceEntry],
+    kind_overrides: BTreeMap<String, Kind>,
+) -> Plant {
+    let files: Vec<SourceFile> = sources
+        .iter()
+        .enumerate()
+        .map(|(position, source)| SourceFile {
+            id: FileId(position as u32),
+            path: source.rel.clone(),
+            lang: source.lang,
+            content_hash: ContentHash::UNREAD,
+            symbols: Vec::new(),
+            imports: Vec::new(),
+        })
+        .collect();
+    let mut plant = Plant {
+        root: root.to_path_buf(),
+        revision: revision_of(&files),
+        machines: Vec::new(),
+        belts: Vec::new(),
+        files,
+        state_machines: Vec::new(),
+        state_candidates: Vec::new(),
+        kind_overrides,
+    };
+    plant.regroup(&Grouping::default());
+    plant
 }
 
 /// Digests each file's path and content hash in path order, so any content or file-set change moves it.

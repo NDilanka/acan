@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { HISTORY_REASONS, historyBlock } from "../../www/guard.js";
+import { HISTORY_REASONS, historyBlock, setMappingBlock } from "../../www/guard.js";
 
 const COMMANDS = ["send", "answer", "settle", "adopt", "seal", "strike", "cancel"];
 
@@ -24,6 +24,19 @@ test("a rewound map blocks each command with one sentence that says to go live",
 
 test("a command with no rule is a programming error, not a silent pass", () => {
   assert.throws(() => historyBlock("launch", true), /no history rule/);
+});
+
+test("a map still mapping blocks every command, whatever the scrubber shows", () => {
+  setMappingBlock("Mapping the codebase first.");
+  try {
+    for (const command of COMMANDS) {
+      assert.equal(historyBlock(command, false), "Mapping the codebase first.", command);
+      assert.equal(historyBlock(command, true), "Mapping the codebase first.", command);
+    }
+  } finally {
+    setMappingBlock(null);
+  }
+  assert.equal(historyBlock("send", false), null, "writes open once the map has mapped");
 });
 
 // Each control that changes the origin's state asks the guard both where it paints (the control is

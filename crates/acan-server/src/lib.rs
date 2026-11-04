@@ -54,6 +54,7 @@ mod registry;
 pub mod release;
 pub mod replay;
 mod ruling;
+mod scan_feed;
 mod settings;
 mod setup;
 mod statemap;
@@ -74,7 +75,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use acan_core::{Command, HumanCmd, MemberId, Origin, Seq, SystemCmd, WorldId, WorldRef};
+use acan_core::{Command, HumanCmd, MemberId, Origin, Seq, WorldId, WorldRef};
 use acan_llm::{KeyFile, ModelClient, UsageLedger};
 use anyhow::{Context, bail, ensure};
 use tokio::net::TcpListener;
@@ -172,6 +173,11 @@ pub struct ServeConfig {
     /// that project another count. Zero runs none. Each loop has its own agent, `local-1` and so
     /// on, in every project.
     pub local_workers: usize,
+    /// Whether each project's codebase maps when its first page connects, rather than as the server
+    /// starts. A waiting project's map stays blank and takes no writes until then. Such a server
+    /// must be started with [`start_projects_serving`], since waiting for the maps would wait for a
+    /// page that may never come.
+    pub map_on_first_view: bool,
 }
 
 impl From<ServerConfig> for ServeConfig {
@@ -189,9 +195,14 @@ impl From<ServerConfig> for ServeConfig {
             witness_concurrency: config.witness_concurrency,
             vision: config.vision,
             local_workers: 0,
+            map_on_first_view: false,
         }
     }
 }
+
+/// A project's mapping state as its watch channel holds it: `None` while the codebase maps, then
+/// `Some(Ok)` once it is open or `Some(Err)` when mapping failed.
+type MappingState = watch::Receiver<Option<Result<(), String>>>;
 
 /// A server that is listening. Dropping it does not stop the server.
 #[derive(Debug)]
@@ -204,6 +215,10 @@ pub struct Running {
     shutdown: watch::Sender<bool>,
     server: Option<JoinHandle<io::Result<()>>>,
     runtimes: Vec<Runtime>,
+    /// Each project's codebase mapping task. Stop aborts them first.
+    mapping: Vec<JoinHandle<()>>,
+    /// Each project's mapping state, by project id, for [`Running::wait_mapped`].
+    mapped: Vec<(String, MappingState)>,
     /// The multiplexed streams, which span projects, so shutdown waits for them first.
     streams: Arc<Mutex<JoinSet<()>>>,
     /// The default project's stream and ruling holds, which the tests park to hold a write.
@@ -237,6 +252,28 @@ impl Running {
             let finished = server.await;
             self.server = None;
             finished.context("the server task did not finish")??;
+        }
+        Ok(())
+    }
+
+    /// Waits until every project's codebase has mapped, so each takes writes. An error names the
+    /// project whose codebase did not map.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a project's codebase failed to map, or its mapping stopped first.
+    pub async fn wait_mapped(&self) -> anyhow::Result<()> {
+        for (id, state) in &self.mapped {
+            let mut state = state.clone();
+            let settled = state
+                .wait_for(Option::is_some)
+                .await
+                .map(|settled| (*settled).clone());
+            match settled {
+                Ok(Some(Err(reason))) => bail!("project {id}: {reason}"),
+                Ok(_) => {}
+                Err(_) => bail!("project {id}: its codebase did not map"),
+            }
         }
         Ok(())
     }
@@ -280,6 +317,10 @@ impl Running {
     /// Panics when a stream task panicked while holding the stream set lock.
     pub async fn stop(mut self) -> anyhow::Result<()> {
         self.shutdown.send_replace(true);
+        for mapping in std::mem::take(&mut self.mapping) {
+            mapping.abort();
+            let _ = mapping.await;
+        }
         // A local worker may be waiting on the origin for up to its wait limit, so its loop is
         // aborted rather than awaited. Its lease then ends on its own after the origin's TTL.
         for runtime in &mut self.runtimes {
@@ -389,6 +430,31 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
     clients: Vec<(C, UsageLedger)>,
     settings_file: Option<PathBuf>,
 ) -> anyhow::Result<Running> {
+    ensure!(
+        !config.map_on_first_view,
+        "a server that maps on first view waits for a page, so it must start with start_projects_serving"
+    );
+    let running = start_projects_serving(config, clients, settings_file).await?;
+    if let Err(err) = running.wait_mapped().await {
+        let _ = running.stop().await;
+        return Err(err);
+    }
+    Ok(running)
+}
+
+/// As [`start_projects_with_settings`], but returns once the server listens, even while the
+/// codebases map. A project takes no writes until its codebase maps, and its scan reports on the
+/// live feed meanwhile. A caller that needs the maps waits with [`Running::wait_mapped`].
+///
+/// # Errors
+///
+/// Returns the errors [`start_projects_with_settings`] returns, except that a codebase that fails
+/// to map does not fail the start.
+pub async fn start_projects_serving<C: ModelClient + 'static>(
+    config: ServeConfig,
+    clients: Vec<(C, UsageLedger)>,
+    settings_file: Option<PathBuf>,
+) -> anyhow::Result<Running> {
     if !config.addr.ip().is_loopback() && !config.team {
         bail!(
             "refusing to bind {} without --team, since that exposes this world to the network",
@@ -463,13 +529,14 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
             Origin::replay(log)?
         };
         let repo = spec.repo.clone();
-        let mut scan = tokio::task::spawn_blocking(move || scan(&repo))
+        // Only the skeleton is read before the listener binds. The codebase maps after that, with
+        // its progress on the live feed.
+        let scan = tokio::task::spawn_blocking(move || index::skeleton(&repo))
             .await
-            .context("the scan task did not finish")??;
+            .context("the skeleton scan task did not finish")??;
         // Read from the settings file at each scan. A flag that is off makes no model call and
         // writes no cache.
         let statemap = statemap::SettingsSource::new(settings_file.clone(), spec.id.clone());
-        statemap::refine(&client, &mut scan.plant, statemap.current()).await;
         openings.push(Opening {
             spec,
             store,
@@ -510,7 +577,7 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
             worker_tokens,
         } = opening;
         let git = open_git(&spec).await;
-        let host = Host::new_with_statemap(
+        let host = Host::new_mapping(
             HostParts {
                 origin,
                 store,
@@ -529,6 +596,9 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
             Arc::clone(&slots),
             Some(statemap),
         );
+        if config.map_on_first_view {
+            host.hold_until_viewed();
+        }
         entries.push(Entry {
             id: spec.id,
             name: spec.name,
@@ -538,33 +608,18 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
         });
         project_workers.push(worker_tokens);
     }
-    for entry in &entries {
-        if let Err(err) = entry
-            .host
-            .submit(Command::System(SystemCmd::IndexUpdated))
-            .await
-        {
-            for entry in &entries {
-                let _ = entry.host.shutdown().await;
-            }
-            return Err(err).context("recording the initial code index");
-        }
-    }
+    // Each project maps its codebase in the background. It records the index and registers its
+    // local workers, then opens to writes. Its job and worker loops wait for that.
+    let mut mapping = Vec::with_capacity(entries.len());
+    let mut mapped = Vec::with_capacity(entries.len());
     for (entry, worker_tokens) in entries.iter().zip(&project_workers) {
-        for index in 0..worker_tokens.len() {
-            let registration = Command::Human {
-                member: founder.clone(),
-                cmd: HumanCmd::RegisterAgent {
-                    agent: workers::agent(index)?,
-                },
-            };
-            if let Err(err) = entry.host.submit(registration).await {
-                for entry in &entries {
-                    let _ = entry.host.shutdown().await;
-                }
-                return Err(err).context("registering a local worker");
-            }
-        }
+        mapped.push((entry.id.clone(), entry.host.mapping_state()));
+        mapping.push(tokio::spawn(map_project(
+            entry.host.clone(),
+            founder.clone(),
+            worker_tokens.len(),
+            config.map_on_first_view,
+        )));
     }
 
     // Each project's loops reach that project's routes, so their MCP calls take the project's
@@ -619,12 +674,52 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
         shutdown,
         server: Some(server),
         runtimes,
+        mapping,
+        mapped,
         streams,
         #[cfg(test)]
         stream_hold,
         #[cfg(test)]
         ruling_hold,
     })
+}
+
+/// Maps one project's codebase in the background: scans it, commits its index, registers its local
+/// workers, and opens it to writes. A failure is recorded on the project, which then takes no
+/// writes, and the server keeps running so the page can show why. With `on_view`, the scan starts
+/// only once a page has connected to the project.
+async fn map_project<C: ModelClient + 'static>(
+    host: Host<C>,
+    founder: MemberId,
+    workers: usize,
+    on_view: bool,
+) {
+    if on_view {
+        host.wait_viewed().await;
+    }
+    let mapped = async {
+        host.scan_and_commit().await?;
+        for index in 0..workers {
+            let registration = Command::Human {
+                member: founder.clone(),
+                cmd: HumanCmd::RegisterAgent {
+                    agent: workers::agent(index)?,
+                },
+            };
+            host.submit_unmapped(registration).await?;
+        }
+        anyhow::Ok(())
+    }
+    .await;
+    match mapped {
+        Ok(()) => host.open_writes(),
+        Err(err) => {
+            let reason = format!("{err:#}");
+            tracing::error!(error = %reason, "mapping the codebase failed");
+            host.mapping_failed(reason);
+        }
+    }
+    host.wake_jobs();
 }
 
 /// The settings file beside `keys`: `settings.json` in the folder the keys file is in. A user's

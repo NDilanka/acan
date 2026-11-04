@@ -362,7 +362,7 @@ function Test-TakeFunctions {
     $needed = @(
         'Send-Command', 'Invoke-Api', 'Invoke-Api404Tolerant', 'Wait-Until', 'Get-OrderTasks', 'Start-Worker',
         'Get-AgentEvents', 'Read-ControlResult', 'Read-KeyFile', 'Read-Routing', 'Assert-OutsideGit', 'Get-DemoRefs',
-        'New-TakeClone', 'Start-TakeServer', 'Invoke-ScopeEdits', 'Invoke-ScopeConfirm', 'Invoke-ControlWithRuling',
+        'New-TakeClone', 'Start-TakeServer', 'Wait-TakeMapped', 'Invoke-ScopeEdits', 'Invoke-ScopeConfirm', 'Invoke-ControlWithRuling',
         'Wait-TaskClaimable', 'Get-TaskView', 'Get-WorkerTask', 'Close-OrderLeftovers'
     )
     $missing = @($needed | Where-Object { -not (Get-Command -Name $_ -CommandType Function -ErrorAction SilentlyContinue) })

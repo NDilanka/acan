@@ -133,6 +133,9 @@ impl From<SubmitError> for JobError {
         match err {
             SubmitError::Rejected(rejection) => Self::Rejected(rejection),
             SubmitError::Internal(err) => Self::Store(err),
+            SubmitError::NotMapped => {
+                Self::Unavailable("the codebase is still being mapped".to_owned())
+            }
         }
     }
 }
@@ -166,6 +169,11 @@ struct WorktreeSync {
 }
 
 async fn run<C: ModelClient + 'static>(host: Host<C>) {
+    // Derived jobs read the index, so they wait until the codebase has mapped. A project whose
+    // mapping failed runs none.
+    if host.wait_mapped().await.is_err() {
+        return;
+    }
     // The sets are owned by this loop, so aborting the loop aborts every task it started. A job
     // must never write to the log after its server has stopped.
     let mut tasks: JoinSet<(Job, Result<(), JobError>)> = JoinSet::new();
@@ -1509,6 +1517,9 @@ async fn rebind<C: ModelClient>(
         Err(SubmitError::Internal(err)) => Err(JobError::Unavailable(format!(
             "re-binding the scope to the protected head: {err}"
         ))),
+        Err(SubmitError::NotMapped) => Err(JobError::Unavailable(
+            "the codebase is still being mapped".to_owned(),
+        )),
     }
 }
 

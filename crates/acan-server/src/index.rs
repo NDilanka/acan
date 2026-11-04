@@ -25,7 +25,32 @@ pub struct Scan {
 ///
 /// Returns an error when the scan fails or the plant cannot be expressed as a code index.
 pub fn scan(repo: &Path) -> anyhow::Result<Scan> {
-    let plant = acan_scan::scan(repo).with_context(|| format!("scanning {}", repo.display()))?;
+    scan_observed(repo, |_| {})
+}
+
+/// Scans `repo` like [`scan`], and reports each step of the scan to `observe` as it happens.
+///
+/// # Errors
+///
+/// Returns the errors [`scan`] returns.
+pub fn scan_observed(
+    repo: &Path,
+    observe: impl FnMut(acan_scan::Progress<'_>),
+) -> anyhow::Result<Scan> {
+    let plant = acan_scan::scan_with(repo, observe)
+        .with_context(|| format!("scanning {}", repo.display()))?;
+    let index = code_index(&plant)?;
+    Ok(Scan { plant, index })
+}
+
+/// The machines and kinds of `repo`, from its file names and paths alone. Its index has no
+/// symbols and no belts, so it is the first scan a server can serve while the full one runs.
+///
+/// # Errors
+///
+/// Returns an error when the directory walk fails or the plant cannot be expressed as an index.
+pub fn skeleton(repo: &Path) -> anyhow::Result<Scan> {
+    let plant = acan_scan::skeleton(repo).with_context(|| format!("mapping {}", repo.display()))?;
     let index = code_index(&plant)?;
     Ok(Scan { plant, index })
 }

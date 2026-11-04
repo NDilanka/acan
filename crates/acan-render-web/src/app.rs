@@ -25,6 +25,7 @@ use crate::plant::{Plant, PlantMachine, from_scan_json, rest_labels, stress};
 use crate::plant_view;
 use crate::pov::{self, Ride};
 use crate::project::{self, ProjectMarks};
+use crate::scanfill::{self, ScanFill};
 use crate::scene;
 use crate::seal;
 use crate::stand;
@@ -202,6 +203,8 @@ pub struct App {
     parked_version: u32,
     /// Each plant's layout from the origin, by `canvas::layout_key`.
     layouts: HashMap<u64, Layout>,
+    /// Each machine's phase in the first scan's fill. See [`scanfill`].
+    scan: ScanFill,
 }
 
 /// A project on the canvas that is not on screen: its plant at its place and its log folded, so
@@ -265,6 +268,9 @@ struct Loaded {
     plan_instance: Vec<usize>,
     /// For each plan machine, its model's top and the free spots on its plinth top.
     stands: Vec<Stand>,
+    /// Each machine's footprint on the ground as `[x, y, w, h]` in plan units, by its index in the
+    /// plant. The first scan's outlines follow it. See [`scanfill`].
+    footprints: Vec<[f32; 4]>,
     /// Each machine's model box, which a ride sizes its distance from, in the layout's machine
     /// order. See `scene::machine_model_boxes`.
     machine_bounds: Vec<Aabb>,
@@ -275,17 +281,24 @@ struct Loaded {
 
 impl Loaded {
     /// The overlays of every plan machine, placed on its base instance. `instances` holds this
-    /// plant's base instances from `start` on, as a scene does once they are added.
+    /// plant's base instances from `start` on, as a scene does once they are added. A machine the
+    /// scan has not filled has no body, so it has no overlays. A filling body carries its overlays
+    /// up with it.
     fn overlays(
         &self,
         instances: &[Instance],
         start: usize,
         marks: &Marks,
         staged: Option<&[bool]>,
+        scan: &ScanFill,
     ) -> Vec<Instance> {
         let mut out = Vec::new();
         for (plan_index, &instance) in self.plan_instance.iter().enumerate() {
-            let at = instances[start + instance].offset;
+            if scan.hidden(instance) {
+                continue;
+            }
+            let mut at = instances[start + instance].offset;
+            at[2] += scan.drop_of(instance);
             out.extend(scene::overlay_instances(
                 &self.machines[instance],
                 at,
@@ -374,6 +387,7 @@ impl App {
             order: Vec::new(),
             parked_version: 0,
             layouts: HashMap::new(),
+            scan: ScanFill::default(),
         })
     }
 
@@ -532,6 +546,55 @@ impl App {
             own.dirty = true;
             self.parked[index].view_json = None;
         }
+    }
+
+    /// Applies a scan's status to the plant on screen: a `scan_status` frame, or a plant's `scan`
+    /// summary. The machines of its filled modules are built. The others wait as outlines while
+    /// the first scan runs, and a settled map builds them all.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON is not a scan status.
+    pub fn set_scan(&mut self, json: &str) -> Result<(), JsError> {
+        let status = scanfill::parse_status(json).map_err(js_err)?;
+        let filled: Vec<usize> = self.plant.as_ref().map_or_else(Vec::new, |loaded| {
+            status
+                .filled
+                .iter()
+                .filter_map(|module| loaded.machines.iter().position(|m| m.name == module.name))
+                .collect()
+        });
+        self.scan.apply(status.stage, &filled);
+        self.sync_scene();
+        Ok(())
+    }
+
+    /// Applies the stage a live `scan_progress` step reports, so a waiting map starts. A step does
+    /// not list the modules that filled, so the machines keep their phases.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON is not a scan status.
+    pub fn set_scan_stage(&mut self, json: &str) -> Result<(), JsError> {
+        let status = scanfill::parse_status(json).map_err(js_err)?;
+        self.scan.step(status.stage);
+        self.sync_scene();
+        Ok(())
+    }
+
+    /// Starts the machine named `name` filling in, as its module finishes. A page that asks for
+    /// reduced motion, or a settled map, builds it at once. Returns whether the plant has it.
+    pub fn scan_fill(&mut self, name: &str, reduced: bool) -> bool {
+        let index = self
+            .plant
+            .as_ref()
+            .and_then(|loaded| loaded.machines.iter().position(|m| m.name == name));
+        let Some(index) = index else {
+            return false;
+        };
+        let found = self.scan.fill(index, reduced);
+        self.sync_scene();
+        found
     }
 
     /// Tells the marks the time now, in epoch milliseconds, so a quiet agent's drone can read
@@ -747,16 +810,17 @@ impl App {
         let topping = self.advance_top_move(dt_ms);
         let moving = self.motion.advance(dt_ms);
         let (parked_upload, parked_moving) = self.advance_parked(dt_ms);
+        let filling = self.scan.advance(dt_ms);
         // The frame an ease ends on still uploads, so the marks land on their final places.
-        if moving || self.moving || parked_upload {
+        if moving || self.moving || parked_upload || filling {
             self.sync_scene();
         }
         self.moving = moving;
         let riding = self.advance_ride(dt_ms);
         self.calm = moving
             && self.motion.calm()
-            && !(turning || touring || topping || riding || parked_moving);
-        turning || touring || topping || moving || riding || parked_moving
+            && !(turning || touring || topping || riding || parked_moving || filling);
+        turning || touring || topping || moving || riding || parked_moving || filling
     }
 
     /// Moves the top-down turn on by `dt_ms`: the pivot and zoom by the tour ease, the elevation by
@@ -1725,6 +1789,18 @@ impl App {
             .map_or(-1.0, |stand| stand.top)
     }
 
+    /// Whether machine `name` is not on the map yet: its scan has not filled it, or the scan has
+    /// not started. A hidden machine takes no pointer. A name the plant lacks is not hidden.
+    pub fn machine_hidden(&self, name: &str) -> bool {
+        self.plant.as_ref().is_some_and(|loaded| {
+            loaded
+                .machines
+                .iter()
+                .position(|machine| machine.name == name)
+                .is_some_and(|index| self.scan.hidden(index))
+        })
+    }
+
     pub fn machine_count(&self) -> u32 {
         self.plant
             .as_ref()
@@ -1761,6 +1837,7 @@ impl App {
     /// Puts `plant` on screen with its layout from the origin moved to `offset`, and fits it.
     fn show(&mut self, plant: Plant, at_origin: Layout, offset: [f32; 2]) {
         let (loaded, plan) = self.build(plant, at_origin, offset);
+        self.scan.load(loaded.machines.len());
         self.plan = Some(plan);
         self.view = None;
         self.marks = Marks::default();
@@ -1834,6 +1911,15 @@ impl App {
                 }
             })
             .collect();
+        let mut footprints = vec![[0.0_f32; 4]; plant.machines.len()];
+        for (plan_index, machine) in plan.machines.iter().enumerate() {
+            footprints[plan_instance[plan_index]] = [
+                machine.min[0],
+                machine.min[1],
+                machine.size[0],
+                machine.size[1],
+            ];
+        }
         let drone_reach = stand::reach(&self.models[usize::from(scene::mark_kinds().body)]);
         let framing = scene::fit_boxes(&laid, &self.models, &self.kind_spots, drone_reach);
         let machine_bounds = scene::machine_model_boxes(&laid, &self.models);
@@ -1859,6 +1945,7 @@ impl App {
             base: scene,
             plan_instance,
             stands,
+            footprints,
             source,
             at_origin,
         };
@@ -1898,7 +1985,23 @@ impl App {
             scene.instances[instance].tint =
                 marks::machine_tint(&self.marks, plan_index, staged.as_deref());
         }
-        let overlays = loaded.overlays(&scene.instances, 0, &self.marks, staged.as_deref());
+        // The overlays are placed before the bodies are removed or lifted, so they read the plan's
+        // indexes. See `Loaded::overlays`.
+        let overlays = loaded.overlays(
+            &scene.instances,
+            0,
+            &self.marks,
+            staged.as_deref(),
+            &self.scan,
+        );
+        // A machine still an outline has no body yet. A filling body stands above its place.
+        let mut index = 0;
+        scene.instances.retain_mut(|instance| {
+            let kept = !self.scan.hidden(index);
+            instance.offset[2] += self.scan.drop_of(index);
+            index += 1;
+            kept
+        });
         self.motion.set_px_units(self.dpr / self.camera.zoom());
         let riding = self.riding_agent();
         let hovered = self.hovered.as_deref();
@@ -1917,6 +2020,9 @@ impl App {
             self.dpr,
             staged.as_deref(),
         ));
+        scene
+            .beams
+            .extend(self.scan.ghosts(&loaded.footprints, self.dpr));
         scene.instances.extend(overlays);
         scene.instances.extend(marks::mark_instances(
             &self.motion,
@@ -1937,9 +2043,13 @@ impl App {
                 scene.instances[start + instance].tint =
                     marks::machine_tint(&own.marks, plan_index, None);
             }
-            let overlays = parked
-                .loaded
-                .overlays(&scene.instances, start, &own.marks, None);
+            let overlays = parked.loaded.overlays(
+                &scene.instances,
+                start,
+                &own.marks,
+                None,
+                &ScanFill::default(),
+            );
             scene.instances.extend(overlays);
             own.motion.set_px_units(px_units);
             if !parked.far {

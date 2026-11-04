@@ -18,6 +18,7 @@ pub mod plant;
 pub mod plant_view;
 pub mod pov;
 pub mod project;
+pub mod scanfill;
 pub mod scenario;
 pub mod scene;
 pub mod seal;

@@ -206,7 +206,9 @@ if ! wait_http_200 "http://127.0.0.1:$demo_port/health" 60; then
   fail_take "the demo app did not answer on port $demo_port; see $logs/demo-app.err.log"
 fi
 
-plant=$(api "$port" "$owner" GET /api/plant) || fail_take "could not read the plant from port $port"
+# The server refuses writes with 503 until the codebase has mapped, so the take waits for the scan first.
+plant=$(wait_mapped "$port" "$owner") || fail_take "the codebase did not finish mapping on port $port; see $logs/acan-serve.err.log"
+echo "codebase mapped: $(printf '%s\n' "$plant" | jq -r '.scan.modules_total') module(s)"
 echo "plant machines: $(printf '%s\n' "$plant" | jq -r '[.machines[].name] | join(", ")')"
 if ! printf '%s\n' "$plant" | jq -e --arg m "$machine" 'any(.machines[]; .name == $m)' > /dev/null; then
   fail_take "machine '$machine' is not on the plant; pick one of the names above and pass -m"

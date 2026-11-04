@@ -27,6 +27,10 @@ impl<'de> Deserialize<'de> for ContentHash {
 }
 
 impl ContentHash {
+    /// The stand-in for a file no one has read yet. The skeleton of a scan uses it, so its
+    /// revision digests the paths alone.
+    pub(crate) const UNREAD: Self = Self(0);
+
     pub(crate) fn of(bytes: &[u8]) -> Self {
         let mut digest = Digest::new();
         digest.update(bytes);

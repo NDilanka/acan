@@ -139,7 +139,8 @@ async fn connect(running: &Running, token: &str, from: u64) -> Socket {
     socket
 }
 
-/// Reads exactly `count` events. Ping and pong frames are skipped.
+/// Reads exactly `count` events. Ping and pong frames are skipped, and so are a scan's live
+/// frames, which are not events.
 async fn next_events(socket: &mut Socket, count: usize) -> Vec<Stamped> {
     let mut events = Vec::with_capacity(count);
     while events.len() < count {
@@ -149,10 +150,22 @@ async fn next_events(socket: &mut Socket, count: usize) -> Vec<Stamped> {
             .expect("the stream ended early")
             .expect("the stream read failed");
         if let WsMessage::Text(text) = message {
-            events.push(serde_json::from_str::<Stamped>(&text).expect("a stream event"));
+            events.extend(event_of(&text));
         }
     }
     events
+}
+
+/// The stamped event a stream text carries, or `None` for a scan's live frame.
+fn event_of(text: &str) -> Option<Stamped> {
+    let frame: Value = serde_json::from_str(text).expect("a JSON frame");
+    if matches!(
+        frame["type"].as_str(),
+        Some("scan_status" | "scan_progress")
+    ) {
+        return None;
+    }
+    Some(serde_json::from_value(frame).expect("a stream event"))
 }
 
 /// Reads events until the server closes the stream. Returns the events and the close frame.
@@ -164,7 +177,7 @@ async fn drain(socket: &mut Socket) -> (Vec<Stamped>, u16, String) {
             .expect("the stream went quiet without closing");
         match message {
             Some(Ok(WsMessage::Text(text))) => {
-                events.push(serde_json::from_str::<Stamped>(&text).expect("a stream event"));
+                events.extend(event_of(&text));
             }
             Some(Ok(WsMessage::Close(Some(frame)))) => {
                 return (events, u16::from(frame.code), frame.reason.to_string());
@@ -362,10 +375,19 @@ async fn plant_endpoint_returns_the_scanned_plant() {
         .as_object_mut()
         .expect("the plant is a JSON object")
         .remove("vision");
+    let summary = plant
+        .as_object_mut()
+        .expect("the plant is a JSON object")
+        .remove("scan");
     let expected = serde_json::to_value(scan(dir.path()).expect("scan").plant).expect("plant JSON");
     assert_eq!(
         plant, expected,
         "the endpoint returns the same plant as a fresh scan"
+    );
+    assert_eq!(
+        summary,
+        Some(json!({ "stage": "done", "modules_done": 1, "modules_total": 1 })),
+        "the plant says its scan is done"
     );
     assert_eq!(
         contract,
