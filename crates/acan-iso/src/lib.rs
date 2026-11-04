@@ -13,6 +13,7 @@ mod models;
 mod overlay;
 mod parts;
 mod plan;
+mod rules;
 mod shade;
 
 pub use drone::{
@@ -24,4 +25,5 @@ pub use marks::{PIN_HEIGHT, PLINTH_TOP, STALK_HEIGHT, clash_pin, clash_stalk, wa
 pub use model::{Aabb, Detail, Dot3, Ink, Line3, Mesh, Model, Surface};
 pub use models::{Footprint, Kind, footprint, model};
 pub use overlay::{Overlay, bar_count, overlay_model};
+pub use rules::{Decision, classify};
 pub use shade::{Tone, tone_for};
