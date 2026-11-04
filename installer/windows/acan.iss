@@ -7,8 +7,9 @@
 ;
 ; The in-app updater runs it silently:
 ;   acan-setup-<version>-windows-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-; Restart Manager closes a running acan.exe from this folder first. Acan starts again at the end,
-; unless /NOLAUNCH=1 is given. The PATH entry is for this user only, and it is removed on uninstall.
+; Restart Manager closes a running acan.exe from this folder first. Acan starts again at the end
+; with --no-browser, so the tab already open reconnects, unless /NOLAUNCH=1 is given. The PATH
+; entry is for this user only, and it is removed on uninstall.
 
 #ifndef StageDir
   #error StageDir must be passed to ISCC with /DStageDir=<folder>
@@ -55,7 +56,7 @@ Name: "{autodesktop}\Acan"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\
 Name: "{group}\Uninstall Acan"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{sys}\wscript.exe"; Parameters: """{app}\acan-open.vbs"""; Description: "Open Acan"; WorkingDir: "{app}"; Flags: nowait postinstall runasoriginaluser; Check: LaunchWanted
+Filename: "{sys}\wscript.exe"; Parameters: "{code:OpenParams}"; Description: "Open Acan"; WorkingDir: "{app}"; Flags: nowait postinstall runasoriginaluser; Check: LaunchWanted
 
 [Code]
 const
@@ -66,6 +67,14 @@ const
 function LaunchWanted: Boolean;
 begin
   Result := ExpandConstant('{param:NOLAUNCH|0}') <> '1';
+end;
+
+// The launcher and its argument. A silent setup is the in-app update, and the browser tab that
+// started it is still open, so Acan starts without opening another one.
+function OpenParams(Param: String): String;
+begin
+  Result := '"' + ExpandConstant('{app}\acan-open.vbs') + '"';
+  if WizardSilent then Result := Result + ' --no-browser';
 end;
 
 // Drops every PATH entry equal to Dir, ignoring case. Empty entries go too.
@@ -116,17 +125,33 @@ end;
 // Stops every acan and acan-worker process that runs from this install folder, so its files can
 // be replaced or removed. The shortcuts start the server with no window, so Restart Manager may not
 // find one to close. This stop covers installs, updates and uninstalls.
-// The folder goes into a single-quoted PowerShell string, so its own single quotes are doubled.
+// Each process is asked to stop first and gets 3 seconds, then any that is left is forced.
+// After that, the single-server files of acan open (server.lock, server.pid, server.port) are
+// removed when the process named in server.pid is gone, so a server from another folder keeps its
+// files. The logs next to them stay.
+// Both folders go into single-quoted PowerShell strings, so their own single quotes are doubled.
+// The command has no braces: the removal is a list repeated once or zero times, not an if block.
 // Get-Process leaves an error for a name with no process, so the command ends with exit 0.
 procedure StopServers;
 var
-  App: String;
+  App, Data: String;
   ResultCode: Integer;
 begin
   App := ExpandConstant('{app}');
   StringChangeEx(App, '''', '''''', True);
+  Data := ExpandConstant('{localappdata}\Acan');
+  StringChangeEx(Data, '''', '''''', True);
   Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
-    '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "Get-Process -Name acan,acan-worker -ErrorAction SilentlyContinue | Where-Object Path -like ''' + App + '\*'' | Stop-Process -Force; exit 0"',
+    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command "' +
+    '$p = @(Get-Process -Name acan,acan-worker -ErrorAction SilentlyContinue | Where-Object Path -like ''' + App + '\*''); ' +
+    '$p | Stop-Process -ErrorAction SilentlyContinue; ' +
+    '$p | Wait-Process -Timeout 3 -ErrorAction SilentlyContinue; ' +
+    '$p | Where-Object HasExited -eq $false | Stop-Process -Force -ErrorAction SilentlyContinue; ' +
+    '$d = ''' + Data + '''; ' +
+    '$sp = Get-Content -LiteralPath (Join-Path $d ''server.pid'') -ErrorAction SilentlyContinue | Select-Object -First 1; ' +
+    '$live = [bool]($sp -and (Get-Process -Id $sp -ErrorAction SilentlyContinue)); ' +
+    '@((Join-Path $d ''server.lock''), (Join-Path $d ''server.pid''), (Join-Path $d ''server.port'')) * [int](-not $live) | Remove-Item -Force -ErrorAction SilentlyContinue; ' +
+    'exit 0"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
