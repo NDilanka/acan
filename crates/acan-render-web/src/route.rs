@@ -54,6 +54,13 @@ const OVERLAP: u64 = 400;
 /// of one machine, or into one machine, gather into one trunk. A dense plant then draws a few
 /// trunks into its most used machines instead of a mesh of belts side by side.
 const TRUNK: u64 = 4;
+/// How far the town reaches past the outermost machines along each lattice line, in plan
+/// units: a street and the pad round it.
+pub const OUTSKIRT: f32 = 96.0;
+/// Factor on a lattice edge outside the town. Every monotone route between two machines is
+/// equally long, so without it a long belt takes the one that crosses nothing: round the
+/// empty edge of the plan, where it reads as a detour.
+const OUTSKIRT_FACTOR: u64 = 2;
 const NONE: u32 = u32::MAX;
 const FREE: usize = usize::MAX;
 
@@ -171,6 +178,9 @@ struct Lattice {
     px: Vec<u64>,
     py: Vec<u64>,
     cover: Vec<u16>,
+    /// Per horizontal line, the span along x the town covers; per vertical line, along y.
+    rows: Vec<[f32; 2]>,
+    cols: Vec<[f32; 2]>,
 }
 
 impl Lattice {
@@ -192,13 +202,24 @@ impl Lattice {
                 }
             }
         }
+        let rows = town(plan.boxes, &ys, 1);
+        let cols = town(plan.boxes, &xs, 0);
         Self {
             xs,
             ys,
             px,
             py,
             cover,
+            rows,
+            cols,
         }
+    }
+
+    /// Whether node `(i, j)` lies outside the town along its row or its column.
+    fn outskirts(&self, i: usize, j: usize) -> bool {
+        let (x, y) = (self.xs[i], self.ys[j]);
+        let (row, col) = (self.rows[j], self.cols[i]);
+        x < row[0] || x > row[1] || y < col[0] || y > col[1]
     }
 
     /// The step from node `(i, j)` towards `dir`, if the lattice goes on that way.
@@ -311,6 +332,27 @@ fn lines(plan: Plan, ends: &[[f32; 4]], lo: f32, hi: f32, axis: usize) -> Vec<f3
     }
     out.extend(raw.last().copied());
     out
+}
+
+/// For each line across `axis` (0 for vertical lines at x, 1 for horizontal lines at y), the
+/// span the town covers along it: from the first to the last footprint within [`OUTSKIRT`] of
+/// the line, pushed out by as much. A line no footprint comes near has an empty span.
+fn town(boxes: &[[f32; 4]], lines: &[f32], axis: usize) -> Vec<[f32; 2]> {
+    let along = 1 - axis;
+    lines
+        .iter()
+        .map(|&v| {
+            boxes
+                .iter()
+                .filter(|b| v >= b[axis] - OUTSKIRT && v <= b[axis + 2] + OUTSKIRT)
+                .fold([f32::INFINITY, f32::NEG_INFINITY], |s, b| {
+                    [
+                        s[0].min(b[along] - OUTSKIRT),
+                        s[1].max(b[along + 2] + OUTSKIRT),
+                    ]
+                })
+        })
+        .collect()
 }
 
 /// The integer cost of the distance from the first line to each line.
@@ -449,8 +491,16 @@ impl Occupancy {
     }
 
     /// The cost of the step `m` towards `dir` for the belt `request`: its length, scaled by who
-    /// already runs there, plus a crossing charge when it lands across a belt that is not kin.
-    fn cost(&self, lattice: &Lattice, m: &Move, dir: usize, request: Request) -> u64 {
+    /// already runs there and by [`OUTSKIRT_FACTOR`] when `outskirts`, plus a crossing charge
+    /// when it lands across a belt that is not kin.
+    fn cost(
+        &self,
+        lattice: &Lattice,
+        m: &Move,
+        dir: usize,
+        request: Request,
+        outskirts: bool,
+    ) -> u64 {
         let (nx, ny) = (lattice.xs.len(), lattice.ys.len());
         let (owner, crosses) = if horizontal(dir) {
             let north = m.j + 1 < ny && self.vertical[m.node].other(request);
@@ -462,12 +512,17 @@ impl Occupancy {
             let west = m.i > 0 && self.horizontal[row + m.i - 1].other(request);
             (self.vertical[m.edge], east || west)
         };
-        let step = if owner.other(request) {
-            m.cost * OVERLAP
-        } else if owner.kin(request) {
-            (m.cost / TRUNK).max(1)
+        let base = if outskirts {
+            m.cost * OUTSKIRT_FACTOR
         } else {
             m.cost
+        };
+        let step = if owner.other(request) {
+            base * OVERLAP
+        } else if owner.kin(request) {
+            (base / TRUNK).max(1)
+        } else {
+            base
         };
         if crosses { step + CROSSING } else { step }
     }
@@ -759,8 +814,9 @@ impl Search {
                 }
                 let next = axis(dir);
                 let straight = next == along;
+                let outskirts = lattice.outskirts(i, j) || lattice.outskirts(m.i, m.j);
                 let cost = g
-                    + occupancy.cost(lattice, &m, dir, query.request)
+                    + occupancy.cost(lattice, &m, dir, query.request, outskirts)
                     + bend(along, next, slot.run, slot.leaving);
                 let label = Slot {
                     round,

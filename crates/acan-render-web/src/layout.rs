@@ -229,6 +229,67 @@ pub fn district_pads(boxes: &[[f32; 4]], districts: &[u32]) -> Vec<DistrictPad> 
         .collect()
 }
 
+/// How far inside its pad's front edge a district sign stands, in plan units.
+const SIGN_INSET: f32 = GRID;
+
+/// Where the sign of the district on the pad `rect` may stand, best first: just inside the two
+/// pad edges nearest the viewer, level with each of the district's `machines` in turn. The
+/// machine nearest the viewer comes first, and of its two spots the one on the edge nearer it.
+/// So a sign stands by its district's front machine, not off at the pad's far corner, and the
+/// page takes the first spot clear of the machine names. `depth` tells how near the viewer a
+/// ground point is: the larger, the nearer. Spots keep [`PAD_MARGIN`] from the pad's corners.
+pub fn sign_spots(
+    rect: [f32; 4],
+    machines: &[[f32; 4]],
+    depth: impl Fn([f32; 2]) -> f32,
+) -> Vec<[f32; 2]> {
+    let [x0, y0, x1, y1] = rect;
+    let corners = |r: [f32; 4]| [[r[0], r[1]], [r[2], r[1]], [r[0], r[3]], [r[2], r[3]]];
+    let nearest = |r: [f32; 4]| {
+        corners(r)
+            .into_iter()
+            .map(&depth)
+            .fold(f32::NEG_INFINITY, f32::max)
+    };
+    let Some(front) = corners(rect)
+        .into_iter()
+        .max_by(|a, b| depth(*a).total_cmp(&depth(*b)))
+    else {
+        return Vec::new();
+    };
+    // The front corner's two edges: one at a fixed x, one at a fixed y.
+    let ex = if front[0] == x1 {
+        x1 - SIGN_INSET
+    } else {
+        x0 + SIGN_INSET
+    };
+    let ey = if front[1] == y1 {
+        y1 - SIGN_INSET
+    } else {
+        y0 + SIGN_INSET
+    };
+    let along = |v: f32, lo: f32, hi: f32| v.min(hi - PAD_MARGIN).max(lo + PAD_MARGIN);
+    let mut order: Vec<[f32; 4]> = machines.to_vec();
+    order.sort_by(|a, b| nearest(*b).total_cmp(&nearest(*a)));
+    let mut spots = Vec::with_capacity(order.len() * 2);
+    for b in order {
+        let mid = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
+        let on_y = [along(mid[0], x0, x1), ey];
+        let on_x = [ex, along(mid[1], y0, y1)];
+        let pair = if (mid[1] - ey).abs() <= (mid[0] - ex).abs() {
+            [on_y, on_x]
+        } else {
+            [on_x, on_y]
+        };
+        for spot in pair {
+            if !spots.contains(&spot) {
+                spots.push(spot);
+            }
+        }
+    }
+    spots
+}
+
 /// The plan rectangle a machine's name hangs over, which belts keep out of: the quarter of the
 /// plate nearest the viewer and the ground in front of it, `LABEL_BAND` deep. The default camera
 /// looks from 45 degrees round, so the plate's front is its corner at the greatest x and y, and
@@ -764,6 +825,132 @@ mod tests {
             laid.districts[0].rect[0] + 100.0
         );
         assert_eq!(moved.districts[0].rect[3], laid.districts[0].rect[3] - 50.0);
+    }
+
+    #[test]
+    fn a_district_sign_stands_by_the_front_machine_of_its_pad() {
+        let plant = dense_workspace();
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
+        // The default view's front is the greatest x and y; a view orbited a quarter turn has
+        // its front at the least x and the greatest y.
+        let views: [fn([f32; 2]) -> f32; 2] = [|p| p[0] + p[1], |p| p[1] - p[0]];
+        for depth in views {
+            for pad in &laid.districts {
+                let boxes: Vec<[f32; 4]> = laid
+                    .machines
+                    .iter()
+                    .zip(&districts)
+                    .filter(|(_, d)| **d == pad.district)
+                    .map(|(placed, _)| placed.footprint())
+                    .collect();
+                let spots = sign_spots(pad.rect, &boxes, depth);
+                assert!(
+                    spots.len() >= 2,
+                    "pad {:?} has {} spots",
+                    pad.rect,
+                    spots.len()
+                );
+                let r = pad.rect;
+                for s in &spots {
+                    assert!(s[0] > r[0] && s[0] < r[2] && s[1] > r[1] && s[1] < r[3]);
+                }
+                let corners = [[r[0], r[1]], [r[2], r[1]], [r[0], r[3]], [r[2], r[3]]];
+                let front = corners
+                    .into_iter()
+                    .max_by(|a, b| depth(*a).total_cmp(&depth(*b)))
+                    .expect("four corners");
+                let first = spots[0];
+                let on_front_edge = (first[0] - front[0]).abs() <= GRID + 1e-3
+                    || (first[1] - front[1]).abs() <= GRID + 1e-3;
+                assert!(on_front_edge, "sign {first:?} off the front of {r:?}");
+                // It stands nearer a front machine of the district than the bare corner does.
+                let near = |f: &[f32; 4]| {
+                    [[f[0], f[1]], [f[2], f[1]], [f[0], f[3]], [f[2], f[3]]]
+                        .map(depth)
+                        .into_iter()
+                        .fold(f32::NEG_INFINITY, f32::max)
+                };
+                let most = boxes.iter().map(near).fold(f32::NEG_INFINITY, f32::max);
+                let far = |p: [f32; 2], f: &[f32; 4]| {
+                    let mid = [(f[0] + f[2]) / 2.0, (f[1] + f[3]) / 2.0];
+                    (p[0] - mid[0]).abs() + (p[1] - mid[1]).abs()
+                };
+                assert!(
+                    boxes
+                        .iter()
+                        .filter(|f| near(f) == most)
+                        .any(|f| far(first, f) < far(front, f)),
+                    "sign {first:?} no nearer a front machine than corner {front:?}: {boxes:?}"
+                );
+            }
+        }
+    }
+
+    /// How far the belt `path` runs outside the town round `boxes`: where no footprint comes
+    /// within `route::OUTSKIRT` of it along its row, or along its column, pushed out as far.
+    fn outskirts_run(boxes: &[[f32; 4]], path: &[[f32; 2]]) -> f32 {
+        let reach = route::OUTSKIRT;
+        let outside = |x: f32, y: f32| {
+            let span = |lo: usize, at: f32| {
+                boxes
+                    .iter()
+                    .filter(|b| at >= b[lo] - reach && at <= b[lo + 2] + reach)
+                    .fold([f32::INFINITY, f32::NEG_INFINITY], |s, b| {
+                        let across = 1 - lo;
+                        [s[0].min(b[across] - reach), s[1].max(b[across + 2] + reach)]
+                    })
+            };
+            let (row, col) = (span(1, y), span(0, x));
+            x < row[0] || x > row[1] || y < col[0] || y > col[1]
+        };
+        let mut run = 0.0;
+        for s in path.windows(2) {
+            let length = (s[0][0] - s[1][0]).abs() + (s[0][1] - s[1][1]).abs();
+            let steps = (length / 4.0).ceil().max(1.0);
+            for q in 0..steps as usize {
+                let t = (q as f32 + 0.5) / steps;
+                let x = s[0][0] + (s[1][0] - s[0][0]) * t;
+                let y = s[0][1] + (s[1][1] - s[0][1]) * t;
+                if outside(x, y) {
+                    run += length / steps;
+                }
+            }
+        }
+        run
+    }
+
+    #[test]
+    fn belts_of_a_dense_workspace_keep_to_the_town_and_take_no_long_way_round() {
+        let plant = dense_workspace();
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
+        let boxes: Vec<[f32; 4]> = laid.machines.iter().map(Placed::footprint).collect();
+        for belt in &laid.belts {
+            let (a, b) = (boxes[belt.from], boxes[belt.to]);
+            let apart =
+                (b[0] - a[2]).max(a[0] - b[2]).max(0.0) + (b[1] - a[3]).max(a[1] - b[3]).max(0.0);
+            let length: f32 = belt
+                .path
+                .windows(2)
+                .map(|s| (s[0][0] - s[1][0]).abs() + (s[0][1] - s[1][1]).abs())
+                .sum();
+            assert!(
+                length <= 2.0 * apart + 200.0,
+                "belt {} -> {} runs {length} for machines {apart} apart",
+                belt.from,
+                belt.to
+            );
+            // A belt may cut a corner of the town, not run round its edge.
+            let run = outskirts_run(&boxes, &belt.path);
+            assert!(
+                run <= route::OUTSKIRT,
+                "belt {} -> {} runs {run} outside the town: {:?}",
+                belt.from,
+                belt.to,
+                belt.path
+            );
+        }
     }
 
     #[test]

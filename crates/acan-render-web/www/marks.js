@@ -19,7 +19,7 @@ const LABEL_OFFSET_PX = 6;
 
 const LABEL_PAD_PX = 4;
 
-// A district's sign hangs this far under the front corner of its pad.
+// A district's sign stands this far above its spot on screen, inside the front edge of its pad.
 const SIGN_OFFSET_PX = 4;
 
 const PIN_PICK_PX = 18;
@@ -119,16 +119,20 @@ export function placeLabels() {
 // Each district's sign element, by sign index.
 const signs = new Map();
 
-// One quiet name per district, hung under the front corner of its ground pad. Signs come after the
-// machine names and the flags, and show only where clear of all of them, so a sign never hides a
-// machine's name. A plant that reads as one place has no pads and no signs.
+// One quiet name per district, standing just inside the front edge of its ground pad beside its
+// front machine. The wasm side gives each sign its spots best first; the sign takes the first one
+// in view and clear of the machine names and flags, which are placed before it, so a sign never
+// hides a machine's name. A sign with no clear spot stays hidden. A plant that reads as one place
+// has no pads and no signs.
 function placeSigns(taken, width, height) {
   const triples = state.app.district_layout();
-  const seen = new Set();
+  const spots = new Map();
   for (let k = 0; k < triples.length; k += 3) {
     const index = triples[k];
-    const x = triples[k + 1];
-    const y = triples[k + 2];
+    if (!spots.has(index)) spots.set(index, []);
+    spots.get(index).push([triples[k + 1], triples[k + 2]]);
+  }
+  for (const [index, list] of spots) {
     const name = state.app.district_sign(index);
     let el = signs.get(index);
     if (el === undefined) {
@@ -142,16 +146,20 @@ function placeSigns(taken, width, height) {
       el.size = undefined;
     }
     if (el.size === undefined) el.size = [el.offsetWidth, el.offsetHeight];
-    seen.add(index);
     const [w, h] = el.size;
-    const box = boxAt(x - w / 2, y + SIGN_OFFSET_PX, w, h, LABEL_PAD_PX);
-    const clear = name !== "" && inView(box, width, height) && taken.every((other) => !overlaps(box, other));
-    if (clear) taken.push(box);
-    el.style.visibility = clear ? "visible" : "hidden";
-    el.style.transform = `translate(${x}px, ${y}px) translate(-50%, ${SIGN_OFFSET_PX}px)`;
+    const boxOf = ([x, y]) => boxAt(x - w / 2, y - h - SIGN_OFFSET_PX, w, h, LABEL_PAD_PX);
+    const spot = name === "" ? undefined : list.find((at) => {
+      const box = boxOf(at);
+      return inView(box, width, height) && taken.every((other) => !overlaps(box, other));
+    });
+    el.style.visibility = spot === undefined ? "hidden" : "visible";
+    if (spot === undefined) continue;
+    taken.push(boxOf(spot));
+    const [x, y] = spot;
+    el.style.transform = `translate(${x}px, ${y}px) translate(-50%, ${-h - SIGN_OFFSET_PX}px)`;
   }
   for (const [index, el] of signs) {
-    if (!seen.has(index)) {
+    if (!spots.has(index)) {
       el.remove();
       signs.delete(index);
     }

@@ -264,6 +264,8 @@ struct Loaded {
     labels: Vec<String>,
     /// Each district's sign name, by district. See `Plant::district_labels`.
     district_labels: Vec<String>,
+    /// Each machine's district, in the layout's machine order. See `Plant::districts`.
+    districts: Vec<u32>,
     /// Whether each machine carries a name at rest once it is large enough on screen.
     rest: Vec<bool>,
     /// The machines and belts as the layout places them, before any mark is added.
@@ -1776,23 +1778,30 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Each district sign's anchor on screen, as flat `[sign index, css x, css y]` triples: the
-    /// corner of the district's pad nearest the viewer, the lowest on screen. Empty when the
-    /// plant has no pads. See `district_sign`.
+    /// Where each district sign may stand on screen, as flat `[sign index, css x, css y]`
+    /// triples, best first for each sign: just inside the front edges of the district's pad,
+    /// level with its machines, the one lowest on screen first (see `layout::sign_spots`). The
+    /// page shows a sign at its first spot clear of the machine names. Empty when the plant has
+    /// no pads. See `district_sign`.
     pub fn district_layout(&self) -> Vec<f32> {
         let Some(loaded) = &self.plant else {
             return Vec::new();
         };
         let camera = self.drawn_camera();
-        let mut out = Vec::with_capacity(loaded.layout.districts.len() * 3);
+        let depth = |[x, y]: [f32; 2]| camera.world_to_screen([x, y, 0.0])[1];
+        let mut out = Vec::new();
         for (i, pad) in loaded.layout.districts.iter().enumerate() {
-            let [x0, y0, x1, y1] = pad.rect;
-            let front = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]
-                .map(|[x, y]| camera.world_to_screen([x, y, 0.0]))
-                .into_iter()
-                .max_by(|a, b| a[1].total_cmp(&b[1]));
-            if let Some([x, y]) = front {
-                out.extend([i as f32, x / self.dpr, y / self.dpr]);
+            let machines: Vec<[f32; 4]> = loaded
+                .layout
+                .machines
+                .iter()
+                .zip(&loaded.districts)
+                .filter(|(_, district)| **district == pad.district)
+                .map(|(placed, _)| placed.footprint())
+                .collect();
+            for [x, y] in crate::layout::sign_spots(pad.rect, &machines, depth) {
+                let [sx, sy] = camera.world_to_screen([x, y, 0.0]);
+                out.extend([i as f32, sx / self.dpr, sy / self.dpr]);
             }
         }
         out
@@ -1973,6 +1982,7 @@ impl App {
         let machine_bounds = scene::machine_model_boxes(&laid, &self.models);
         let labels = plant.machine_labels();
         let district_labels = plant.district_labels();
+        let districts = plant.districts();
         let loaded = Loaded {
             machine_bounds,
             repo: plant.repo,
@@ -1989,6 +1999,7 @@ impl App {
                 .collect(),
             labels,
             district_labels,
+            districts,
             machines: plant.machines,
             layout: laid,
             framing,
