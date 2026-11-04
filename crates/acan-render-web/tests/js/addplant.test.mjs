@@ -2,6 +2,7 @@
 // each answer, and where the new plant goes beside the others. Run with:
 //   node --test crates/acan-render-web/tests/js/addplant.test.mjs
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { ADD_PATH, addNote, addRequest } from "../../www/addplant-model.js";
@@ -55,4 +56,12 @@ test("a new plant sits one gap right of the others, its top on the origin line",
 
 test("a plant whose bounds do not read falls back to the placeholder box", () => {
   assert.deepEqual(placeAfter(0, null), [PACK_GAP - PLACEHOLDER[0], 0 - PLACEHOLDER[1]]);
+});
+
+test("a codebase added while the page is open gets its own plate, painted with its name", () => {
+  const multi = readFileSync(new URL("../../www/multi.js", import.meta.url), "utf8");
+  const plates = readFileSync(new URL("../../www/nameplates.js", import.meta.url), "utf8");
+  assert.match(plates, /export function addPlate\(project\) \{\s*if \(layer === null \|\| plates\.has\(project\.id\)\) return;/);
+  assert.match(plates, /for \(const project of canvasState\.list\) addPlate\(project\);/);
+  assert.match(multi, /canvasState\.list\.push\(known\);\s*addPlate\(known\);\s*paintPlates\(\);/);
 });

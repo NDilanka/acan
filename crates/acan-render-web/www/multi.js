@@ -22,7 +22,7 @@ import {
   swapState,
   worldBounds,
 } from "./projects.js";
-import { installPlates, paintPlates } from "./nameplates.js";
+import { addPlate, installPlates, paintPlates } from "./nameplates.js";
 import { nearestGap, parkedClick, pinNear } from "./overlays.js";
 import { installParked } from "./parked.js";
 import { applyPlantScan, applyStreamed, feed, foldScanFrame, forgetToken, get, hold, setLink } from "./stream.js";
@@ -113,7 +113,10 @@ export async function attachProject(project) {
     if (box !== null) rightEdge = Math.max(rightEdge, box[2]);
   }
   const place = placeAfter(rightEdge, origin);
-  canvasState.list.push({ id: project.id, name: project.name, default: false, status: "mapping", head: null });
+  const known = { id: project.id, name: project.name, default: false, status: "mapping", head: null };
+  canvasState.list.push(known);
+  addPlate(known);
+  paintPlates();
   multi.origin.set(project.id, origin);
   multi.places.set(project.id, place);
   state.app.add_project(project.id, text, place[0], place[1]);
