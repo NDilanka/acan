@@ -47,17 +47,19 @@ pub fn ease(from: f32, to: f32, elapsed_ms: f32) -> f32 {
 }
 
 /// How far the screen points reach past the edges: `top` is the least y a point may have, and
-/// `right` the greatest x. Returns `[above, beyond]`, the reach past each, in the same units, zero
-/// where every point is inside.
+/// `right` the greatest x. The left edge is the screen's own, at x = 0. Returns `[above, beyond,
+/// left]`, the reach past each, in the same units, zero where every point is inside.
 #[must_use]
-pub fn overlap(points: &[[f32; 2]], top: f32, right: f32) -> [f32; 2] {
+pub fn overlap(points: &[[f32; 2]], top: f32, right: f32) -> [f32; 3] {
     let mut above = 0.0_f32;
     let mut beyond = 0.0_f32;
+    let mut left = 0.0_f32;
     for &[x, y] in points {
         above = above.max(top - y);
         beyond = beyond.max(x - right);
+        left = left.max(-x);
     }
-    [above, beyond]
+    [above, beyond, left]
 }
 
 #[cfg(test)]
@@ -106,10 +108,14 @@ mod tests {
 
     #[test]
     fn the_overlap_is_how_far_points_reach_past_the_edges() {
-        assert_eq!(overlap(&[[10.0, 100.0]], 60.0, 250.0), [0.0, 0.0]);
+        assert_eq!(overlap(&[[10.0, 100.0]], 60.0, 250.0), [0.0, 0.0, 0.0]);
         assert_eq!(
             overlap(&[[10.0, 40.0], [300.0, 200.0]], 60.0, 250.0),
-            [20.0, 50.0]
+            [20.0, 50.0, 0.0]
+        );
+        assert_eq!(
+            overlap(&[[-30.0, 100.0], [20.0, 90.0]], 60.0, 250.0),
+            [0.0, 0.0, 30.0]
         );
     }
 }

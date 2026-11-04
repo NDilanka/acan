@@ -93,13 +93,13 @@ fn fit_clear(
             .iter()
             .map(|&corner| camera.world_to_screen(corner))
             .collect();
-        let [above, beyond] = topdown::overlap(&screen, top, right);
-        if above == 0.0 && beyond == 0.0 {
+        let [above, beyond, left] = topdown::overlap(&screen, top, right);
+        if above == 0.0 && beyond == 0.0 && left == 0.0 {
             break;
         }
-        // The ground under the centre moves down by `above` and left by `beyond`, which moves the
-        // picture the same way.
-        camera.drag_ground(centre, [centre[0] - beyond, centre[1] + above]);
+        // The ground under the centre moves down by `above`, left by `beyond` and right by `left`,
+        // which moves the picture the same way.
+        camera.drag_ground(centre, [centre[0] - beyond + left, centre[1] + above]);
     }
 }
 
