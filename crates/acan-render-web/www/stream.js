@@ -3,9 +3,10 @@
 // the timeline scrubber holds the map in the past, the stream keeps every event in the hold
 // instead, and the scrubber folds them all when the map goes live again.
 import { linkQuiet } from "./chrome.js";
+import { noteEmptyList } from "./emptystart.js";
 import { reducedNow, requestRender } from "./main.js";
-import { listProjects, startMulti } from "./multi.js";
-import { apiPath, target } from "./projects.js";
+import { listProjects, placeOf, replaceProjectPlant, startMulti } from "./multi.js";
+import { apiPath, canvasState, target } from "./projects.js";
 import { createFeed, createHold, eventsBefore } from "./scrub.js";
 import { readFootprints } from "./statemachine-paint.js";
 import { noteTouch, readStateMachines, setStateMachines, touchOf } from "./statemachine.js";
@@ -141,7 +142,16 @@ export function foldScanFrame(scan) {
 async function reloadPlant(id) {
   try {
     const text = await get(apiPath(id, "/api/plant"));
-    state.app.set_plant(text);
+    // The plant on screen may have changed while it was read; the text is for `id` only.
+    if (target() !== id) return;
+    if (canvasState.multi) {
+      // The plant on a canvas changes in place: it keeps its place and its log, and the camera
+      // stays where the reader put it.
+      replaceProjectPlant(id, text);
+    } else {
+      const [x, y] = placeOf(id);
+      state.app.set_plant_at(text, x, y);
+    }
     scanner().applyPlant(text);
     requestRender();
   } catch (err) {
@@ -154,6 +164,11 @@ export async function start() {
   // An origin that lists several projects puts them all on one canvas. Any other answer, such as
   // 404 from an origin without the route, keeps the one-plant page.
   const projects = await listProjects(state.token);
+  // An origin with no codebase: no stream is opened and no project route is called.
+  if (projects !== null && projects.length === 0) {
+    enterEmpty();
+    return;
+  }
   if (projects !== null) {
     await startMulti(projects);
     return;
@@ -171,8 +186,19 @@ export async function start() {
   }
 }
 
+// The empty world: the page shows the grid and the "Add a codebase" hint at the "+". The first
+// codebase added turns the page on (see `attachFirst` in multi.js).
+function enterEmpty() {
+  state.empty = true;
+  noteEmptyList([]);
+  setLink("no codebase");
+  requestRender();
+}
+
 async function reload() {
   const log = await get(apiPath(target(), "/api/events?from=0"));
+  // The page turned into a canvas while the one-plant log was read; the canvas folds its own.
+  if (canvasState.multi) return;
   const kept = upto === null ? log : keepBefore(log, upto);
   if (hold.on) {
     hold.replace(JSON.parse(kept));
@@ -197,6 +223,7 @@ function connect() {
     setLink(`live · seq ${state.app.next_seq()}`);
   };
   ws.onmessage = (message) => {
+    if (state.socket !== ws) return;
     if (!applyStreamed(message.data)) ws.close();
   };
   ws.onclose = (event) => {
@@ -247,10 +274,25 @@ export function applyStreamed(data) {
   }
 }
 
+// Closes the one-plant stream as the page turns into a canvas. The socket is let go first, so its
+// close does not reconnect it.
+export function leaveOnePlant() {
+  const old = state.socket;
+  state.socket = null;
+  old?.close();
+}
+
+// Opens the one-plant stream again when the page could not turn into a canvas.
+export function resumeOnePlant() {
+  if (!freeze) void resync();
+}
+
 async function resync() {
-  if (!state.token) return;
+  // A reconnect the one-plant stream asked for before the page turned into a canvas.
+  if (!state.token || canvasState.multi) return;
   try {
     await reload();
+    if (canvasState.multi) return;
     connect();
   } catch (err) {
     console.error(err);

@@ -32,24 +32,61 @@ impl PublicRoot {
     /// Returns an error when `web` does not exist, contains the repository or the state
     /// directory, or lies inside the state directory.
     pub(crate) fn new(web: &Path, repo: &Path) -> anyhow::Result<Self> {
-        let root = web
-            .canonicalize()
-            .with_context(|| format!("opening the web directory {}", web.display()))?;
+        let checked = Self::open(web)?;
         let repo = repo
             .canonicalize()
             .with_context(|| format!("opening the repository {}", repo.display()))?;
         let state = repo.join(crate::STATE_DIR);
         ensure!(
-            !repo.starts_with(&root),
+            !repo.starts_with(&checked.root),
             "the web directory {} contains the repository; give it a dedicated public directory",
             web.display()
         );
         ensure!(
-            !root.starts_with(&state),
+            !checked.root.starts_with(&state),
             "the web directory {} is inside the private state directory",
             web.display()
         );
+        Ok(checked)
+    }
+
+    /// Accepts `web` as the public root before any repository is known. A server with no project
+    /// still serves its page from it. Each private folder must then be checked with
+    /// [`keep_out`](Self::keep_out).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `web` does not exist.
+    pub(crate) fn open(web: &Path) -> anyhow::Result<Self> {
+        let root = web
+            .canonicalize()
+            .with_context(|| format!("opening the web directory {}", web.display()))?;
         Ok(Self { root })
+    }
+
+    /// Checks that the private folder `dir`, such as the user's folder with its tokens and keys,
+    /// neither sits inside the root nor holds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `dir` does not exist, or when it and the root overlap.
+    pub(crate) fn keep_out(&self, dir: &Path) -> anyhow::Result<()> {
+        let private = dir
+            .canonicalize()
+            .with_context(|| format!("opening {}", dir.display()))?;
+        ensure!(
+            !private.starts_with(&self.root),
+            "the web directory {} contains the private folder {}; give it a dedicated public directory",
+            self.root.display(),
+            dir.display()
+        );
+        ensure!(
+            !self.root.starts_with(&private),
+            "the web directory {} is inside the private folder {}",
+            self.root.display(),
+            dir.display()
+        );
+        Ok(())
     }
 
     /// The file a request path names, or `None` when it is missing, not a plain path, or

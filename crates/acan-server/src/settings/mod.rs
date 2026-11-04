@@ -33,9 +33,11 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::STATE_DIR;
+use crate::add;
 use crate::auth::{Principal, Tokens};
 use crate::host::Host;
 use crate::http::{ApiError, bearer};
+use crate::projects::same_folder;
 use crate::registry::Registry;
 use crate::release::{self, VersionInfo};
 use crate::setup::setup_error;
@@ -450,11 +452,30 @@ pub(crate) struct Settings<C> {
     founder: MemberId,
     /// The settings file.
     file: PathBuf,
+    /// The user's own model client, which holds the keys when no project runs. Keys are user-wide,
+    /// so it reports the same keys a project's client does. `None` when the server has none.
+    keys: Option<Arc<C>>,
     /// The settings as the server last loaded or saved them. Replaced only after a change is
     /// written.
     stored: RwLock<Stored>,
     /// Held for a whole change, so two changes never interleave.
     changes: Mutex<()>,
+}
+
+/// The model client the settings read and change the keys through: the default project's client,
+/// or the user's own when no project runs.
+enum Keys<C> {
+    Project(Host<C>),
+    Own(Arc<C>),
+}
+
+impl<C: ModelClient> Keys<C> {
+    fn client(&self) -> &C {
+        match self {
+            Self::Project(host) => host.client(),
+            Self::Own(client) => client,
+        }
+    }
 }
 
 /// Who a request acts for, as the settings see it.
@@ -466,31 +487,29 @@ enum Caller {
 
 impl<C: ModelClient + 'static> Settings<C> {
     /// The settings `stored`, kept in `file`, for the projects in `projects`. `founder` is the
-    /// member whose token is the owner's.
+    /// member whose token is the owner's. `keys` is the user's own client, if there is one.
     pub(crate) fn new(
         file: PathBuf,
         stored: Stored,
         projects: Arc<Registry<C>>,
         founder: MemberId,
+        keys: Option<Arc<C>>,
     ) -> Self {
         Self {
             projects,
             founder,
             file,
+            keys,
             stored: RwLock::new(stored),
             changes: Mutex::new(()),
         }
     }
 
-    /// The principal the request's bearer token acts for. Each project keeps its own tokens, so
-    /// every project's table is asked.
+    /// The principal the request's bearer token acts for. Each project keeps its own tokens, and the
+    /// user's folder keeps the owner's, so both are asked.
     fn principal(&self, headers: &HeaderMap) -> Result<Principal, ApiError> {
         let token = bearer(headers).ok_or(ApiError::Unauthorized)?;
-        self.projects
-            .entries()
-            .iter()
-            .find_map(|entry| entry.host.tokens().principal(token))
-            .ok_or(ApiError::Unauthorized)
+        self.projects.principal(token).ok_or(ApiError::Unauthorized)
     }
 
     /// Who the request acts for. An agent is refused with `why`.
@@ -510,14 +529,25 @@ impl<C: ModelClient + 'static> Settings<C> {
             .clone()
     }
 
-    /// The project whose client holds the model keys: the default project.
-    fn default_host(&self) -> &Host<C> {
+    /// The model client the settings read and change the keys through: the default project's, or
+    /// the user's own when no project runs. `None` when neither is held.
+    fn keys(&self) -> Option<Keys<C>> {
         let entries = self.projects.entries();
+        let default_id = self.projects.default_id();
         let default = entries
             .iter()
-            .find(|entry| entry.id == self.projects.default_id())
-            .unwrap_or(&entries[0]);
-        &default.host
+            .find(|entry| entry.id == default_id)
+            .or_else(|| entries.first());
+        match default {
+            Some(entry) => Some(Keys::Project(entry.host.clone())),
+            None => self.keys.clone().map(Keys::Own),
+        }
+    }
+
+    /// The key status the settings show: the status of the keys client, or none when none is held.
+    fn key_status(&self) -> KeyStatus {
+        self.keys()
+            .map_or_else(KeyStatus::default, |keys| keys.client().key_status())
     }
 
     /// The document `GET /api/settings` returns to `caller`. It holds no key, and no setting this
@@ -531,7 +561,7 @@ impl<C: ModelClient + 'static> Settings<C> {
                 Caller::Member => "member",
             },
             editable: caller == Caller::Owner,
-            models: ModelsView::of(self.default_host().client().key_status()),
+            models: ModelsView::of(self.key_status()),
             harness: HarnessView::of(&stored.harness),
             projects: self.projects_view(stored),
             budgets: stored.budgets.clone(),
@@ -539,12 +569,35 @@ impl<C: ModelClient + 'static> Settings<C> {
             notifications: stored.notifications.clone(),
             applied: self.applied_fields(),
             project_changes: (caller == Caller::Owner).then(|| ProjectChangesView {
-                add: stored.projects.add.clone(),
+                add: self.pending_adds(stored),
                 remove: stored.projects.remove.clone(),
             }),
             tokens: (caller == Caller::Owner).then(|| self.tokens_view()),
             about: release::version_info(),
         }
+    }
+
+    /// The folders the next start adds: each folder in the settings that no running project serves.
+    /// A folder a live add opened is served, so it is not pending. It stays in the settings, so the
+    /// next start serves it too.
+    fn pending_adds(&self, stored: &Stored) -> Vec<String> {
+        let served: Vec<PathBuf> = self
+            .projects
+            .entries()
+            .iter()
+            .map(|entry| entry.host.repo().to_path_buf())
+            .collect();
+        stored
+            .projects
+            .add
+            .iter()
+            .filter(|folder| {
+                !served
+                    .iter()
+                    .any(|repo| same_folder(repo, Path::new(folder)))
+            })
+            .cloned()
+            .collect()
     }
 
     /// How each setting a change can name takes effect, by its dotted path. The projects listed
@@ -565,7 +618,7 @@ impl<C: ModelClient + 'static> Settings<C> {
             note(&mut applied, format!("harness.roles.{role}"));
         }
         note(&mut applied, "harness.custom_command".to_owned());
-        for provider in self.default_host().client().key_status().providers {
+        for provider in self.key_status().providers {
             note(&mut applied, format!("models.keys.{}", provider.name));
         }
         note(&mut applied, "projects.add".to_owned());
@@ -612,6 +665,7 @@ impl<C: ModelClient + 'static> Settings<C> {
             .entries()
             .iter()
             .find_map(|entry| entry.host.tokens().token_of(principal))
+            .or_else(|| self.projects.home()?.tokens.token_of(principal))
     }
 
     /// The owner's view of the tokens: the owner's token and each agent's, all masked.
@@ -811,25 +865,20 @@ async fn put_settings<C: ModelClient + 'static>(
     let patch = Patch::deserialize(&raw)
         .map_err(|_| ApiError::BadRequest("a JSON object of settings sections"))?;
     let _turn = state.changes.lock().await;
-    let running: Vec<(&str, PathBuf)> = state
-        .projects
-        .entries()
+    let entries = state.projects.entries();
+    let running: Vec<(&str, PathBuf)> = entries
         .iter()
         .map(|entry| (entry.id.as_str(), entry.host.repo().to_path_buf()))
         .collect();
-    let changes = validate::check(
-        &patch,
-        &state.stored(),
-        &running,
-        state.projects.default_id(),
-    )
-    .map_err(ApiError::Invalid)?;
+    let default_id = state.projects.default_id();
+    let changes = validate::check(&patch, &state.stored(), &running, &default_id)
+        .map_err(ApiError::Invalid)?;
 
-    let host = state.default_host();
     let mut keys = BTreeMap::new();
     if let Some(models) = &changes.models {
-        refuse_model_conflicts(&host.client().key_status(), models)?;
-        keys = apply_models(host, models).await?;
+        let held = state.keys().ok_or(ApiError::Conflict("no_codebase"))?;
+        refuse_model_conflicts(&held.client().key_status(), models)?;
+        keys = apply_models(held.client(), models).await?;
     }
     if changes
         .sections
@@ -852,6 +901,63 @@ async fn put_settings<C: ModelClient + 'static>(
         Json(json!({ "settings": settings, "applied": applied, "keys": keys })),
     )
         .into_response())
+}
+
+/// The body of `POST /api/settings/projects`: the folder to serve, as an absolute path.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddProject {
+    path: String,
+}
+
+/// `POST /api/settings/projects`. Only the owner may add a project. The folder is opened and its
+/// first scan starts at once, with no restart. The folder is also kept in the settings, so the next
+/// start serves it too. A failed open puts the settings back as they were.
+///
+/// Status codes: `202` with the new project's id, name and status `mapping`. `400` for a body with
+/// no path. `401` for an unknown token. `403` for any token but the owner's. `409` when the folder
+/// is already served, or the server was started without live adds. `422` with the reason when the
+/// path is not an existing absolute folder, sits inside another project's state folder, or is inside
+/// the public folder. `500` when the folder cannot be opened or the settings cannot be saved.
+async fn post_project<C: ModelClient + 'static>(
+    State(state): State<Arc<Settings<C>>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    if state.caller(&headers, ONLY_OWNER_CHANGES)? != Caller::Owner {
+        return Err(ApiError::Forbidden(ONLY_OWNER_CHANGES));
+    }
+    let request: AddProject = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::BadRequest("a JSON object with a path"))?;
+    let _turn = state.changes.lock().await;
+    let live = state
+        .projects
+        .live()
+        .ok_or(ApiError::Conflict("live_add_unavailable"))?;
+    let spec = add::check_new(&state.projects, &request.path, live.web.as_deref())?;
+    let folder = spec.repo.display().to_string();
+    let previous = state.stored();
+    let mut next = previous.clone();
+    next.projects.remove.retain(|kept| *kept != folder);
+    if !next.projects.add.contains(&folder) {
+        next.projects.add.push(folder);
+    }
+    file::save(&state.file, &next).map_err(|err| ApiError::Internal(err.into()))?;
+    *state.stored.write().unwrap_or_else(PoisonError::into_inner) = next;
+    match add::open(live, &state.projects, spec).await {
+        Ok((id, name)) => Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({ "id": id, "name": name, "status": "mapping" })),
+        )
+            .into_response()),
+        Err(err) => {
+            if let Err(restore) = file::save(&state.file, &previous) {
+                tracing::error!(error = %restore, "restoring the settings after a failed add");
+            }
+            *state.stored.write().unwrap_or_else(PoisonError::into_inner) = previous;
+            Err(ApiError::Internal(err))
+        }
+    }
 }
 
 /// Refuses a model change the current state does not allow, before any key is checked or saved.
@@ -905,10 +1011,9 @@ fn refuse_model_conflicts(status: &KeyStatus, models: &ModelsChange) -> Result<(
 /// Returns each key's result: `stored`, `rejected` or `unreachable` for a key that was checked, and
 /// `cleared` for a key that was removed.
 async fn apply_models<C: ModelClient>(
-    host: &Host<C>,
+    client: &C,
     models: &ModelsChange,
 ) -> Result<BTreeMap<String, &'static str>, ApiError> {
-    let client = host.client();
     let mut results = BTreeMap::new();
     for (provider, change) in &models.keys {
         let result = match change {
@@ -968,6 +1073,15 @@ async fn rotate_owner_token<C: ModelClient + 'static>(
             let step = format!("the owner token in project {}", entry.id);
             return Ok(rotation_failed(&step, &err));
         }
+    }
+    // The user's folder holds the owner's token too, so the old token stops working there as well.
+    if let Some(home) = state.projects.home()
+        && let Err(err) = home.tokens.replace_token(&home.dir, &owner, &token)
+    {
+        return Ok(rotation_failed(
+            "the owner token in the user's folder",
+            &err,
+        ));
     }
     Ok((StatusCode::OK, Json(json!({ "token": token }))).into_response())
 }
@@ -1072,7 +1186,8 @@ async fn test_role<C: ModelClient + 'static>(
     let role = name
         .parse::<Role>()
         .map_err(|_| ApiError::NotFound("role"))?;
-    let client = state.default_host().client();
+    let held = state.keys().ok_or(ApiError::Conflict("no_codebase"))?;
+    let client = held.client();
     let Some(destination) = client.destination(role) else {
         return Ok(Json(RoleTest::no_key(role)));
     };
@@ -1170,6 +1285,7 @@ pub(crate) fn routes<C: ModelClient + 'static>(state: Arc<Settings<C>>) -> Route
             "/api/settings",
             get(get_settings::<C>).put(put_settings::<C>),
         )
+        .route("/api/settings/projects", post(post_project::<C>))
         .route("/api/settings/update", post(post_update::<C>))
         .route("/api/settings/update/check", get(get_update_check::<C>))
         .route("/api/settings/tokens/owner", get(get_owner_token::<C>))

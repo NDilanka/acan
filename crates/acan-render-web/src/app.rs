@@ -45,6 +45,10 @@ const FIT_FLAG_RIGHT_CSS: f32 = 60.0;
 /// about 30 pixels, and four rows stack above a machine in a clash. Measured against the shots:
 /// three rows leave about 70 pixels of margin, four about 40.
 const FIT_FLAG_TOP_CSS: f32 = 100.0;
+/// Room a fly to a project leaves under its plant, in CSS pixels: the nameplate hangs 30 px under
+/// the plant's lowest ground corner and is about 26 px tall, and the bottom island, such as the
+/// notice that no model key is set, takes about 92 px under it with its margin, plus a 12 px gap.
+const FIT_PLATE_CSS: f32 = 160.0;
 /// Degrees of orbit per CSS pixel of drag.
 const ORBIT_DEG_PER_PX: f32 = 0.4;
 /// Degrees of tilt per CSS pixel of drag.
@@ -417,6 +421,22 @@ impl App {
     pub fn set_plant(&mut self, json: &str) -> Result<u32, JsError> {
         let plant = from_scan_json(json).map_err(js_err)?;
         Ok(self.load(plant))
+    }
+
+    /// Sets the plant on screen as `set_plant` does, with its layout moved to `(x, y)`, the place
+    /// the canvas gives the project. A canvas of several plants reads the plant on screen again
+    /// with this, so the plant stays where it was placed. Returns the machine count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON is not the plant's shape.
+    pub fn set_plant_at(&mut self, json: &str, x: f32, y: f32) -> Result<u32, JsError> {
+        let plant = from_scan_json(json).map_err(js_err)?;
+        let (kinds, edges) = plant.layout_input();
+        let laid = layout(&kinds, &edges);
+        let count = plant.machines.len() as u32;
+        self.show(plant, laid, [x, y], true);
+        Ok(count)
     }
 
     /// Checks one `plant-view/1` view, as `GET /api/orders/{order}/plant-view` answers it, and
@@ -1887,28 +1907,51 @@ impl App {
         let (kinds, edges, districts) = plant.layout_input();
         let laid = layout(&kinds, &edges, &districts);
         let count = plant.machines.len() as u32;
-        self.show(plant, laid, [0.0; 2]);
+        self.show(plant, laid, [0.0; 2], true);
         count
     }
 
-    /// Puts `plant` on screen with its layout from the origin moved to `offset`, and fits it.
-    fn show(&mut self, plant: Plant, at_origin: Layout, offset: [f32; 2]) {
+    /// Puts `plant` on screen with its layout from the origin moved to `offset`, and fits it when
+    /// `fit`. The log is kept either way, and the view folds from it again on the next frame. A
+    /// plant that replaces the one on screen in place keeps the camera and the drones' eases, cut,
+    /// so the drones land where the new plant puts them instead of dropping in again.
+    fn show(&mut self, plant: Plant, at_origin: Layout, offset: [f32; 2], fit: bool) {
+        // A fly to this plant aimed at its old framing; it lands on the new one instead.
+        let flying_here = !fit
+            && self.tour_move.as_ref().is_some_and(|movement| {
+                let old = self.plant.as_ref().map(|loaded| self.fly_pose(loaded));
+                old.is_some_and(|old| same_pose(old, movement.to))
+            });
         let (loaded, plan) = self.build(plant, at_origin, offset);
         self.scan.load(loaded.machines.len());
         self.plan = Some(plan);
         self.view = None;
         self.marks = Marks::default();
-        self.motion = self.new_motion();
+        if fit {
+            self.motion = self.new_motion();
+        } else {
+            self.motion.cut();
+        }
         self.card_clash = None;
-        self.tour_move = None;
-        self.top_move = None;
+        if fit {
+            self.tour_move = None;
+            self.top_move = None;
+        }
         self.ride = None;
         self.fit_after_leave = false;
         self.dirty = true;
+        if flying_here {
+            let to = self.fly_pose(&loaded);
+            if let Some(movement) = self.tour_move.as_mut() {
+                movement.to = to;
+            }
+        }
         self.plant = Some(loaded);
         self.refresh_fog();
-        // A new plant keeps the view it had, top-down or not.
-        self.fit_view();
+        if fit {
+            // A new plant keeps the view it had, top-down or not.
+            self.fit_view();
+        }
         self.sync_scene();
     }
 
@@ -2250,19 +2293,13 @@ impl App {
         self.camera.set_fog_bounds(bounds);
     }
 
-    /// The pivot and zoom that fit `framing` at the framing angles.
-    fn pose_of(&self, framing: &[Aabb]) -> tour::Pose {
+    /// The pivot and zoom that fit `framing` at the framing angles, keeping `room`.
+    fn pose_of(&self, framing: &[Aabb], room: FitRoom) -> tour::Pose {
         let mut probe = self.camera;
         let (azimuth, elevation) = self.framing_angles();
         probe.set_angles(azimuth, elevation);
         let clear = self.clear_for(elevation);
-        fit_clear(
-            &mut probe,
-            framing,
-            FIT_MARGIN_CSS * self.dpr,
-            self.fit_room(),
-            clear,
-        );
+        fit_clear(&mut probe, framing, FIT_MARGIN_CSS * self.dpr, room, clear);
         (probe.pivot(), probe.zoom())
     }
 
@@ -2383,8 +2420,9 @@ impl App {
     }
 
     /// Puts project `id`'s plant on the canvas with its layout's origin at `(x, y)`. The first
-    /// project goes on screen and is fitted; a later one is parked beside it. A project the canvas
-    /// holds already takes the new plant in place and keeps its log. Returns the machine count.
+    /// project on an empty canvas goes on screen and is fitted; a later one is parked beside it. A
+    /// project the canvas holds already takes the new plant in place and keeps its log, and the
+    /// camera stays where it is. Returns the machine count.
     ///
     /// # Errors
     ///
@@ -2393,12 +2431,15 @@ impl App {
         let plant = from_scan_json(json).map_err(js_err)?;
         let count = plant.machines.len() as u32;
         let at_origin = self.laid_out(&plant);
+        // A one-plant page that turns into a canvas has its plant on screen from `set_plant`,
+        // outside the order. The first project takes that plant's place.
+        let in_place = self.plant.is_some() && (self.project == id || self.order.is_empty());
         if !self.order.iter().any(|known| known == id) {
             self.order.push(id.to_owned());
         }
-        if self.plant.is_none() || self.project == id {
+        if self.plant.is_none() || in_place {
             self.project = id.to_owned();
-            self.show(plant, at_origin, [x, y]);
+            self.show(plant, at_origin, [x, y], !in_place);
             return Ok(count);
         }
         let (loaded, plan) = self.build(plant, at_origin, [x, y]);
@@ -2598,21 +2639,37 @@ impl App {
         if self.ride.is_some() {
             return false;
         }
-        let framing = if id == self.project {
-            self.plant.as_ref().map(|loaded| loaded.framing.clone())
+        let loaded = if id == self.project {
+            self.plant.as_ref()
         } else {
             self.parked
                 .iter()
                 .find(|parked| parked.id == id)
-                .map(|parked| parked.loaded.framing.clone())
+                .map(|parked| &parked.loaded)
         };
-        let Some(framing) = framing else {
+        let Some(loaded) = loaded else {
             return false;
         };
+        let to = self.fly_pose(loaded);
         self.turn = None;
-        let to = self.pose_of(&framing);
         self.ease_to(to, reduced);
         true
+    }
+
+    /// The pose a fly to a plant ends at: the plant fitted with its nameplate in view. The plate
+    /// hangs under the ground box the page's `boundsOf` gives, which the framing leaves out, so that
+    /// box joins the framing, and the bottom keeps the plate's room.
+    fn fly_pose(&self, loaded: &Loaded) -> tour::Pose {
+        let [x0, y0, x1, y1] = loaded.layout.bounds;
+        let base = loaded.base.bounds;
+        let mut framing = loaded.framing.clone();
+        framing.push(Aabb {
+            min: [x0.min(base.min[0]), y0.min(base.min[1]), 0.0],
+            max: [x1.max(base.max[0]), y1.max(base.max[1]), 0.0],
+        });
+        let mut room = self.fit_room();
+        room.bottom = room.bottom.max(FIT_PLATE_CSS * self.dpr);
+        self.pose_of(&framing, room)
     }
 
     /// The project whose plant holds the ground under the CSS point, or the nearest one. Empty
@@ -2892,6 +2949,12 @@ fn screen_box(camera: &Camera, b: [f32; 4], dpr: f32) -> [f32; 4] {
         },
     )
 }
+/// Whether two poses are the same up to float noise, as the same framing fitted twice gives.
+fn same_pose(a: tour::Pose, b: tour::Pose) -> bool {
+    let near = |x: f32, y: f32| (x - y).abs() <= 1e-3 * x.abs().max(y.abs()).max(1.0);
+    near(a.0[0], b.0[0]) && near(a.0[1], b.0[1]) && near(a.1, b.1)
+}
+
 /// The box round two boxes. An empty box adds nothing.
 fn joined(a: Aabb, b: Aabb) -> Aabb {
     let mut out = a;

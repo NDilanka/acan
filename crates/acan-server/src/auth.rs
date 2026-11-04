@@ -173,6 +173,28 @@ impl Tokens {
         Ok((tokens, minted))
     }
 
+    /// The owner's token in the tokens file of `dir`, read without writing the file. `None` when the
+    /// file is missing or holds no entry for `founder`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read or parsed.
+    pub fn owner_token_in(dir: &Path, founder: &MemberId) -> anyhow::Result<Option<Token>> {
+        let path = dir.join(TOKENS_FILE);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let entries: Vec<Entry> =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let owner = Principal::Member(founder.clone());
+        Ok(entries
+            .into_iter()
+            .find(|entry| entry.principal == owner)
+            .map(|entry| Token(entry.token)))
+    }
+
     /// The principal a token acts for, or `None` for an unknown token.
     #[must_use]
     pub fn principal(&self, token: &str) -> Option<Principal> {
