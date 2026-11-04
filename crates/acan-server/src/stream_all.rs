@@ -16,6 +16,10 @@
 //! A token that is revoked, such as by an owner's rotation, closes the socket with 4001 and the
 //! reason `token revoked`. The client must then authenticate again with the new token.
 //!
+//! Each project's scan is live as well. After the backlog, each project sends its `scan_status`
+//! frame, and then each step of its scan as `scan_progress`, tagged with the project as touches
+//! are. Scan frames are never resumed: a project that lags sends its status again.
+//!
 //! Ids repeat across projects, so a client that merges events keys them by project and id.
 
 use std::collections::BTreeMap;
@@ -38,6 +42,7 @@ use crate::host::Host;
 use crate::http::bearer;
 use crate::redact;
 use crate::registry::{Entry, Registry};
+use crate::scan_feed::{Frame, ScanFeed, Status, StatusFrame};
 use crate::stream::{
     AuthFrame, CLOSE_INTERNAL, CLOSE_RESUME, CLOSE_REVOKED, CLOSE_SHUTDOWN, CLOSE_UNAUTHORIZED,
     Offer, REVOKED_REASON, Resume, close, next_text, shutting_down,
@@ -73,6 +78,10 @@ enum Live {
     Closed,
     /// A live transition touch. Touches are not resumable, so they never close the socket.
     Touch(Box<TransitionTouch>),
+    /// One step of a project's scan. Scan frames are not resumable either.
+    Scan(Box<Frame>),
+    /// A project's scan status, sent again when its forwarder lagged and joined the scan anew.
+    ScanStatus(Box<Status>),
 }
 
 /// One touch frame of a project, as the multiplexed stream frames it: the touch's own fields, with
@@ -82,6 +91,15 @@ struct ProjectTouch<'a> {
     project: &'a str,
     #[serde(flatten)]
     touch: &'a TransitionTouch,
+}
+
+/// One scan frame of a project, as the multiplexed stream frames it: the frame's own fields, with
+/// the project it belongs to.
+#[derive(Serialize)]
+struct ProjectScan<'a, T: Serialize> {
+    project: &'a str,
+    #[serde(flatten)]
+    frame: &'a T,
 }
 
 /// Upgrades `GET /api/stream/all`.
@@ -179,6 +197,8 @@ async fn pump<C: ModelClient + 'static>(
     // the copy that arrives second. Each project's forwarder feeds one channel.
     let (tx, mut live) = mpsc::channel::<(usize, Live)>(FAN_IN_BUFFER);
     let mut forwarders = JoinSet::new();
+    // Each project's scan is joined with its status, which is sent once its backlog is in.
+    let mut scan_statuses = Vec::with_capacity(members.len());
     for (index, member) in members.iter().enumerate() {
         forwarders.spawn(forward(index, member.host.subscribe(), tx.clone()));
         forwarders.spawn(forward_touches(
@@ -186,10 +206,14 @@ async fn pump<C: ModelClient + 'static>(
             member.host.subscribe_touches(),
             tx.clone(),
         ));
+        let feed = member.host.scan_feed();
+        let (status, scans) = feed.join();
+        scan_statuses.push(status);
+        forwarders.spawn(forward_scan(index, feed, scans, tx.clone()));
     }
     drop(tx);
 
-    for member in &mut members {
+    for (index, member) in members.iter_mut().enumerate() {
         let backlog = match member.host.store().load_from(member.resume.next()).await {
             Ok(events) => events,
             Err(err) => {
@@ -216,6 +240,10 @@ async fn pump<C: ModelClient + 'static>(
                     return;
                 }
             }
+        }
+        let status = StatusFrame::of(&scan_statuses[index]);
+        if !send_scan(&mut socket, &member.id, &status).await {
+            return;
         }
     }
 
@@ -263,6 +291,19 @@ async fn pump<C: ModelClient + 'static>(
                 Some((index, Live::Touch(touch))) => {
                     let member = &members[index];
                     if !send_touch(&mut socket, &member.id, &touch).await {
+                        return;
+                    }
+                }
+                Some((index, Live::Scan(frame))) => {
+                    let member = &members[index];
+                    if !send_scan(&mut socket, &member.id, &*frame).await {
+                        return;
+                    }
+                }
+                Some((index, Live::ScanStatus(status))) => {
+                    let member = &members[index];
+                    let status = StatusFrame::of(&status);
+                    if !send_scan(&mut socket, &member.id, &status).await {
                         return;
                     }
                 }
@@ -327,6 +368,32 @@ async fn forward(
     }
 }
 
+/// Passes one project's live scan frames to the socket's loop. A scan frame is not resumable, so a
+/// lag sends the project's status again, from a join that starts a new receiver. A closed channel
+/// ends the forwarder.
+async fn forward_scan(
+    index: usize,
+    feed: Arc<ScanFeed>,
+    mut scans: broadcast::Receiver<Frame>,
+    out: mpsc::Sender<(usize, Live)>,
+) {
+    loop {
+        let item = match scans.recv().await {
+            Ok(frame) => Live::Scan(Box::new(frame)),
+            Err(RecvError::Lagged(missed)) => {
+                tracing::debug!(missed, "a multiplexed stream skipped live scan frames");
+                let (status, joined) = feed.join();
+                scans = joined;
+                Live::ScanStatus(Box::new(status))
+            }
+            Err(RecvError::Closed) => return,
+        };
+        if out.send((index, item)).await.is_err() {
+            return;
+        }
+    }
+}
+
 /// Passes one project's live transition touches to the socket's loop. A touch is not resumable, so
 /// a lag skips the touches missed and the forwarder goes on. A closed channel ends it.
 async fn forward_touches(
@@ -358,11 +425,26 @@ async fn forward_touches(
 
 /// Sends one touch frame, tagged with its project. `false` means the socket is gone.
 async fn send_touch(socket: &mut WebSocket, project: &str, touch: &TransitionTouch) -> bool {
-    let frame = ProjectTouch { project, touch };
-    let text = match serde_json::to_string(&frame) {
+    send_tagged(
+        socket,
+        &ProjectTouch { project, touch },
+        "a transition touch",
+    )
+    .await
+}
+
+/// Sends one scan frame, tagged with its project. `false` means the socket is gone.
+async fn send_scan<T: Serialize>(socket: &mut WebSocket, project: &str, frame: &T) -> bool {
+    send_tagged(socket, &ProjectScan { project, frame }, "a scan frame").await
+}
+
+/// Encodes one project-tagged frame as text and sends it. A frame that does not encode is logged
+/// and skipped, and the stream goes on.
+async fn send_tagged<T: Serialize>(socket: &mut WebSocket, frame: &T, what: &str) -> bool {
+    let text = match serde_json::to_string(frame) {
         Ok(text) => text,
         Err(err) => {
-            tracing::error!(error = %err, "encoding a transition touch for the stream failed");
+            tracing::error!(error = %err, "encoding {what} for the stream failed");
             return true;
         }
     };
@@ -556,6 +638,79 @@ mod tests {
             .expect("a resume control frame arrives before the close");
         assert_eq!(control["control"], "resume");
         assert_eq!(control["project"], "alpha", "the control frame names alpha");
+        running.stop().await.expect("the server stops");
+    }
+
+    /// Reads frames, parsed as JSON, until `done` says the frames read so far end the wait.
+    async fn read_until(socket: &mut Socket, done: impl Fn(&[Value]) -> bool) -> Vec<Value> {
+        let mut frames = Vec::new();
+        while !done(&frames) {
+            let message = timeout(WAIT, socket.next())
+                .await
+                .expect("the stream went quiet before the wait ended")
+                .expect("the stream stayed open")
+                .expect("the stream did not fail");
+            if let WsMessage::Text(text) = message {
+                frames.push(serde_json::from_str(&text).expect("a JSON frame"));
+            }
+        }
+        frames
+    }
+
+    /// Each project's scan status arrives tagged with its project, and a rescan of one project
+    /// streams its steps tagged with that project alone.
+    #[tokio::test]
+    async fn a_rescan_streams_its_steps_tagged_with_their_project() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (running, owner) = boot(dir.path()).await;
+        let mut socket = connect(&running, &owner).await;
+        let subscription = json!({ "from": {} });
+        socket
+            .send(WsMessage::Text(subscription.to_string().into()))
+            .await
+            .expect("the subscription is sent");
+        let statuses = read_until(&mut socket, |frames| {
+            frames.iter().filter(|f| f["type"] == "scan_status").count() == 2
+        })
+        .await;
+        let status_of: Vec<(&str, &str)> = statuses
+            .iter()
+            .filter(|f| f["type"] == "scan_status")
+            .map(|f| {
+                (
+                    f["project"].as_str().unwrap_or(""),
+                    f["stage"].as_str().unwrap_or(""),
+                )
+            })
+            .collect();
+        assert_eq!(
+            status_of,
+            vec![("alpha", "done"), ("beta", "done")],
+            "each project's status is tagged with it and reads done"
+        );
+
+        let response = reqwest::Client::new()
+            .post(format!("http://{}/api/p/alpha/scan", running.local_addr))
+            .bearer_auth(&owner)
+            .send()
+            .await
+            .expect("the rescan request is sent");
+        assert!(response.status().is_success(), "the rescan is accepted");
+        let live = read_until(&mut socket, |frames| {
+            frames
+                .iter()
+                .any(|f| f["type"] == "scan_progress" && f["stage"] == "done")
+        })
+        .await;
+        let steps: Vec<&Value> = live
+            .iter()
+            .filter(|f| f["type"] == "scan_progress")
+            .collect();
+        assert!(
+            steps.iter().all(|f| f["project"] == "alpha"),
+            "every step of alpha's rescan is tagged alpha"
+        );
+        assert_eq!(steps.first().map(|f| &f["stage"]), Some(&json!("skeleton")));
         running.stop().await.expect("the server stops");
     }
 }

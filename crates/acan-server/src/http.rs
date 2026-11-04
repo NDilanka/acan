@@ -42,6 +42,7 @@ use crate::public::{self, PublicRoot};
 use crate::registry::{self, Registry};
 use crate::release::{self, BugReport, UpdateStatus, VersionInfo};
 use crate::ruling::{self, RulingBody, RulingDraftView};
+use crate::scan_feed::Summary as ScanSummary;
 use crate::settings::data::{self, DataOwner};
 use crate::settings::{self, Settings};
 use crate::vision::{self, Side, VisionWitness};
@@ -256,6 +257,9 @@ pub enum ApiError {
     Refused(McpError),
     /// The project's writer has stopped, so the project cannot take a request.
     ProjectUnavailable,
+    /// The project's codebase is still mapping, so it takes no writes yet. Retry once the scan
+    /// reports done.
+    NotMapped,
     /// Something on the server failed. The detail goes to the log, not the response.
     Internal(anyhow::Error),
 }
@@ -300,6 +304,11 @@ impl IntoResponse for ApiError {
                 Json(json!({ "error": "project_unavailable", "what": "project" })),
             )
                 .into_response(),
+            Self::NotMapped => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "not_mapped", "what": "codebase" })),
+            )
+                .into_response(),
             Self::Internal(err) => {
                 tracing::error!(error = ?err, "request failed");
                 (
@@ -317,6 +326,7 @@ impl From<SubmitError> for ApiError {
         match err {
             SubmitError::Rejected(rejection) => Self::Rejected(rejection),
             SubmitError::Internal(err) => Self::Internal(err),
+            SubmitError::NotMapped => Self::NotMapped,
         }
     }
 }
@@ -332,6 +342,7 @@ impl From<IntentError> for ApiError {
         match err {
             IntentError::Refused(err) => Self::Refused(err),
             IntentError::Internal(err) => Self::Internal(err),
+            IntentError::NotMapped => Self::NotMapped,
         }
     }
 }
@@ -457,6 +468,9 @@ struct PlantResponse {
     plant: Plant,
     contract: ContractView,
     vision: VisionView,
+    /// Where the codebase's scan is. A page reads `stage` to tell a mapping project from a mapped
+    /// one, and the stream carries the filled modules.
+    scan: ScanSummary,
 }
 
 async fn get_plant<C: ModelClient + 'static>(
@@ -465,6 +479,7 @@ async fn get_plant<C: ModelClient + 'static>(
 ) -> Result<Json<PlantResponse>, ApiError> {
     authenticate(&host, bearer(&headers))?;
     let plant = host.scan().plant.clone();
+    let scan = host.scan_feed().status().summary();
     // The plant still loads when the protected head cannot be read. The contract then reads absent.
     let contract = match contract_of(&host).await {
         Ok(contract) => contract,
@@ -480,6 +495,7 @@ async fn get_plant<C: ModelClient + 'static>(
         plant,
         contract,
         vision: vision_of(&host),
+        scan,
     }))
 }
 
@@ -980,6 +996,20 @@ fn invalid_request(detail: &str) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A codebase still mapping answers 503 with its reason, so a client can retry once the scan
+    /// reports done.
+    #[tokio::test]
+    async fn a_codebase_still_mapping_answers_503_with_its_reason() {
+        let response = ApiError::NotMapped.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("the body is read");
+        let json: Value = serde_json::from_slice(&body).expect("the body is JSON");
+        assert_eq!(json["error"], "not_mapped");
+        assert_eq!(json["what"], "codebase");
+    }
 
     fn vision_role(off_reason: Option<&'static str>) -> RoleStatus {
         RoleStatus {

@@ -1559,9 +1559,11 @@ async fn an_agent_never_reads_a_scope_draft_through_the_events_or_the_stream() {
         frames.iter().all(|frame| !frame.contains(DRAFT_MARKER)),
         "the agent's stream carries no draft: {frames:?}"
     );
+    // The scan's status frame is live, not an event, so the events are the frames without a type.
     let streamed: Vec<Value> = frames
         .iter()
-        .map(|frame| serde_json::from_str(frame).expect("a stream event"))
+        .map(|frame| serde_json::from_str(frame).expect("a stream frame"))
+        .filter(|frame: &Value| frame.get("type").is_none())
         .collect();
     assert_eq!(
         streamed.as_slice(),

@@ -9,6 +9,10 @@
 //! Between the events, a stream sends each live transition touch as a text frame,
 //! `{"type": "transition_touched", ...}`. A touch is not in the log: it has no seq, a resume never
 //! replays it, and a lagging stream skips the touches it missed without closing.
+//!
+//! A stream also sends the project's scan. On connect it sends one `scan_status` frame with the
+//! scan's status, then each step of the scan as a `scan_progress` frame. Scan frames are live
+//! only, as touches are: no seq, no replay, and a lagging stream sends the status again.
 
 use std::time::Duration;
 
@@ -18,7 +22,7 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::watch;
 
@@ -26,6 +30,7 @@ use crate::auth::{Principal, subscribe_revocations};
 use crate::host::Host;
 use crate::http::{ApiError, authenticate, bearer};
 use crate::redact;
+use crate::scan_feed::StatusFrame;
 use crate::touches::TransitionTouch;
 
 /// How long a connection without an `Authorization` header has to send its token frame, and the
@@ -182,6 +187,11 @@ async fn pump<C: ModelClient>(
     // Touches are not in the log, so they bypass `Resume` and are not part of the backlog.
     let mut touches = host.subscribe_touches();
     let mut touches_open = true;
+    // The scan is live too, and joined with its status, so the status sent below and the frames
+    // after it cover the scan exactly.
+    let feed = host.scan_feed();
+    let (scan_status, mut scan) = feed.join();
+    let mut scan_open = true;
     let backlog = match host.store().load_from(from).await {
         Ok(events) => events,
         Err(err) => {
@@ -210,6 +220,9 @@ async fn pump<C: ModelClient>(
                 return;
             }
         }
+    }
+    if !send_scan(&mut socket, &StatusFrame::of(&scan_status)).await {
+        return;
     }
 
     #[cfg(test)]
@@ -276,6 +289,24 @@ async fn pump<C: ModelClient>(
                 // No sender is left, so no more touches come. The events still stream.
                 Err(RecvError::Closed) => touches_open = false,
             },
+            frame = scan.recv(), if scan_open => match frame {
+                Ok(frame) => {
+                    if !send_scan(&mut socket, &frame).await {
+                        return;
+                    }
+                }
+                // The scan's frames are live only, so the frames this stream missed are not sent
+                // again. The status is, and the stream joins the scan again from it.
+                Err(RecvError::Lagged(missed)) => {
+                    tracing::debug!(missed, "a stream skipped live scan frames");
+                    let (status, joined) = feed.join();
+                    scan = joined;
+                    if !send_scan(&mut socket, &StatusFrame::of(&status)).await {
+                        return;
+                    }
+                }
+                Err(RecvError::Closed) => scan_open = false,
+            },
         }
     }
 }
@@ -283,10 +314,22 @@ async fn pump<C: ModelClient>(
 /// Sends one touch frame as text. A touch is not in the log, so it has no seq and no resume
 /// bookkeeping. `false` means the socket is gone.
 async fn send_touch(socket: &mut WebSocket, touch: &TransitionTouch) -> bool {
-    let json = match serde_json::to_string(touch) {
+    send_frame(socket, touch, "a transition touch").await
+}
+
+/// Sends one scan frame as text. A scan frame is not in the log either. `false` means the socket
+/// is gone.
+async fn send_scan<T: Serialize>(socket: &mut WebSocket, frame: &T) -> bool {
+    send_frame(socket, frame, "a scan frame").await
+}
+
+/// Encodes one live frame as text and sends it. A frame that does not encode is logged and
+/// skipped, and the stream goes on.
+async fn send_frame<T: Serialize>(socket: &mut WebSocket, frame: &T, what: &str) -> bool {
+    let json = match serde_json::to_string(frame) {
         Ok(json) => json,
         Err(err) => {
-            tracing::error!(error = %err, "encoding a transition touch for the stream failed");
+            tracing::error!(error = %err, "encoding {what} for the stream failed");
             return true;
         }
     };
@@ -417,6 +460,7 @@ mod tests {
     };
     use acan_llm::{Stub, UsageLedger};
     use futures_util::StreamExt;
+    use serde_json::Value;
     use tokio::net::TcpStream;
     use tokio::time::timeout;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -468,6 +512,7 @@ mod tests {
     }
 
     /// Reads events until the server closes the stream. Returns the events and the close frame.
+    /// A live frame, such as a scan frame, has a `type` and is not an event, so it is skipped.
     async fn drain(socket: &mut Socket) -> (Vec<Stamped>, u16, String) {
         let mut events = Vec::new();
         loop {
@@ -476,7 +521,12 @@ mod tests {
                 .expect("the stream went quiet without closing");
             match message {
                 Some(Ok(WsMessage::Text(text))) => {
-                    events.push(serde_json::from_str::<Stamped>(&text).expect("a stream event"));
+                    let value: Value = serde_json::from_str(&text).expect("a JSON frame");
+                    if value.get("type").is_none() {
+                        events.push(
+                            serde_json::from_value::<Stamped>(value).expect("a stream event"),
+                        );
+                    }
                 }
                 Some(Ok(WsMessage::Close(Some(frame)))) => {
                     return (events, u16::from(frame.code), frame.reason.to_string());
@@ -547,6 +597,197 @@ mod tests {
                 .collect::<Vec<_>>(),
             (0..next).collect::<Vec<u64>>(),
             "every event before the close arrived in order, with none dropped"
+        );
+        running.stop().await.expect("the server stops");
+    }
+
+    /// The owner's token, which the first start minted.
+    fn owner_token(running: &Running) -> String {
+        running
+            .owner_token
+            .as_ref()
+            .expect("the first start mints the owner token")
+            .as_str()
+            .to_owned()
+    }
+
+    /// Reads text frames, parsed as JSON, until `done` says the frames read so far end the wait.
+    async fn read_until(socket: &mut Socket, done: impl Fn(&[Value]) -> bool) -> Vec<Value> {
+        let mut frames = Vec::new();
+        while !done(&frames) {
+            let message = timeout(WAIT, socket.next())
+                .await
+                .expect("the stream went quiet before the wait ended")
+                .expect("the stream stayed open")
+                .expect("the stream did not fail");
+            if let WsMessage::Text(text) = message {
+                frames.push(serde_json::from_str(&text).expect("a JSON frame"));
+            }
+        }
+        frames
+    }
+
+    /// Whether a frame carries the live `type` tag `kind`.
+    fn is_type(frame: &Value, kind: &str) -> bool {
+        frame.get("type").and_then(Value::as_str) == Some(kind)
+    }
+
+    /// Whether a frame is an `IndexUpdated` event.
+    fn is_index_updated(frame: &Value) -> bool {
+        frame.pointer("/event/type").and_then(Value::as_str) == Some("index_updated")
+    }
+
+    /// Adds a file to the repository at `dir`, so the next rescan finds a new revision and commits
+    /// it. A rescan to the same revision commits nothing.
+    fn add_file(dir: &std::path::Path) {
+        std::fs::write(
+            dir.join("model/save.ts"),
+            "export function save() {\n  return 2;\n}\n",
+        )
+        .expect("write the added file");
+    }
+
+    /// Runs a rescan over HTTP and returns the events it committed, as the response shows them.
+    async fn rescan(running: &Running, token: &str) -> Vec<Value> {
+        reqwest::Client::new()
+            .post(format!("http://{}/api/scan", running.local_addr))
+            .bearer_auth(token)
+            .send()
+            .await
+            .expect("the rescan request is sent")
+            .error_for_status()
+            .expect("the rescan is accepted")
+            .json()
+            .await
+            .expect("the rescan returns its events")
+    }
+
+    /// The log from seq 0, as the owner reads it over HTTP.
+    async fn log_of(running: &Running, token: &str) -> Vec<Value> {
+        reqwest::Client::new()
+            .get(format!("http://{}/api/events?from=0", running.local_addr))
+            .bearer_auth(token)
+            .send()
+            .await
+            .expect("the log request is sent")
+            .json()
+            .await
+            .expect("the log is a JSON array")
+    }
+
+    /// A rescan's steps reach a connected client as live `scan_progress` frames, in order, and
+    /// none of them is in the log. The log gains only the events the scan commits.
+    #[tokio::test]
+    async fn a_rescan_streams_its_steps_live_and_logs_only_its_commit() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let running = boot(dir.path()).await;
+        let token = owner_token(&running);
+        let mut socket = connect(&running, &token).await;
+        let backlog = read_until(&mut socket, |frames| {
+            frames.iter().any(|frame| is_type(frame, "scan_status"))
+        })
+        .await;
+        let status = backlog.last().expect("the status frame ends the backlog");
+        assert_eq!(status["stage"], "done", "a mapped project's scan is done");
+        let logged_before = backlog.iter().filter(|f| f.get("seq").is_some()).count();
+        let indexed_before = backlog.iter().filter(|f| is_index_updated(f)).count();
+
+        add_file(dir.path());
+        let committed = rescan(&running, &token).await;
+        assert!(!committed.is_empty(), "the rescan commits the added file");
+        let live = read_until(&mut socket, |frames| {
+            let done = frames
+                .iter()
+                .any(|f| is_type(f, "scan_progress") && f["stage"] == "done");
+            let events = frames.iter().filter(|f| f.get("type").is_none()).count();
+            done && events >= committed.len()
+        })
+        .await;
+
+        let steps: Vec<&str> = live
+            .iter()
+            .filter(|f| is_type(f, "scan_progress"))
+            .map(|f| f["stage"].as_str().expect("a step has a stage"))
+            .collect();
+        assert_eq!(
+            steps.first(),
+            Some(&"skeleton"),
+            "the scan opens on the skeleton"
+        );
+        assert_eq!(steps.last(), Some(&"done"), "the scan ends done");
+        assert!(
+            steps.contains(&"states"),
+            "the state machines resolve after the modules"
+        );
+        assert!(
+            live.iter()
+                .filter(|f| is_type(f, "scan_progress"))
+                .any(|f| f.get("module").is_some()),
+            "a module frame names the module that filled"
+        );
+        assert!(
+            live.iter()
+                .filter(|f| is_type(f, "scan_progress"))
+                .all(|f| f.get("seq").is_none()),
+            "a scan frame has no seq"
+        );
+        let streamed: Vec<&Value> = live.iter().filter(|f| f.get("type").is_none()).collect();
+        let streamed_seqs: Vec<&Value> = streamed.iter().map(|e| &e["seq"]).collect();
+        let committed_seqs: Vec<&Value> = committed.iter().map(|e| &e["seq"]).collect();
+        assert_eq!(
+            streamed_seqs, committed_seqs,
+            "the stream sends the committed events in the order the rescan returned them"
+        );
+
+        let log = log_of(&running, &token).await;
+        assert_eq!(
+            log.len(),
+            logged_before + committed.len(),
+            "the log gains the committed events and no scan frame"
+        );
+        assert!(
+            log.iter()
+                .all(|e| e.get("seq").is_some() && e.get("type").is_none()),
+            "every logged entry is an event"
+        );
+        assert_eq!(
+            log.iter().filter(|e| is_index_updated(e)).count(),
+            indexed_before + committed.iter().filter(|e| is_index_updated(e)).count(),
+            "each scan commits its IndexUpdated once"
+        );
+        running.stop().await.expect("the server stops");
+    }
+
+    /// A stream that connects after a scan replays the events and sends the status. The steps of
+    /// the scan are live only, so they are not replayed.
+    #[tokio::test]
+    async fn a_resumed_stream_gets_the_status_and_not_the_steps_of_a_past_scan() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let running = boot(dir.path()).await;
+        let token = owner_token(&running);
+        add_file(dir.path());
+        let committed = rescan(&running, &token).await;
+        assert!(!committed.is_empty(), "the rescan commits the added file");
+
+        let mut socket = connect(&running, &token).await;
+        let frames = read_until(&mut socket, |frames| {
+            frames.iter().any(|frame| is_type(frame, "scan_status"))
+        })
+        .await;
+        assert!(
+            frames.iter().all(|frame| !is_type(frame, "scan_progress")),
+            "no step of the past scan is replayed"
+        );
+        let status = frames.last().expect("the status frame ends the backlog");
+        assert_eq!(
+            status["stage"], "done",
+            "the status reads done after the scan"
+        );
+        let events = frames.iter().filter(|f| f.get("type").is_none()).count();
+        assert_eq!(
+            events,
+            log_of(&running, &token).await.len(),
+            "the backlog holds every logged event"
         );
         running.stop().await.expect("the server stops");
     }

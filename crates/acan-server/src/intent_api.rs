@@ -34,6 +34,8 @@ pub(crate) enum IntentError {
     Refused(McpError),
     /// The origin or its log failed. The detail goes to the log only.
     Internal(anyhow::Error),
+    /// The codebase is still mapping, so the project takes no writes yet.
+    NotMapped,
 }
 
 /// The answer of one intent call.
@@ -238,6 +240,7 @@ async fn submit<C: ModelClient>(
     .map_err(|err| match err {
         SubmitError::Rejected(rejection) => IntentError::Refused(refusal(rejection, action)),
         SubmitError::Internal(err) => IntentError::Internal(err),
+        SubmitError::NotMapped => IntentError::NotMapped,
     })
 }
 
