@@ -247,13 +247,14 @@ impl Look {
     }
 }
 
-/// Dark: a dark desk with a light grid. The paper models stay white.
+/// Dark: a dark desk with a light grid. The paper models stay white. The belts are a grey well
+/// under the machines' faces, so the white machines stand out on the desk.
 const DARK: [[f32; 4]; PALETTE_LEN] = [
     rgb(0x262624, 1.0),  // page
     rgb(0xd99a1e, 1.0),  // lit
     rgb(0xf2f2f2, 1.0),  // glass
-    rgb(0x000000, 0.30), // contact shadow
-    rgb(0xffffff, 0.6),  // grid, at its alpha
+    rgb(0x000000, 0.70), // contact shadow
+    rgb(0xffffff, 0.8),  // grid, at its alpha
     rgb(0x26262a, 1.0),  // hi
     rgb(0x8a8a8f, 1.0),  // mid
     rgb(0xb4b4b8, 1.0),  // lo
@@ -266,8 +267,8 @@ const DARK: [[f32; 4]; PALETTE_LEN] = [
     rgb(AGENT_HUES[1], 1.0),
     rgb(AGENT_HUES[2], 1.0),
     rgb(AGENT_HUES[3], 1.0),
-    rgb(0xe9e9e9, 1.0), // belt
-    rgb(0xb8b8b8, 1.0), // belt edge
+    rgb(0x6b6b70, 1.0), // belt
+    rgb(0x4e4e53, 1.0), // belt edge
     rgb(0x767676, 1.0), // contour and crease
     rgb(0xa8a8a8, 1.0), // seam
 ];
@@ -621,15 +622,25 @@ mod tests {
     }
 
     #[test]
-    fn a_belt_is_a_step_darker_than_a_plate_top() {
+    fn a_belt_sits_under_the_plate_tops_with_a_darker_edge() {
         for look in LOOKS {
             let palette = look.colours();
             let belt = ink(palette[SLOT_BELT as usize]);
-            assert!(
-                belt > PAPER_TOP && belt < PAPER_LIT * 2.0,
-                "{look:?} belt ink {belt}"
-            );
+            // Every belt is below a plate top and stays a grey, never black.
+            assert!(belt > PAPER_TOP && belt < 0.7, "{look:?} belt ink {belt}");
             assert!(ink(palette[SLOT_BELT_EDGE as usize]) > belt, "{look:?}");
+            if look == Look::Dark {
+                // On the dark desk the belt is softer than the machines: darker than the darkest
+                // plate face, and still clear of the desk.
+                assert!(belt > PAPER_DARK, "{look:?} belt ink {belt}");
+                assert!(
+                    contrast(palette[SLOT_BELT as usize], palette[SLOT_PAGE as usize]) >= 2.0,
+                    "{look:?} belt reads on the desk"
+                );
+            } else {
+                // On a light desk a belt is one step below a plate top.
+                assert!(belt < PAPER_LIT * 2.0, "{look:?} belt ink {belt}");
+            }
         }
     }
 
