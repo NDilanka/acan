@@ -28,7 +28,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::STATE_DIR;
@@ -40,7 +40,7 @@ use crate::release::{self, VersionInfo};
 use crate::setup::setup_error;
 
 pub(crate) use file::load;
-use validate::{KeyChange, ModelsChange, Patch, ProjectsPatch};
+use validate::{KeyChange, ModelsChange, Patch};
 
 /// The file the settings are kept in, beside the keys file.
 pub(crate) const FILE: &str = "settings.json";
@@ -150,17 +150,19 @@ pub(crate) struct Harness {
     pub(crate) custom_command: Vec<String>,
 }
 
-/// The projects a change records. Adds and removals take effect at the next start, and the worker
-/// counts are what each project runs with.
+/// The projects a change records. Adds and removals take effect at the next start, and stay in
+/// effect until a later change undoes them. The worker counts are what each project runs with.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct Projects {
     /// The local worker count of each project, by id. A project with no entry runs the count the
     /// server started with.
     pub(crate) workers: BTreeMap<String, u8>,
-    /// Folders to add as projects at the next start, as absolute paths.
+    /// Folders served as projects beyond the ones the command line or projects file names, as
+    /// absolute paths.
     pub(crate) add: Vec<String>,
-    /// Ids of projects to remove at the next start.
+    /// Folders of projects that are not served, as absolute paths. A folder stays here until a
+    /// change adds it again.
     pub(crate) remove: Vec<String>,
     /// Whether each project uses the LLM refinement of scanned state charts, by id. A project with
     /// no entry does not use it. This takes effect at once, since the flag is read on each use.
@@ -296,7 +298,7 @@ impl Default for Notifications {
     }
 }
 
-/// A part of the settings that a change names. Each part says how its change takes effect.
+/// A part of the settings that a change names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Section {
     Models,
@@ -307,39 +309,53 @@ pub(crate) enum Section {
     Notifications,
 }
 
-impl Section {
-    /// The section's name in the request, and in the `applied` map of the response.
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Models => "models",
-            Self::Harness => "harness",
-            Self::Projects => "projects",
-            Self::Budgets => "budgets",
-            Self::Look => "look",
-            Self::Notifications => "notifications",
-        }
-    }
-
-    /// How a change to the section takes effect. `live` means the server uses it at once. `stored`
-    /// means it is saved, and no server path reads it yet. `restart` means it takes effect at the
-    /// next start. `client` means the page applies it. The projects section is `restart` here; a
-    /// change that only sets statemap flags is `live`, as [`applied_of`] decides.
-    pub(crate) fn applied(self) -> &'static str {
-        match self {
-            Self::Models => "live",
-            Self::Harness | Self::Budgets => "stored",
-            Self::Projects => "restart",
-            Self::Look | Self::Notifications => "client",
-        }
+/// How the setting at `path` takes effect, as the `applied` map of a response and `GET` name it.
+/// The path is dotted, as a request names the setting. `live` means the server uses it at once.
+/// `stored` means it is saved, and no server path reads it yet. `restart` means it takes effect at
+/// the next start. `client` means the page applies it. A project's statemap flag is read on each
+/// use, so it is `live`. So is `budgets.call_limits.statemap`, once the statemap pass reads it on
+/// each scan.
+fn applied_label(path: &str) -> &'static str {
+    let mut parts = path.split('.');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("models"), _, _) => "live",
+        (Some("harness"), _, _) => "stored",
+        (Some("projects"), Some("statemap_llm"), _) => "live",
+        (Some("projects"), _, _) => "restart",
+        (Some("budgets"), Some("call_limits"), Some("statemap")) => "live",
+        (Some("budgets"), _, _) => "stored",
+        (Some("look" | "notifications"), _, _) => "client",
+        _ => "stored",
     }
 }
 
-/// How `section`, as `patch` names it, takes effect. The projects section is live when it only
-/// sets which projects use the statemap LLM. Adds, removals and worker counts wait for a restart.
-fn applied_of(section: Section, patch: &Patch) -> &'static str {
-    match (section, &patch.projects) {
-        (Section::Projects, Some(projects)) if !ProjectsPatch::needs_restart(projects) => "live",
-        _ => section.applied(),
+/// Records the setting at `path`, and how it takes effect.
+fn note(applied: &mut BTreeMap<String, &'static str>, path: String) {
+    let label = applied_label(&path);
+    applied.insert(path, label);
+}
+
+/// Records each setting under `value`, at its dotted `path`. An object's fields are walked, so each
+/// budget limit is its own setting. A provider's key is one setting however it is written, so
+/// `models.keys` names each provider. Any other value, arrays included, is one setting.
+fn note_each(value: &Value, path: &str, applied: &mut BTreeMap<String, &'static str>) {
+    match value {
+        Value::Object(fields) if path == "models.keys" => {
+            for name in fields.keys() {
+                note(applied, format!("{path}.{name}"));
+            }
+        }
+        Value::Object(fields) => {
+            for (name, field) in fields {
+                let child = if path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{path}.{name}")
+                };
+                note_each(field, &child, applied);
+            }
+        }
+        _ => note(applied, path.to_owned()),
     }
 }
 
@@ -437,9 +453,44 @@ impl<C: ModelClient + 'static> Settings<C> {
             budgets: stored.budgets.clone(),
             look: stored.look.clone(),
             notifications: stored.notifications.clone(),
+            applied: self.applied_fields(),
+            project_changes: (caller == Caller::Owner).then(|| ProjectChangesView {
+                add: stored.projects.add.clone(),
+                remove: stored.projects.remove.clone(),
+            }),
             tokens: (caller == Caller::Owner).then(|| self.tokens_view()),
             about: release::version_info(),
         }
+    }
+
+    /// How each setting a change can name takes effect, by its dotted path. The projects listed
+    /// are the running ones, as `GET` lists them.
+    fn applied_fields(&self) -> BTreeMap<String, &'static str> {
+        let mut applied = BTreeMap::new();
+        note_each(
+            &json!({
+                "budgets": Budgets::default(),
+                "look": Look::default(),
+                "notifications": Notifications::default(),
+            }),
+            "",
+            &mut applied,
+        );
+        for role in Role::ALL {
+            note(&mut applied, format!("models.roles.{role}"));
+            note(&mut applied, format!("harness.roles.{role}"));
+        }
+        note(&mut applied, "harness.custom_command".to_owned());
+        for provider in self.default_host().client().key_status().providers {
+            note(&mut applied, format!("models.keys.{}", provider.name));
+        }
+        note(&mut applied, "projects.add".to_owned());
+        note(&mut applied, "projects.remove".to_owned());
+        for entry in self.projects.entries() {
+            note(&mut applied, format!("projects.workers.{}", entry.id));
+            note(&mut applied, format!("projects.statemap_llm.{}", entry.id));
+        }
+        applied
     }
 
     /// Each running project, with its worker count: the stored count, or the one it started with.
@@ -450,10 +501,7 @@ impl<C: ModelClient + 'static> Settings<C> {
             .map(|entry| ProjectView {
                 id: entry.id.clone(),
                 name: entry.name.clone(),
-                workers: stored.projects.workers.get(&entry.id).map_or_else(
-                    || entry.board.view().workers.len(),
-                    |count| usize::from(*count),
-                ),
+                workers: worker_count(stored, &entry.id, entry.board.view().workers.len()),
                 statemap_llm: stored
                     .projects
                     .statemap_llm
@@ -538,10 +586,24 @@ struct View {
     budgets: Budgets,
     look: Look,
     notifications: Notifications,
+    /// How each setting takes effect, by its dotted path: `live`, `stored`, `restart` or `client`.
+    applied: BTreeMap<String, &'static str>,
+    /// Only the owner's document has this key. The folders settings added and removed as projects,
+    /// which the next start applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_changes: Option<ProjectChangesView>,
     /// Only the owner's document has this key. Its contents are filled in by the token routes.
     #[serde(skip_serializing_if = "Option::is_none")]
     tokens: Option<TokensView>,
     about: VersionInfo,
+}
+
+/// The folders settings added and removed as projects. They are paths, so only the owner sees
+/// them.
+#[derive(Debug, Serialize)]
+struct ProjectChangesView {
+    add: Vec<String>,
+    remove: Vec<String>,
 }
 
 /// The owner's view of the tokens. Every token is masked, so no response carries a whole one.
@@ -647,8 +709,8 @@ async fn get_settings<C: ModelClient + 'static>(
 /// failing field changes nothing. The model keys are checked and saved through the client, and each
 /// key's result is reported. The other sections are written to the settings file.
 ///
-/// Status codes: `200` with the settings after the change, how each section takes effect, and the
-/// result of each key. `400` for a body that is not a settings object, or names a section or field
+/// Status codes: `200` with the settings after the change, how each changed setting takes effect
+/// by its dotted path, and the result of each key. `400` for a body that is not a settings object, or names a section or field
 /// the server does not take. `401` for an unknown token. `403` for any token but the owner's. `409`
 /// when the model keys cannot be changed here, or the current state refuses the change. `422` with
 /// each failing field. `500` when the settings file cannot be written.
@@ -660,16 +722,24 @@ async fn put_settings<C: ModelClient + 'static>(
     if state.caller(&headers, ONLY_OWNER_CHANGES)? != Caller::Owner {
         return Err(ApiError::Forbidden(ONLY_OWNER_CHANGES));
     }
-    let patch: Patch = serde_json::from_slice(&body)
+    let raw: Value = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::BadRequest("a JSON object of settings sections"))?;
+    let patch = Patch::deserialize(&raw)
         .map_err(|_| ApiError::BadRequest("a JSON object of settings sections"))?;
     let _turn = state.changes.lock().await;
-    let known: Vec<&str> = state
+    let running: Vec<(&str, PathBuf)> = state
         .projects
         .entries()
         .iter()
-        .map(|entry| entry.id.as_str())
+        .map(|entry| (entry.id.as_str(), entry.host.repo().to_path_buf()))
         .collect();
-    let changes = validate::check(&patch, &state.stored(), &known).map_err(ApiError::Invalid)?;
+    let changes = validate::check(
+        &patch,
+        &state.stored(),
+        &running,
+        state.projects.default_id(),
+    )
+    .map_err(ApiError::Invalid)?;
 
     let host = state.default_host();
     let mut keys = BTreeMap::new();
@@ -686,11 +756,12 @@ async fn put_settings<C: ModelClient + 'static>(
         *state.stored.write().unwrap_or_else(PoisonError::into_inner) = changes.next.clone();
     }
 
-    let applied: BTreeMap<&str, &str> = changes
-        .sections
-        .iter()
-        .map(|section| (section.name(), applied_of(*section, &patch)))
-        .collect();
+    let mut applied = BTreeMap::new();
+    if let Value::Object(sections) = &raw {
+        for (name, section) in sections.iter().filter(|(_, section)| !section.is_null()) {
+            note_each(section, name, &mut applied);
+        }
+    }
     let settings = state.view(Caller::Owner, &state.stored());
     Ok((
         StatusCode::OK,
@@ -984,11 +1055,70 @@ pub(crate) fn statemap_llm_enabled(settings_path: &Path, project_id: &str) -> bo
     }
 }
 
+/// The most calls the statemap role may make, as the settings file at `settings_path` says now.
+/// The file is read on each call, like [`statemap_llm_enabled`]. A missing file, or one that
+/// cannot be read, gives the default limit.
+pub(crate) fn statemap_call_limit(settings_path: &Path) -> u32 {
+    match file::load(settings_path) {
+        Ok(stored) => stored.budgets.call_limits.statemap,
+        Err(err) => {
+            tracing::warn!(error = %err, "the statemap call limit cannot be read; the default applies");
+            DEFAULT_CALL_LIMIT
+        }
+    }
+}
+
+/// The local worker count of project `id`: the count the settings give it, or `started` when they
+/// give none. The count is read when the server starts, so a change takes effect at the next start.
+pub(crate) fn worker_count(stored: &Stored, id: &str, started: usize) -> usize {
+    stored
+        .projects
+        .workers
+        .get(id)
+        .map_or(started, |count| usize::from(*count))
+}
+
 #[cfg(test)]
 mod tests {
     use acan_llm::ProviderStatus;
 
     use super::*;
+
+    #[test]
+    fn a_project_with_no_worker_count_runs_the_count_it_started_with() {
+        let mut stored = Stored::default();
+        assert_eq!(worker_count(&stored, "alpha", 2), 2);
+        stored.projects.workers.insert("alpha".to_owned(), 0);
+        assert_eq!(worker_count(&stored, "alpha", 2), 0, "zero runs none");
+        assert_eq!(
+            worker_count(&stored, "beta", 2),
+            2,
+            "the others keep theirs"
+        );
+    }
+
+    #[test]
+    fn the_statemap_call_limit_is_read_from_the_file_on_each_call() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(FILE);
+        assert_eq!(
+            statemap_call_limit(&path),
+            30,
+            "a missing file gives the default"
+        );
+
+        let mut stored = Stored::default();
+        stored.budgets.call_limits.statemap = 12;
+        file::save(&path, &stored).expect("the settings are saved");
+        assert_eq!(statemap_call_limit(&path), 12);
+
+        std::fs::write(&path, "{ not json").expect("the file is written");
+        assert_eq!(
+            statemap_call_limit(&path),
+            30,
+            "a file that does not parse gives the default"
+        );
+    }
 
     /// A status where each `(provider, saved, environment)` has a key, and the setup saved the keys.
     fn status(providers: &[(&str, bool, bool)]) -> KeyStatus {
@@ -1111,14 +1241,66 @@ mod tests {
     }
 
     #[test]
-    fn section_names_and_their_effects_are_fixed() {
-        assert_eq!(Section::Models.applied(), "live");
-        assert_eq!(Section::Harness.applied(), "stored");
-        assert_eq!(Section::Budgets.applied(), "stored");
-        assert_eq!(Section::Projects.applied(), "restart");
-        assert_eq!(Section::Look.applied(), "client");
-        assert_eq!(Section::Notifications.applied(), "client");
-        assert_eq!(Section::Look.name(), "look");
+    fn each_setting_says_how_it_takes_effect() {
+        assert_eq!(applied_label("models.roles.foreman"), "live");
+        assert_eq!(applied_label("models.keys.fireworks"), "live");
+        assert_eq!(applied_label("harness.roles.foreman"), "stored");
+        assert_eq!(applied_label("harness.custom_command"), "stored");
+        assert_eq!(applied_label("budgets.repair_rounds"), "stored");
+        assert_eq!(applied_label("budgets.call_limits.worker"), "stored");
+        assert_eq!(applied_label("budgets.call_limits.statemap"), "live");
+        assert_eq!(applied_label("projects.add"), "restart");
+        assert_eq!(applied_label("projects.remove"), "restart");
+        assert_eq!(applied_label("projects.workers.acan-wip"), "restart");
+        assert_eq!(applied_label("projects.statemap_llm.acan-wip"), "live");
+        assert_eq!(applied_label("look.theme"), "client");
+        assert_eq!(applied_label("notifications.sound"), "client");
+    }
+
+    #[test]
+    fn a_change_names_each_setting_it_sets_by_its_path() {
+        let mut applied = BTreeMap::new();
+        note_each(
+            &json!({"repair_rounds": 3, "call_limits": {"statemap": 9, "worker": 40}}),
+            "budgets",
+            &mut applied,
+        );
+        assert_eq!(
+            applied,
+            BTreeMap::from([
+                ("budgets.call_limits.statemap".to_owned(), "live"),
+                ("budgets.call_limits.worker".to_owned(), "stored"),
+                ("budgets.repair_rounds".to_owned(), "stored"),
+            ])
+        );
+
+        let mut applied = BTreeMap::new();
+        note_each(
+            &json!({"workers": {"acan-wip": 1}, "statemap_llm": {"acan-wip": true}}),
+            "projects",
+            &mut applied,
+        );
+        assert_eq!(
+            applied,
+            BTreeMap::from([
+                ("projects.statemap_llm.acan-wip".to_owned(), "live"),
+                ("projects.workers.acan-wip".to_owned(), "restart"),
+            ])
+        );
+
+        let mut applied = BTreeMap::new();
+        note_each(
+            &json!({"keys": {"fireworks": {"clear": true}}, "roles": {"foreman": null}}),
+            "models",
+            &mut applied,
+        );
+        assert_eq!(
+            applied,
+            BTreeMap::from([
+                ("models.keys.fireworks".to_owned(), "live"),
+                ("models.roles.foreman".to_owned(), "live"),
+            ])
+        );
     }
 
     #[test]
@@ -1128,20 +1310,6 @@ mod tests {
         limits.set(Role::Statemap, 12);
         assert_eq!(limits.statemap, 12);
         assert_eq!(limits.wonder, 30, "setting one role leaves the others");
-    }
-
-    #[test]
-    fn a_projects_change_is_live_only_when_it_names_no_restart_part() {
-        let flags: Patch = serde_json::from_value(json!({
-            "projects": {"statemap_llm": {"acan-wip": true}}
-        }))
-        .expect("the patch parses");
-        assert_eq!(applied_of(Section::Projects, &flags), "live");
-        let workers: Patch = serde_json::from_value(json!({
-            "projects": {"workers": {"acan-wip": 1}, "statemap_llm": {"acan-wip": true}}
-        }))
-        .expect("the patch parses");
-        assert_eq!(applied_of(Section::Projects, &workers), "restart");
     }
 
     #[test]

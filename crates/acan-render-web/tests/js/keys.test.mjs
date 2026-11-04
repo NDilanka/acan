@@ -111,6 +111,14 @@ test("a held G does not re-arm the chord", () => {
   assert.equal(step.action, null);
 });
 
+test("V turns the map to top-down once per press, and a held V does not turn it again", () => {
+  assert.deepEqual(keyAction(press("v"), ctx()).action, { kind: "top-down" });
+  assert.deepEqual(keyAction(press("V", { shift: true }), ctx()).action, { kind: "top-down" });
+  assert.equal(keyAction(press("v", { repeat: true }), ctx()).action, null);
+  const armed = keyAction(press("g"), ctx());
+  assert.deepEqual(keyAction(press("v"), ctx({ armed: armed.armed, now: 1100 })).action, { kind: "top-down" });
+});
+
 test("the comma key toggles settings, and Esc closes an open settings drawer first", () => {
   assert.deepEqual(keyAction(press(","), ctx()).action, { kind: "settings" });
   const step = keyAction(press("Escape"), ctx({ open: { ...NONE, settings: true, clash: true } }));
