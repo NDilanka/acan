@@ -3,8 +3,9 @@
 // the timeline scrubber holds the map in the past, the stream keeps every event in the hold
 // instead, and the scrubber folds them all when the map goes live again.
 import { linkQuiet } from "./chrome.js";
+import { noteEmptyList } from "./emptystart.js";
 import { reducedNow, requestRender } from "./main.js";
-import { listProjects, startMulti } from "./multi.js";
+import { listProjects, placeOf, startMulti } from "./multi.js";
 import { apiPath, target } from "./projects.js";
 import { createFeed, createHold, eventsBefore } from "./scrub.js";
 import { TOKEN_KEY, freeze, gate, link, replay, state, upto } from "./state.js";
@@ -139,7 +140,11 @@ export function foldScanFrame(scan) {
 async function reloadPlant(id) {
   try {
     const text = await get(apiPath(id, "/api/plant"));
-    state.app.set_plant(text);
+    // The plant on screen may have changed while it was read; the text is for `id` only.
+    if (target() !== id) return;
+    // A canvas of several plants keeps the place the plant was given; the one-plant page has none.
+    const [x, y] = placeOf(id);
+    state.app.set_plant_at(text, x, y);
     scanner().applyPlant(text);
     requestRender();
   } catch (err) {
@@ -152,6 +157,11 @@ export async function start() {
   // An origin that lists several projects puts them all on one canvas. Any other answer, such as
   // 404 from an origin without the route, keeps the one-plant page.
   const projects = await listProjects(state.token);
+  // An origin with no codebase: no stream is opened and no project route is called.
+  if (projects !== null && projects.length === 0) {
+    enterEmpty();
+    return;
+  }
   if (projects !== null) {
     await startMulti(projects);
     return;
@@ -165,6 +175,15 @@ export async function start() {
   } else {
     connect();
   }
+}
+
+// The empty world: the page shows the grid and the "Add a codebase" hint at the "+". The first
+// codebase added turns the page on (see `attachFirst` in multi.js).
+function enterEmpty() {
+  state.empty = true;
+  noteEmptyList([]);
+  setLink("no codebase");
+  requestRender();
 }
 
 async function reload() {

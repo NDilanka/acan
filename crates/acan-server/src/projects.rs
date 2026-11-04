@@ -133,16 +133,21 @@ impl ProjectSet {
 
     /// Checks the set before anything opens. Ids must be valid and unique, and the default must
     /// be one of them. Every repository must exist, must not be another project's repository, and
-    /// must not sit inside another project's state directory.
+    /// must not sit inside another project's state directory. An empty set is valid: a server
+    /// opened with no codebase starts with an empty world, and a codebase is added later.
     ///
     /// # Errors
     ///
     /// Returns an error naming the first problem found.
     pub fn validate(&self) -> anyhow::Result<()> {
-        ensure!(
-            !self.projects.is_empty(),
-            "no project to serve: give --repo or --projects"
-        );
+        if self.projects.is_empty() {
+            ensure!(
+                self.default.is_empty(),
+                "the default project {:?} is not one of the projects",
+                self.default
+            );
+            return Ok(());
+        }
         let mut ids = BTreeSet::new();
         for project in &self.projects {
             ensure!(
@@ -248,11 +253,20 @@ impl ProjectSet {
                 continue;
             }
             let mut trial = taken.clone();
-            self.projects.push(spec_for(repo, &mut trial));
+            let spec = spec_for(repo, &mut trial);
+            // A set with no project has no default, so the first folder added becomes it.
+            let first = self.projects.is_empty();
+            if first {
+                self.default.clone_from(&spec.id);
+            }
+            self.projects.push(spec);
             match self.validate() {
                 Ok(()) => taken = trial,
                 Err(err) => {
                     self.projects.pop();
+                    if first {
+                        self.default.clear();
+                    }
                     skipped.push((repo.clone(), format!("{err:#}")));
                 }
             }
@@ -467,9 +481,40 @@ mod tests {
     }
 
     #[test]
-    fn validation_refuses_an_empty_set() {
-        let set = ProjectSet::from_repos(&[]);
-        assert!(set.validate().is_err());
+    fn an_empty_set_is_valid_only_without_a_default() {
+        let mut set = ProjectSet::from_repos(&[]);
+        assert!(set.validate().is_ok(), "no project and no default is valid");
+        set.default = "a".to_owned();
+        assert!(
+            set.validate().is_err(),
+            "a default with no project is refused"
+        );
+    }
+
+    #[test]
+    fn the_first_folder_added_to_an_empty_set_becomes_the_default() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let a = repo(root.path(), "a");
+        let b = repo(root.path(), "b");
+        let mut set = ProjectSet::from_repos(&[]);
+        let skipped = set.apply_changes(&[a, b], &[]).expect("the change applies");
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let ids: Vec<&str> = set.projects.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"]);
+        assert_eq!(set.default, "a");
+    }
+
+    #[test]
+    fn a_first_folder_that_cannot_be_served_leaves_the_set_empty() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let mut set = ProjectSet::from_repos(&[]);
+        let missing = root.path().join("missing");
+        let skipped = set
+            .apply_changes(std::slice::from_ref(&missing), &[])
+            .expect("the change applies");
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert!(set.projects.is_empty());
+        assert!(set.default.is_empty(), "no default is left behind");
     }
 
     #[test]

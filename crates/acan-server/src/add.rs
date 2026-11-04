@@ -55,6 +55,9 @@ pub(crate) struct LiveContext<C> {
     pub(crate) open_client: ClientFactory<C>,
     /// The runtimes of projects added while the server runs. Shutdown stops them.
     pub(crate) runtimes: Arc<Mutex<Vec<Runtime>>>,
+    /// The user's folder, when the server was opened with one. Its tokens file is read first, so a
+    /// project added to a server with no codebase still takes the owner's token.
+    pub(crate) home: Option<PathBuf>,
 }
 
 /// Checks that `folder` can be served beside the running projects, and returns its spec. The folder
@@ -128,12 +131,14 @@ pub(crate) async fn open<C: ModelClient + 'static>(
     let state_dir = spec.repo.join(STATE_DIR);
     prepare_state_dir(&state_dir)?;
     // The owner's token is the one every project holds. The new project's file takes it from the
-    // projects already running, so one browser token opens every project.
-    let mut dirs: Vec<PathBuf> = registry
-        .entries()
-        .iter()
-        .map(|entry| entry.host.repo().join(STATE_DIR))
-        .collect();
+    // user's folder and the projects already running, so one browser token opens every project.
+    let mut dirs: Vec<PathBuf> = live.home.iter().cloned().collect();
+    dirs.extend(
+        registry
+            .entries()
+            .iter()
+            .map(|entry| entry.host.repo().join(STATE_DIR)),
+    );
     dirs.push(state_dir.clone());
     let refs: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
     let (mut all, _) = Tokens::load_shared(&refs, &live.founder)?;
@@ -206,8 +211,21 @@ pub(crate) async fn open<C: ModelClient + 'static>(
         },
         host.clone(),
         board.clone(),
-        owner,
+        owner.clone(),
     );
+    // The caller holds the settings change lock, so no other add can take the default meanwhile.
+    let becomes_default = registry.default_id().is_empty();
+    let plain = becomes_default.then(|| {
+        project_routes(
+            Mount {
+                api: "/api",
+                mcp: "/mcp",
+            },
+            host.clone(),
+            board.clone(),
+            owner,
+        )
+    });
     let mapping = tokio::spawn(map_project(
         host.clone(),
         live.founder.clone(),
@@ -242,6 +260,7 @@ pub(crate) async fn open<C: ModelClient + 'static>(
         board,
         head: tokio::sync::Mutex::new(None),
         router: Some(router),
+        plain,
     });
     Ok((id, name))
 }

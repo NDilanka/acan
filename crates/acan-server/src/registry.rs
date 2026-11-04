@@ -3,8 +3,10 @@
 //! The registry holds each project's host and nothing else. Which project a request reaches is
 //! decided by its path, so a request can only use the host of the project it names.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
+use acan_core::MemberId;
 use acan_llm::ModelClient;
 use axum::Json;
 use axum::Router;
@@ -15,20 +17,44 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use crate::add::LiveContext;
+use crate::auth::{Principal, Tokens};
 use crate::host::Host;
 use crate::http::{ApiError, bearer};
+use crate::signin::SignIns;
 use crate::workers::Board;
 
 /// Every project one server runs, and which of them answers the unprefixed routes. A project added
-/// while the server runs joins the list, so the list is read through [`Registry::entries`].
+/// while the server runs joins the list, so the list is read through [`Registry::entries`]. The list
+/// may be empty: a server opened with no codebase runs none until one is added.
 pub(crate) struct Registry<C> {
-    default_id: String,
+    /// The id the unprefixed routes map to. Empty while no project runs, and then the first project
+    /// added becomes the default.
+    default_id: RwLock<String>,
     /// The projects, in the order the server was given them and then the order they were added.
     entries: RwLock<Vec<Arc<Entry<C>>>>,
     /// The multiplexed streams, which span projects, so shutdown waits for them here.
     streams: Arc<Mutex<JoinSet<()>>>,
     /// What a project added while the server runs is opened with. `None` refuses such adds.
     live: Option<LiveContext<C>>,
+    /// The server's shutdown signal, which every stream that is not a project's follows.
+    shutdown: watch::Receiver<bool>,
+    /// The user's own folder, when the server was opened with `acan open`. Its owner token signs in
+    /// the owner even while no project runs.
+    home: Option<HomeTokens>,
+    /// The sign-in codes not yet used. The running server keeps a clone, so it can mint a code for
+    /// the link it opens.
+    signins: Arc<SignIns>,
+}
+
+/// The user's folder a server opened with `acan open` holds. Its tokens file holds the owner's
+/// token, so the owner's sign-in and the owner's token rotation reach it with no project running.
+pub(crate) struct HomeTokens {
+    /// The owner's token table. Clones share one table.
+    pub(crate) tokens: Tokens,
+    /// The folder the tokens file is in. A rotation writes the file there.
+    pub(crate) dir: PathBuf,
+    /// The member whose token is the owner's.
+    pub(crate) owner: MemberId,
 }
 
 /// One project as the server runs it.
@@ -48,30 +74,41 @@ pub(crate) struct Entry<C> {
     /// server built at start, so requests for them reach these routes through the fallback. `None`
     /// for a project the server started with.
     pub(crate) router: Option<Router>,
+    /// The unprefixed routes, `/api/...` and `/mcp`, of a project that became the default when it
+    /// was added to a server running no project. The router built at start has no unprefixed
+    /// routes then, so they are reached through the fallback too. `None` for every other project.
+    pub(crate) plain: Option<Router>,
 }
 
 impl<C> Registry<C> {
-    /// A registry of `entries`, whose default is `default_id`. The entries must not be empty:
-    /// the server shuts down through the first project's signal. `live` says how a project added
-    /// later is opened, and `None` refuses such adds.
+    /// A registry of `entries`, whose default is `default_id`. The entries may be empty, and then
+    /// the default is empty too. `live` says how a project added later is opened, and `None` refuses
+    /// such adds. `shutdown` is the server's signal, and `home` is the user's folder if there is one.
     pub(crate) fn new(
         default_id: String,
         entries: Vec<Entry<C>>,
         streams: Arc<Mutex<JoinSet<()>>>,
         live: Option<LiveContext<C>>,
+        shutdown: watch::Receiver<bool>,
+        home: Option<HomeTokens>,
     ) -> Self {
-        assert!(!entries.is_empty(), "a registry holds at least one project");
         Self {
-            default_id,
+            default_id: RwLock::new(default_id),
             entries: RwLock::new(entries.into_iter().map(Arc::new).collect()),
             streams,
             live,
+            shutdown,
+            home,
+            signins: Arc::new(SignIns::default()),
         }
     }
 
-    /// The id of the project the unprefixed routes map to.
-    pub(crate) fn default_id(&self) -> &str {
-        &self.default_id
+    /// The id of the project the unprefixed routes map to. Empty while no project runs.
+    pub(crate) fn default_id(&self) -> String {
+        self.default_id
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Every project, in the order it joined the registry.
@@ -82,12 +119,37 @@ impl<C> Registry<C> {
             .clone()
     }
 
-    /// Adds a project that was opened while the server runs.
+    /// Adds a project that was opened while the server runs. The first one added becomes the
+    /// default when no project ran before.
     pub(crate) fn add(&self, entry: Entry<C>) {
+        {
+            let mut default_id = self
+                .default_id
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            if default_id.is_empty() {
+                default_id.clone_from(&entry.id);
+            }
+        }
         self.entries
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .push(Arc::new(entry));
+    }
+
+    /// The server's shutdown signal. A stream follows it, whether or not a project runs.
+    pub(crate) fn shutdown_signal(&self) -> watch::Receiver<bool> {
+        self.shutdown.clone()
+    }
+
+    /// The user's folder, when the server was opened with one.
+    pub(crate) fn home(&self) -> Option<&HomeTokens> {
+        self.home.as_ref()
+    }
+
+    /// The sign-in codes not yet used.
+    pub(crate) fn signins(&self) -> &Arc<SignIns> {
+        &self.signins
     }
 
     /// What a project added while the server runs is opened with, or `None` when such adds are off.
@@ -95,13 +157,26 @@ impl<C> Registry<C> {
         self.live.as_ref()
     }
 
-    /// The routes of the live-added project whose id `path` names, if `path` names one.
+    /// The live-added routes that answer `path`, if any. A path under `/api/p/<id>` reaches the
+    /// routes of the live-added project `id`. Any other API path, and `/mcp`, reaches the default
+    /// project's unprefixed routes when that project was added to a server running none.
     pub(crate) fn live_router(&self, path: &str) -> Option<Router> {
-        let id = path.strip_prefix("/api/p/")?.split('/').next()?;
+        if let Some(rest) = path.strip_prefix("/api/p/") {
+            let id = rest.split('/').next()?;
+            return self
+                .entries()
+                .into_iter()
+                .find(|entry| entry.id == id)
+                .and_then(|entry| entry.router.clone());
+        }
+        if path != "/mcp" && !path.starts_with("/api/") {
+            return None;
+        }
+        let default_id = self.default_id();
         self.entries()
             .into_iter()
-            .find(|entry| entry.id == id)
-            .and_then(|entry| entry.router.clone())
+            .find(|entry| entry.id == default_id)
+            .and_then(|entry| entry.plain.clone())
     }
 
     /// The set the multiplexed streams are tracked in.
@@ -111,9 +186,13 @@ impl<C> Registry<C> {
 }
 
 impl<C: ModelClient> Registry<C> {
-    /// The server's shutdown signal, which every project's host shares.
-    pub(crate) fn shutdown_signal(&self) -> watch::Receiver<bool> {
-        self.entries()[0].host.shutdown_signal()
+    /// The principal `token` acts for in any project or in the user's folder, or `None` for an
+    /// unknown token. Each project's tokens are asked, then the user's folder.
+    pub(crate) fn principal(&self, token: &str) -> Option<Principal> {
+        self.entries()
+            .iter()
+            .find_map(|entry| entry.host.tokens().principal(token))
+            .or_else(|| self.home.as_ref()?.tokens.principal(token))
     }
 }
 
@@ -157,20 +236,25 @@ struct NeedsYouView {
 
 /// The projects the caller's token is a member of. A member is a principal listed in that
 /// project's tokens file, so a token sees only the projects it may use. A token that is a member
-/// of none gets 401, the same answer an unknown token gets from any route.
+/// of none gets 401, the same answer an unknown token gets from any route. The owner of a user's
+/// folder gets an empty list while no project runs.
 pub(crate) async fn list_projects<C: ModelClient + 'static>(
     State(projects): State<Arc<Registry<C>>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ProjectView>>, ApiError> {
     let token = bearer(&headers).ok_or(ApiError::Unauthorized)?;
     let mut views = Vec::new();
+    let default_id = projects.default_id();
     for entry in projects.entries() {
         if entry.host.tokens().principal(token).is_none() {
             continue;
         }
-        views.push(view(&entry, projects.default_id()).await);
+        views.push(view(&entry, &default_id).await);
     }
-    if views.is_empty() {
+    let known_at_home = projects
+        .home()
+        .is_some_and(|home| home.tokens.principal(token).is_some());
+    if views.is_empty() && !known_at_home {
         return Err(ApiError::Unauthorized);
     }
     Ok(Json(views))

@@ -4,6 +4,7 @@
 // is the one whose marks and panels show; orders and every per-project call go to it.
 import { requestRender } from "./main.js";
 import { installAddPlant } from "./addplant.js";
+import { isEmptyWorld, noteAttached } from "./emptystart.js";
 import {
   PACK_GAP,
   PLACES_KEY,
@@ -71,11 +72,14 @@ const multi = {
 // GET /api/projects with the token, or null when the page keeps one plant: an origin without the
 // route, one that lists a single project, or a refused or failed read. A refused token is left
 // for the one-plant path to report, as it always did.
+// An origin with no codebase answers `[]`, which is an empty world, not an error: it resolves to [].
 export async function listProjects(token) {
   try {
     const res = await fetch("/api/projects", { headers: { Authorization: `Bearer ${token}` } });
     if (!res.ok) return null;
-    return projectList(res.status, await res.json());
+    const body = await res.json();
+    if (isEmptyWorld(res.status, body)) return [];
+    return projectList(res.status, body);
   } catch {
     return null;
   }
@@ -101,7 +105,7 @@ export function installMulti(kit) {
 // The stream is opened again, so it carries the new codebase's events and its scan. Resolves to
 // false when this page keeps one plant, which cannot show it beside another without a reload.
 export async function attachProject(project) {
-  if (!canvasState.multi) return false;
+  if (!canvasState.multi) return state.empty ? attachFirst(project) : false;
   const [text, log] = await Promise.all([
     get(apiPath(project.id, "/api/plant")),
     get(apiPath(project.id, "/api/events?from=0")),
@@ -134,8 +138,36 @@ export async function attachProject(project) {
   return true;
 }
 
+// The first codebase added to an empty origin. The page turns on as a canvas of one, through the same
+// start as any canvas, so its plant, scan, plate and stream are the ones a canvas of several has.
+// Resolves to false, and leaves the page empty, when its plant cannot be read.
+async function attachFirst(project) {
+  try {
+    await startMulti([{ id: project.id, name: project.name, default: false, status: "mapping", head: null }]);
+  } catch (err) {
+    console.error(`the new codebase ${project.id} could not be put on the canvas`, err);
+    canvasState.multi = false;
+    canvasState.list = [];
+    canvasState.active = null;
+    return false;
+  }
+  state.empty = false;
+  noteAttached();
+  // The sign-in panels and the workers read the first project, which they could not before.
+  window.dispatchEvent(new Event("acan:attached"));
+  flyProject(project.id);
+  requestRender();
+  return true;
+}
+
 export function nameOf(id) {
   return canvasState.list.find((project) => project.id === id)?.name ?? id;
+}
+
+// The place the canvas gives project `id`, as `[x, y]`, or the origin for one it does not know, such
+// as the one-plant page's null target.
+export function placeOf(id) {
+  return multi.places.get(id) ?? [0, 0];
 }
 
 // The world bounds of a project's plant, or null for one the canvas does not know.
@@ -288,12 +320,25 @@ function connectAll() {
     if (!state.token) return;
     const action = closeAction(event.code);
     if (action === "sign-in") {
-      forgetToken();
+      void recheckRefusal();
       return;
     }
     setLink("reconnecting");
     setTimeout(resync, action === "resume" ? 0 : RECONNECT_MS);
   };
+}
+
+// A 1008 close also means the token frame came after the server's wait, which a busy page can do.
+// The token is asked again on a plain read: only a refusal there signs the owner out. Otherwise the
+// stream simply connects again.
+async function recheckRefusal() {
+  const res = await fetch("/api/projects", { headers: { Authorization: `Bearer ${state.token}` } }).catch(() => null);
+  if (res === null || (res.status !== 401 && res.status !== 403)) {
+    setLink("reconnecting");
+    setTimeout(resync, RECONNECT_MS);
+    return;
+  }
+  forgetToken();
 }
 
 // A project whose log is not on the canvas starts past its head, so its old events are not sent.

@@ -359,6 +359,22 @@ impl App {
         Ok(self.load(plant))
     }
 
+    /// Sets the plant on screen as `set_plant` does, with its layout moved to `(x, y)`, the place
+    /// the canvas gives the project. A canvas of several plants reads the plant on screen again
+    /// with this, so the plant stays where it was placed. Returns the machine count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON is not the plant's shape.
+    pub fn set_plant_at(&mut self, json: &str, x: f32, y: f32) -> Result<u32, JsError> {
+        let plant = from_scan_json(json).map_err(js_err)?;
+        let (kinds, edges) = plant.layout_input();
+        let laid = layout(&kinds, &edges);
+        let count = plant.machines.len() as u32;
+        self.show(plant, laid, [x, y]);
+        Ok(count)
+    }
+
     /// Checks one `plant-view/1` view, as `GET /api/orders/{order}/plant-view` answers it, and
     /// returns its summary as JSON. The page takes its numbers from the summary only after this
     /// passes.

@@ -109,6 +109,9 @@ export const state = {
   povWanted: params.get("pov"),
   app: null,
   token: null,
+  // True while the origin has no codebase: no stream is open and no project route is called. See
+  // `emptystart.js`.
+  empty: false,
   view: null,
   renderedVersion: -1,
   // The marks as the wasm side last gave them: the flags in order, and the open clash card.

@@ -35,6 +35,8 @@ import {
 import { THEMES, applyTheme } from "./themes.js";
 import { createMockApi } from "./settings-mock.js";
 import { apiPath, target } from "./projects.js";
+import { addCodebase, addedNote } from "./addplant.js";
+import { addNote } from "./addplant-model.js";
 
 const ARM_MS = 6000;
 const FLASH_MS = 1500;
@@ -1091,7 +1093,7 @@ function setStatemapLlm(id, value) {
 // The project whose Remove was pressed last, so a refusal of that removal shows beside its row.
 let removeTarget = null;
 
-// Projects are added and removed by path and id, and take effect on restart.
+// A project is removed by id and takes effect on restart. Adding is live; see addProject.
 function removeProject(id) {
   armed = null;
   clearTimeout(armTimer);
@@ -1112,14 +1114,25 @@ function pendingGroup() {
   return group("Pending", "After restart", rows);
 }
 
-function addProject() {
+// Adds the folder live, as the "+" does: the codebase joins the canvas as its first scan starts. A
+// refusal shows beside the field and changes nothing.
+async function addProject() {
   const path = (drafts.get("add") ?? "").trim();
   if (path === "") {
     invalid.set("projects.add", "Type a path.");
     render();
     return;
   }
-  return put("projects", { projects: { add: [path] } }, () => drafts.delete("add"));
+  const answer = await addCodebase(path);
+  if (answer.status !== 202 || !answer.body) {
+    invalid.set("projects.add", addNote(answer.status, answer.body));
+    render();
+    return;
+  }
+  drafts.delete("add");
+  invalid.delete("projects.add");
+  notes.set("projects", { bad: false, text: addedNote(answer.live) });
+  render();
 }
 
 function projectsBody() {

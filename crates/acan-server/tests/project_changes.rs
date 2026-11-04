@@ -183,6 +183,16 @@ async fn a_folder_added_in_settings_is_served_at_every_later_start() {
     assert_eq!(running.project_ids(), ["alpha", "beta"]);
     assert_eq!(
         settings_doc(&running, &token).await["project_changes"]["add"],
+        json!([]),
+        "a folder that is served is not pending"
+    );
+    let saved: Value = serde_json::from_str(
+        &fs::read_to_string(default_settings_file(&ProjectSet::from_repos(&alpha_only)))
+            .expect("the settings file"),
+    )
+    .expect("the settings parse");
+    assert_eq!(
+        saved["projects"]["add"],
         json!([beta_text.clone()]),
         "the change is kept after the start"
     );

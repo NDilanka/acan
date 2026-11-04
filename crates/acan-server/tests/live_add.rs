@@ -15,8 +15,8 @@ use std::time::Duration;
 use acan_llm::{Stub, UsageLedger};
 use acan_server::projects::{ProjectSet, ProjectSpec};
 use acan_server::{
-    ClientFactory, DEFAULT_WITNESS_CONCURRENCY, Running, ServeConfig, default_settings_file,
-    start_projects_adding, start_projects_serving,
+    ClientFactory, DEFAULT_WITNESS_CONCURRENCY, Running, ServeConfig, apply_project_changes,
+    default_settings_file, start_projects_adding, start_projects_serving,
 };
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -185,15 +185,15 @@ async fn a_folder_added_while_the_server_runs_is_served_and_scanned() {
     let (status, _) = get(&running, "/api/p/beta/events", &token).await;
     assert_eq!(status, StatusCode::OK, "the added project's events answer");
 
-    // The folder is kept in the settings, so the next start serves it too. It is served now, so
-    // it is not pending.
+    // Pending is derived: a folder in the settings that no running project serves. The added
+    // folder is served now, so it is not pending, and it stays in the settings for the next start.
     let doc = settings_doc(&running, &token).await;
     assert!(
         doc["project_changes"]["add"]
             .as_array()
             .expect("the pending folders")
             .is_empty(),
-        "a folder served live is not pending: {doc}"
+        "a folder that is served is not pending: {doc}"
     );
     let saved: Value = serde_json::from_str(
         &fs::read_to_string(default_settings_file(&projects)).expect("the settings file"),
@@ -204,6 +204,10 @@ async fn a_folder_added_while_the_server_runs_is_served_and_scanned() {
         Some(1),
         "the folder is kept for the next start: {saved}"
     );
+    assert!(
+        saved["projects"].get("live").is_none(),
+        "no separate list marks the folders opened while running: {saved}"
+    );
 
     // Adding the same folder again is refused, since the server already serves it.
     let (status, body) = add(&running, Some(&token), &beta.display().to_string()).await;
@@ -213,8 +217,8 @@ async fn a_folder_added_while_the_server_runs_is_served_and_scanned() {
         "a second add is refused: {body}"
     );
 
-    // A folder added through a settings change is not live, so it waits for the next start and
-    // shows as pending.
+    // A folder added through a settings change is not opened at once, so no project serves it. It
+    // waits for the next start and shows as pending.
     let gamma = repo(root.path(), "gamma");
     let (status, body) = put_settings(
         &running,
@@ -247,6 +251,31 @@ async fn a_folder_added_while_the_server_runs_is_served_and_scanned() {
         .stop()
         .await
         .expect("the server stops with the added project");
+
+    // The next start applies the settings, so the folder opened while running is served again,
+    // beside the folder the settings change added.
+    let mut next = projects.clone();
+    let skipped = apply_project_changes(&mut next, &default_settings_file(&projects))
+        .expect("the project changes apply");
+    assert!(
+        skipped.is_empty(),
+        "every added folder is served: {skipped:?}"
+    );
+    let running = start(&next, 0).await;
+    let (status, list) = get(&running, "/api/projects", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<&str> = list
+        .as_array()
+        .expect("a list of projects")
+        .iter()
+        .filter_map(|project| project["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["alpha", "beta", "gamma"],
+        "the restart serves the added folders"
+    );
+    running.stop().await.expect("the restarted server stops");
 }
 
 #[tokio::test]

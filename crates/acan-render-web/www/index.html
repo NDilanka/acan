@@ -105,6 +105,11 @@
   #add-form .row { display: flex; gap: 8px; align-items: center; }
   #add-form .row input { flex: 1 1 auto; min-width: 0; }
   #add-note { margin: 0; font-size: 12px; color: var(--muted); min-height: 1em; }
+  /* The empty origin's hint: centred, not in the way (no pointer), with a line to the "+". */
+  #empty-hint { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; z-index: 1; }
+  #empty-hint[hidden] { display: none; }
+  #empty-hint p { margin: 0; font: 600 15px/1.3 var(--sans); color: var(--soft); }
+  #empty-hint-line { position: fixed; left: 0; top: 0; width: 0; height: 1px; background: var(--muted); transform-origin: 0 0; }
   /* At rest the shell is the brand and two keys; the repo and a healthy link show with the key bar. */
   #shell .repo:not(:empty), #shell #link { display: none; }
   #shell.open .repo:not(:empty), #shell.open #link, #shell #link:not(.quiet) { display: inline; }
@@ -546,6 +551,7 @@
 <svg id="pov-reticle" hidden aria-hidden="true"><path id="pov-bracket" d=""></path></svg>
 <div class="island" id="pov-chip" hidden><span class="dot" id="pov-dot"></span><span class="inside">inside</span><b id="pov-agent"></b><span class="line" id="pov-line"></span><kbd>Esc</kbd><span class="alt" id="pov-alt" hidden></span></div>
 <div class="island" id="shell"><span class="brand">Acan</span><span class="repo" id="repo"></span><span id="link" class="muted quiet">starting</span><span id="stale" class="stale" hidden></span><span id="version" class="version" hidden></span><button type="button" id="command-open" class="key" aria-label="Command bar" title="Command bar (/)">/</button><button type="button" id="topdown-toggle" class="key" aria-pressed="false" aria-label="Top-down view" title="Top-down view (V)">top</button><button type="button" id="help-toggle" class="key" aria-expanded="false" aria-controls="hint" aria-label="Keys" title="Keys (?)">?</button><button type="button" id="add-plant" class="key" aria-expanded="false" aria-controls="add-form" aria-label="Add a codebase" title="Add a codebase">+</button></div>
+<div id="empty-hint" hidden aria-hidden="true"><p id="empty-hint-text">Add a codebase</p><span id="empty-hint-line"></span></div>
 <form class="island" id="add-form" aria-label="Add a codebase" hidden><label for="add-path">Folder path on this machine</label><div class="row"><input id="add-path" type="text" spellcheck="false" autocomplete="off" placeholder="/path/to/repo"><button type="submit" class="key">Add</button></div><p id="add-note" role="status"></p></form>
 <div class="island" id="mapping" role="status" hidden></div>
 <div class="island" id="alpha" hidden><span id="setup-banner" hidden><span id="setup-banner-text"></span><button id="setup-open" type="button">Set a key</button></span><span id="update" class="update" hidden><span id="update-text"></span> <a id="update-link" target="_blank" rel="noopener">open release</a></span><span class="alpha-actions"><button id="setup-manage" type="button" hidden>Model setup</button></span><span id="bug-note" class="muted" hidden></span></div>
@@ -655,6 +661,7 @@
       <button type="submit">open</button>
     </div>
     <p id="token-hint" class="gate-hint">The first <code>acan serve</code> in a repo saves this token in that repo's <code>.acan/tokens.json</code>, and prints it to the terminal.</p>
+    <p id="gate-note" class="gate-hint" role="alert" hidden></p>
   </form>
 </div>
 <div class="island" id="usage" hidden>

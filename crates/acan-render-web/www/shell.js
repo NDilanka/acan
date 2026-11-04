@@ -92,7 +92,8 @@ function paintVersion() {
 }
 
 async function checkUpdate(run, attempt) {
-  if (!state.token) {
+  // An origin with no codebase has no project to ask, so there is no update check to make.
+  if (!state.token || state.empty) {
     paintUpdate(null);
     return;
   }
@@ -189,7 +190,7 @@ function showNote(text) {
 // Reads GET /api/setup and shows the banner when no key is in use. Any principal may read it.
 async function loadSetup() {
   setupStatus = null;
-  if (state.token) {
+  if (state.token && !state.empty) {
     try {
       const res = await fetch(apiPath(target(), "/api/setup"), { headers: { Authorization: `Bearer ${state.token}` } });
       if (res.ok) setupStatus = await res.json();

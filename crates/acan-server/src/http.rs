@@ -187,6 +187,8 @@ pub(crate) fn router<C: ModelClient + 'static>(
             Router::new()
                 .route("/api/projects", get(registry::list_projects::<C>))
                 .route("/api/stream/all", get(stream_all::upgrade::<C>))
+                .route("/api/signin", post(crate::signin::mint::<C>))
+                .route("/api/signin/exchange", post(crate::signin::exchange::<C>))
                 .with_state(Arc::clone(&projects)),
         )
         .merge(settings::routes(settings));
@@ -234,6 +236,10 @@ async fn unmatched<C: ModelClient + 'static>(
         let Ok(response) = routes.oneshot(request).await;
         return response;
     }
+    // With no codebase running there is no API to answer, so an API path says why, in JSON.
+    if projects.entries().is_empty() && request.uri().path().starts_with("/api/") {
+        return ApiError::NoCodebase.into_response();
+    }
     match web {
         Some(root) => public::serve(root, request).await,
         None => StatusCode::NOT_FOUND.into_response(),
@@ -271,6 +277,8 @@ pub enum ApiError {
     Refused(McpError),
     /// The project's writer has stopped, so the project cannot take a request.
     ProjectUnavailable,
+    /// The server runs no codebase, so no project can answer the request.
+    NoCodebase,
     /// The project's codebase is still mapping, so it takes no writes yet. Retry once the scan
     /// reports done.
     NotMapped,
@@ -321,6 +329,11 @@ impl IntoResponse for ApiError {
             Self::NotMapped => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "error": "not_mapped", "what": "codebase" })),
+            )
+                .into_response(),
+            Self::NoCodebase => (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "no_codebase", "what": "codebase" })),
             )
                 .into_response(),
             Self::Internal(err) => {

@@ -4,6 +4,9 @@
 
 export const ADD_PATH = "/api/settings/projects";
 
+// What an add says when this page cannot put the new codebase on its canvas: a one-plant page.
+export const RELOAD_NOTE = "Added. Reload the page to see it beside this one.";
+
 // The request that adds the folder at `path`, for the owner's `token`.
 export function addRequest(token, path) {
   return {

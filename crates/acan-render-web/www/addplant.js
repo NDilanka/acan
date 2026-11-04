@@ -1,12 +1,45 @@
-// The "+" in the shell and the form it opens. A folder path is posted to the server, and the new
-// codebase is put on the canvas as it starts its scan, with no reload. The request and the words
-// the form shows are in addplant-model.js.
-import { addNote, addRequest } from "./addplant-model.js";
+// The live add: the "+" in the shell, its form, and the Settings "Add a project" row. Both send the
+// folder path to the server, and the new codebase is put on the canvas as its first scan starts,
+// with no reload. The request and the words the page shows are in addplant-model.js.
+import { RELOAD_NOTE, addNote, addRequest } from "./addplant-model.js";
 import { state } from "./state.js";
+
+// Puts a codebase on the canvas once the server has added it. Set by installAddPlant. It resolves to
+// true when the codebase is on the canvas, or false when this page cannot show it without a reload.
+let attach = async () => false;
+
+// Adds the folder at `path` on the server, then puts the new codebase on the canvas. Resolves to the
+// status and body of the answer, and `live`: whether the canvas now shows the new codebase.
+export async function addCodebase(path) {
+  const { url, init } = addRequest(state.token, path);
+  let status = 0;
+  let body = null;
+  try {
+    const res = await fetch(url, init);
+    status = res.status;
+    body = await res.json().catch(() => null);
+  } catch {
+    status = 0;
+  }
+  if (status !== 202 || !body) return { status, body, live: false };
+  let live = false;
+  try {
+    live = await attach({ id: body.id, name: body.name });
+  } catch (err) {
+    console.error(`the new codebase ${body.id} could not be put on the canvas`, err);
+  }
+  return { status, body, live };
+}
+
+// The line an add shows once the server has added the codebase.
+export function addedNote(live) {
+  return live ? addNote(202) : RELOAD_NOTE;
+}
 
 // `added` takes `{ id, name }` of the new codebase and resolves to true when it is on the canvas,
 // or false when this page cannot show it without a reload.
 export function installAddPlant({ added }) {
+  attach = added;
   const button = document.getElementById("add-plant");
   const form = document.getElementById("add-form");
   const input = document.getElementById("add-path");
@@ -26,33 +59,18 @@ export function installAddPlant({ added }) {
   });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const { url, init } = addRequest(state.token, input.value);
     note.textContent = "Adding…";
-    let status = 0;
-    let body = null;
-    try {
-      const res = await fetch(url, init);
-      status = res.status;
-      body = await res.json().catch(() => null);
-    } catch {
-      status = 0;
-    }
-    if (status !== 202 || !body) {
-      note.textContent = addNote(status, body);
+    const answer = await addCodebase(input.value);
+    if (answer.status !== 202 || !answer.body) {
+      note.textContent = addNote(answer.status, answer.body);
       return;
     }
     input.value = "";
-    let live = false;
-    try {
-      live = await added({ id: body.id, name: body.name });
-    } catch (err) {
-      console.error(`the new codebase ${body.id} could not be put on the canvas`, err);
-    }
-    if (live) {
+    if (answer.live) {
       open(false);
       note.textContent = "";
     } else {
-      note.textContent = "Added. Reload the page to see it beside this one.";
+      note.textContent = RELOAD_NOTE;
     }
   });
 }
