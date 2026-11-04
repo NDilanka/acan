@@ -133,6 +133,9 @@ impl Demo {
             &root,
             &["checkout", "--quiet", "-B", PROTECTED_BRANCH, DEMO_COMMIT],
         );
+        // The candidates are committed in this clone. A CI runner has no git identity of its own.
+        git(&root, &["config", "user.name", "Test User"]);
+        git(&root, &["config", "user.email", "test@example.test"]);
         let repo = Repo::open_with_protected(&root, PROTECTED_BRANCH)
             .await
             .expect("the clone opens with its protected branch");
