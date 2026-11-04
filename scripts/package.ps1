@@ -71,7 +71,7 @@ function Get-Exe([string]$Os) {
 # The launcher each file ships, relative to the repository root.
 function Get-LauncherSource([string]$Kind, [string]$Os) {
     switch ("$Kind-$Os") {
-        'app-windows' { 'installer/windows/acan-start.cmd' }
+        'app-windows' { 'installer/windows/acan-open.vbs' }
         'app-linux' { 'install.sh' }
         'demo-windows' { 'installer/windows/start-acan-demo.ps1' }
         'demo-linux' { 'installer/linux/start-acan-demo.sh' }

@@ -43,15 +43,19 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 
+[Tasks]
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: checkedonce
+
 [Files]
 Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Acan"; Filename: "{app}\acan-start.cmd"; WorkingDir: "{app}"; Comment: "Start Acan on your repository"
+Name: "{group}\Acan"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\acan-open.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\acan.exe"; Comment: "Open Acan in your browser"
+Name: "{autodesktop}\Acan"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\acan-open.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\acan.exe"; Comment: "Open Acan in your browser"; Tasks: desktopicon
 Name: "{group}\Uninstall Acan"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\acan-start.cmd"; Description: "Start Acan"; WorkingDir: "{app}"; Flags: nowait postinstall runasoriginaluser shellexec; Check: LaunchWanted
+Filename: "{sys}\wscript.exe"; Parameters: """{app}\acan-open.vbs"""; Description: "Open Acan"; WorkingDir: "{app}"; Flags: nowait postinstall runasoriginaluser; Check: LaunchWanted
 
 [Code]
 const
@@ -109,6 +113,29 @@ begin
     RegWriteExpandStringValue(HKCU, EnvKey, 'Path', WithoutEntry(Path, ExpandConstant('{app}')));
 end;
 
+// Stops every acan and acan-worker process that runs from this install folder, so its files can
+// be replaced or removed. The shortcuts start the server with no window, so Restart Manager may not
+// find one to close. This stop covers installs, updates and uninstalls.
+// The folder goes into a single-quoted PowerShell string, so its own single quotes are doubled.
+// Get-Process leaves an error for a name with no process, so the command ends with exit 0.
+procedure StopServers;
+var
+  App: String;
+  ResultCode: Integer;
+begin
+  App := ExpandConstant('{app}');
+  StringChangeEx(App, '''', '''''', True);
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "Get-Process -Name acan,acan-worker -ErrorAction SilentlyContinue | Where-Object Path -like ''' + App + '\*'' | Stop-Process -Force; exit 0"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopServers;
+  Result := '';
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then AddToUserPath;
@@ -116,5 +143,6 @@ end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
+  if CurUninstallStep = usUninstall then StopServers;
   if CurUninstallStep = usPostUninstall then RemoveFromUserPath;
 end;
