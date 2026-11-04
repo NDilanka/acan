@@ -62,11 +62,15 @@ struct ScanPlant {
 struct ScanMachine {
     id: u32,
     name: String,
-    files: Vec<u32>,
-    /// Missing in older plant JSON, which reads as an assembler. A kind this build does not know
-    /// also reads as an assembler (see acan-iso's `Kind`).
+    /// The directory the scan grouped the machine under. The rules read it when no kind is given.
     #[serde(default)]
-    kind: Kind,
+    dir: String,
+    files: Vec<u32>,
+    /// Missing in older plant JSON. Then the kind comes from the name, the directory and the file
+    /// paths, with the scan's own rules (acan-iso's `classify`), so the drawing matches a fresh scan.
+    /// A kind this build does not know reads as an assembler (see acan-iso's `Kind`).
+    #[serde(default)]
+    kind: Option<Kind>,
     #[serde(default)]
     kind_guessed: bool,
     #[serde(default)]
@@ -111,13 +115,25 @@ pub fn from_scan_json(text: &str) -> Result<Plant, PlantError> {
                 .iter()
                 .filter_map(|id| paths.get(id).copied())
                 .collect();
+            let (kind, guessed, reason, set_by_user) = match machine.kind {
+                Some(kind) => (
+                    kind,
+                    machine.kind_guessed,
+                    machine.kind_reason.clone(),
+                    machine.kind_set_by_user,
+                ),
+                None => {
+                    let decision = acan_iso::classify(&machine.name, &machine.dir, &paths);
+                    (decision.kind, decision.guessed, decision.reason, false)
+                }
+            };
             PlantMachine {
                 name: machine.name.clone(),
                 files: machine.files.len(),
-                kind: machine.kind,
-                guessed: machine.kind_guessed,
-                reason: machine.kind_reason.clone(),
-                set_by_user: machine.kind_set_by_user,
+                kind,
+                guessed,
+                reason,
+                set_by_user,
                 paths: paths.iter().map(|path| (*path).to_owned()).collect(),
             }
         })
@@ -418,6 +434,69 @@ mod tests {
                 .all(|(i, m)| { named.contains(&i) || m.files <= fewest_named.unwrap_or(0) })
         );
         assert_eq!(rest_labels(&machines[..5]).len(), 5);
+    }
+
+    #[test]
+    fn a_plant_without_kinds_takes_the_kinds_its_names_give() {
+        // Older plant JSON has no kind keys. The kinds then come from the scan's rules, as a fresh scan gives them.
+        let text = LIVE.replace(
+            ", \"kind\": \"crate\", \"kind_guessed\": false, \"kind_reason\": \"only tests\"",
+            "",
+        );
+        let text = text.replace("\"name\": \"src\"", "\"name\": \"auth\"");
+        let plant = from_scan_json(&text).expect("a plant without kinds parses");
+        assert_eq!(
+            kinds_by_name(&plant),
+            vec![("auth", Kind::Gate), ("test", Kind::Crate)]
+        );
+        assert!(plant.machines[0].guessed);
+        assert_eq!(plant.machines[0].reason, "name word \"auth\"");
+        assert_eq!(plant.machines[1].reason, "only tests");
+        assert!(!plant.machines[1].set_by_user);
+    }
+
+    #[test]
+    fn the_shipped_replay_plant_parses_into_nine_machines_with_their_kinds() {
+        const REPLAY: &str = include_str!("../../../replay/plant.json");
+        let plant = from_scan_json(REPLAY).expect("the shipped replay plant parses");
+        assert_eq!(plant.machines.len(), 9);
+        assert_eq!(plant.machines[0].name, "auth");
+        assert_eq!(plant.machines[0].kind, Kind::Gate);
+    }
+
+    #[test]
+    fn the_shipped_replay_plant_carries_the_kinds_the_rules_give() {
+        // The recorded replay has a kind for every machine, and each is the scan's rule for its name,
+        // directory and file paths. A changed rule or a new scan needs the bundle's kinds written again.
+        const REPLAY: &str = include_str!("../../../replay/plant.json");
+        let value: serde_json::Value =
+            serde_json::from_str(REPLAY).expect("the replay plant parses");
+        let files: HashMap<u64, &str> = value["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .map(|file| {
+                (
+                    file["id"].as_u64().expect("file id"),
+                    file["path"].as_str().expect("path"),
+                )
+            })
+            .collect();
+        let machines = value["machines"].as_array().expect("machines");
+        assert_eq!(machines.len(), 9);
+        for machine in machines {
+            let name = machine["name"].as_str().expect("machine name");
+            let dir = machine["dir"].as_str().expect("machine dir");
+            let paths: Vec<&str> = machine["files"]
+                .as_array()
+                .expect("machine files")
+                .iter()
+                .filter_map(|id| files.get(&id.as_u64()?).copied())
+                .collect();
+            let want = serde_json::to_value(acan_iso::classify(name, dir, &paths).kind)
+                .expect("a kind name");
+            assert_eq!(machine["kind"], want, "{name}");
+        }
     }
 
     #[test]

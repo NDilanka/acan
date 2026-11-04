@@ -5,8 +5,6 @@
 //! it lies on. A joint between two plan edges is smooth when the surface turns by less than 60 degrees there, so
 //! a rounded corner shades as one curve. Joints in a profile are always creases, so bevels and steps stay crisp.
 
-use std::f32::consts::TAU;
-
 use crate::model::{Aabb, Detail, Dot3, Ink, Line3, Mesh, Model, Surface};
 use crate::plan::{Plan, Point, circle_ring};
 
@@ -32,6 +30,9 @@ pub(crate) enum Base {
     },
     /// A convex polygon, counter-clockwise in plan. Growing it offsets each side, with mitred corners.
     Polygon(Vec<Point>),
+    /// A test-only outline that gains a vertex once grown, which breaks the invariant `sweep` checks.
+    #[cfg(test)]
+    Ragged(Vec<Point>),
 }
 
 impl Base {
@@ -54,6 +55,14 @@ impl Base {
                 steps,
             } => circle_ring(center[0], center[1], radius + grow, *steps),
             Self::Polygon(points) => offset(points, grow),
+            #[cfg(test)]
+            Self::Ragged(points) => {
+                let mut ring = points.clone();
+                if grow > 0.0 {
+                    ring.push(points[0]);
+                }
+                ring
+            }
         }
     }
 }
@@ -97,6 +106,14 @@ impl Finish {
             ..self
         }
     }
+
+    /// The same finish, sent to the `Close` mesh.
+    pub(crate) const fn close(self) -> Self {
+        Self {
+            level: Detail::Close,
+            ..self
+        }
+    }
 }
 
 /// How a painted line is drawn: its ink, its weight and the level it needs.
@@ -130,10 +147,6 @@ impl Stroke {
         }
     }
 
-    pub(crate) const fn width(self, width: f32) -> Self {
-        Self { width, ..self }
-    }
-
     pub(crate) fn tone(self) -> Ink {
         self.tone
     }
@@ -149,6 +162,7 @@ pub(crate) struct Part {
     meshes: [Mesh; 3],
     lines: Vec<Line3>,
     dots: Vec<Dot3>,
+    pub(crate) solids: u32,
 }
 
 impl Part {
@@ -163,11 +177,73 @@ impl Part {
             lines: self.lines,
             dots: self.dots,
             bounds,
+            solids: self.solids,
+        }
+    }
+
+    /// Adds a part in a right-handed orthonormal frame. Positions move with the origin; normals only rotate.
+    pub(crate) fn place(&mut self, part: Part, origin: [f32; 3], axes: [[f32; 3]; 3]) {
+        let rotate = |v: [f32; 3]| {
+            std::array::from_fn(|i| axes[0][i] * v[0] + axes[1][i] * v[1] + axes[2][i] * v[2])
+        };
+        let position = |v: [f32; 3]| {
+            let rotated: [f32; 3] = rotate(v);
+            std::array::from_fn(|i| origin[i] + rotated[i])
+        };
+        self.solids += part.solids;
+        for (target, source) in self.meshes.iter_mut().zip(part.meshes) {
+            let start =
+                u32::try_from(target.positions.len()).expect("mesh has fewer than 2^32 vertices");
+            target
+                .positions
+                .extend(source.positions.into_iter().map(position));
+            target
+                .normals
+                .extend(source.normals.into_iter().map(rotate));
+            target.surfaces.extend(source.surfaces);
+            target
+                .indices
+                .extend(source.indices.into_iter().map(|i| start + i));
+        }
+        self.lines.extend(part.lines.into_iter().map(|mut line| {
+            line.points = line.points.into_iter().map(position).collect();
+            line
+        }));
+        self.dots.extend(part.dots.into_iter().map(|mut dot| {
+            dot.center = position(dot.center);
+            dot.normal = rotate(dot.normal);
+            dot
+        }));
+    }
+
+    /// A closed thin plate over a simple polygon, including concave outlines such as a mould cavity.
+    pub(crate) fn plate(&mut self, points: &[Point], z: [f32; 2], finish: Finish) {
+        let base = Base::polygon(points);
+        let ring = base.ring(0.0);
+        self.slab(&base, z[0], z[1], 0.0, finish);
+        let mesh = &mut self.meshes[finish.level as usize];
+        // Replace the sweep's convex fan caps with ears; the side walls and the solid tally stay unchanged.
+        mesh.indices.truncate(mesh.indices.len() - ring.len() * 6);
+        let triangles = polygon_triangles(&ring);
+        for (height, up) in [(z[0], false), (z[1], true)] {
+            let normal = [0.0, 0.0, if up { 1.0 } else { -1.0 }];
+            let vertices: Vec<u32> = ring
+                .iter()
+                .map(|p| mesh.vertex([p[0], p[1], height], normal, finish.surface))
+                .collect();
+            for &[a, b, c] in &triangles {
+                if up {
+                    mesh.triangle(vertices[a], vertices[b], vertices[c]);
+                } else {
+                    mesh.triangle(vertices[c], vertices[b], vertices[a]);
+                }
+            }
         }
     }
 
     /// Sweeps `base` through `stations`, bottom first, and closes both ends with flat caps.
     pub(crate) fn sweep(&mut self, base: &Base, stations: &[Station], finish: Finish) {
+        self.solids += 1;
         assert!(
             stations.len() >= 2,
             "a sweep needs two stations, got {}",
@@ -175,6 +251,11 @@ impl Part {
         );
         let rings: Vec<Vec<Point>> = stations.iter().map(|s| base.ring(s.grow)).collect();
         let count = rings[0].len();
+        debug_assert!(
+            rings.iter().all(|ring| ring.len() == count),
+            "every station of a sweep needs {count} vertices, got {:?}",
+            rings.iter().map(Vec::len).collect::<Vec<_>>()
+        );
         let plan = PlanNormals::new(&base.ring(0.0));
         let mesh = &mut self.meshes[finish.level as usize];
 
@@ -251,70 +332,27 @@ impl Part {
         self.sweep(base, &stations, finish);
     }
 
-    /// A round tube from `a` to `b`, with flat ends.
-    pub(crate) fn tube(
-        &mut self,
-        a: [f32; 3],
-        b: [f32; 3],
-        radius: f32,
-        steps: usize,
-        finish: Finish,
-    ) {
-        let axis = unit3(sub3(b, a));
-        let helper = if axis[0].abs() < 0.9 {
-            [1.0, 0.0, 0.0]
+    /// A flat quad, flat-shaded, with its corners in order around its edge. Its normal points to the side `facing`
+    /// points to, so the corners may wind either way.
+    pub(crate) fn quad(&mut self, corners: [[f32; 3]; 4], facing: [f32; 3], finish: Finish) {
+        self.solids += 1;
+        let mut normal = unit3(cross3(
+            sub3(corners[1], corners[0]),
+            sub3(corners[2], corners[0]),
+        ));
+        let order = if dot3(normal, facing) < 0.0 {
+            normal = scale3(normal, -1.0);
+            [0, 3, 2, 1]
         } else {
-            [0.0, 1.0, 0.0]
+            [0, 1, 2, 3]
         };
-        let u = unit3(cross3(helper, axis));
-        let v = cross3(axis, u);
-        let radial: Vec<[f32; 3]> = (0..steps)
-            .map(|i| {
-                let angle = i as f32 / steps as f32 * TAU;
-                let (sin, cos) = angle.sin_cos();
-                [
-                    cos * u[0] + sin * v[0],
-                    cos * u[1] + sin * v[1],
-                    cos * u[2] + sin * v[2],
-                ]
-            })
-            .collect();
         let mesh = &mut self.meshes[finish.level as usize];
-        let low: Vec<u32> = radial
+        let v: Vec<u32> = order
             .iter()
-            .map(|n| mesh.vertex(add3(a, scale3(*n, radius)), *n, finish.surface))
+            .map(|&i| mesh.vertex(corners[i], normal, finish.surface))
             .collect();
-        let high: Vec<u32> = radial
-            .iter()
-            .map(|n| mesh.vertex(add3(b, scale3(*n, radius)), *n, finish.surface))
-            .collect();
-        for i in 0..steps {
-            let j = (i + 1) % steps;
-            mesh.triangle(low[i], low[j], high[j]);
-            mesh.triangle(low[i], high[j], high[i]);
-        }
-        // The caps have their own rim vertices, so their normals point along the axis, not across the wall.
-        let low_cap: Vec<u32> = radial
-            .iter()
-            .map(|n| {
-                mesh.vertex(
-                    add3(a, scale3(*n, radius)),
-                    scale3(axis, -1.0),
-                    finish.surface,
-                )
-            })
-            .collect();
-        let high_cap: Vec<u32> = radial
-            .iter()
-            .map(|n| mesh.vertex(add3(b, scale3(*n, radius)), axis, finish.surface))
-            .collect();
-        let low_centre = mesh.vertex(a, scale3(axis, -1.0), finish.surface);
-        let high_centre = mesh.vertex(b, axis, finish.surface);
-        for i in 0..steps {
-            let j = (i + 1) % steps;
-            mesh.triangle(low_centre, low_cap[j], low_cap[i]);
-            mesh.triangle(high_centre, high_cap[i], high_cap[j]);
-        }
+        mesh.triangle(v[0], v[1], v[2]);
+        mesh.triangle(v[0], v[2], v[3]);
     }
 
     /// A polyline. It is painted on top of whatever it lies on, so the caller lifts it by [`LIFT`].
@@ -426,6 +464,44 @@ fn cap(mesh: &mut Mesh, ring: &[Point], z: f32, normal: [f32; 3], surface: Surfa
     }
 }
 
+/// Ear clipping for a simple counter-clockwise polygon. A point on an ear's edge keeps that ear from being cut.
+fn polygon_triangles(ring: &[Point]) -> Vec<[usize; 3]> {
+    let cross = |a: Point, b: Point, c: Point| {
+        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    };
+    let mut remaining: Vec<usize> = (0..ring.len()).collect();
+    let mut triangles = Vec::new();
+    while remaining.len() > 3 {
+        let count = remaining.len();
+        let ear = (0..count)
+            .find(|&i| {
+                let [a, b, c] = [
+                    remaining[(i + count - 1) % count],
+                    remaining[i],
+                    remaining[(i + 1) % count],
+                ];
+                cross(ring[a], ring[b], ring[c]) > 1e-6
+                    && !remaining.iter().any(|&j| {
+                        j != a
+                            && j != b
+                            && j != c
+                            && cross(ring[a], ring[b], ring[j]) >= -1e-6
+                            && cross(ring[b], ring[c], ring[j]) >= -1e-6
+                            && cross(ring[c], ring[a], ring[j]) >= -1e-6
+                    })
+            })
+            .expect("a simple polygon has an ear");
+        triangles.push([
+            remaining[(ear + count - 1) % count],
+            remaining[ear],
+            remaining[(ear + 1) % count],
+        ]);
+        remaining.remove(ear);
+    }
+    triangles.push([remaining[0], remaining[1], remaining[2]]);
+    triangles
+}
+
 /// The outline offset by `grow`, with each corner mitred along the average of its two edge normals.
 fn offset(points: &[Point], grow: f32) -> Vec<Point> {
     let count = points.len();
@@ -515,16 +591,16 @@ fn unit2(v: Point) -> Point {
     }
 }
 
-fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
 fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
 fn scale3(v: [f32; 3], by: f32) -> [f32; 3] {
     [v[0] * by, v[1] * by, v[2] * by]
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -588,10 +664,11 @@ pub(crate) mod tests {
         counts
     }
 
-    /// Checks a closed solid: every edge is shared by exactly two triangles.
+    /// Checks a union of closed solids: every edge is used by an even number of triangles, so no edge is left open.
+    /// Solids that stand on one another share a face, and their shared edges count twice for each solid.
     pub(crate) fn check_closed(mesh: &Mesh) -> Result<(), String> {
         for (edge, count) in edge_counts(mesh) {
-            if count != 2 {
+            if count % 2 != 0 {
                 return Err(format!("edge {edge:?} is used by {count} triangles"));
             }
         }
@@ -716,12 +793,66 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_tube_is_closed_and_outward_along_any_axis() {
-        let mesh = mesh_of(|part| {
-            part.tube([0.0, 0.0, 0.0], [3.0, 4.0, 1.0], 1.0, 12, Finish::paper());
-        });
-        assert_closed(&mesh);
-        assert_outward(&mesh);
+    fn a_concave_plate_has_closed_outward_caps_whichever_way_it_winds() {
+        let mut ring = vec![
+            [0.0, 0.0],
+            [6.0, 0.0],
+            [6.0, 1.0],
+            [4.0, 1.0],
+            [4.0, 3.0],
+            [6.0, 3.0],
+            [6.0, 4.0],
+            [0.0, 4.0],
+            [0.0, 3.0],
+            [2.0, 3.0],
+            [2.0, 1.0],
+            [0.0, 1.0],
+        ];
+        for _ in 0..2 {
+            let mut p = Part::new();
+            p.plate(&ring, [0.01, 0.02], Finish::paper().near());
+            let model = p.finish();
+            assert_eq!(model.solids, 1);
+            assert_eq!(model.meshes[1].indices.len() / 3, 44);
+            assert_closed(&model.meshes[1]);
+            assert_outward(&model.meshes[1]);
+            ring.reverse();
+        }
+    }
+
+    #[test]
+    fn placing_a_part_rotates_its_mesh_lines_and_dots_without_changing_the_tally() {
+        let mut source = Part::new();
+        source.slab(&square(2.0), 0.0, 3.0, 0.0, Finish::paper().near());
+        source.line(
+            &[[0.0, 0.0, 1.0], [0.0, 0.0, 2.0]],
+            false,
+            Stroke::new(Ink::Lo).close(),
+        );
+        source.dot(
+            [0.0, 0.0, 3.0],
+            [0.0, 0.0, 1.0],
+            0.5,
+            Stroke::new(Ink::Lo).close(),
+        );
+        let mut target = Part::new();
+        target.place(
+            source,
+            [10.0, 20.0, 30.0],
+            [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
+        );
+        let model = target.finish();
+        assert_eq!(model.solids, 1);
+        assert_eq!(
+            model.lines[0].points,
+            [[11.0, 20.0, 30.0], [12.0, 20.0, 30.0]]
+        );
+        assert_eq!(model.dots[0].center, [13.0, 20.0, 30.0]);
+        assert_eq!(model.dots[0].normal, [1.0, 0.0, 0.0]);
+        assert_closed(&model.meshes[1]);
+        assert_outward(&model.meshes[1]);
+        assert!(model.meshes[0].indices.is_empty());
+        assert!(model.meshes[2].indices.is_empty());
     }
 
     #[test]
@@ -749,5 +880,23 @@ pub(crate) mod tests {
         let model = part.finish();
         assert_eq!(model.bounds.min, [-4.0, -0.5, 0.5]);
         assert_eq!(model.bounds.max, [1.0, 2.0, 3.0]);
+    }
+
+    const SQUARE: [Point; 4] = [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]];
+
+    #[test]
+    fn a_sweep_whose_stations_have_equal_rings_passes_the_check() {
+        let mut part = Part::new();
+        let stations = [Station::at(0.0, 0.0), Station::at(0.5, 2.0)];
+        part.sweep(&Base::Polygon(SQUARE.to_vec()), &stations, Finish::paper());
+        assert_eq!(part.finish().solids, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "every station of a sweep needs 4 vertices, got [4, 5]")]
+    fn a_station_ring_with_an_extra_vertex_fails_loudly() {
+        let mut part = Part::new();
+        let stations = [Station::at(0.0, 0.0), Station::at(0.5, 2.0)];
+        part.sweep(&Base::Ragged(SQUARE.to_vec()), &stations, Finish::paper());
     }
 }
