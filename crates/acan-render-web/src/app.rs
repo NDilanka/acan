@@ -66,14 +66,15 @@ struct FocusHold {
     camera: Camera,
 }
 
-/// How many times the top-down fit pans the picture back from a screen edge it must keep clear of.
-const CLEAR_PASSES: usize = 4;
+/// How many steps the top-down fit takes to bring the plant inside the screen edges it keeps clear.
+const CLEAR_STEPS: usize = 12;
 
 /// Fits `boxes` on `camera` at its angles, with `room`, as `Camera::fit_boxes_room` does. With
 /// `clear`, the top-down fit, the corners must also stay inside the screen edges it names, as
 /// `[top, right]` in device pixels. The kit's fit shifts the picture to clear the usage panel, which
-/// can push the top of the plant under the shell bar. Any corner past an edge pans the picture back
-/// by its reach, which leaves the zoom the fit chose.
+/// can push the plant under the shell bar or past the left edge. A plant too big for the room the
+/// edges leave zooms out to fit it. Otherwise a corner past an edge pans the picture back by its
+/// reach.
 fn fit_clear(
     camera: &mut Camera,
     boxes: &[Aabb],
@@ -88,7 +89,9 @@ fn fit_clear(
     let corners: Vec<[f32; 3]> = boxes.iter().flat_map(|bounds| bounds.corners()).collect();
     let [width, height] = camera.viewport();
     let centre = [width * 0.5, height * 0.5];
-    for _ in 0..CLEAR_PASSES {
+    let room_x = right.max(1.0);
+    let room_y = (height - top).max(1.0);
+    for _ in 0..CLEAR_STEPS {
         let screen: Vec<[f32; 2]> = corners
             .iter()
             .map(|&corner| camera.world_to_screen(corner))
@@ -96,6 +99,26 @@ fn fit_clear(
         let [above, beyond, left] = topdown::overlap(&screen, top, right);
         if above == 0.0 && beyond == 0.0 && left == 0.0 {
             break;
+        }
+        let [lo_x, hi_x, lo_y, hi_y] = screen.iter().fold(
+            [
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+            ],
+            |[lo_x, hi_x, lo_y, hi_y], &[x, y]| {
+                [lo_x.min(x), hi_x.max(x), lo_y.min(y), hi_y.max(y)]
+            },
+        );
+        // The plant's span on screen against the room. A span past the room means it cannot fit at
+        // this zoom, so the zoom comes down a little and the next step measures again.
+        let fit = (room_x / (hi_x - lo_x))
+            .min(room_y / (hi_y - lo_y))
+            .min(1.0);
+        if fit < 1.0 {
+            camera.set_zoom(camera.zoom() * fit * 0.98);
+            continue;
         }
         // The ground under the centre moves down by `above`, left by `beyond` and right by `left`,
         // which moves the picture the same way.
