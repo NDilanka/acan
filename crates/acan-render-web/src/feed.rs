@@ -157,6 +157,18 @@ mod tests {
     }
 
     #[test]
+    fn a_scope_draft_this_build_cannot_read_is_still_unread() {
+        let later = stamped_json(
+            7,
+            json!({ "type": "scope_drafted", "order": "o-1", "rev": 0, "draft": { "later": true } }),
+        );
+        assert_eq!(
+            entry(&later.to_string()).expect("the event parses"),
+            Entry::Unknown(Seq::new(7))
+        );
+    }
+
+    #[test]
     fn an_event_without_a_readable_seq_is_an_error() {
         let text = json!({ "event": { "type": "vision_checked" } }).to_string();
         assert!(entry(&text).is_err());

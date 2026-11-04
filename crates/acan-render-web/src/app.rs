@@ -28,6 +28,7 @@ use crate::project::{self, ProjectMarks};
 use crate::scene;
 use crate::seal;
 use crate::stand;
+use crate::topdown;
 use crate::tour;
 
 /// Space around the plant at fit, in CSS pixels.
@@ -65,6 +66,43 @@ struct FocusHold {
     camera: Camera,
 }
 
+/// How many times the top-down fit pans the picture back from a screen edge it must keep clear of.
+const CLEAR_PASSES: usize = 4;
+
+/// Fits `boxes` on `camera` at its angles, with `room`, as `Camera::fit_boxes_room` does. With
+/// `clear`, the top-down fit, the corners must also stay inside the screen edges it names, as
+/// `[top, right]` in device pixels. The kit's fit shifts the picture to clear the usage panel, which
+/// can push the top of the plant under the shell bar. Any corner past an edge pans the picture back
+/// by its reach, which leaves the zoom the fit chose.
+fn fit_clear(
+    camera: &mut Camera,
+    boxes: &[Aabb],
+    margin: f32,
+    room: FitRoom,
+    clear: Option<[f32; 2]>,
+) {
+    camera.fit_boxes_room(boxes, margin, room);
+    let Some([top, right]) = clear else {
+        return;
+    };
+    let corners: Vec<[f32; 3]> = boxes.iter().flat_map(|bounds| bounds.corners()).collect();
+    let [width, height] = camera.viewport();
+    let centre = [width * 0.5, height * 0.5];
+    for _ in 0..CLEAR_PASSES {
+        let screen: Vec<[f32; 2]> = corners
+            .iter()
+            .map(|&corner| camera.world_to_screen(corner))
+            .collect();
+        let [above, beyond] = topdown::overlap(&screen, top, right);
+        if above == 0.0 && beyond == 0.0 {
+            break;
+        }
+        // The ground under the centre moves down by `above` and left by `beyond`, which moves the
+        // picture the same way.
+        camera.drag_ground(centre, [centre[0] - beyond, centre[1] + above]);
+    }
+}
+
 #[wasm_bindgen]
 pub struct App {
     renderer: Renderer,
@@ -76,6 +114,17 @@ pub struct App {
     turn: Option<Turn>,
     /// The camera's move to the tour step on screen, while one runs.
     tour_move: Option<TourMove>,
+    /// Whether the view is top-down, the camera looking straight down. See [`topdown`].
+    top_down: bool,
+    /// The tilt the view had before it turned top-down, which turning back restores.
+    tilt_before_top: f32,
+    /// The camera's turn to top-down, or back to the default tilt, while one runs.
+    top_move: Option<TopMove>,
+    /// Whether the top-down view is set once the ride has eased back, as `V` asks while riding.
+    top_after_leave: Option<bool>,
+    /// The room the top-down fit keeps clear of the shell bar at the top and of the right column,
+    /// as `[top, right]` in CSS pixels. See [`App::set_fit_inset`].
+    fit_inset: [f32; 2],
     /// The machines the shown tour step stages, with the chip labels on each. Empty when no step
     /// is shown, so every machine keeps its normal tint.
     stage: Vec<tour::Spot>,
@@ -161,6 +210,18 @@ struct TourMove {
     elapsed_ms: f32,
 }
 
+/// The camera's turn to top-down, back, or a grid step: the pivot and zoom, the elevation and the
+/// azimuth, each from where they were to where the fit puts them. See [`topdown`].
+struct TopMove {
+    from_pose: tour::Pose,
+    to_pose: tour::Pose,
+    from_elevation: f32,
+    to_elevation: f32,
+    from_azimuth: f32,
+    to_azimuth: f32,
+    elapsed_ms: f32,
+}
+
 /// The plant on screen.
 struct Loaded {
     repo: String,
@@ -233,6 +294,11 @@ impl App {
             dpr: 1.0,
             turn: None,
             tour_move: None,
+            top_down: false,
+            tilt_before_top: DEFAULT_ELEVATION,
+            top_move: None,
+            top_after_leave: None,
+            fit_inset: [0.0; 2],
             stage: Vec::new(),
             plant: None,
             plan: None,
@@ -549,6 +615,7 @@ impl App {
             return;
         }
         self.tour_move = None;
+        self.cancel_top_move();
         self.camera.drag_ground(
             [x0 * self.dpr, y0 * self.dpr],
             [x1 * self.dpr, y1 * self.dpr],
@@ -562,6 +629,7 @@ impl App {
             return;
         }
         self.tour_move = None;
+        self.cancel_top_move();
         let [vw, vh] = self.camera.viewport();
         let from = [vw * 0.5, vh * 0.5];
         self.camera
@@ -575,9 +643,15 @@ impl App {
             return;
         }
         self.camera.toggle_projection();
+        let (room, clear) = (self.fit_room(), self.clear_for(self.camera.elevation()));
         if let Some(loaded) = &self.plant {
-            self.camera
-                .fit_boxes_room(&loaded.framing, FIT_MARGIN_CSS * self.dpr, self.fit_room());
+            fit_clear(
+                &mut self.camera,
+                &loaded.framing,
+                FIT_MARGIN_CSS * self.dpr,
+                room,
+                clear,
+            );
         }
     }
 
@@ -589,8 +663,11 @@ impl App {
         }
         self.turn = None;
         self.tour_move = None;
+        self.cancel_top_move();
         self.camera
             .orbit(dx * ORBIT_DEG_PER_PX, -dy * TILT_DEG_PER_PX);
+        // A tilt away from the top ends the top-down view, so the page's button tells the truth.
+        self.top_down = self.top_down && topdown::is_top_down(self.camera.elevation());
     }
 
     /// Starts an ease of `degrees` of azimuth. Repeated calls add up.
@@ -614,6 +691,7 @@ impl App {
     pub fn advance(&mut self, dt_ms: f32) -> bool {
         let turning = self.advance_turn(dt_ms);
         let touring = self.advance_tour_move(dt_ms);
+        let topping = self.advance_top_move(dt_ms);
         let moving = self.motion.advance(dt_ms);
         let (parked_upload, parked_moving) = self.advance_parked(dt_ms);
         // The frame an ease ends on still uploads, so the marks land on their final places.
@@ -622,9 +700,36 @@ impl App {
         }
         self.moving = moving;
         let riding = self.advance_ride(dt_ms);
-        self.calm =
-            moving && self.motion.calm() && !(turning || touring || riding || parked_moving);
-        turning || touring || moving || riding || parked_moving
+        self.calm = moving
+            && self.motion.calm()
+            && !(turning || touring || topping || riding || parked_moving);
+        turning || touring || topping || moving || riding || parked_moving
+    }
+
+    /// Moves the top-down turn on by `dt_ms`: the pivot and zoom by the tour ease, the elevation by
+    /// the same ease. It lands exactly on the fit at its end, then clears.
+    fn advance_top_move(&mut self, dt_ms: f32) -> bool {
+        let Some(movement) = self.top_move.as_mut() else {
+            return false;
+        };
+        movement.elapsed_ms += dt_ms.max(0.0);
+        let elapsed = movement.elapsed_ms;
+        if elapsed >= topdown::MOVE_MS {
+            let (pivot, zoom) = movement.to_pose;
+            let (azimuth, elevation) = (movement.to_azimuth, movement.to_elevation);
+            self.top_move = None;
+            self.camera.set_angles(azimuth, elevation);
+            self.camera.set_pivot(pivot);
+            self.camera.set_zoom(zoom);
+            return false;
+        }
+        let (pivot, zoom) = tour::progress(movement.from_pose, movement.to_pose, elapsed);
+        let azimuth = topdown::ease(movement.from_azimuth, movement.to_azimuth, elapsed);
+        let elevation = topdown::ease(movement.from_elevation, movement.to_elevation, elapsed);
+        self.camera.set_angles(azimuth, elevation);
+        self.camera.set_pivot(pivot);
+        self.camera.set_zoom(zoom);
+        true
     }
 
     /// Moves every parked project's eases on, far ones too, so their state is current when the
@@ -673,6 +778,9 @@ impl App {
             if self.fit_after_leave {
                 self.fit_after_leave = false;
                 self.fit_view();
+            }
+            if let Some(on) = self.top_after_leave.take() {
+                self.set_top_down(on, false);
             }
         }
         if riding_before != self.riding_agent().is_some() {
@@ -724,7 +832,7 @@ impl App {
     fn tour_pose(&self, machine_id: &str, zoom: &str) -> Option<tour::Pose> {
         let zoom = tour::zoom_named(zoom)?;
         let Some(ratio) = tour::zoom_ratio(zoom) else {
-            return self.fit_pose();
+            return self.framing_pose();
         };
         let loaded = self.plant.as_ref()?;
         let index = loaded
@@ -745,6 +853,7 @@ impl App {
             return;
         }
         self.tour_move = None;
+        self.cancel_top_move();
         self.camera.zoom_at([x * self.dpr, y * self.dpr], factor);
     }
 
@@ -752,22 +861,147 @@ impl App {
     pub fn view(&mut self, azimuth: f32, elevation: f32) {
         self.turn = None;
         self.tour_move = None;
+        self.top_move = None;
         self.camera.set_angles(azimuth, elevation);
+        self.top_down = topdown::is_top_down(self.camera.elevation());
+        let (room, clear) = (self.fit_room(), self.clear_for(self.camera.elevation()));
         if let Some(loaded) = &self.plant {
-            self.camera
-                .fit_boxes_room(&loaded.framing, FIT_MARGIN_CSS * self.dpr, self.fit_room());
+            fit_clear(
+                &mut self.camera,
+                &loaded.framing,
+                FIT_MARGIN_CSS * self.dpr,
+                room,
+                clear,
+            );
         }
     }
 
-    /// Returns to the default angles and fits the plant. While riding, the ride eases back first
-    /// and the fit runs once it has landed.
+    /// Returns to the default angles and fits the plant, which also leaves the top-down view. While
+    /// riding, the ride eases back first and the fit runs once it has landed.
     pub fn fit(&mut self) {
+        self.top_down = false;
+        self.top_after_leave = None;
         if self.ride.is_some() {
             self.leave();
             self.fit_after_leave = true;
             return;
         }
         self.fit_view();
+    }
+
+    /// Whether the view is top-down: the camera looks straight down at the plant. The page shows
+    /// it on the top-down button.
+    pub fn top_down(&self) -> bool {
+        self.top_down
+    }
+
+    /// Turns the view to top-down, or back to the tilt it had, and fits the plant there. The
+    /// azimuth and the projection stay. With `reduced`, or on a still page, the camera jumps; else
+    /// it eases over the tour's time. While riding, the ride eases back first and the turn runs
+    /// once it has landed. A turn in progress is replaced.
+    pub fn set_top_down(&mut self, on: bool, reduced: bool) {
+        if self.ride.is_some() {
+            self.leave();
+            self.fit_after_leave = false;
+            self.top_after_leave = Some(on);
+            return;
+        }
+        self.top_after_leave = None;
+        // Asking for the state the view is in, with no turn running, changes nothing.
+        if self.top_down == on && self.top_move.is_none() {
+            return;
+        }
+        self.tour_move = None;
+        let mid_turn = self.top_move.take().is_some();
+        let to_elevation = if on {
+            // A turn back to the default tilt in progress keeps the tilt it is returning to.
+            if !self.top_down && !mid_turn {
+                self.tilt_before_top = self.camera.elevation();
+            }
+            topdown::ELEVATION
+        } else if topdown::is_top_down(self.tilt_before_top) {
+            DEFAULT_ELEVATION
+        } else {
+            self.tilt_before_top
+        };
+        self.top_down = on;
+        // Turning to top-down snaps the azimuth to a grid step, so the grid lines up with the screen.
+        // Turning back keeps the azimuth the reader chose.
+        let azimuth = self.camera.azimuth();
+        let to_azimuth = if on { topdown::snap(azimuth) } else { azimuth };
+        self.move_top(to_azimuth, to_elevation, reduced);
+    }
+
+    /// Eases the camera to the fit at `to_azimuth` and `to_elevation`, from where it is now. With
+    /// `reduced`, or on a still page, the camera jumps.
+    fn move_top(&mut self, to_azimuth: f32, to_elevation: f32, reduced: bool) {
+        self.top_move = None;
+        let to_pose = self.fit_pose_at(to_azimuth, to_elevation);
+        match to_pose {
+            Some(to_pose) if !(reduced || self.still) => {
+                self.top_move = Some(TopMove {
+                    from_pose: (self.camera.pivot(), self.camera.zoom()),
+                    to_pose,
+                    from_elevation: self.camera.elevation(),
+                    to_elevation,
+                    from_azimuth: self.camera.azimuth(),
+                    to_azimuth,
+                    elapsed_ms: 0.0,
+                });
+            }
+            _ => {
+                self.camera.set_angles(to_azimuth, to_elevation);
+                if let Some((pivot, zoom)) = to_pose {
+                    self.camera.set_pivot(pivot);
+                    self.camera.set_zoom(zoom);
+                }
+            }
+        }
+    }
+
+    /// Flips the top-down view, as `V` does. Reads the state a pending turn will leave, so a press
+    /// while riding flips it too.
+    pub fn toggle_top_down(&mut self, reduced: bool) {
+        let on = !self.top_after_leave.unwrap_or(self.top_down);
+        self.set_top_down(on, reduced);
+    }
+
+    /// Turns the top-down view by `degrees` about the vertical axis, to the grid step that many
+    /// degrees from the current one, and fits the plant there. Q and E turn one step. A turn in
+    /// progress adds up. With `reduced`, or on a still page, the camera jumps. Does nothing off the
+    /// top-down view.
+    pub fn turn_top_down(&mut self, degrees: f32, reduced: bool) {
+        if self.ride.is_some() || !self.top_down {
+            return;
+        }
+        self.turn = None;
+        self.tour_move = None;
+        let from = match &self.top_move {
+            Some(movement) => movement.to_azimuth,
+            None => self.camera.azimuth(),
+        };
+        self.move_top(topdown::snap(from) + degrees, topdown::ELEVATION, reduced);
+    }
+
+    /// Ends a horizontal orbit drag in the top-down view: the view turns to the grid step nearest
+    /// its azimuth, and fits the plant there. Does nothing off the top-down view, where a tilt has
+    /// already left it.
+    pub fn settle_top_down(&mut self, reduced: bool) {
+        if self.ride.is_some() || !self.top_down {
+            return;
+        }
+        self.move_top(
+            topdown::snap(self.camera.azimuth()),
+            topdown::ELEVATION,
+            reduced,
+        );
+    }
+
+    /// Sets the room the top-down fit keeps clear of the page's shell bar, which hangs at the top,
+    /// and of the right column, in CSS pixels from the canvas edges. The next fit uses it; the
+    /// view does not move until then.
+    pub fn set_fit_inset(&mut self, top_css: f32, right_css: f32) {
+        self.fit_inset = [top_css.max(0.0), right_css.max(0.0)];
     }
 
     /// Rides the drone of agent `agent` from inside. A ride already on switches to it, and a
@@ -782,6 +1016,7 @@ impl App {
         };
         self.turn = None;
         self.tour_move = None;
+        self.cancel_top_move();
         self.fit_after_leave = false;
         if let Some(ride) = self.ride.as_mut().filter(|ride| ride.is_leaving()) {
             ride.resume(snapshot, self.camera);
@@ -884,14 +1119,41 @@ impl App {
         motion
     }
 
-    /// Returns to the default angles and fits the plant.
+    /// Fits the plant at the angles the framing uses: the top-down view's while it is on, else the
+    /// default angles.
     fn fit_view(&mut self) {
         self.turn = None;
         self.tour_move = None;
+        self.top_move = None;
         if let Some(loaded) = &self.plant {
-            self.camera.set_angles(DEFAULT_AZIMUTH, DEFAULT_ELEVATION);
-            self.camera
-                .fit_boxes_room(&loaded.framing, FIT_MARGIN_CSS * self.dpr, self.fit_room());
+            let (azimuth, elevation) = self.framing_angles();
+            self.camera.set_angles(azimuth, elevation);
+            let (room, clear) = (self.fit_room(), self.clear_for(elevation));
+            fit_clear(
+                &mut self.camera,
+                &loaded.framing,
+                FIT_MARGIN_CSS * self.dpr,
+                room,
+                clear,
+            );
+        }
+    }
+
+    /// The azimuth and elevation the page frames the plant at: the top-down view's while it is on,
+    /// with the reader's azimuth, else the kit's own view.
+    fn framing_angles(&self) -> (f32, f32) {
+        if self.top_down {
+            (self.camera.azimuth(), topdown::ELEVATION)
+        } else {
+            (DEFAULT_AZIMUTH, DEFAULT_ELEVATION)
+        }
+    }
+
+    /// Stops a top-down turn in progress. The view stays where the turn had got to, and the
+    /// top-down state follows where it is.
+    fn cancel_top_move(&mut self) {
+        if self.top_move.take().is_some() {
+            self.top_down = topdown::is_top_down(self.camera.elevation());
         }
     }
 
@@ -1413,12 +1675,14 @@ impl App {
         self.motion = self.new_motion();
         self.card_clash = None;
         self.tour_move = None;
+        self.top_move = None;
         self.ride = None;
         self.fit_after_leave = false;
         self.dirty = true;
         self.plant = Some(loaded);
         self.refresh_fog();
-        self.fit();
+        // A new plant keeps the view it had, top-down or not.
+        self.fit_view();
         self.sync_scene();
     }
 
@@ -1632,11 +1896,45 @@ impl App {
 
     /// The pivot and zoom of the fit at the default angles, or `None` before a plant loads.
     fn fit_pose(&self) -> Option<tour::Pose> {
+        self.fit_pose_at(DEFAULT_AZIMUTH, DEFAULT_ELEVATION)
+    }
+
+    /// The pivot and zoom of the fit at the framing angles, which are the top-down view's while it
+    /// is on.
+    fn framing_pose(&self) -> Option<tour::Pose> {
+        let (azimuth, elevation) = self.framing_angles();
+        self.fit_pose_at(azimuth, elevation)
+    }
+
+    /// The pivot and zoom that fit the plant at `azimuth` and `elevation` in the current
+    /// projection, or `None` before a plant loads.
+    fn fit_pose_at(&self, azimuth: f32, elevation: f32) -> Option<tour::Pose> {
         let loaded = self.plant.as_ref()?;
         let mut probe = self.camera;
-        probe.set_angles(DEFAULT_AZIMUTH, DEFAULT_ELEVATION);
-        probe.fit_boxes_room(&loaded.framing, FIT_MARGIN_CSS * self.dpr, self.fit_room());
+        probe.set_angles(azimuth, elevation);
+        let clear = self.clear_for(elevation);
+        fit_clear(
+            &mut probe,
+            &loaded.framing,
+            FIT_MARGIN_CSS * self.dpr,
+            self.fit_room(),
+            clear,
+        );
         Some((probe.pivot(), probe.zoom()))
+    }
+
+    /// The screen edges the top-down fit keeps every corner inside, in device pixels as
+    /// `[top, right]`: the bottom of the shell bar and the left edge of the right column. `None`
+    /// off the top-down view, where the fit keeps only its own room.
+    fn clear_for(&self, elevation: f32) -> Option<[f32; 2]> {
+        if !topdown::is_top_down(elevation) {
+            return None;
+        }
+        let [width, _] = self.camera.viewport();
+        Some([
+            self.fit_inset[0] * self.dpr,
+            width - self.fit_inset[1] * self.dpr,
+        ])
     }
 
     fn lod(&self) -> Lod {
@@ -1671,11 +1969,19 @@ impl App {
         self.camera.set_fog_bounds(bounds);
     }
 
-    /// The pivot and zoom that fit `framing` at the default angles.
+    /// The pivot and zoom that fit `framing` at the framing angles.
     fn pose_of(&self, framing: &[Aabb]) -> tour::Pose {
         let mut probe = self.camera;
-        probe.set_angles(DEFAULT_AZIMUTH, DEFAULT_ELEVATION);
-        probe.fit_boxes_room(framing, FIT_MARGIN_CSS * self.dpr, self.fit_room());
+        let (azimuth, elevation) = self.framing_angles();
+        probe.set_angles(azimuth, elevation);
+        let clear = self.clear_for(elevation);
+        fit_clear(
+            &mut probe,
+            framing,
+            FIT_MARGIN_CSS * self.dpr,
+            self.fit_room(),
+            clear,
+        );
         (probe.pivot(), probe.zoom())
     }
 

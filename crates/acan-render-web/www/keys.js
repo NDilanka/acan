@@ -35,6 +35,7 @@ const SINGLE = {
   _: { kind: "zoom", dir: -1, repeats: true },
   0: { kind: "fit", repeats: true },
   f: { kind: "ride-centre", repeats: false },
+  v: { kind: "top-down", repeats: false },
   q: { kind: "turn", dir: -1, repeats: false },
   e: { kind: "turn", dir: 1, repeats: false },
   p: { kind: "play", repeats: false },

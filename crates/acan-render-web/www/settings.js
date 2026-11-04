@@ -71,7 +71,7 @@ const BUDGET_GROUPS = [
   },
 ];
 
-let deps = { app: null, requestRender: () => {}, token: () => null, onToken: () => {} };
+let deps = { app: null, requestRender: () => {}, token: () => null, onToken: () => {}, syncFit: () => {} };
 let api = null;
 let wired = false;
 let cog = null;
@@ -241,9 +241,10 @@ export async function installSettings({
   requestRender = () => {},
   token = () => null,
   onToken = () => {},
+  syncFit = () => {},
   fixture = false,
 } = {}) {
-  deps = { app, requestRender, token, onToken };
+  deps = { app, requestRender, token, onToken, syncFit };
   cog = document.getElementById("settings-cog");
   drawer = document.getElementById("settings");
   titleEl = document.getElementById("settings-title");
@@ -256,6 +257,13 @@ export async function installSettings({
   api = fixture ? await mockApi() : fetchApi();
   cog.hidden = false;
   await load();
+  // The map opens top-down when the Map setting says so. It is read once, here, so a later change of
+  // the setting does not move a view the reader has already turned.
+  if (settings?.look && !loadFailed) {
+    deps.syncFit();
+    deps.app?.set_top_down?.(settings.look.top_down_default === true, true);
+    deps.requestRender();
+  }
   deepLink();
 }
 
