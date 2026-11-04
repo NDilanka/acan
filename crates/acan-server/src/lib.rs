@@ -492,6 +492,7 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
     // The validated projects are never empty, so the first one's state directory exists.
     let settings_file = settings_file.unwrap_or_else(|| states[0].join(settings::FILE));
     let stored = settings::load(&settings_file)?;
+    settings::warn_unknown_keys(&stored);
     let mut visions = Vec::with_capacity(specs.len());
     for spec in &specs {
         visions.push(

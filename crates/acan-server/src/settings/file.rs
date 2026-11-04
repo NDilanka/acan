@@ -13,7 +13,8 @@ use anyhow::bail;
 use super::{FILE, Stored};
 
 /// Reads the settings at `path`. A missing file reads as the defaults. An unreadable file, or one
-/// that does not parse, is an error: the server does not replace it with the defaults.
+/// that does not parse, is an error: the server does not replace it with the defaults. A key this
+/// version does not use is not an error. It is kept, and [`Stored::unknown_keys`] names it.
 ///
 /// # Errors
 ///
@@ -81,7 +82,9 @@ fn write_private(path: &Path, text: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{Budgets, Look, Theme};
+    use acan_llm::Role;
+
+    use crate::settings::{Adapter, Budgets, CallLimits, Look, Theme};
 
     fn write(path: &Path, text: &str) {
         fs::write(path, text).expect("the test file is written");
@@ -130,10 +133,119 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_key_in_the_file_is_an_error() {
+    fn an_unknown_key_loads_and_is_kept_on_save() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("settings.json");
-        write(&path, r#"{"budgets": {"repair_roundz": 3}}"#);
+        write(&path, r#"{"projects": {"live": ["/some/folder"]}}"#);
+        let stored = load(&path).expect("an unknown key does not stop the load");
+        assert_eq!(stored.unknown_keys(), vec!["projects.live".to_owned()]);
+        assert!(stored.projects.add.is_empty());
+        save(&path, &stored).expect("the settings are saved");
+        let text = fs::read_to_string(&path).expect("the file is there");
+        assert!(text.contains("\"live\""), "the key is written back: {text}");
+        assert!(
+            text.contains("/some/folder"),
+            "its value is written back: {text}"
+        );
+    }
+
+    #[test]
+    fn a_misspelt_setting_is_reported_by_its_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("settings.json");
+        write(
+            &path,
+            r#"{"budgets": {"call_limits": {"statemapp": 3}}, "lok": {}}"#,
+        );
+        let stored = load(&path).expect("a misspelt key loads");
+        assert_eq!(
+            stored.unknown_keys(),
+            vec!["lok".to_owned(), "budgets.call_limits.statemapp".to_owned()]
+        );
+        assert_eq!(
+            stored.budgets.call_limits.statemap,
+            CallLimits::default().statemap
+        );
+    }
+
+    #[test]
+    fn unknown_keys_at_every_level_are_kept_beside_the_settings_they_sit_with() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("settings.json");
+        write(
+            &path,
+            r#"{
+                "top": 1,
+                "harness": {"roles": {"worker": "codex"}, "wrapper": {"depth": 2}},
+                "projects": {"workers": {"alpha": 3}, "live": ["/some/folder"]},
+                "budgets": {"repair_rounds": 5, "spare": true,
+                            "call_limits": {"statemap": 12, "planner": 7}},
+                "look": {"theme": "dark", "glow": "soft"},
+                "notifications": {"sound": true, "chime": null}
+            }"#,
+        );
+        let stored = load(&path).expect("unknown keys do not stop the load");
+        assert_eq!(
+            stored.unknown_keys(),
+            vec![
+                "top".to_owned(),
+                "harness.wrapper".to_owned(),
+                "projects.live".to_owned(),
+                "budgets.spare".to_owned(),
+                "budgets.call_limits.planner".to_owned(),
+                "look.glow".to_owned(),
+                "notifications.chime".to_owned(),
+            ]
+        );
+        assert_eq!(
+            stored.harness.roles.get(&Role::Worker),
+            Some(&Adapter::Codex)
+        );
+        assert_eq!(stored.projects.workers.get("alpha"), Some(&3));
+        assert_eq!(stored.budgets.repair_rounds, 5);
+        assert_eq!(stored.budgets.call_limits.statemap, 12);
+        assert_eq!(stored.look.theme, Theme::Dark);
+        assert!(stored.notifications.sound);
+
+        save(&path, &stored).expect("the settings are saved");
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("the file is there"))
+                .expect("the saved file is JSON");
+        assert_eq!(saved["top"], 1);
+        assert_eq!(saved["harness"]["wrapper"]["depth"], 2);
+        assert_eq!(saved["projects"]["live"][0], "/some/folder");
+        assert_eq!(saved["budgets"]["spare"], true);
+        assert_eq!(saved["budgets"]["call_limits"]["planner"], 7);
+        assert_eq!(saved["look"]["glow"], "soft");
+        assert!(saved["notifications"]["chime"].is_null());
+        assert!(
+            saved["notifications"]
+                .as_object()
+                .expect("the section is an object")
+                .contains_key("chime")
+        );
+        assert_eq!(load(&path).expect("the saved file loads"), stored);
+    }
+
+    #[test]
+    fn a_known_setting_with_the_wrong_type_is_still_an_error() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("settings.json");
+        for text in [
+            r#"{"look": {"motion": "yes"}}"#,
+            r#"{"budgets": {"call_limits": {"statemap": "many"}}}"#,
+            r#"{"look": "dark"}"#,
+        ] {
+            write(&path, text);
+            assert!(load(&path).is_err(), "file: {text}");
+        }
+    }
+
+    #[test]
+    fn a_role_name_this_version_does_not_know_is_still_an_error() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("settings.json");
+        write(&path, r#"{"harness": {"roles": {"painter": "codex"}}}"#);
         assert!(load(&path).is_err());
     }
 
