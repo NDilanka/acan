@@ -19,8 +19,9 @@ A hackathon pre-release. The files are not code-signed, so Windows SmartScreen m
 - Minimap. A small map in the bottom-right corner of the world canvas shows every plant and the
   part you are looking at. Click or drag on it to move the view. Press G then M to reach it from
   the keyboard. It hides when there is only one plant.
-- Plant layout. Machines sit in districts by crate and folder, with belts along the streets and
-  more room between them.
+- Plant layout. A codebase now grows as a round town: one block per crate or folder on a faint
+  ground pad with one name sign, short machine names, wide streets, and belts that run along the
+  streets and merge into trunks.
 - More machine kinds. A machine's kind now also comes from its file names and the packages it
   imports, so codebases show more varied machines. Each crate's test folders group into one
   machine.
