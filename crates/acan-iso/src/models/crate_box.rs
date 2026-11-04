@@ -1,5 +1,5 @@
-//! The crate: a sealed, strapped shipping case with a lid, two diagonal straps, four corner caps and a hasp. It stands
-//! for generated code, vendored output, tests, and modules with no source files: nothing in it runs.
+//! The crate: a sealed, strapped shipping case with a lid, two diagonal straps, two grab handles, four corner caps and a
+//! hasp. It stands for generated code, vendored output, tests, and modules with no source files: nothing in it runs.
 
 use crate::mesh::{Finish, Part, Stroke};
 use crate::model::{Ink, Model};
@@ -43,7 +43,7 @@ fn skids(p: &mut Part, f: Frame) {
     );
 }
 
-/// The box with its straps, its slat lines on the two visible faces and eight corner bolts.
+/// The box with its slat lines on the two visible faces, eight corner bolts, and a label plate held by two screws.
 fn box_body(p: &mut Part, f: Frame) {
     f.block(
         p,
@@ -80,9 +80,20 @@ fn box_body(p: &mut Part, f: Frame) {
             f.bolt(p, [44.0, y], z, [1.0, 0.0, 0.0]);
         }
     }
+    // A label plate on the front face, clear of the slats, held by two screws.
+    f.block(
+        p,
+        [33.0, 44.0, 41.0, 44.4],
+        [9.0, 14.0],
+        0.0,
+        0.0,
+        Finish::paper().near(),
+    );
+    f.bolt(p, [34.0, 44.4], 10.0, [0.0, 1.0, 0.0]);
+    f.bolt(p, [40.0, 44.4], 13.0, [0.0, 1.0, 0.0]);
 }
 
-/// The lid with its two diagonal straps, and four corner caps with their bolts.
+/// The lid with its two diagonal straps, two grab handles, and four corner caps with their bolts.
 fn lid(p: &mut Part, f: Frame) {
     f.block(
         p,
@@ -109,9 +120,21 @@ fn lid(p: &mut Part, f: Frame) {
         );
         f.bolt(p, [at[0] + 2.5, at[1] + 2.5], 24.0, [0.0, 0.0, 1.0]);
     }
+    // Two grab handles lie across the lid, one near each long edge, clear of the straps.
+    for y in [9.0, 37.8] {
+        f.block(
+            p,
+            [15.0, y, 33.0, y + 1.2],
+            [23.0, 23.9],
+            0.0,
+            0.0,
+            Finish::paper().near(),
+        );
+    }
 }
 
-/// The two handle recesses on the side faces, the hasp plate and its lit staple, and the two hinges on the back.
+/// The two handle recesses on the side faces, the hasp plate with two screws and its lit staple, and the two hinges
+/// on the back.
 fn handles_and_hasp(p: &mut Part, f: Frame) {
     f.block(
         p,
@@ -138,6 +161,10 @@ fn handles_and_hasp(p: &mut Part, f: Frame) {
         Finish::paper().near(),
     );
     f.block(p, [23.6, 44.6, 24.4, 45.2], [18.0, 19.5], 0.0, 0.0, lit());
+    // Two screws hold the hasp plate to the front face.
+    for x in [22.5, 25.5] {
+        f.bolt(p, [x, 44.6], 17.5, [0.0, 1.0, 0.0]);
+    }
     for x in [10.0, 35.0] {
         f.block(
             p,
@@ -147,5 +174,16 @@ fn handles_and_hasp(p: &mut Part, f: Frame) {
             0.0,
             Finish::paper().near(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::models::{Kind, assert_solids_near, solids_at_two_bars};
+
+    #[test]
+    fn solids_match_the_design_and_meet_the_floor() {
+        assert!(solids_at_two_bars(Kind::Crate) >= 38);
+        assert_solids_near(Kind::Crate, 40, 15);
     }
 }

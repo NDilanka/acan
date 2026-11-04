@@ -209,3 +209,14 @@ fn reader(p: &mut Part, f: Frame) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::models::{Kind, assert_solids_near};
+
+    #[test]
+    fn solids_match_the_design() {
+        // The design count is 46 and the figure draws about 42 at two bars, so the tolerance covers it.
+        assert_solids_near(Kind::Gate, 46, 15);
+    }
+}

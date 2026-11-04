@@ -77,6 +77,11 @@ fn figure_of(kind: Kind) -> Kind {
         | Kind::Splitter
         | Kind::Valve
         | Kind::Crate
+        | Kind::Switchboard
+        | Kind::Kiosk
+        | Kind::Mould
+        | Kind::Switchbox
+        | Kind::Toolrack
         | Kind::Assembler => kind,
         _ => Kind::Assembler,
     }
@@ -131,6 +136,36 @@ fn deck(kind: Kind) -> Deck {
             top: 23.0,
             centre: 24.0,
             length: 12.0,
+        },
+        Kind::Switchboard => Deck {
+            back: 4.0,
+            top: 40.0,
+            centre: 32.0,
+            length: 28.0,
+        },
+        Kind::Kiosk => Deck {
+            back: 10.0,
+            top: 44.0,
+            centre: 24.0,
+            length: 16.0,
+        },
+        Kind::Mould => Deck {
+            back: 30.0,
+            top: 11.0,
+            centre: 18.0,
+            length: 14.0,
+        },
+        Kind::Switchbox => Deck {
+            back: 6.0,
+            top: 40.0,
+            centre: 15.0,
+            length: 8.0,
+        },
+        Kind::Toolrack => Deck {
+            back: 4.0,
+            top: 40.0,
+            centre: 28.0,
+            length: 24.0,
         },
         _ => Deck {
             back: 8.0,
@@ -280,12 +315,20 @@ mod tests {
 
     #[test]
     fn the_kinds_without_a_figure_take_the_assemblers_marks() {
-        for overlay in Overlay::ALL {
-            assert_eq!(
-                overlay_model(Kind::Switchboard, overlay),
-                overlay_model(Kind::Assembler, overlay),
-                "{overlay:?}"
-            );
+        for kind in [
+            Kind::Conveyor,
+            Kind::Horn,
+            Kind::Gantry,
+            Kind::Console,
+            Kind::Antenna,
+        ] {
+            for overlay in Overlay::ALL {
+                assert_eq!(
+                    overlay_model(kind, overlay),
+                    overlay_model(Kind::Assembler, overlay),
+                    "{kind:?} {overlay:?}"
+                );
+            }
         }
     }
 }

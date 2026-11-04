@@ -287,6 +287,7 @@ fn finish(build: Build) -> (Model, DroneParts) {
         lines: build.lines,
         dots: build.dots,
         bounds,
+        solids: 0,
     };
     (model, build.parts)
 }

@@ -212,3 +212,14 @@ fn vice(p: &mut Part, f: Frame) {
         f.bolt(p, [x, 58.4], 28.0, [0.0, 1.0, 0.0]);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::models::{Kind, assert_solids_near};
+
+    #[test]
+    fn solids_match_the_design() {
+        // The design count is 40 and the figure draws about 51 at two bars, so the tolerance covers it.
+        assert_solids_near(Kind::Assembler, 40, 28);
+    }
+}

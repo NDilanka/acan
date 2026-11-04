@@ -101,6 +101,53 @@ impl Frame {
         part.slab(base, z[0], z[1], bevel, finish);
     }
 
+    /// A profile in the y-z plane, swept from `x[0]` to `x[1]`.
+    pub(crate) fn prism_x(self, part: &mut Part, x: [f32; 2], profile: &[Point], finish: Finish) {
+        let mut local = Part::new();
+        local.slab(&Base::polygon(profile), x[0], x[1], 0.0, finish);
+        part.place(
+            local,
+            self.at3(0.0, 0.0, 0.0),
+            [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
+        );
+    }
+
+    /// A rectangular bar between two design points, with a square-ended section `size`.
+    pub(crate) fn bar(
+        self,
+        part: &mut Part,
+        a: [f32; 3],
+        b: [f32; 3],
+        size: Point,
+        finish: Finish,
+    ) {
+        let delta = std::array::from_fn::<_, 3, _>(|i| b[i] - a[i]);
+        let length = delta.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!(length > 0.0, "a bar needs distinct ends");
+        let axis = delta.map(|v| v / length);
+        let horizontal = axis[0].hypot(axis[1]);
+        let across = if horizontal > 1e-6 {
+            [-axis[1] / horizontal, axis[0] / horizontal, 0.0]
+        } else {
+            [1.0, 0.0, 0.0]
+        };
+        let up = cross(axis, across);
+        let mut local = Part::new();
+        local.slab(
+            &Base::polygon(&rectangle([
+                -size[0] / 2.0,
+                -size[1] / 2.0,
+                size[0] / 2.0,
+                size[1] / 2.0,
+            ])),
+            0.0,
+            length,
+            0.0,
+            finish,
+        );
+        part.place(local, self.at3(a[0], a[1], a[2]), [across, up, axis]);
+    }
+
     /// A polyline on the surface at height `z`, through the design points `points`.
     pub(crate) fn line(
         self,
@@ -189,6 +236,125 @@ impl Frame {
     }
 }
 
+/// A surface in design coordinates, with two perpendicular unit axes and their outward normal.
+#[derive(Clone, Copy)]
+pub(crate) struct Plane {
+    origin: [f32; 3],
+    axes: [[f32; 3]; 3],
+}
+
+impl Plane {
+    pub(crate) fn new(origin: [f32; 3], along: [f32; 3], across: [f32; 3]) -> Self {
+        Self {
+            origin,
+            axes: [along, across, cross(along, across)],
+        }
+    }
+
+    pub(crate) fn top(z: f32) -> Self {
+        Self::new([0.0, 0.0, z], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
+    }
+
+    /// The same plane lifted along its normal.
+    pub(crate) fn lifted(self, by: f32) -> Self {
+        Self {
+            origin: std::array::from_fn(|i| self.origin[i] + self.axes[2][i] * by),
+            ..self
+        }
+    }
+
+    /// A local surface position, lifted out along the normal by `height`.
+    fn at(self, point: Point, height: f32) -> [f32; 3] {
+        std::array::from_fn(|i| {
+            self.origin[i]
+                + self.axes[0][i] * point[0]
+                + self.axes[1][i] * point[1]
+                + self.axes[2][i] * height
+        })
+    }
+
+    /// A closed plate, including concave shapes, at the given heights above the plane.
+    pub(crate) fn slab(
+        self,
+        part: &mut Part,
+        frame: Frame,
+        points: &[Point],
+        z: [f32; 2],
+        finish: Finish,
+    ) {
+        let mut local = Part::new();
+        local.plate(points, z, finish);
+        part.place(
+            local,
+            frame.at3(self.origin[0], self.origin[1], self.origin[2]),
+            self.axes,
+        );
+    }
+
+    /// A flat painted face. Its very thin closed backing keeps the figure's meshes watertight.
+    pub(crate) fn face(self, part: &mut Part, frame: Frame, points: &[Point], finish: Finish) {
+        self.slab(part, frame, points, [LIFT / 2.0, LIFT], finish);
+    }
+
+    /// A recess floor and its faint rim, drawn flat rather than cutting a sub-unit pocket.
+    pub(crate) fn recess(self, part: &mut Part, frame: Frame, points: &[Point]) {
+        self.face(part, frame, points, flat(Ink::Lo).near());
+        self.line(part, frame, points, true, Stroke::new(Ink::Faint).near());
+    }
+
+    pub(crate) fn line(
+        self,
+        part: &mut Part,
+        frame: Frame,
+        points: &[Point],
+        closed: bool,
+        stroke: Stroke,
+    ) {
+        let mapped: Vec<_> = points
+            .iter()
+            .map(|&p| {
+                let at = self.at(p, LIFT);
+                frame.at3(at[0], at[1], at[2])
+            })
+            .collect();
+        part.line(&mapped, closed, stroke);
+    }
+
+    /// A bolt on this plane: one counted head and a ring, both at close detail.
+    pub(crate) fn bolt(
+        self,
+        part: &mut Part,
+        frame: Frame,
+        at: Point,
+        radii: Point,
+        inks: [Ink; 2],
+    ) {
+        part.solids += 1;
+        let centre = self.at(at, LIFT);
+        part.dot(
+            frame.at3(centre[0], centre[1], centre[2]),
+            self.axes[2],
+            radii[0],
+            Stroke::new(inks[0]).close(),
+        );
+        let ring = crate::plan::circle_ring(at[0], at[1], radii[1], 12);
+        self.line(part, frame, &ring, true, Stroke::new(inks[1]).close());
+    }
+}
+
+/// Corners of the rectangle `[x0, y0, x1, y1]` in a surface's local coordinates.
+pub(crate) fn rectangle([x0, y0, x1, y1]: [f32; 4]) -> [Point; 4] {
+    [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
 /// The bevelled base every figure stands on. Its groove is an overlay, so the plinth itself is plain.
 pub(crate) fn plinth(part: &mut Part, frame: Frame) {
     frame.block(
@@ -203,6 +369,7 @@ pub(crate) fn plinth(part: &mut Part, frame: Frame) {
 
 /// A bolt head: a small disc set just proud of the face whose outward normal is `normal`.
 pub(crate) fn bolt(part: &mut Part, at: [f32; 3], normal: [f32; 3]) {
+    part.solids += 1;
     let proud = std::array::from_fn(|axis| at[axis] + normal[axis] * LIFT);
     part.dot(proud, normal, BOLT, Stroke::new(Ink::Lo).close());
 }

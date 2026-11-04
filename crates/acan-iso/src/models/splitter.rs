@@ -201,3 +201,14 @@ fn boss(p: &mut Part, f: Frame) {
         Stroke::new(Ink::Lo).close(),
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::models::{Kind, assert_solids_near};
+
+    #[test]
+    fn solids_match_the_design() {
+        // The design count is 49 and the figure draws about 46 at two bars, so the tolerance covers it.
+        assert_solids_near(Kind::Splitter, 49, 15);
+    }
+}

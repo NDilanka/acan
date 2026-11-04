@@ -4,7 +4,7 @@
 use crate::mesh::{Finish, Part, Stroke};
 use crate::model::{Ink, Model};
 use crate::models::Footprint;
-use crate::parts::{self, Frame, polar};
+use crate::parts::{self, Frame, polar, rect_on, unit};
 
 pub(crate) const FOOTPRINT: Footprint = Footprint {
     w: 40.0,
@@ -51,7 +51,7 @@ fn pad(p: &mut Part, f: Frame) {
     }
 }
 
-/// The two flanges, each with four bolts on its outer face and a gasket ring round its middle.
+/// The two flanges, each with four bolts and a gasket pad on its outer face.
 fn flanges(p: &mut Part, f: Frame) {
     for (x0, outward) in [(4.0, -1.0), (32.0, 1.0)] {
         f.block(
@@ -68,6 +68,20 @@ fn flanges(p: &mut Part, f: Frame) {
                 f.bolt(p, [face, y], z, [outward, 0.0, 0.0]);
             }
         }
+        // The gasket pad sits on the outer face, between the two rows of bolts.
+        let (gx0, gx1) = if outward < 0.0 {
+            (x0 - 0.6, x0)
+        } else {
+            (x0 + 4.0, x0 + 4.6)
+        };
+        f.block(
+            p,
+            [gx0, 15.0, gx1, 29.0],
+            [7.5, 9.5],
+            0.0,
+            0.0,
+            Finish::paper(),
+        );
         parts::sideline(
             p,
             &f.rect([x0, 14.0, x0 + 4.0, 30.0], 0.0),
@@ -145,32 +159,50 @@ fn body(p: &mut Part, f: Frame) {
     );
 }
 
-/// The handwheel with its knurled rim, four spokes on top and the lit hub.
+/// The handwheel with its knurled rim, four raised spokes, and the lit hub.
 fn wheel(p: &mut Part, f: Frame) {
     f.solid(
         p,
         &f.circle(HUB, 5.0, 32),
-        [19.0, 20.0],
+        [17.8, 19.2],
         0.0,
         Finish::paper().near(),
     );
-    f.knurl(p, HUB, 5.0, [19.0, 20.0], 24, Stroke::new(Ink::Lo).close());
+    f.knurl(p, HUB, 5.0, [17.8, 19.2], 24, Stroke::new(Ink::Lo).close());
+    // Each spoke is a flat bar that stands on the wheel's top, from just off the hub out to the rim.
     for angle in [0.0, 90.0, 180.0, 270.0] {
-        f.line(
+        let spoke = rect_on(
+            polar(HUB, 3.1, angle),
+            unit(angle),
+            unit(angle + 90.0),
+            [1.6, 0.45],
+        );
+        f.solid(
             p,
-            &[polar(HUB, 1.2, angle), polar(HUB, 4.6, angle)],
-            20.0,
-            false,
-            Stroke::new(Ink::Mid).near(),
+            &f.poly(&spoke),
+            [19.2, 20.0],
+            0.0,
+            Finish::paper().near(),
         );
     }
     // The hub is the figure's one lit mark, a flat black disc.
     f.dot(
         p,
         HUB,
-        20.0,
+        19.6,
         [0.0, 0.0, 1.0],
         0.8,
         Stroke::new(Ink::Hi).near(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::models::{Kind, assert_solids_near, solids_at_two_bars};
+
+    #[test]
+    fn solids_match_the_design_and_meet_the_floor() {
+        assert!(solids_at_two_bars(Kind::Valve) >= 38);
+        assert_solids_near(Kind::Valve, 42, 15);
+    }
 }

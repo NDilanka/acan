@@ -6,8 +6,13 @@ mod assembler;
 mod crate_box;
 mod gate;
 mod intake;
+mod kiosk;
+mod mould;
 mod splitter;
+mod switchboard;
+mod switchbox;
 mod tank;
+mod toolrack;
 mod valve;
 
 use serde::{Deserialize, Serialize};
@@ -109,17 +114,15 @@ pub fn model(kind: Kind) -> Model {
         Kind::Splitter => splitter::build(),
         Kind::Valve => valve::build(),
         Kind::Crate => crate_box::build(),
-        // The sixteen new kinds draw as the assembler until their figures land (kinds-expansion.md).
-        Kind::Switchboard
-        | Kind::Kiosk
-        | Kind::Mould
-        | Kind::Conveyor
-        | Kind::Horn
-        | Kind::Switchbox
-        | Kind::Gantry
-        | Kind::Console
-        | Kind::Antenna
-        | Kind::Toolrack => assembler::build(),
+        Kind::Switchboard => switchboard::build(),
+        Kind::Kiosk => kiosk::build(),
+        Kind::Mould => mould::build(),
+        Kind::Switchbox => switchbox::build(),
+        Kind::Toolrack => toolrack::build(),
+        // Kinds without a figure yet draw as the assembler.
+        Kind::Conveyor | Kind::Horn | Kind::Gantry | Kind::Console | Kind::Antenna => {
+            assembler::build()
+        }
     }
 }
 
@@ -134,18 +137,33 @@ pub fn footprint(kind: Kind) -> Footprint {
         Kind::Splitter => splitter::FOOTPRINT,
         Kind::Valve => valve::FOOTPRINT,
         Kind::Crate => crate_box::FOOTPRINT,
+        Kind::Switchboard => switchboard::FOOTPRINT,
+        Kind::Kiosk => kiosk::FOOTPRINT,
+        Kind::Mould => mould::FOOTPRINT,
+        Kind::Switchbox => switchbox::FOOTPRINT,
+        Kind::Toolrack => toolrack::FOOTPRINT,
         // Until their figures land, the new kinds take the assembler's footprint.
-        Kind::Switchboard
-        | Kind::Kiosk
-        | Kind::Mould
-        | Kind::Conveyor
-        | Kind::Horn
-        | Kind::Switchbox
-        | Kind::Gantry
-        | Kind::Console
-        | Kind::Antenna
-        | Kind::Toolrack => assembler::FOOTPRINT,
+        Kind::Conveyor | Kind::Horn | Kind::Gantry | Kind::Console | Kind::Antenna => {
+            assembler::FOOTPRINT
+        }
     }
+}
+
+/// The solids a figure is built from at two file bars: its own solids plus the two bars, as the design counts them.
+#[cfg(test)]
+pub(crate) fn solids_at_two_bars(kind: Kind) -> u32 {
+    model(kind).solids
+        + crate::overlay::overlay_model(kind, crate::overlay::Overlay::Bars(2)).solids
+}
+
+/// Checks a figure's approximate design tally without counting painted lines, dots or the groove as solids.
+#[cfg(test)]
+pub(crate) fn assert_solids_near(kind: Kind, design: u32, percent: u32) {
+    let actual = solids_at_two_bars(kind);
+    assert!(
+        actual.abs_diff(design) * 100 <= design * percent,
+        "{kind:?} draws {actual} solids at two bars; design {design}, tolerance {percent}%"
+    );
 }
 
 #[cfg(test)]
@@ -227,12 +245,13 @@ mod tests {
             let built = model(kind);
             let total = triangles(&built);
             println!(
-                "{kind:?}: triangles always {}, near {}, close {}, total {total}; lines {}, dots {}",
+                "{kind:?}: triangles always {}, near {}, close {}, total {total}; lines {}, dots {}; solids at two bars {}",
                 built.meshes[0].indices.len() / 3,
                 built.meshes[1].indices.len() / 3,
                 built.meshes[2].indices.len() / 3,
                 built.lines.len(),
                 built.dots.len(),
+                solids_at_two_bars(kind),
             );
             assert!(total <= 4000, "{kind:?} draws {total} triangles");
         }

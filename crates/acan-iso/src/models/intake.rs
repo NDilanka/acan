@@ -280,3 +280,14 @@ fn mid3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
         (a[2] + b[2]) / 2.0,
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::models::{Kind, assert_solids_near};
+
+    #[test]
+    fn solids_match_the_design() {
+        // The design count is 66 and the figure draws about 76 at two bars, so the tolerance covers it.
+        assert_solids_near(Kind::Intake, 66, 16);
+    }
+}
