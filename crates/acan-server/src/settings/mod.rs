@@ -1058,10 +1058,6 @@ pub(crate) fn statemap_llm_enabled(settings_path: &Path, project_id: &str) -> bo
 /// The most calls the statemap role may make, as the settings file at `settings_path` says now.
 /// The file is read on each call, like [`statemap_llm_enabled`]. A missing file, or one that
 /// cannot be read, gives the default limit.
-#[allow(
-    dead_code,
-    reason = "the statemap pass does not read this limit in this crate yet"
-)]
 pub(crate) fn statemap_call_limit(settings_path: &Path) -> u32 {
     match file::load(settings_path) {
         Ok(stored) => stored.budgets.call_limits.statemap,

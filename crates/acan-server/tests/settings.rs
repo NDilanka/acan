@@ -1369,6 +1369,9 @@ async fn the_owner_exports_the_receipts_and_the_recorded_run_as_one_archive() {
     running.stop().await.expect("the server stops");
 }
 
+// Windows does not remove a file the running server holds open, so this test runs on Unix only.
+// The fresh-repository test below checks the same conflict on every platform.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_export_with_no_recorded_run_is_a_conflict_and_receipts_still_answer() {
     let repo = temp_repo();

@@ -1016,7 +1016,9 @@ mod tests {
             "projects.remove"
         ));
         let other = accepted(json!({"projects": {"remove": ["beta"]}}));
-        assert_eq!(other.next.projects.remove, vec!["/work/beta".to_owned()]);
+        // A removed folder is kept as its absolute path, which is drive-qualified on Windows.
+        let beta = std::path::absolute("/work/beta").expect("an absolute path");
+        assert_eq!(other.next.projects.remove, vec![beta.display().to_string()]);
         let eight = accepted(json!({"projects": {"workers": {"acan-wip": 8}}}));
         assert_eq!(eight.next.projects.workers.get("acan-wip"), Some(&8));
         assert!(names(
