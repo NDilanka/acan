@@ -462,6 +462,14 @@ fn seq_of(frame: &Value) -> u64 {
     frame["seq"].as_u64().expect("a seq")
 }
 
+/// Whether a frame is a scan's live status or step, which is not a log event.
+fn is_scan_frame(frame: &Value) -> bool {
+    matches!(
+        frame["type"].as_str(),
+        Some("scan_status" | "scan_progress")
+    )
+}
+
 #[tokio::test]
 async fn multiplexed_stream_shows_only_member_projects_tagged() {
     let root = tempfile::tempdir().expect("temp dir");
@@ -484,7 +492,10 @@ async fn multiplexed_stream_shows_only_member_projects_tagged() {
             frame["project"], "alpha",
             "every frame is tagged, and only alpha's"
         );
-        assert!(frame.get("event").is_some(), "the frame carries the event");
+        assert!(
+            is_scan_frame(frame) || frame.get("event").is_some(),
+            "a log frame carries its event"
+        );
     }
 
     // The owner is a member of both, and each project's frames carry its own tag.
@@ -492,7 +503,9 @@ async fn multiplexed_stream_shows_only_member_projects_tagged() {
     let frames = read_until_quiet(&mut both).await;
     for id in ["alpha", "beta"] {
         assert!(
-            frames.iter().any(|frame| frame["project"] == id),
+            frames
+                .iter()
+                .any(|frame| frame["project"] == id && !is_scan_frame(frame)),
             "the owner's stream carries {id}'s events"
         );
     }
@@ -521,7 +534,7 @@ async fn cursors_are_per_project() {
     let seqs = |project: &str| -> Vec<u64> {
         frames
             .iter()
-            .filter(|frame| frame["project"] == project)
+            .filter(|frame| frame["project"] == project && !is_scan_frame(frame))
             .map(|frame| frame["event"]["seq"].as_u64().expect("a seq"))
             .collect()
     };
