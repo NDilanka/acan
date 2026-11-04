@@ -48,10 +48,11 @@ const CROSSING: u64 = 60 * 64;
 /// How far past the box round its two machines a route is first searched for, in plan units:
 /// a street and a bit.
 const REACH: f32 = 120.0;
-/// Factor on a lattice edge that a belt from another machine already uses.
+/// Factor on a lattice edge that a belt with no end in common already uses.
 const OVERLAP: u64 = 400;
-/// Divisor on a lattice edge that a belt from the same machine already uses, so its belts
-/// gather into one trunk.
+/// Divisor on a lattice edge that only belts sharing an end with this one use, so the belts out
+/// of one machine, or into one machine, gather into one trunk. A dense plant then draws a few
+/// trunks into its most used machines instead of a mesh of belts side by side.
 const TRUNK: u64 = 4;
 const NONE: u32 = u32::MAX;
 const FREE: usize = usize::MAX;
@@ -71,8 +72,9 @@ const VERTICAL: usize = 1;
 ///
 /// Returns one centre line per request, in request order: at least two points, axis-aligned
 /// segments, starting on an edge of `boxes[from]` and ending on an edge of `boxes[to]`. `None`
-/// where no route fits inside the frame. Each route sees the routes before it: belts from the
-/// same machine share a trunk, and belts from different machines keep off each other's track.
+/// where no route fits inside the frame. Each route sees the routes before it: belts that leave
+/// the same machine or enter the same machine share a trunk, and other belts keep off each
+/// other's track.
 pub fn route(
     boxes: &[[f32; 4]],
     keep_out: &[[f32; 4]],
@@ -118,7 +120,7 @@ pub fn route(
                     })
                 })
                 .or_else(|| tight(plan, frame, request))?;
-            occupancy.mark(&lattice, &points, request.from);
+            occupancy.mark(&lattice, &points, request);
             Some(points)
         })
         .collect()
@@ -386,29 +388,48 @@ fn axis(dir: usize) -> usize {
     dir >> 1
 }
 
-/// The machines whose belts run on one lattice edge: the first, and whether any other has.
+/// The belts that run on one lattice edge: the machine they all leave, and the one they all
+/// enter, where they share one. Belts that share an end are kin: they may run on one track, as
+/// a trunk out of the machine they leave or into the machine they enter.
 #[derive(Clone, Copy)]
 struct Owner {
-    first: usize,
-    mixed: bool,
+    used: bool,
+    from: usize,
+    to: usize,
 }
 
 impl Owner {
     const EMPTY: Self = Self {
-        first: FREE,
-        mixed: false,
+        used: false,
+        from: FREE,
+        to: FREE,
     };
 
-    fn add(&mut self, from: usize) {
-        if self.first == FREE {
-            self.first = from;
-        } else if self.first != from {
-            self.mixed = true;
+    fn add(&mut self, request: Request) {
+        if !self.used {
+            *self = Self {
+                used: true,
+                from: request.from,
+                to: request.to,
+            };
+            return;
+        }
+        if self.from != request.from {
+            self.from = FREE;
+        }
+        if self.to != request.to {
+            self.to = FREE;
         }
     }
 
-    fn other(self, from: usize) -> bool {
-        self.first != FREE && (self.first != from || self.mixed)
+    /// Whether a belt that is not kin to `request` runs here.
+    fn other(self, request: Request) -> bool {
+        self.used && self.from != request.from && self.to != request.to
+    }
+
+    /// Whether every belt here is kin to `request`, by the same end.
+    fn kin(self, request: Request) -> bool {
+        self.used && (self.from == request.from || self.to == request.to)
     }
 }
 
@@ -427,24 +448,23 @@ impl Occupancy {
         }
     }
 
-    /// The cost of the step `m` towards `dir` for a belt from machine `from`: its length,
-    /// scaled by who already runs there, plus a crossing charge when it lands across a belt
-    /// from another machine.
-    fn cost(&self, lattice: &Lattice, m: &Move, dir: usize, from: usize) -> u64 {
+    /// The cost of the step `m` towards `dir` for the belt `request`: its length, scaled by who
+    /// already runs there, plus a crossing charge when it lands across a belt that is not kin.
+    fn cost(&self, lattice: &Lattice, m: &Move, dir: usize, request: Request) -> u64 {
         let (nx, ny) = (lattice.xs.len(), lattice.ys.len());
         let (owner, crosses) = if horizontal(dir) {
-            let north = m.j + 1 < ny && self.vertical[m.node].other(from);
-            let south = m.j > 0 && self.vertical[m.node - nx].other(from);
+            let north = m.j + 1 < ny && self.vertical[m.node].other(request);
+            let south = m.j > 0 && self.vertical[m.node - nx].other(request);
             (self.horizontal[m.edge], north || south)
         } else {
             let row = m.j * (nx - 1);
-            let east = m.i + 1 < nx && self.horizontal[row + m.i].other(from);
-            let west = m.i > 0 && self.horizontal[row + m.i - 1].other(from);
+            let east = m.i + 1 < nx && self.horizontal[row + m.i].other(request);
+            let west = m.i > 0 && self.horizontal[row + m.i - 1].other(request);
             (self.vertical[m.edge], east || west)
         };
-        let step = if owner.other(from) {
+        let step = if owner.other(request) {
             m.cost * OVERLAP
-        } else if owner.first == from {
+        } else if owner.kin(request) {
             (m.cost / TRUNK).max(1)
         } else {
             m.cost
@@ -452,9 +472,9 @@ impl Occupancy {
         if crosses { step + CROSSING } else { step }
     }
 
-    /// Records the lattice edges under the route `points` as used by machine `from`. Works on
-    /// coordinates, so a route found on another lattice over the same plan is recorded too.
-    fn mark(&mut self, lattice: &Lattice, points: &[[f32; 2]], from: usize) {
+    /// Records the lattice edges under the route `points` as used by the belt `request`. Works
+    /// on coordinates, so a route found on another lattice over the same plan is recorded too.
+    fn mark(&mut self, lattice: &Lattice, points: &[[f32; 2]], request: Request) {
         let nx = lattice.xs.len();
         for pair in points.windows(2) {
             let (a, b) = (pair[0], pair[1]);
@@ -464,7 +484,7 @@ impl Occupancy {
                 };
                 let (i0, i1) = around(&lattice.xs, a[0].min(b[0]), a[0].max(b[0]));
                 for i in i0..i1.saturating_sub(1) {
-                    self.horizontal[j * (nx - 1) + i].add(from);
+                    self.horizontal[j * (nx - 1) + i].add(request);
                 }
             } else {
                 let Some(i) = find(&lattice.xs, a[0]) else {
@@ -472,7 +492,7 @@ impl Occupancy {
                 };
                 let (j0, j1) = around(&lattice.ys, a[1].min(b[1]), a[1].max(b[1]));
                 for j in j0..j1.saturating_sub(1) {
-                    self.vertical[j * nx + i].add(from);
+                    self.vertical[j * nx + i].add(request);
                 }
             }
         }
@@ -740,7 +760,7 @@ impl Search {
                 let next = axis(dir);
                 let straight = next == along;
                 let cost = g
-                    + occupancy.cost(lattice, &m, dir, from)
+                    + occupancy.cost(lattice, &m, dir, query.request)
                     + bend(along, next, slot.run, slot.leaving);
                 let label = Slot {
                     round,
@@ -1171,6 +1191,22 @@ mod tests {
         );
         assert_eq!(missing, 0);
         assert!(elapsed.as_secs() < 20);
+    }
+
+    #[test]
+    fn belts_into_one_machine_gather_into_one_trunk() {
+        // Three machines in a row above a fourth; each imports it. The belts share a track into
+        // it instead of running side by side.
+        let mut boxes = grid(3, 1, [60.0, 60.0], 72.0);
+        boxes.push([66.0, 240.0, 126.0, 300.0]);
+        let frame = frame_around(&boxes, 48.0);
+        let reqs = requests(&[(0, 3), (1, 3), (2, 3)]);
+        let routes = route(&boxes, &[], frame, &reqs);
+        assert_eq!(check(&boxes, frame, &reqs, &routes), 0);
+        assert!(
+            shared(&reqs, &routes) >= 2,
+            "the belts into one machine run apart: {routes:?}"
+        );
     }
 
     #[test]

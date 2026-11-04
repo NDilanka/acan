@@ -45,6 +45,10 @@
     box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.05); }
   #labels .label .count { display: none; margin-left: 6px; color: var(--leader); }
   #labels.alt .count { display: inline; }
+  /* A district's sign: its name in small capitals, quieter than a machine's name. */
+  #labels .sign { position: absolute; left: 0; top: 0; white-space: nowrap;
+    font: 600 10px/1.2 system-ui, sans-serif; letter-spacing: 0.08em; text-transform: uppercase; color: var(--leader);
+    text-shadow: 1px 0 0 var(--halo), -1px 0 0 var(--halo), 0 1px 0 var(--halo), 0 -1px 0 var(--halo), 0 0 3px var(--halo); }
   /* A canvas of several projects: one plate under each plant. The page makes them only then. */
   #nameplates { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
   #nameplates .nameplate { position: absolute; left: 0; top: 0; display: inline-flex; align-items: baseline; gap: 6px;

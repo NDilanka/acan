@@ -47,14 +47,99 @@ impl Plant {
     /// A machine with no file takes the folders of its name.
     pub fn districts(&self) -> Vec<u32> {
         let names: Vec<String> = self.machines.iter().map(district_name).collect();
-        let mut sorted = names.clone();
-        sorted.sort_unstable();
-        sorted.dedup();
+        let sorted = self.district_paths();
         names
             .iter()
             .map(|name| sorted.binary_search(name).unwrap_or(0) as u32)
             .collect()
     }
+
+    /// The folder of each district, in the order [`Plant::districts`] numbers them.
+    pub fn district_paths(&self) -> Vec<String> {
+        let mut sorted: Vec<String> = self.machines.iter().map(district_name).collect();
+        sorted.sort_unstable();
+        sorted.dedup();
+        sorted
+    }
+
+    /// The name each district's sign shows, in the order [`Plant::districts`] numbers them: the
+    /// last folder of its path, such as `acan-server` for `crates/acan-server`, with as many
+    /// folders before it as tell it from the other districts.
+    pub fn district_labels(&self) -> Vec<String> {
+        short_names(&self.district_paths())
+    }
+
+    /// The short name each machine's label shows, in machine order. A machine is named within
+    /// its district: `crates/acan-server/src` is `src`, and `crates/acan-server/src/vision` is
+    /// `vision`, with as many folders before the last as tell it from its district mates. A
+    /// machine that is its district's folder itself takes the district's sign name. A name
+    /// outside its district's folder, as a demo plant's `auth`, is shortened the same way. The
+    /// full name stays the machine's name, for its tooltip and its detail.
+    pub fn machine_labels(&self) -> Vec<String> {
+        let paths = self.district_paths();
+        let signs = short_names(&paths);
+        let districts = self.districts();
+        let relative: Vec<&str> = self
+            .machines
+            .iter()
+            .zip(&districts)
+            .map(|(machine, &d)| {
+                let folder = paths[d as usize].as_str();
+                let name = machine.name.trim_matches('/');
+                if name == folder {
+                    ""
+                } else {
+                    name.strip_prefix(folder)
+                        .and_then(|rest| rest.strip_prefix('/'))
+                        .filter(|_| !folder.is_empty())
+                        .unwrap_or(name)
+                }
+            })
+            .collect();
+        let mut labels = vec![String::new(); self.machines.len()];
+        for (d, sign) in signs.iter().enumerate() {
+            let mates: Vec<usize> = (0..self.machines.len())
+                .filter(|&i| districts[i] as usize == d)
+                .collect();
+            let names: Vec<String> = mates.iter().map(|&i| relative[i].to_owned()).collect();
+            for (&i, short) in mates.iter().zip(short_names(&names)) {
+                labels[i] = if short.is_empty() {
+                    sign.clone()
+                } else {
+                    short
+                };
+            }
+        }
+        labels
+    }
+}
+
+/// For each path, its last folder, or as many of its last folders as no other path ends with.
+/// A path that is a whole tail of another keeps all of itself. Empty paths stay empty.
+pub fn short_names(paths: &[String]) -> Vec<String> {
+    let parts: Vec<Vec<&str>> = paths
+        .iter()
+        .map(|path| path.split('/').filter(|part| !part.is_empty()).collect())
+        .collect();
+    parts
+        .iter()
+        .enumerate()
+        .map(|(i, own)| {
+            fn tail<'p, 'a>(p: &'p [&'a str], k: usize) -> &'p [&'a str] {
+                &p[p.len().saturating_sub(k)..]
+            }
+            let k = (1..=own.len())
+                .find(|&k| {
+                    let mine = tail(own, k);
+                    parts
+                        .iter()
+                        .enumerate()
+                        .all(|(j, other)| j == i || other.len() < k || tail(other, k) != mine)
+                })
+                .unwrap_or(own.len());
+            tail(own, k).join("/")
+        })
+        .collect()
 }
 
 /// The first two folders of a machine's first file, or of its name when it has no file.
@@ -531,6 +616,102 @@ mod tests {
             let want = serde_json::to_value(acan_iso::classify(name, dir, &paths).kind)
                 .expect("a kind name");
             assert_eq!(machine["kind"], want, "{name}");
+        }
+    }
+
+    /// A plant of machines named by their folders, each with one file in it, as a workspace of
+    /// crates scans.
+    fn named(names: &[&str]) -> Plant {
+        Plant {
+            repo: "workspace".to_owned(),
+            machines: names
+                .iter()
+                .map(|name| PlantMachine {
+                    name: (*name).to_owned(),
+                    files: 1,
+                    kind: Kind::Crate,
+                    guessed: false,
+                    reason: String::new(),
+                    set_by_user: false,
+                    paths: vec![format!("{name}/lib.rs")],
+                })
+                .collect(),
+            edges: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn short_names_keep_the_last_folder_and_as_many_before_it_as_tell_them_apart() {
+        let paths = |list: &[&str]| list.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            short_names(&paths(&[
+                "crates/acan-server",
+                "crates/acan-scan",
+                "tla/views"
+            ])),
+            ["acan-server", "acan-scan", "views"]
+        );
+        assert_eq!(
+            short_names(&paths(&[
+                "src",
+                "tests/fixtures/rust-crate/src",
+                "src/vision"
+            ])),
+            ["src", "rust-crate/src", "vision"]
+        );
+        assert_eq!(short_names(&paths(&["a/x", "b/x", ""])), ["a/x", "b/x", ""]);
+    }
+
+    #[test]
+    fn a_machine_is_labelled_within_its_district() {
+        let plant = named(&[
+            "crates/acan-server",
+            "crates/acan-server/src",
+            "crates/acan-server/src/vision",
+            "crates/acan-server/tests",
+            "crates/acan-server/tests/support",
+            "crates/acan-scan/src",
+            "crates/acan-scan/tests",
+            "crates/acan-scan/tests/fixtures/rust-crate/src",
+            "crates/acan-scan/tests/fixtures/rust-crate/src/a",
+            "crates/acan-witness/tests/support",
+            "tla/views",
+        ]);
+        assert_eq!(
+            plant.district_labels(),
+            ["acan-scan", "acan-server", "acan-witness", "views"]
+        );
+        assert_eq!(
+            plant.machine_labels(),
+            [
+                "acan-server",
+                "src",
+                "vision",
+                "tests",
+                "support",
+                "src",
+                "tests",
+                "rust-crate/src",
+                "a",
+                "support",
+                "views",
+            ]
+        );
+        for (label, machine) in plant.machine_labels().iter().zip(&plant.machines) {
+            assert!(
+                !label.contains("crates/"),
+                "{} keeps its whole path",
+                machine.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_demo_and_live_plants_keep_their_machine_names_as_labels() {
+        for text in [FIXTURE, LIVE] {
+            let plant = from_scan_json(text).expect("plant parses");
+            let names: Vec<String> = plant.machines.iter().map(|m| m.name.clone()).collect();
+            assert_eq!(plant.machine_labels(), names);
         }
     }
 

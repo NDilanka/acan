@@ -364,10 +364,11 @@ impl Placer {
             }
             self.widen();
         };
+        let (bw, bh) = block.size;
+        self.grid.mark(bx, by, bw, bh, district);
         for &(i, x, y) in &block.spots {
             let (sw, sh) = self.sizes[i];
             let (cx, cy) = (bx + x, by + y);
-            self.grid.mark(cx, cy, sw, sh, district);
             self.slot[i] = (cx, cy);
             self.centre[i] = middle(cx, cy, sw, sh);
             self.placed[i] = true;
@@ -399,12 +400,9 @@ impl Placer {
         let (bw, bh) = block.size;
         let want_x = ((aim[0] - bw as f32 * GRID / 2.0) / GRID).round() as i32;
         let want_y = ((aim[1] - bh as f32 * GRID / 2.0) / GRID).round() as i32;
-        let fits = |cx: i32, cy: i32| {
-            block.spots.iter().all(|&(i, x, y)| {
-                let (sw, sh) = self.sizes[i];
-                self.grid.fits(cx + x, cy + y, sw, sh, district)
-            })
-        };
+        // The whole block must be clear, empty corners too, so no other district builds inside
+        // it and the district's ground pad (see `layout::district_pads`) keeps clear of others.
+        let fits = |cx: i32, cy: i32| self.grid.fits(cx, cy, bw, bh, district);
         // The search walks the cell under the top-left of the block's first machine, which must
         // be free, a tile at a time outward from where it would be at the aim, and skips tiles
         // with no free cell. A district is put once, so no cell is near its machines yet, and a

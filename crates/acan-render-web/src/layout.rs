@@ -16,6 +16,12 @@ pub const LABEL_BAND: f32 = 32.0;
 /// Room beyond the outermost machines that belts may use, in plan units. Belts can run round the
 /// outside of the plant through it, past the label bands of the outermost machines.
 const MARGIN: f32 = LABEL_BAND + 16.0;
+/// How far a district's ground pad reaches past its outermost machines, in plan units: past the
+/// label bands of its front machines, and well inside half a street, so two pads never meet.
+pub const PAD_MARGIN: f32 = LABEL_BAND + GRID;
+/// A district gets a pad only when at least this many districts hold two machines or more. A
+/// plant of one folder of sources and a test or two reads as one place, not as districts.
+const PADDED_DISTRICTS: usize = 2;
 
 /// A directed import between two machines, by index. `from` imports `to`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +57,15 @@ pub struct Belt {
     pub path: Vec<[f32; 2]>,
 }
 
+/// The ground under one district's machines: a quiet pad its sign stands on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DistrictPad {
+    /// The district, as `Plant::districts` numbers it.
+    pub district: u32,
+    /// `[min x, min y, max x, max y]` of the pad.
+    pub rect: [f32; 4],
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layout {
     /// One entry per input machine, in input order.
@@ -60,6 +75,9 @@ pub struct Layout {
     pub belts: Vec<Belt>,
     /// `[min x, min y, max x, max y]` of all footprints.
     pub bounds: [f32; 4],
+    /// One pad per district, in district order, or none for a plant that reads as one place
+    /// (see [`district_pads`]).
+    pub districts: Vec<DistrictPad>,
 }
 
 impl Layout {
@@ -92,6 +110,19 @@ impl Layout {
                 self.bounds[2] + dx,
                 self.bounds[3] + dy,
             ],
+            districts: self
+                .districts
+                .iter()
+                .map(|pad| DistrictPad {
+                    district: pad.district,
+                    rect: [
+                        pad.rect[0] + dx,
+                        pad.rect[1] + dy,
+                        pad.rect[2] + dx,
+                        pad.rect[3] + dy,
+                    ],
+                })
+                .collect(),
         }
     }
 }
@@ -152,10 +183,50 @@ pub fn layout(kinds: &[Kind], edges: &[Edge], districts: &[u32]) -> Layout {
         })
         .collect();
     Layout {
+        districts: district_pads(&boxes, districts),
         machines,
         belts,
         bounds,
     }
+}
+
+/// One pad per district: the box round its machines, [`PAD_MARGIN`] wider on every side. Places
+/// keep every district's whole block a street from the next (see `place`), so pads never
+/// overlap. None when fewer than [`PADDED_DISTRICTS`] districts hold two machines or more.
+pub fn district_pads(boxes: &[[f32; 4]], districts: &[u32]) -> Vec<DistrictPad> {
+    if districts.len() != boxes.len() {
+        return Vec::new();
+    }
+    let mut rects: std::collections::BTreeMap<u32, ([f32; 4], usize)> = Default::default();
+    for (&district, &b) in districts.iter().zip(boxes) {
+        rects
+            .entry(district)
+            .and_modify(|(r, count)| {
+                *r = [
+                    r[0].min(b[0]),
+                    r[1].min(b[1]),
+                    r[2].max(b[2]),
+                    r[3].max(b[3]),
+                ];
+                *count += 1;
+            })
+            .or_insert((b, 1));
+    }
+    if rects.values().filter(|(_, count)| *count >= 2).count() < PADDED_DISTRICTS {
+        return Vec::new();
+    }
+    rects
+        .into_iter()
+        .map(|(district, (r, _))| DistrictPad {
+            district,
+            rect: [
+                r[0] - PAD_MARGIN,
+                r[1] - PAD_MARGIN,
+                r[2] + PAD_MARGIN,
+                r[3] + PAD_MARGIN,
+            ],
+        })
+        .collect()
 }
 
 /// The plan rectangle a machine's name hangs over, which belts keep out of: the quarter of the
@@ -258,6 +329,46 @@ mod tests {
                 .map(|&(from, to, imports)| Edge { from, to, imports })
                 .collect(),
         }
+    }
+
+    /// The workspace's 46 folders in twelve crates, densely linked the way a workspace of crates
+    /// that use each other scans: each folder imports its own crate's first folder, and up to four
+    /// other crates' first folders, the low-numbered crates far more often, as a core crate is.
+    /// About two hundred imports.
+    fn dense_workspace() -> Plant {
+        let mut plant = workspace();
+        let districts = plant.districts();
+        let first: Vec<usize> = (0..12)
+            .map(|d| districts.iter().position(|&x| x == d).expect("crate"))
+            .collect();
+        let mut edges = Vec::new();
+        let mut seed = 0x9e37_79b9_u32;
+        for (i, &own) in districts.iter().enumerate() {
+            let own = own as usize;
+            if first[own] != i {
+                edges.push((i, first[own]));
+            }
+            for _ in 0..5 {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                // Squaring a uniform pick leans it toward crate 0.
+                let u = (seed >> 8) as f32 / (1 << 24) as f32;
+                let crate_ = ((u * u) * 12.0) as usize;
+                if crate_ != own {
+                    edges.push((i, first[crate_]));
+                }
+            }
+        }
+        edges.sort_unstable();
+        edges.dedup();
+        plant.edges = edges
+            .into_iter()
+            .map(|(from, to)| Edge {
+                from,
+                to,
+                imports: 1 + ((from * 7 + to) % 5) as u32,
+            })
+            .collect();
+        plant
     }
 
     /// The clear distance between two footprints along the axis where they are furthest apart.
@@ -475,6 +586,7 @@ mod tests {
                 path: vec![[96.0, 40.0], [400.0, 40.0]],
             }],
             bounds: [0.0, 0.0, 496.0, 86.0],
+            districts: Vec::new(),
         };
         check_invariants(&laid);
     }
@@ -571,6 +683,100 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_densely_linked_workspace_routes_every_import() {
+        let plant = dense_workspace();
+        assert!(
+            (150..=260).contains(&plant.edges.len()),
+            "{} imports",
+            plant.edges.len()
+        );
+        check_plant(&plant);
+    }
+
+    #[test]
+    fn the_most_used_crate_of_a_dense_workspace_sits_near_the_middle() {
+        let plant = dense_workspace();
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
+        let b = laid.bounds;
+        let middle = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
+        let away: Vec<f32> = laid
+            .districts
+            .iter()
+            .map(|pad| {
+                let r = pad.rect;
+                ((r[0] + r[2]) / 2.0 - middle[0]).hypot((r[1] + r[3]) / 2.0 - middle[1])
+            })
+            .collect();
+        // Crate 0 is the one the others import most; it sorts first among the districts.
+        let core = away[0];
+        let nearer = away.iter().filter(|&&d| d < core).count();
+        assert!(
+            nearer <= 2,
+            "{nearer} districts sit nearer the middle: {away:?}"
+        );
+    }
+
+    #[test]
+    fn each_district_has_a_pad_round_its_machines_and_no_two_pads_meet() {
+        for plant in [workspace(), dense_workspace()] {
+            check_pads(&plant);
+        }
+    }
+
+    fn check_pads(plant: &Plant) {
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
+        assert_eq!(laid.districts.len(), 12, "one pad per crate");
+        let inside =
+            |r: [f32; 4], b: [f32; 4]| b[0] >= r[0] && b[1] >= r[1] && b[2] <= r[2] && b[3] <= r[3];
+        for (m, placed) in laid.machines.iter().enumerate() {
+            let pad = laid
+                .districts
+                .iter()
+                .find(|pad| pad.district == districts[m])
+                .expect("every machine's district has a pad");
+            assert!(
+                inside(pad.rect, placed.footprint()),
+                "machine {m} off its pad"
+            );
+            assert!(
+                inside(pad.rect, label_band(placed.footprint())),
+                "machine {m}'s name off its pad"
+            );
+        }
+        for (i, a) in laid.districts.iter().enumerate() {
+            for b in &laid.districts[i + 1..] {
+                assert!(
+                    gap(a.rect, b.rect) >= GRID,
+                    "pads {:?} and {:?} meet",
+                    a.rect,
+                    b.rect
+                );
+            }
+        }
+        let moved = laid.translated([100.0, -50.0]);
+        assert_eq!(
+            moved.districts[0].rect[0],
+            laid.districts[0].rect[0] + 100.0
+        );
+        assert_eq!(moved.districts[0].rect[3], laid.districts[0].rect[3] - 50.0);
+    }
+
+    #[test]
+    fn a_plant_that_reads_as_one_place_has_no_pads() {
+        // The demo's sources share one folder, and its one test folder holds a single machine.
+        let demo = from_scan_json(FIXTURE).expect("fixture parses");
+        let (kinds, edges, districts) = demo.layout_input();
+        assert!(layout(&kinds, &edges, &districts).districts.is_empty());
+        let (kinds, edges) = chain_plant();
+        assert!(layout(&kinds, &edges, &[]).districts.is_empty());
+        // A plant of one machine per district has nothing to group.
+        let (kinds, edges, districts) = stress(60).layout_input();
+        assert!(layout(&kinds, &edges, &districts).districts.is_empty());
     }
 
     #[test]

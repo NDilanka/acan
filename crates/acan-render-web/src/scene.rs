@@ -2,7 +2,7 @@
 //! the layout and the acan-iso models.
 
 use acan_iso::{BODY_RADIUS, Overlay};
-use acan_render::{Aabb, HueLine, Instance, Model, Ribbon, Scene};
+use acan_render::{Aabb, HueLine, Instance, Model, Pad, Ribbon, Scene};
 
 use crate::bends;
 use crate::kind::{self, ALL, Kind, PlanFootprint};
@@ -92,15 +92,27 @@ pub fn mark_kinds() -> MarkKinds {
     }
 }
 
-/// The plant: a ribbon for each belt and an instance for each machine. `models` is indexed the
-/// way [`kind::index`] indexes kinds.
+/// The plant: a pad for each district, a ribbon for each belt and an instance for each machine.
+/// `models` is indexed the way [`kind::index`] indexes kinds.
 pub fn plant_scene(layout: &Layout, models: &[Model]) -> Scene {
     let ribbons = belt_ribbons(&layout.belts);
+    let pads: Vec<Pad> = layout
+        .districts
+        .iter()
+        .map(|district| Pad {
+            rect: district.rect,
+        })
+        .collect();
     let mut bounds = Aabb::EMPTY;
     for ribbon in &ribbons {
         for &[x, y] in &ribbon.centre {
             bounds.include([x, y, 0.0]);
         }
+    }
+    for pad in &pads {
+        let [x0, y0, x1, y1] = pad.rect;
+        bounds.include([x0, y0, 0.0]);
+        bounds.include([x1, y1, 0.0]);
     }
 
     let mut instances = Vec::with_capacity(layout.machines.len());
@@ -131,6 +143,7 @@ pub fn plant_scene(layout: &Layout, models: &[Model]) -> Scene {
         });
     }
     Scene {
+        pads,
         ribbons,
         instances,
         hue_lines: Vec::new(),
