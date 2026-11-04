@@ -12,6 +12,7 @@ function fakeApp() {
   return {
     calls,
     set_scan: (json) => calls.push(["set_scan", json]),
+    set_scan_stage: (json) => calls.push(["set_scan_stage", json]),
     scan_fill: (name, reduced) => {
       calls.push(["scan_fill", name, reduced]);
       return true;
@@ -84,6 +85,18 @@ test("a first map shows its outlines and blocks writes until it ends", () => {
   assert.equal(view.fold(scanFrameOf(progress("fill", core))), null);
   assert.deepEqual(app.calls.at(-1), ["scan_fill", "core", false]);
   assert.equal(shown.at(-1).modules_done, 1);
+});
+
+test("a live step gives the renderer its stage, so a waiting map starts before any status", () => {
+  const { app, view } = fresh();
+  view.applyPlant(plant("waiting"));
+  const skeleton = progress("skeleton");
+  assert.equal(view.fold(scanFrameOf(skeleton)), null);
+  assert.deepEqual(app.calls.at(-1), ["set_scan_stage", skeleton], "a step with no module only gives its stage");
+
+  const step = progress("fill", core);
+  view.fold(scanFrameOf(step));
+  assert.deepEqual(app.calls.slice(-2), [["set_scan_stage", step], ["scan_fill", "core", false]]);
 });
 
 test("a fill runs as reduced motion asks it to", () => {

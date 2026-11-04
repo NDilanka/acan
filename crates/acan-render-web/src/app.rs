@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use acan_render::camera::{DEFAULT_AZIMUTH, DEFAULT_ELEVATION, FitRoom};
-use acan_render::{Aabb, Camera, Lod, Model, Renderer, Scene, wgpu};
+use acan_render::{Aabb, Camera, Instance, Lod, Model, Renderer, Scene, wgpu};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
@@ -67,40 +67,63 @@ struct FocusHold {
     camera: Camera,
 }
 
-/// How many times the top-down fit pans the picture back from a screen edge it must keep clear of.
-const CLEAR_PASSES: usize = 4;
+/// How many steps the top-down fit takes to bring the plant inside the screen edges it keeps clear.
+const CLEAR_STEPS: usize = 12;
 
 /// Fits `boxes` on `camera` at its angles, with `room`, as `Camera::fit_boxes_room` does. With
 /// `clear`, the top-down fit, the corners must also stay inside the screen edges it names, as
-/// `[top, right]` in device pixels. The kit's fit shifts the picture to clear the usage panel, which
-/// can push the top of the plant under the shell bar. Any corner past an edge pans the picture back
-/// by its reach, which leaves the zoom the fit chose.
+/// `[top, right, left]` in device pixels. The kit's fit shifts the picture to clear the usage panel,
+/// which can push the plant under the shell bar, past the left edge or under the receipt plate. A
+/// plant too big for the room the edges leave zooms out to fit it. Otherwise a corner past an edge
+/// pans the picture back by its reach.
 fn fit_clear(
     camera: &mut Camera,
     boxes: &[Aabb],
     margin: f32,
     room: FitRoom,
-    clear: Option<[f32; 2]>,
+    clear: Option<[f32; 3]>,
 ) {
     camera.fit_boxes_room(boxes, margin, room);
-    let Some([top, right]) = clear else {
+    let Some([top, right, edge_left]) = clear else {
         return;
     };
     let corners: Vec<[f32; 3]> = boxes.iter().flat_map(|bounds| bounds.corners()).collect();
     let [width, height] = camera.viewport();
     let centre = [width * 0.5, height * 0.5];
-    for _ in 0..CLEAR_PASSES {
+    let room_x = (right - edge_left).max(1.0);
+    let room_y = (height - top).max(1.0);
+    for _ in 0..CLEAR_STEPS {
         let screen: Vec<[f32; 2]> = corners
             .iter()
             .map(|&corner| camera.world_to_screen(corner))
             .collect();
-        let [above, beyond] = topdown::overlap(&screen, top, right);
-        if above == 0.0 && beyond == 0.0 {
+        let [above, beyond, left] = topdown::overlap(&screen, top, right, edge_left);
+        if above == 0.0 && beyond == 0.0 && left == 0.0 {
             break;
         }
-        // The ground under the centre moves down by `above` and left by `beyond`, which moves the
-        // picture the same way.
-        camera.drag_ground(centre, [centre[0] - beyond, centre[1] + above]);
+        let [lo_x, hi_x, lo_y, hi_y] = screen.iter().fold(
+            [
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+            ],
+            |[lo_x, hi_x, lo_y, hi_y], &[x, y]| {
+                [lo_x.min(x), hi_x.max(x), lo_y.min(y), hi_y.max(y)]
+            },
+        );
+        // The plant's span on screen against the room. A span past the room means it cannot fit at
+        // this zoom, so the zoom comes down a little and the next step measures again.
+        let fit = (room_x / (hi_x - lo_x))
+            .min(room_y / (hi_y - lo_y))
+            .min(1.0);
+        if fit < 1.0 {
+            camera.set_zoom(camera.zoom() * fit * 0.98);
+            continue;
+        }
+        // The ground under the centre moves down by `above`, left by `beyond` and right by `left`,
+        // which moves the picture the same way.
+        camera.drag_ground(centre, [centre[0] - beyond + left, centre[1] + above]);
     }
 }
 
@@ -123,9 +146,9 @@ pub struct App {
     top_move: Option<TopMove>,
     /// Whether the top-down view is set once the ride has eased back, as `V` asks while riding.
     top_after_leave: Option<bool>,
-    /// The room the top-down fit keeps clear of the shell bar at the top and of the right column,
-    /// as `[top, right]` in CSS pixels. See [`App::set_fit_inset`].
-    fit_inset: [f32; 2],
+    /// The room the top-down fit keeps clear of the shell bar at the top, the right column and the
+    /// receipt plate at the left, as `[top, right, left]` in CSS pixels. See [`App::set_fit_inset`].
+    fit_inset: [f32; 3],
     /// The machines the shown tour step stages, with the chip labels on each. Empty when no step
     /// is shown, so every machine keeps its normal tint.
     stage: Vec<tour::Spot>,
@@ -256,6 +279,37 @@ struct Loaded {
     at_origin: Layout,
 }
 
+impl Loaded {
+    /// The overlays of every plan machine, placed on its base instance. `instances` holds this
+    /// plant's base instances from `start` on, as a scene does once they are added. A machine the
+    /// scan has not filled has no body, so it has no overlays. A filling body carries its overlays
+    /// up with it.
+    fn overlays(
+        &self,
+        instances: &[Instance],
+        start: usize,
+        marks: &Marks,
+        staged: Option<&[bool]>,
+        scan: &ScanFill,
+    ) -> Vec<Instance> {
+        let mut out = Vec::new();
+        for (plan_index, &instance) in self.plan_instance.iter().enumerate() {
+            if scan.hidden(instance) {
+                continue;
+            }
+            let mut at = instances[start + instance].offset;
+            at[2] += scan.drop_of(instance);
+            out.extend(scene::overlay_instances(
+                &self.machines[instance],
+                at,
+                marks.failed.get(plan_index).copied().unwrap_or(false),
+                marks::overlay_tint(plan_index, staged),
+            ));
+        }
+        out
+    }
+}
+
 #[wasm_bindgen]
 impl App {
     /// Builds the renderer on `canvas`. `backend` is `"webgpu"` or `"webgl"`. Set the canvas
@@ -304,7 +358,7 @@ impl App {
             tilt_before_top: DEFAULT_ELEVATION,
             top_move: None,
             top_after_leave: None,
-            fit_inset: [0.0; 2],
+            fit_inset: [0.0; 3],
             stage: Vec::new(),
             plant: None,
             plan: None,
@@ -531,6 +585,19 @@ impl App {
         Ok(())
     }
 
+    /// Applies the stage a live `scan_progress` step reports, so a waiting map starts. A step does
+    /// not list the modules that filled, so the machines keep their phases.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON is not a scan status.
+    pub fn set_scan_stage(&mut self, json: &str) -> Result<(), JsError> {
+        let status = scanfill::parse_status(json).map_err(js_err)?;
+        self.scan.step(status.stage);
+        self.sync_scene();
+        Ok(())
+    }
+
     /// Starts the machine named `name` filling in, as its module finishes. A page that asks for
     /// reduced motion, or a settled map, builds it at once. Returns whether the plant has it.
     pub fn scan_fill(&mut self, name: &str, reduced: bool) -> bool {
@@ -723,9 +790,15 @@ impl App {
         self.turn = None;
         self.tour_move = None;
         self.cancel_top_move();
-        self.camera
-            .orbit(dx * ORBIT_DEG_PER_PX, -dy * TILT_DEG_PER_PX);
-        // A tilt away from the top ends the top-down view, so the page's button tells the truth.
+        // From the top there is no higher tilt, so a vertical drag there tilts away from the top
+        // whichever way it goes. A tilt away from the top ends the top-down view, so the page's
+        // button tells the truth.
+        let tilt = if self.top_down {
+            -dy.abs() * TILT_DEG_PER_PX
+        } else {
+            -dy * TILT_DEG_PER_PX
+        };
+        self.camera.orbit(dx * ORBIT_DEG_PER_PX, tilt);
         self.top_down = self.top_down && topdown::is_top_down(self.camera.elevation());
     }
 
@@ -1058,10 +1131,24 @@ impl App {
     }
 
     /// Sets the room the top-down fit keeps clear of the page's shell bar, which hangs at the top,
-    /// and of the right column, in CSS pixels from the canvas edges. The next fit uses it; the
-    /// view does not move until then.
-    pub fn set_fit_inset(&mut self, top_css: f32, right_css: f32) {
-        self.fit_inset = [top_css.max(0.0), right_css.max(0.0)];
+    /// of the right column, and of the receipt plate at the left, in CSS pixels from the canvas
+    /// edges. The next fit uses it; the view does not move until then.
+    pub fn set_fit_inset(&mut self, top_css: f32, right_css: f32, left_css: f32) {
+        self.fit_inset = [top_css.max(0.0), right_css.max(0.0), left_css.max(0.0)];
+    }
+
+    /// Refits the top-down view to the room the page's panels leave now, as a receipt plate that
+    /// shows or hides moves them. Does nothing off the top-down view, or while a turn or a ride
+    /// runs. With `reduced`, or on a still page, the view jumps.
+    pub fn refit_top_down(&mut self, reduced: bool) {
+        if !self.top_down || self.top_move.is_some() || self.ride.is_some() {
+            return;
+        }
+        self.move_top(
+            topdown::snap(self.camera.azimuth()),
+            topdown::ELEVATION,
+            reduced,
+        );
     }
 
     /// Rides the drone of agent `agent` from inside. A ride already on switches to it, and a
@@ -1691,6 +1778,15 @@ impl App {
             .map_or_else(String::new, |machine| machine.name.clone())
     }
 
+    /// The wire name of machine `name`'s kind, such as `gate`, or an empty string when the plant
+    /// has no such machine. The Set kind menu marks the kind a machine has now.
+    pub fn machine_kind(&self, name: &str) -> String {
+        self.plant
+            .as_ref()
+            .and_then(|loaded| loaded.machines.iter().find(|machine| machine.name == name))
+            .map_or_else(String::new, |machine| crate::kind::wire_name(machine.kind))
+    }
+
     pub fn machine_files(&self, index: u32) -> u32 {
         self.plant
             .as_ref()
@@ -1709,10 +1805,38 @@ impl App {
             .map_or(-1.0, |stand| stand.top)
     }
 
+    /// Whether machine `name` is not on the map yet: its scan has not filled it, or the scan has
+    /// not started. A hidden machine takes no pointer. A name the plant lacks is not hidden.
+    pub fn machine_hidden(&self, name: &str) -> bool {
+        self.plant.as_ref().is_some_and(|loaded| {
+            loaded
+                .machines
+                .iter()
+                .position(|machine| machine.name == name)
+                .is_some_and(|index| self.scan.hidden(index))
+        })
+    }
+
     pub fn machine_count(&self) -> u32 {
         self.plant
             .as_ref()
             .map_or(0, |loaded| loaded.machines.len() as u32)
+    }
+
+    /// The footprint of each machine on the plan, in plan order, as JSON `[{"name", "min",
+    /// "size"}]` in world units. Empty before a plant loads. A plant with no log has footprints
+    /// but no view, so the page places its state machines on these.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the footprints cannot be written as JSON.
+    pub fn plant_footprints(&self) -> Result<String, JsError> {
+        let machines = self
+            .plan
+            .as_ref()
+            .map(|plan| plan.machines.clone())
+            .unwrap_or_default();
+        serde_json::to_string(&machines).map_err(js_err)
     }
 }
 
@@ -1877,6 +2001,15 @@ impl App {
             scene.instances[instance].tint =
                 marks::machine_tint(&self.marks, plan_index, staged.as_deref());
         }
+        // The overlays are placed before the bodies are removed or lifted, so they read the plan's
+        // indexes. See `Loaded::overlays`.
+        let overlays = loaded.overlays(
+            &scene.instances,
+            0,
+            &self.marks,
+            staged.as_deref(),
+            &self.scan,
+        );
         // A machine still an outline has no body yet. A filling body stands above its place.
         let mut index = 0;
         scene.instances.retain_mut(|instance| {
@@ -1898,9 +2031,15 @@ impl App {
         scene
             .beams
             .extend(marks::ghost_beams(&self.motion, &self.marks, self.dpr));
+        scene.beams.extend(marks::outline_beams(
+            &self.marks,
+            self.dpr,
+            staged.as_deref(),
+        ));
         scene
             .beams
             .extend(self.scan.ghosts(&loaded.footprints, self.dpr));
+        scene.instances.extend(overlays);
         scene.instances.extend(marks::mark_instances(
             &self.motion,
             &self.marks,
@@ -1920,6 +2059,14 @@ impl App {
                 scene.instances[start + instance].tint =
                     marks::machine_tint(&own.marks, plan_index, None);
             }
+            let overlays = parked.loaded.overlays(
+                &scene.instances,
+                start,
+                &own.marks,
+                None,
+                &ScanFill::default(),
+            );
+            scene.instances.extend(overlays);
             own.motion.set_px_units(px_units);
             if !parked.far {
                 scene
@@ -1934,6 +2081,9 @@ impl App {
                 scene
                     .beams
                     .extend(marks::ghost_beams(&own.motion, &own.marks, dpr));
+                scene
+                    .beams
+                    .extend(marks::outline_beams(&own.marks, dpr, None));
             }
             scene.instances.extend(marks::mark_instances(
                 &own.motion,
@@ -2006,9 +2156,10 @@ impl App {
     }
 
     /// The screen edges the top-down fit keeps every corner inside, in device pixels as
-    /// `[top, right]`: the bottom of the shell bar and the left edge of the right column. `None`
-    /// off the top-down view, where the fit keeps only its own room.
-    fn clear_for(&self, elevation: f32) -> Option<[f32; 2]> {
+    /// `[top, right, left]`: the bottom of the shell bar, the left edge of the right column, and
+    /// the right edge of the receipt plate. `None` off the top-down view, where the fit keeps only
+    /// its own room.
+    fn clear_for(&self, elevation: f32) -> Option<[f32; 3]> {
         if !topdown::is_top_down(elevation) {
             return None;
         }
@@ -2016,6 +2167,7 @@ impl App {
         Some([
             self.fit_inset[0] * self.dpr,
             width - self.fit_inset[1] * self.dpr,
+            self.fit_inset[2] * self.dpr,
         ])
     }
 

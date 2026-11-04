@@ -20,7 +20,7 @@ use clap::{Args, Parser, Subcommand};
 
 /// Acan's local server: one world per repository, one or more repositories per server.
 #[derive(Debug, Parser)]
-#[command(name = "acan", version)]
+#[command(name = "acan", version = release::version())]
 struct Cli {
     #[command(subcommand)]
     command: Command,

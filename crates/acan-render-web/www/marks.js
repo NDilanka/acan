@@ -333,8 +333,9 @@ function markAt(x, y) {
   // A machine behind a close camera projects to a huge outline that would swallow the pointer,
   // so only machines whose footprint lies near the view are picked.
   const [w, h] = [canvas.clientWidth, canvas.clientHeight];
-  const near = state.view.machines.filter((machine) => machineQuad(machine, project)
-    .every(([px, py]) => px >= -w && px <= 2 * w && py >= -h && py <= 2 * h));
+  // A machine the scan has not filled takes no pointer, so its outline is not picked either.
+  const near = state.view.machines.filter((machine) => !state.app.machine_hidden(machine.name)
+    && machineQuad(machine, project).every(([px, py]) => px >= -w && px <= 2 * w && py >= -h && py <= 2 * h));
   const machine = machineAt(near, project, x, y, [], topOf);
   return machine === null ? null : { machine };
 }

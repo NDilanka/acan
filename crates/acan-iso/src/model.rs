@@ -15,6 +15,8 @@ pub struct Model {
     pub dots: Vec<Dot3>,
     /// The box that contains every mesh vertex, line point and dot.
     pub bounds: Aabb,
+    /// The solid parts the figure is built from: each swept body, each flat face and each bolt counts as one.
+    pub solids: u32,
 }
 
 /// Triangles with per-vertex data. Indices form a triangle list, counter-clockwise seen from outside.

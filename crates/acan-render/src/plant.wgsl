@@ -273,9 +273,10 @@ fn fs_grid(@builtin(position) frag: vec4<f32>) -> GridOut {
     let alpha = select(0.0, line_alpha, ray.hit);
 
     let page = theme.palette[SLOT_PAGE].rgb;
-    let ink = theme.palette[SLOT_GRID].rgb;
+    // The look's grid colour, and its opacity in the alpha lane.
+    let grid = theme.palette[SLOT_GRID];
     let depth = select(0.0, clamp(ndc_depth(vec3<f32>(g, GROUND_Z)), 0.0, 1.0), ray.hit);
-    return GridOut(vec4<f32>(mix(page, ink, alpha), 1.0), depth);
+    return GridOut(vec4<f32>(mix(page, grid.rgb, alpha * grid.a), 1.0), depth);
 }
 
 // Belts: flat opaque ribbons on the ground. The side and end lines are drawn in the fill, from the

@@ -8,6 +8,7 @@
 
 pub(crate) mod data;
 pub(crate) mod file;
+mod update;
 mod validate;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -61,6 +62,9 @@ const ONLY_OWNER_TOKENS: &str = "only the owner may manage tokens";
 
 /// Why anyone but the owner may not test a model.
 const ONLY_OWNER_TESTS: &str = "only the owner may test a model";
+
+/// Why anyone but the owner may not check for or install an update.
+const ONLY_OWNER_UPDATES: &str = "only the owner may update Acan";
 
 /// The prompt a model test sends. It asks for the smallest reply, so a test costs little.
 const TEST_PROMPT: &str = "Reply with the word ok.";
@@ -1127,6 +1131,72 @@ async fn test_role<C: ModelClient + 'static>(
     }))
 }
 
+/// `GET /api/settings/update/check`. Only the owner may check. It reports the running version and
+/// the newest pre-release on GitHub, and downloads nothing. GitHub being unreachable is a state.
+///
+/// Status codes: `200` with the check. `401` for an unknown token. `403` for any token but the
+/// owner's.
+async fn get_update_check<C: ModelClient + 'static>(
+    State(state): State<Arc<Settings<C>>>,
+    headers: HeaderMap,
+) -> Result<Json<update::Check>, ApiError> {
+    state.owner_only(&headers, ONLY_OWNER_UPDATES)?;
+    Ok(Json(update::check(&update::Github::production()).await))
+}
+
+/// `POST /api/settings/update`. Only the owner may install an update. The newest pre-release's
+/// asset for this install is downloaded, and kept only when its SHA256 matches `SHA256SUMS`. On
+/// Windows the verified setup then runs detached and silently, and the answer is `202` at once. On
+/// Linux the verified archive is kept, and its path is reported.
+///
+/// Status codes: `202` with `{"status": "installing"}` on Windows. `200` with the path and version
+/// of the verified download on Linux. `401` for an unknown token. `403` for any token but the
+/// owner's. `409` with `no_flavor`, `offline`, `no_prerelease`, `no_asset` or `checksum_mismatch`
+/// when the update cannot be verified, which installs nothing. `500` when the download cannot be
+/// written or the setup cannot start.
+async fn post_update<C: ModelClient + 'static>(
+    State(state): State<Arc<Settings<C>>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    state.owner_only(&headers, ONLY_OWNER_UPDATES)?;
+    let dir = update::install_dir().map_err(|err| ApiError::Internal(err.into()))?;
+    let flavor = update::flavor_in(&dir).map_err(update_failure)?;
+    let download = update::download_latest(
+        &update::Github::production(),
+        flavor,
+        &update::download_dir(),
+        cfg!(windows),
+    )
+    .await
+    .map_err(update_failure)?;
+    if cfg!(windows) {
+        update::run_setup_detached(&download.path).map_err(|err| ApiError::Internal(err.into()))?;
+        return Ok((StatusCode::ACCEPTED, Json(json!({"status": "installing"}))).into_response());
+    }
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "downloaded",
+            "path": download.path.display().to_string(),
+            "version": download.version,
+        })),
+    )
+        .into_response())
+}
+
+/// The response for an update that cannot be verified or downloaded. Each cause is a conflict
+/// that names it.
+fn update_failure(err: update::UpdateError) -> ApiError {
+    match err {
+        update::UpdateError::NoFlavor => ApiError::Conflict("no_flavor"),
+        update::UpdateError::Offline => ApiError::Conflict("offline"),
+        update::UpdateError::NoPrerelease => ApiError::Conflict("no_prerelease"),
+        update::UpdateError::NoAsset => ApiError::Conflict("no_asset"),
+        update::UpdateError::Checksum => ApiError::Conflict("checksum_mismatch"),
+        update::UpdateError::Storage(err) => ApiError::Internal(err.into()),
+    }
+}
+
 /// The settings routes. They are global, since the settings belong to the server and not to a
 /// project.
 pub(crate) fn routes<C: ModelClient + 'static>(state: Arc<Settings<C>>) -> Router {
@@ -1136,6 +1206,8 @@ pub(crate) fn routes<C: ModelClient + 'static>(state: Arc<Settings<C>>) -> Route
             get(get_settings::<C>).put(put_settings::<C>),
         )
         .route("/api/settings/projects", post(post_project::<C>))
+        .route("/api/settings/update", post(post_update::<C>))
+        .route("/api/settings/update/check", get(get_update_check::<C>))
         .route("/api/settings/tokens/owner", get(get_owner_token::<C>))
         .route(
             "/api/settings/tokens/owner/rotate",

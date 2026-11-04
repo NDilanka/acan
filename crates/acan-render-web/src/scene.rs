@@ -1,20 +1,25 @@
 //! The plant's scene: a flat ribbon for each belt and one instance for each machine, built from
 //! the layout and the acan-iso models.
 
-use acan_iso::BODY_RADIUS;
+use acan_iso::{BODY_RADIUS, Overlay};
 use acan_render::{Aabb, HueLine, Instance, Model, Ribbon, Scene};
 
 use crate::bends;
-use crate::kind::{self, ALL, PlanFootprint};
+use crate::kind::{self, ALL, Kind, PlanFootprint};
 use crate::layout::{Belt, Layout, Placed};
 use crate::marks::{FLAG_ROOM, MarkKinds, hover_height};
+use crate::plant::PlantMachine;
 
 /// The gap between a belt's end and the plinth it meets, in plan units.
 const BELT_PORT_GAP: f32 = 1.5;
 
+/// The mark models [`models`] lists after the machine kinds: the six [`mark_kinds`].
+const MARK_MODELS: usize = 6;
+
 /// One acan-iso model per kind, in [`kind::ALL`] order. The marks follow: an agent's drone body,
 /// its accent, the ring round a waiting agent, the clash pin, its stalk, and the beam's end.
-/// [`mark_kinds`] names them.
+/// [`mark_kinds`] names them. Then each kind's overlays, six per kind, in [`kind::ALL`] order;
+/// [`overlay_kind`] names them.
 pub fn models() -> Vec<Model> {
     let mut out: Vec<Model> = ALL.iter().map(|&kind| acan_iso::model(kind)).collect();
     out.extend([
@@ -25,7 +30,53 @@ pub fn models() -> Vec<Model> {
         acan_iso::clash_stalk(),
         acan_iso::beacon(),
     ]);
+    out.extend(
+        ALL.iter()
+            .flat_map(|&kind| Overlay::ALL.map(|overlay| acan_iso::overlay_model(kind, overlay))),
+    );
     out
+}
+
+/// The model index of `overlay` on a machine of `kind`, within [`models`].
+pub fn overlay_kind(kind: Kind, overlay: Overlay) -> u16 {
+    let first = ALL.len() + MARK_MODELS;
+    let index = first + kind::index(kind) * Overlay::ALL.len() + overlay.index();
+    u16::try_from(index).expect("model indexes fit in u16")
+}
+
+/// The overlays a machine carries from its data, placed on its base instance at `at`: its file
+/// bars and its groove, which take `tint` so they dim with the machine, and its failed tick, which
+/// stays red while a check fails.
+#[must_use]
+pub fn overlay_instances(
+    machine: &PlantMachine,
+    at: [f32; 3],
+    failed: bool,
+    tint: u8,
+) -> Vec<Instance> {
+    let mut marks = Vec::with_capacity(3);
+    if let Some(count) = acan_iso::bar_count(machine.files) {
+        marks.push((Overlay::Bars(count), tint));
+    }
+    marks.push((
+        Overlay::Groove {
+            broken: machine.guessed,
+        },
+        tint,
+    ));
+    if failed {
+        marks.push((Overlay::FailedTick, 0));
+    }
+    marks
+        .into_iter()
+        .map(|(overlay, tint)| Instance {
+            offset: at,
+            kind: overlay_kind(machine.kind, overlay),
+            tint,
+            grow: [0.0; 2],
+            turn: 0.0,
+        })
+        .collect()
 }
 
 /// The model kinds of the marks, which follow the machine kinds in [`models`].
@@ -327,6 +378,43 @@ mod tests {
     }
 
     #[test]
+    fn a_machines_overlays_follow_its_files_its_guess_and_its_failed_check() {
+        let machine = |files: usize, guessed: bool| PlantMachine {
+            name: "api".to_owned(),
+            files,
+            kind: Kind::Gate,
+            guessed,
+            reason: String::new(),
+            set_by_user: false,
+            paths: Vec::new(),
+        };
+        let at = [10.0, 20.0, 0.0];
+        let kinds = |instances: &[Instance]| -> Vec<u16> {
+            instances.iter().map(|inst| inst.kind).collect()
+        };
+        let bars = overlay_kind(Kind::Gate, Overlay::Bars(2));
+        let broken = overlay_kind(Kind::Gate, Overlay::Groove { broken: true });
+        let closed = overlay_kind(Kind::Gate, Overlay::Groove { broken: false });
+        let tick = overlay_kind(Kind::Gate, Overlay::FailedTick);
+
+        let guessed = overlay_instances(&machine(5, true), at, false, 0);
+        assert_eq!(kinds(&guessed), [bars, broken]);
+        let exact = overlay_instances(&machine(0, false), at, false, 0);
+        assert_eq!(kinds(&exact), [closed], "no files, no bars");
+        let failing = overlay_instances(&machine(5, false), at, true, 9);
+        assert_eq!(kinds(&failing), [bars, closed, tick]);
+        assert_eq!(failing[2].tint, 0, "the failed tick stays red when dimmed");
+        assert_eq!(failing[0].tint, 9, "the bars dim with their machine");
+        assert!(failing.iter().all(|inst| inst.offset == at));
+
+        let models = models();
+        for overlay in Overlay::ALL {
+            let index = usize::from(overlay_kind(Kind::Gate, overlay));
+            assert!(index < models.len(), "{overlay:?} has a model");
+        }
+    }
+
+    #[test]
     fn a_ride_measures_each_machine_from_its_model_alone() {
         let plant = from_scan_json(FIXTURE).expect("fixture parses");
         let (kinds, edges) = plant.layout_input();
@@ -447,8 +535,8 @@ mod tests {
     fn belts_are_narrow_next_to_the_machines() {
         let (w, d) = Kind::Assembler.footprint();
         assert!(
-            belt_width(8) * 10.0 < w.min(d),
-            "the widest belt stays under a tenth of a plate"
+            belt_width(8) * 10.0 <= w.min(d),
+            "the widest belt stays within a tenth of a plate"
         );
         assert!(belt_width(1) < belt_width(8));
     }

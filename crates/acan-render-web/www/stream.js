@@ -8,6 +8,8 @@ import { reducedNow, requestRender } from "./main.js";
 import { listProjects, placeOf, startMulti } from "./multi.js";
 import { apiPath, target } from "./projects.js";
 import { createFeed, createHold, eventsBefore } from "./scrub.js";
+import { readFootprints } from "./statemachine-paint.js";
+import { noteTouch, readStateMachines, setStateMachines, touchOf } from "./statemachine.js";
 import { TOKEN_KEY, freeze, gate, link, replay, state, upto } from "./state.js";
 import { paintMapping, scanFrameOf, scanView } from "./scanview.js";
 
@@ -168,6 +170,8 @@ export async function start() {
   }
   const plant = await get(apiPath(target(), "/api/plant"));
   state.app.set_plant(plant);
+  readFootprints();
+  setStateMachines(readStateMachines(plant));
   scanner().applyPlant(plant);
   await reload();
   if (freeze) {
@@ -230,10 +234,18 @@ function connect() {
 // Folds one streamed event of the map on screen, or keeps it in the hold while the map shows the
 // past. Returns false when the app refused it, so the stream reloads the log.
 export function applyStreamed(data) {
-  // A scan or a touch is not an event of the log, so it never reaches the app's ingest.
+  // A scan frame is not an event of the log, so it never reaches the app's ingest.
   const scan = scanFrameOf(data);
   if (scan !== null) {
     foldScanFrame(scan);
+    return true;
+  }
+  // A transition touch is not an event: it has no seq and the log does not keep it. It lights its
+  // belt and nothing else, and it is not lit while the map shows the past.
+  const touch = touchOf(data);
+  if (touch !== null) {
+    if (!hold.on) noteTouch(touch, Date.now());
+    requestRender();
     return true;
   }
   if (hold.on) {

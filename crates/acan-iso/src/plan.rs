@@ -50,13 +50,6 @@ impl Plan {
             r: (self.r - by).max(0.0),
         }
     }
-
-    /// The four corners, moved in by `inset`: low-x low-y first, then along x, then along y.
-    pub(crate) fn corners(&self, inset: f32) -> [Point; 4] {
-        let (x0, y0) = (self.x + inset, self.y + inset);
-        let (x1, y1) = (self.x + self.w - inset, self.y + self.d - inset);
-        [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]
-    }
 }
 
 /// A circle as `steps` points, starting at angle zero and going round once.

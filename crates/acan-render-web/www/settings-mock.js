@@ -65,11 +65,11 @@ const ADAPTERS = [
   makeAdapter("fx", "fx", true, "2.1.0", "logged_in"),
   makeAdapter("custom", "Custom command", true, null, "unknown"),
 ];
+// The update check as GET /api/settings/update/check answers it: a newer pre-release is published.
 const UPDATE = {
+  state: "available",
   latest: "0.1.1-pre.1",
-  notes: "Pre-release notes for the fixture.",
-  asset: "acan-0.1.1-pre.1-linux.tar.gz",
-  sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  url: "https://github.com/NDilanka/acan/releases/tag/v0.1.1-pre.1",
 };
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -311,11 +311,11 @@ export function createMockApi(initial) {
     if (method === "GET" && path === "/api/settings/harness/adapters") {
       return { status: 200, body: { adapters: ADAPTERS } };
     }
-    if (method === "GET" && path === "/api/update") {
-      return { status: 200, body: { current: state.about.version, ...UPDATE } };
+    if (method === "GET" && path === "/api/settings/update/check") {
+      return member ? forbidden() : { status: 200, body: { current: state.about.version, ...UPDATE } };
     }
-    if (method === "POST" && path === "/api/update") {
-      return member ? forbidden() : { status: 200, body: { state: "verifying" } };
+    if (method === "POST" && path === "/api/settings/update") {
+      return member ? forbidden() : { status: 202, body: { status: "installing" } };
     }
     const role = /^\/api\/settings\/models\/roles\/([^/]+)\/test$/.exec(path);
     if (method === "POST" && role) return member ? forbidden() : testRole(role[1]);
