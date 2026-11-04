@@ -151,7 +151,7 @@ function invalidSettings(body) {
 
 // A project's statemap flag must be on or off, and its worker count a whole number from 0 to 8. Each
 // must name a project on the list.
-function invalidProjects(projects, body = {}) {
+function invalidProjects(projects, body = {}, pending = { add: [], remove: [] }) {
   const fields = [];
   const known = (id) => projects.some((project) => project.id === id);
   for (const [id, on] of Object.entries(body.statemap_llm ?? {})) {
@@ -161,6 +161,12 @@ function invalidProjects(projects, body = {}) {
   for (const [id, n] of Object.entries(body.workers ?? {})) {
     if (!known(id)) fields.push({ path: `projects.${id}`, why: "unknown project" });
     else if (!Number.isInteger(n) || n < 0 || n > 8) fields.push({ path: `projects.${id}.workers`, why: "must be 0 to 8" });
+  }
+  // The first project is the default, which cannot be removed. Only a project the server runs, and
+  // not one already pending removal, can be removed.
+  for (const id of body.remove ?? []) {
+    if (id === projects[0]?.id) fields.push({ path: "projects.remove", why: "the default project cannot be removed" });
+    else if (!known(id) || pending.remove.includes(id)) fields.push({ path: "projects.remove", why: "must name a project the server runs" });
   }
   return fields;
 }
@@ -183,14 +189,11 @@ function modelConflicts(current, models) {
   return conflicts;
 }
 
-// Projects are added or removed by id, and take effect on restart.
-function projectsAfter(projects, { add = [], remove = [] }) {
-  const kept = projects.filter((project) => !remove.includes(project.id));
-  for (const path of add) {
-    const id = path.split("/").filter(Boolean).pop() ?? path;
-    if (!kept.some((project) => project.id === id)) kept.push({ id, name: id, workers: 1 });
-  }
-  return kept;
+// Adds and removes are kept as pending, and the next start applies them. The running projects do not
+// change until then.
+function recordProjects(pending, { add = [], remove = [] }) {
+  for (const path of add) if (!pending.add.includes(path)) pending.add.push(path);
+  for (const id of remove) if (!pending.remove.includes(id)) pending.remove.push(id);
 }
 
 export function createMockApi(initial) {
@@ -200,12 +203,15 @@ export function createMockApi(initial) {
   let agentRotations = 0;
   // Replays need a recorded run. The fixture has none yet, so they answer 409 until one exists.
   let hasRun = false;
+  // Adds and removes the next start applies. Only the owner's view shows them.
+  const pending = { add: [], remove: [] };
   const member = state.you !== "owner";
 
   // A member sees no tokens, and every setting reads as read only.
   function view(settings) {
     const copy = clone(settings);
     copy.applied = appliedLabels(settings);
+    if (!member) copy.project_changes = clone(pending);
     if (member) {
       delete copy.tokens;
       copy.editable = false;
@@ -218,7 +224,7 @@ export function createMockApi(initial) {
     const next = clone(state);
     const fields = [];
     const keys = applyModels(next, body.models ?? {}, fields);
-    fields.push(...invalidSettings(body), ...invalidProjects(state.projects, body.projects));
+    fields.push(...invalidSettings(body), ...invalidProjects(state.projects, body.projects, pending));
     if (fields.length) return { status: 422, body: { error: "invalid", fields } };
     const conflicts = modelConflicts(state, body.models ?? {});
     if (conflicts.length) return { status: 409, body: { error: "conflict", what: conflicts[0] } };
@@ -227,7 +233,7 @@ export function createMockApi(initial) {
     if (body.budgets) merge(next.budgets, body.budgets);
     if (body.look) merge(next.look, body.look);
     if (body.notifications) merge(next.notifications, body.notifications);
-    if (body.projects) next.projects = projectsAfter(next.projects, body.projects);
+    if (body.projects) recordProjects(pending, body.projects);
     for (const [id, on] of Object.entries(body.projects?.statemap_llm ?? {})) {
       next.projects = next.projects.map((project) => (project.id === id ? { ...project, statemap_llm: on } : project));
     }

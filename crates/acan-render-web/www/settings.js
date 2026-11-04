@@ -21,6 +21,7 @@ import {
   appliedNote,
   changedPaths,
   effectText,
+  pendingProjectLines,
   sectionEffect,
   updateView,
   exportNote,
@@ -1021,6 +1022,7 @@ function projectRow(project) {
     ),
     el("span", { class: "acts" }, cf.buttons),
     cf.line,
+    removalRefusal(project.id),
     fieldNote(`projects.${project.id}`),
   );
   const statemap = toggleRow(
@@ -1078,11 +1080,28 @@ function setStatemapLlm(id, value) {
   return put("projects", { projects: { statemap_llm: { [id]: value } } });
 }
 
+// The project whose Remove was pressed last, so a refusal of that removal shows beside its row.
+let removeTarget = null;
+
 // Projects are added and removed by path and id, and take effect on restart.
 function removeProject(id) {
   armed = null;
   clearTimeout(armTimer);
+  removeTarget = id;
   return put("projects", { projects: { remove: [id] } });
+}
+
+// A refusal of this row's removal, in red beside the row that was pressed. Nothing else shows here.
+function removalRefusal(id) {
+  return removeTarget === id && invalid.has("projects.remove") ? fieldNote("projects.remove") : null;
+}
+
+// The adds and removes the next start applies, under one note. Only the owner's view has them.
+function pendingGroup() {
+  const lines = pendingProjectLines(settings?.project_changes);
+  if (!lines.length) return null;
+  const rows = lines.map((line) => el("div", { class: "row wide" }, el("span", { class: "label", text: line })));
+  return group("Pending", "After restart", rows);
 }
 
 function addProject() {
@@ -1123,6 +1142,7 @@ function projectsBody() {
   );
   return [
     group("Projects", null, projects.length ? projects.map((project) => projectRow(project)) : [el("p", { class: "note", text: "No projects yet." })]),
+    pendingGroup(),
     group("Add a project", "A git repo on this machine.", [addRow]),
     statusLine("projects"),
   ];

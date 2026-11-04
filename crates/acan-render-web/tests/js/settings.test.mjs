@@ -25,6 +25,7 @@ import {
   keyRows,
   parseField,
   patchFor,
+  pendingProjectLines,
   providerLabel,
   roleRows,
   sectionEffect,
@@ -659,7 +660,39 @@ test("projects are added and removed, and the answer says they apply on restart"
   });
   assert.equal(put.status, 200);
   assert.deepEqual(put.body.applied, { "projects.add": "restart", "projects.remove": "restart" });
-  assert.deepEqual(put.body.settings.projects.map((project) => project.id), ["acan", "new-thing"]);
+  // The running projects do not change until the next start; the owner sees the pending changes.
+  assert.deepEqual(put.body.settings.projects.map((project) => project.id), ["acan", "acan-web"]);
+  assert.deepEqual(put.body.settings.project_changes, { add: ["repos/new-thing/"], remove: ["acan-web"] });
+});
+
+test("the owner sees pending project changes, and a member sees none", async () => {
+  const owner = createMockApi(fixture);
+  await owner.request("PUT", "/api/settings", { projects: { add: ["repos/new-thing/"] } });
+  const read = await owner.request("GET", "/api/settings");
+  assert.deepEqual(read.body.project_changes, { add: ["repos/new-thing/"], remove: [] });
+  const member = createMockApi({ ...fixture, you: "member" });
+  const seen = await member.request("GET", "/api/settings");
+  assert.equal("project_changes" in seen.body, false);
+});
+
+test("removing an unknown project, or the default one, is a 422 on projects.remove", async () => {
+  const api = createMockApi(fixture);
+  const unknown = await api.request("PUT", "/api/settings", { projects: { remove: ["nope"] } });
+  assert.equal(unknown.status, 422);
+  assert.deepEqual(unknown.body.fields, [{ path: "projects.remove", why: "must name a project the server runs" }]);
+  const dflt = await api.request("PUT", "/api/settings", { projects: { remove: ["acan"] } });
+  assert.deepEqual(dflt.body.fields, [{ path: "projects.remove", why: "the default project cannot be removed" }]);
+  const read = (await api.request("GET", "/api/settings")).body;
+  assert.deepEqual(read.project_changes, { add: [], remove: [] });
+});
+
+test("pending project changes read as lines: adds as paths, removes as ids", () => {
+  assert.deepEqual(pendingProjectLines({ add: ["repos/new-thing/"], remove: ["acan-web"] }), [
+    "+ repos/new-thing/",
+    "− acan-web",
+  ]);
+  assert.deepEqual(pendingProjectLines({ add: [], remove: [] }), []);
+  assert.deepEqual(pendingProjectLines(undefined), []);
 });
 
 test("a member sees no tokens, reads everything as not editable, and cannot write", async () => {

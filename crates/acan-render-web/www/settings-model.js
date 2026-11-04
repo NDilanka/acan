@@ -277,6 +277,15 @@ export function statemapHint(budgets) {
   return `Uses up to ${calls} calls × 3k tokens per scan`;
 }
 
+// The projects the next start adds and removes, one line each. Adds are folder paths; removes are
+// project ids. The owner's GET carries `project_changes`; a member's has none, so nothing shows.
+export function pendingProjectLines(changes) {
+  return [
+    ...(changes?.add ?? []).map((path) => `+ ${path}`),
+    ...(changes?.remove ?? []).map((id) => `− ${id}`),
+  ];
+}
+
 // The server's 409 names its conflict in `what`. Each code gets a short sentence; an unknown code
 // gets the plain fallback.
 const CONFLICT_TEXT = {
