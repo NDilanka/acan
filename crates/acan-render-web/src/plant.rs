@@ -123,7 +123,7 @@ pub fn from_scan_json(text: &str) -> Result<Plant, PlantError> {
                     machine.kind_set_by_user,
                 ),
                 None => {
-                    let decision = acan_iso::classify(&machine.name, &machine.dir, &paths);
+                    let decision = acan_iso::classify(&machine.name, &machine.dir, &paths, &[]);
                     (decision.kind, decision.guessed, decision.reason, false)
                 }
             };
@@ -493,7 +493,7 @@ mod tests {
                 .iter()
                 .filter_map(|id| files.get(&id.as_u64()?).copied())
                 .collect();
-            let want = serde_json::to_value(acan_iso::classify(name, dir, &paths).kind)
+            let want = serde_json::to_value(acan_iso::classify(name, dir, &paths, &[]).kind)
                 .expect("a kind name");
             assert_eq!(machine["kind"], want, "{name}");
         }

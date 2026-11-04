@@ -86,7 +86,8 @@ fn build(files: &[SourceFile], grouping: &Grouping) -> (Vec<Machine>, Vec<Belt>)
         }
         let dir = common_directory(members.iter().map(|file| file.path.as_str()));
         let paths: Vec<&str> = members.iter().map(|file| file.path.as_str()).collect();
-        let decision = acan_iso::classify(&name, &dir, &paths);
+        let packages = shared_packages(&members);
+        let decision = acan_iso::classify(&name, &dir, &paths, &packages);
         machines.push(Machine {
             id,
             name,
@@ -123,7 +124,47 @@ fn build(files: &[SourceFile], grouping: &Grouping) -> (Vec<Machine>, Vec<Belt>)
     (machines, belts)
 }
 
+/// The external packages that at least half of `members` import, by [`package_name`].
+fn shared_packages<'a>(members: &[&'a SourceFile]) -> Vec<&'a str> {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for file in members {
+        let packages: BTreeSet<&str> = file
+            .imports
+            .iter()
+            .filter(|import| matches!(import.target, ImportTarget::External))
+            .map(|import| package_name(&import.specifier))
+            .collect();
+        for package in packages {
+            *counts.entry(package).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|&(_, count)| count * 2 >= members.len())
+        .map(|(package, _)| package)
+        .collect()
+}
+
+/// The package an external import names: the first segment of a Rust path, or the npm package
+/// of a specifier, with no `node:` prefix and no subpath. A scoped package keeps its scope.
+fn package_name(specifier: &str) -> &str {
+    if let Some((first, _)) = specifier.split_once("::") {
+        return first;
+    }
+    let name = specifier.strip_prefix("node:").unwrap_or(specifier);
+    let end = if name.starts_with('@') {
+        name.match_indices('/').nth(1)
+    } else {
+        name.match_indices('/').next()
+    };
+    end.map_or(name, |(index, _)| &name[..index])
+}
+
 /// The machine name each file gets when the grouping does not assign it, keyed by path.
+///
+/// A file under a test directory is named by its path up to and including the first test
+/// directory, so a crate's tests, helpers and fixtures are one crate machine, not one machine
+/// per fixture folder.
 ///
 /// In a small repo, each file of a large non-test directory is its own machine, named by its
 /// file stem. A stem that another machine already uses falls back to the path without its
@@ -148,7 +189,7 @@ fn automatic_names(files: &[SourceFile]) -> BTreeMap<&str, String> {
         if splits(path) {
             modules.push(path);
         } else {
-            let dir = directory_of(path);
+            let dir = test_root(path).unwrap_or_else(|| directory_of(path));
             names.insert(path, dir.to_string());
             used.insert(dir.to_string());
         }
@@ -183,9 +224,21 @@ fn unique(name: String, used: &mut BTreeSet<String>) -> String {
 }
 
 fn is_test_path(path: &str) -> bool {
-    directory_of(path)
-        .split('/')
-        .any(|part| TEST_DIRS.contains(&part))
+    test_root(path).is_some()
+}
+
+/// The directory of `path` up to and including its first test directory, or None when it has none.
+fn test_root(path: &str) -> Option<&str> {
+    let dir = directory_of(path);
+    let mut end = 0;
+    for part in dir.split('/') {
+        end += part.len();
+        if TEST_DIRS.contains(&part) {
+            return Some(&dir[..end]);
+        }
+        end += 1;
+    }
+    None
 }
 
 fn file_name(path: &str) -> &str {
@@ -232,5 +285,76 @@ fn common_directory<'a>(paths: impl Iterator<Item = &'a str>) -> String {
         ".".to_string()
     } else {
         parts.join("/")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hash::ContentHash;
+    use crate::lang::Lang;
+    use crate::model::ImportRef;
+
+    fn source(id: u32, path: &str, externals: &[&str]) -> SourceFile {
+        SourceFile {
+            id: FileId(id),
+            path: path.to_owned(),
+            lang: Lang::TypeScript,
+            content_hash: ContentHash::of(b""),
+            symbols: Vec::new(),
+            imports: externals
+                .iter()
+                .map(|specifier| ImportRef {
+                    specifier: (*specifier).to_owned(),
+                    line: 1,
+                    target: ImportTarget::External,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn package_names_drop_prefixes_and_subpaths() {
+        assert_eq!(package_name("serde::Deserialize"), "serde");
+        assert_eq!(package_name("tokio::sync::mpsc"), "tokio");
+        assert_eq!(package_name("node:crypto"), "crypto");
+        assert_eq!(package_name("react/jsx-runtime"), "react");
+        assert_eq!(package_name("@prisma/client/runtime"), "@prisma/client");
+        assert_eq!(package_name("@trpc/server"), "@trpc/server");
+        assert_eq!(package_name("express"), "express");
+    }
+
+    #[test]
+    fn a_test_file_joins_the_machine_of_its_first_test_directory() {
+        assert_eq!(
+            test_root("crates/acan-scan/tests/fixtures/ts-app/ui/app.tsx"),
+            Some("crates/acan-scan/tests")
+        );
+        assert_eq!(test_root("test/boot.test.ts"), Some("test"));
+        assert_eq!(test_root("src/auth.test.ts"), None);
+        let files = [
+            source(0, "pkg/tests/fixtures/ui/app.tsx", &[]),
+            source(1, "pkg/tests/helpers.ts", &[]),
+            source(2, "pkg/src/lib.ts", &[]),
+        ];
+        let names = automatic_names(&files);
+        assert_eq!(names["pkg/tests/fixtures/ui/app.tsx"], "pkg/tests");
+        assert_eq!(names["pkg/tests/helpers.ts"], "pkg/tests");
+        assert_eq!(names["pkg/src/lib.ts"], "pkg/src");
+    }
+
+    #[test]
+    fn a_package_half_the_files_import_names_the_machine() {
+        let files = [
+            source(0, "src/panel/a.ts", &["react/jsx-runtime"]),
+            source(1, "src/panel/b.ts", &["react", "left-pad"]),
+            source(2, "src/panel/c.ts", &["express"]),
+            source(3, "src/panel/d.ts", &[]),
+        ];
+        let members: Vec<&SourceFile> = files.iter().collect();
+        assert_eq!(shared_packages(&members), ["react"]);
+        let (machines, _) = build(&files, &Grouping::default());
+        assert_eq!(machines[0].kind, acan_iso::Kind::Kiosk);
+        assert_eq!(machines[0].kind_reason, "imports \"react\"");
     }
 }

@@ -5,20 +5,30 @@
 //!
 //! 1. Crate, exactly: no files, only test files, or only files under a generated directory.
 //!    The generated file-name suffixes `.pb.`, `_pb2` and `.g.` also count.
-//! 2. The name pass. The name is split on every character that is not a letter or digit, and each
-//!    word is matched whole and case-insensitively against [`RULES`]. The first row with a
-//!    matching word wins, so `auth-service` is a Gate, and `ci` does not match `decide`.
-//! 3. The path pass, only when the name matched no row. The machine's directory is split the same
-//!    way, outermost segment first, and matched against [`RULES`] in the same row order.
-//! 4. The language pass, only when neither pass matched: a Kiosk when at least 60 percent of the
+//! 2. The name pass. The name is split into segments on `/` and `\`, and the last segment is
+//!    tried first. Each segment is split on every character that is not a letter or digit, and
+//!    each word is matched whole and case-insensitively against [`RULES`]. The first segment with
+//!    a matching word decides, and in it the first row with a matching word wins, so
+//!    `auth-service` is a Gate, `ci` does not match `decide`, and `crates/acan-server/src/settings`
+//!    is a Switchbox, not a server.
+//! 3. The path pass, only when the name matched no row. The machine's directory is matched the
+//!    same way, innermost segment first.
+//! 4. The file-name pass. The first row, Assembler aside, with a word in the stems of at least
+//!    half the files wins, so a folder of `routes.ts` files is a Switchboard.
+//! 5. The import pass. The first row of [`IMPORT_RULES`] with a package that at least half the
+//!    files import wins, so a folder that imports `react` is a Kiosk.
+//! 6. The language pass, only when no pass matched: a Kiosk when at least 60 percent of the
 //!    files are `.tsx` or `.jsx`.
-//! 5. The assembler, the fallback. Its words are a row of [`RULES`] too, so a service name is
+//! 7. The assembler, the fallback. Its words are a row of [`RULES`] too, so a service name is
 //!    named as one in the tooltip.
 //!
 //! The scanner reads only `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs` and `.rs`, so no `.json`,
-//! `.yaml`, `.html` or `.css` file ever reaches a machine. The rules therefore use names, paths
-//! and the tsx/jsx share only. Switchbox and Gantry match on name and path words alone, since the
-//! language rules for their config and infra files cannot fire.
+//! `.yaml`, `.html` or `.css` file ever reaches a machine. The rules therefore use names, paths,
+//! imports and the tsx/jsx share only. Switchbox and Gantry match on words and imports alone,
+//! since the language rules for their config and infra files cannot fire.
+//!
+//! The scanner passes each machine's packages. The renderer passes none when it classifies a
+//! plant without kinds, so there a machine that only its imports would name is an assembler.
 //!
 //! A keyword match is a guess, and the renderer breaks the plinth groove for it. A crate and the
 //! assembler are exact, and so is a kind the user sets in `.acan/kinds.json`.
@@ -46,6 +56,11 @@ const RULES: [(Kind, &[&str]); 16] = [
             "acl",
             "policy",
             "policies",
+            "identity",
+            "password",
+            "passwords",
+            "credential",
+            "credentials",
         ],
     ),
     (
@@ -60,6 +75,8 @@ const RULES: [(Kind, &[&str]); 16] = [
             "quota",
             "quotas",
             "backoff",
+            "budget",
+            "budgets",
         ],
     ),
     (
@@ -103,6 +120,13 @@ const RULES: [(Kind, &[&str]); 16] = [
             "apis",
             "views",
             "resolvers",
+            "http",
+            "rpc",
+            "mcp",
+            "graphql",
+            "rest",
+            "socket",
+            "sockets",
         ],
     ),
     (
@@ -120,6 +144,15 @@ const RULES: [(Kind, &[&str]); 16] = [
             "widgets",
             "styles",
             "theme",
+            "web",
+            "www",
+            "frontend",
+            "render",
+            "renderer",
+            "canvas",
+            "dom",
+            "public",
+            "static",
         ],
     ),
     (
@@ -138,6 +171,16 @@ const RULES: [(Kind, &[&str]); 16] = [
             "cache",
             "migration",
             "migrations",
+            "sql",
+            "sqlite",
+            "database",
+            "databases",
+            "ledger",
+            "ledgers",
+            "snapshot",
+            "snapshots",
+            "archive",
+            "archives",
         ],
     ),
     (
@@ -176,6 +219,10 @@ const RULES: [(Kind, &[&str]); 16] = [
             "consumer",
             "consumers",
             "batch",
+            "agent",
+            "agents",
+            "runner",
+            "runners",
         ],
     ),
     (
@@ -195,6 +242,11 @@ const RULES: [(Kind, &[&str]); 16] = [
             "signals",
             "notify",
             "notifications",
+            "stream",
+            "streams",
+            "feed",
+            "feeds",
+            "broadcast",
         ],
     ),
     (
@@ -232,12 +284,20 @@ const RULES: [(Kind, &[&str]); 16] = [
             "workflows",
             "pipeline",
             "pipelines",
+            "release",
+            "releases",
+            "container",
+            "containers",
+            "sandbox",
+            "volume",
+            "volumes",
         ],
     ),
     (
         Kind::Console,
         &[
             "cli", "cmd", "command", "commands", "console", "scripts", "script", "tools", "bin",
+            "examples", "example", "demo", "demos", "smoke", "harness",
         ],
     ),
     (
@@ -255,6 +315,10 @@ const RULES: [(Kind, &[&str]); 16] = [
             "external",
             "provider",
             "providers",
+            "llm",
+            "llms",
+            "git",
+            "vision",
         ],
     ),
     (
@@ -271,6 +335,147 @@ const RULES: [(Kind, &[&str]); 16] = [
             "service", "services", "domain", "usecase", "usecases", "logic",
         ],
     ),
+];
+
+/// The package table, in the row order of [`RULES`]: the first row with a package the machine
+/// imports wins. The names are as the scanner normalizes them: the first segment of a Rust path,
+/// and the npm package name with no `node:` prefix and no subpath.
+const IMPORT_RULES: [(Kind, &[&str]); 16] = [
+    (
+        Kind::Gate,
+        &[
+            "jsonwebtoken",
+            "jose",
+            "passport",
+            "bcrypt",
+            "bcryptjs",
+            "argon2",
+            "next-auth",
+            "express-session",
+            "oauth2",
+        ],
+    ),
+    (
+        Kind::Valve,
+        &[
+            "express-rate-limit",
+            "bottleneck",
+            "p-limit",
+            "governor",
+            "tower_governor",
+        ],
+    ),
+    (
+        Kind::Splitter,
+        &["http-proxy", "http-proxy-middleware", "tower_http"],
+    ),
+    (Kind::Intake, &[]),
+    (
+        Kind::Switchboard,
+        &[
+            "express",
+            "koa",
+            "fastify",
+            "hono",
+            "@trpc/server",
+            "axum",
+            "actix_web",
+            "warp",
+            "rocket",
+        ],
+    ),
+    (
+        Kind::Kiosk,
+        &[
+            "react",
+            "react-dom",
+            "vue",
+            "svelte",
+            "preact",
+            "solid-js",
+            "@angular/core",
+            "wasm_bindgen",
+            "web_sys",
+            "js_sys",
+        ],
+    ),
+    (
+        Kind::Tank,
+        &[
+            "prisma",
+            "@prisma/client",
+            "sequelize",
+            "typeorm",
+            "knex",
+            "mongoose",
+            "pg",
+            "mysql2",
+            "better-sqlite3",
+            "sqlx",
+            "diesel",
+            "rusqlite",
+            "sea_orm",
+            "tokio_postgres",
+            "redis",
+            "ioredis",
+        ],
+    ),
+    (
+        Kind::Mould,
+        &["zod", "yup", "joi", "ajv", "schemars", "prost"],
+    ),
+    (
+        Kind::Conveyor,
+        &[
+            "bull",
+            "bullmq",
+            "agenda",
+            "node-cron",
+            "cron",
+            "apalis",
+            "tokio_cron_scheduler",
+        ],
+    ),
+    (
+        Kind::Horn,
+        &["eventemitter3", "mitt", "socket.io", "lapin", "rdkafka"],
+    ),
+    (
+        Kind::Switchbox,
+        &["dotenv", "dotenvy", "convict", "figment"],
+    ),
+    (
+        Kind::Gantry,
+        &["dockerode", "bollard", "@kubernetes/client-node", "kube"],
+    ),
+    (
+        Kind::Console,
+        &[
+            "commander",
+            "yargs",
+            "inquirer",
+            "clap",
+            "structopt",
+            "argh",
+        ],
+    ),
+    (
+        Kind::Antenna,
+        &[
+            "axios",
+            "node-fetch",
+            "got",
+            "openai",
+            "@anthropic-ai/sdk",
+            "reqwest",
+            "ureq",
+            "octocrab",
+            "git2",
+            "gix",
+        ],
+    ),
+    (Kind::Toolrack, &[]),
+    (Kind::Assembler, &[]),
 ];
 
 /// Directory names that hold generated or vendored output, not code for an agent to edit.
@@ -297,8 +502,9 @@ pub struct Decision {
     pub reason: String,
 }
 
-/// The kind of a machine from its name, its directory and the repo-relative paths of its files.
-pub fn classify(name: &str, dir: &str, paths: &[&str]) -> Decision {
+/// The kind of a machine from its name, its directory, the repo-relative paths of its files, and
+/// the external packages that at least half of its files import. `packages` is empty when unknown.
+pub fn classify(name: &str, dir: &str, paths: &[&str], packages: &[&str]) -> Decision {
     if let Some(reason) = crate_reason(paths) {
         return Decision {
             kind: Kind::Crate,
@@ -306,11 +512,28 @@ pub fn classify(name: &str, dir: &str, paths: &[&str]) -> Decision {
             reason: reason.to_owned(),
         };
     }
-    if let Some((kind, token)) = by_token(&words(name)) {
+    if let Some((kind, token)) = by_segment(name) {
         return token_decision(kind, format!("name word \"{token}\""));
     }
-    if let Some((kind, token)) = by_token(&words(dir)) {
+    if let Some((kind, token)) = by_segment(dir) {
         return token_decision(kind, format!("directory word \"{token}\""));
+    }
+    if let Some((kind, token, count)) = by_file_names(paths) {
+        return Decision {
+            kind,
+            guessed: true,
+            reason: format!(
+                "most file names: \"{token}\" ({count} of {} files)",
+                paths.len()
+            ),
+        };
+    }
+    if let Some((kind, package)) = by_package(packages) {
+        return Decision {
+            kind,
+            guessed: true,
+            reason: format!("imports \"{package}\""),
+        };
     }
     if mostly_frontend(paths) {
         return Decision {
@@ -339,8 +562,60 @@ fn crate_reason(paths: &[&str]) -> Option<&'static str> {
     }
 }
 
+/// The first match of [`by_token`] over the `/` or `\` segments of `text`, innermost first.
+/// In a large repo a machine's name is its whole folder path, and its innermost folder says the
+/// most about it: `crates/acan-server/src/settings` holds settings, not a server.
+fn by_segment(text: &str) -> Option<(Kind, String)> {
+    text.rsplit(['/', '\\'])
+        .find_map(|segment| by_token(&words(segment)))
+}
+
+/// The first row of [`RULES`], the assembler aside, with a word in the stems of at least half of
+/// `paths`, the first such word, and the number of files with one.
+fn by_file_names(paths: &[&str]) -> Option<(Kind, String, usize)> {
+    let stems: Vec<Vec<String>> = paths.iter().map(|path| words(stem(path))).collect();
+    for (kind, keywords) in RULES {
+        if kind == Kind::Assembler {
+            continue;
+        }
+        let matched: Vec<&String> = stems
+            .iter()
+            .filter_map(|stem_words| {
+                stem_words
+                    .iter()
+                    .find(|word| keywords.contains(&word.as_str()))
+            })
+            .collect();
+        if let Some(word) = matched.first()
+            && matched.len() * 2 >= paths.len()
+        {
+            return Some((kind, (*word).clone(), matched.len()));
+        }
+    }
+    None
+}
+
+/// The first row of [`IMPORT_RULES`] with a package among `packages`, and that package.
+fn by_package(packages: &[&str]) -> Option<(Kind, &'static str)> {
+    IMPORT_RULES.iter().find_map(|(kind, names)| {
+        names
+            .iter()
+            .find(|name| packages.contains(name))
+            .map(|name| (*kind, *name))
+    })
+}
+
+/// The file name of `path` without its last extension. A leading dot is part of the name.
+fn stem(path: &str) -> &str {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    match name.rfind('.') {
+        Some(dot) if dot > 0 => &name[..dot],
+        _ => name,
+    }
+}
+
 /// The first row of [`RULES`] with a word among `words`, and that word. `words` is in order, so
-/// the outermost matching word is the one named.
+/// the first matching word in the text is the one named.
 fn by_token(words: &[String]) -> Option<(Kind, String)> {
     for (kind, keywords) in RULES {
         if let Some(word) = words.iter().find(|word| keywords.contains(&word.as_str())) {
@@ -410,7 +685,7 @@ mod tests {
     use super::*;
 
     fn kind_of(name: &str, dir: &str, paths: &[&str]) -> Kind {
-        classify(name, dir, paths).kind
+        classify(name, dir, paths, &[]).kind
     }
 
     const SRC: [&str; 1] = ["src/x.ts"];
@@ -498,7 +773,7 @@ mod tests {
 
     #[test]
     fn a_name_that_matches_nothing_is_an_assembler() {
-        let decision = classify("errors", "src", &SRC);
+        let decision = classify("errors", "src", &SRC, &[]);
         assert_eq!(decision.kind, Kind::Assembler);
         assert!(!decision.guessed);
         assert_eq!(decision.reason, "no rule matched; default");
@@ -506,7 +781,7 @@ mod tests {
 
     #[test]
     fn a_service_word_names_the_assembler_as_a_service() {
-        let decision = classify("billing-service", "src", &SRC);
+        let decision = classify("billing-service", "src", &SRC, &[]);
         assert_eq!(decision.kind, Kind::Assembler);
         assert!(!decision.guessed);
         assert_eq!(decision.reason, "name word \"service\"");
@@ -514,25 +789,119 @@ mod tests {
 
     #[test]
     fn token_matches_are_guesses_with_their_rule_named() {
-        let decision = classify("auth", "src", &SRC);
+        let decision = classify("auth", "src", &SRC, &[]);
         assert_eq!(decision.kind, Kind::Gate);
         assert!(decision.guessed);
         assert_eq!(decision.reason, "name word \"auth\"");
-        let by_dir = classify("errors", "routes", &["routes/x.ts"]);
+        let by_dir = classify("errors", "routes", &["routes/x.ts"], &[]);
         assert_eq!(by_dir.kind, Kind::Switchboard);
         assert!(by_dir.guessed);
         assert_eq!(by_dir.reason, "directory word \"routes\"");
     }
 
     #[test]
-    fn the_path_pass_names_the_outermost_matching_word() {
-        let decision = classify("errors", "app/routes/api", &["app/routes/api/x.ts"]);
+    fn the_path_pass_names_the_innermost_matching_word() {
+        let decision = classify("errors", "app/routes/api", &["app/routes/api/x.ts"], &[]);
         assert_eq!(
             decision.kind,
-            Kind::Intake,
-            "app is row 4, above the routes row"
+            Kind::Switchboard,
+            "api is the innermost folder, so it beats app"
         );
-        assert_eq!(decision.reason, "directory word \"app\"");
+        assert_eq!(decision.reason, "directory word \"api\"");
+    }
+
+    #[test]
+    fn the_innermost_segment_of_a_name_wins() {
+        let cases: [(&str, Kind); 4] = [
+            ("crates/acan-server/src/settings", Kind::Switchbox),
+            ("crates/acan-server/src", Kind::Intake),
+            ("crates/acan-llm/examples", Kind::Console),
+            ("crates/acan-witness/src/harness", Kind::Console),
+        ];
+        for (name, kind) in cases {
+            assert_eq!(kind_of(name, name, &SRC), kind, "{name}");
+        }
+        assert_eq!(
+            classify("crates\\acan-server\\src\\settings", "src", &SRC, &[]).reason,
+            "name word \"settings\""
+        );
+    }
+
+    #[test]
+    fn most_file_names_decide_when_no_folder_matches() {
+        let majority = [
+            "src/a/routes.ts",
+            "src/b/routes.ts",
+            "src/c/routes.ts",
+            "src/a/x.ts",
+            "src/b/y.ts",
+        ];
+        let decision = classify("feature", "src", &majority, &[]);
+        assert_eq!(decision.kind, Kind::Switchboard);
+        assert!(decision.guessed);
+        assert_eq!(
+            decision.reason,
+            "most file names: \"routes\" (3 of 5 files)"
+        );
+        let minority = [
+            "src/a/routes.ts",
+            "src/b/routes.ts",
+            "src/a/x.ts",
+            "src/b/y.ts",
+            "src/c/z.ts",
+        ];
+        assert_eq!(kind_of("feature", "src", &minority), Kind::Assembler);
+    }
+
+    #[test]
+    fn the_name_beats_the_file_names() {
+        let files = ["src/routes.ts", "src/api.ts"];
+        assert_eq!(kind_of("store", "src", &files), Kind::Tank);
+    }
+
+    #[test]
+    fn the_import_rows_follow_the_token_rows() {
+        for ((token_kind, _), (import_kind, _)) in RULES.iter().zip(IMPORT_RULES.iter()) {
+            assert_eq!(token_kind, import_kind);
+        }
+    }
+
+    #[test]
+    fn a_shared_package_decides_when_no_word_matches() {
+        let decision = classify("panel", "src", &SRC, &["react"]);
+        assert_eq!(decision.kind, Kind::Kiosk);
+        assert!(decision.guessed);
+        assert_eq!(decision.reason, "imports \"react\"");
+        let unknown = classify("panel", "src", &SRC, &[]);
+        assert_eq!(unknown.kind, Kind::Assembler);
+        assert_eq!(unknown.reason, "no rule matched; default");
+        assert_eq!(classify("panel", "src", &SRC, &["left-pad"]), unknown);
+        // Gate is above Kiosk in the table, so jsonwebtoken wins over react.
+        assert_eq!(
+            classify("panel", "src", &SRC, &["react", "jsonwebtoken"]).kind,
+            Kind::Gate
+        );
+        // A word in the name comes before the imports.
+        assert_eq!(classify("store", "src", &SRC, &["react"]).kind, Kind::Tank);
+    }
+
+    #[test]
+    fn each_added_word_group_picks_its_kind() {
+        let cases: [(&str, Kind); 10] = [
+            ("credentials", Kind::Gate),
+            ("budget", Kind::Valve),
+            ("mcp", Kind::Switchboard),
+            ("www", Kind::Kiosk),
+            ("ledger", Kind::Tank),
+            ("agents", Kind::Conveyor),
+            ("stream", Kind::Horn),
+            ("sandbox", Kind::Gantry),
+            ("examples", Kind::Console),
+            ("llm", Kind::Antenna),
+        ];
+        for (name, kind) in cases {
+            assert_eq!(kind_of(name, "src", &SRC), kind, "{name}");
+        }
     }
 
     #[test]
@@ -543,7 +912,7 @@ mod tests {
             "src/panel/c.jsx",
             "src/panel/d.ts",
         ];
-        let decision = classify("panel", "src/panel", &files);
+        let decision = classify("panel", "src/panel", &files, &[]);
         assert_eq!(decision.kind, Kind::Kiosk);
         assert!(decision.guessed);
         assert_eq!(decision.reason, "most files are tsx or jsx");
@@ -564,14 +933,19 @@ mod tests {
 
     #[test]
     fn test_only_empty_and_generated_machines_are_crates() {
-        let test_only = classify("test", "test", &["test/a.ts", "test/b.ts"]);
+        let test_only = classify("test", "test", &["test/a.ts", "test/b.ts"], &[]);
         assert_eq!(test_only.kind, Kind::Crate);
         assert_eq!(test_only.reason, "only tests");
         assert_eq!(kind_of("auth", "src", &["src/auth.test.ts"]), Kind::Crate);
-        let empty = classify("store", "src", &[]);
+        let empty = classify("store", "src", &[], &[]);
         assert_eq!(empty.kind, Kind::Crate);
         assert_eq!(empty.reason, "no files");
-        let generated = classify("api", "src/gen", &["src/gen/api.ts", "src/gen/types.ts"]);
+        let generated = classify(
+            "api",
+            "src/gen",
+            &["src/gen/api.ts", "src/gen/types.ts"],
+            &[],
+        );
         assert_eq!(generated.kind, Kind::Crate);
         assert_eq!(generated.reason, "generated code");
         assert!(!generated.guessed);

@@ -124,7 +124,11 @@ fn overrides_survive_a_regroup_and_follow_the_name() {
         .insert("src/store.ts".to_owned(), "shop".to_owned());
     plant.regroup(&renamed);
     let shop = machine(&plant, "shop");
-    assert_eq!(shop.kind, Kind::Assembler);
+    assert_eq!(shop.kind, Kind::Tank);
+    assert_eq!(
+        shop.kind_reason,
+        "most file names: \"store\" (1 of 1 files)"
+    );
     assert!(!shop.kind_set_by_user);
 }
 
