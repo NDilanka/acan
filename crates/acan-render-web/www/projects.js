@@ -1,7 +1,8 @@
 // The canvas of several projects: one origin that serves N projects, each with its own routes,
 // log, seq and plant. This module holds what the page decides about them. It has no imports and
 // touches no DOM, so Node can test it. A page whose origin lists one project, or answers
-// GET /api/projects with 404, never turns it on, and every path stays as it was.
+// GET /api/projects with 404, does not turn it on at load, and every path stays as it was. A
+// codebase added on that page turns it on then.
 
 // The gap between two packed plants, in plan units: about three machine columns.
 export const PACK_GAP = 240;
@@ -32,8 +33,15 @@ export function apiPath(project, path) {
 // The projects from GET /api/projects, or null when the page keeps one plant: any answer but a
 // list of two or more. Only the fields the page shows are kept.
 export function projectList(status, body) {
+  const list = projectEntries(status, body);
+  return list !== null && list.length > 1 ? list : null;
+}
+
+// The projects from GET /api/projects as `projectList` keeps them, however many there are, or null
+// for an answer that is not a list.
+export function projectEntries(status, body) {
   if (status !== 200 || !Array.isArray(body)) return null;
-  const list = body
+  return body
     .filter((entry) => entry !== null && typeof entry === "object" && typeof entry.id === "string" && entry.id !== "")
     .map((entry) => ({
       id: entry.id,
@@ -42,7 +50,13 @@ export function projectList(status, body) {
       status: entry.status === "degraded" ? "degraded" : "ready",
       head: Number.isInteger(entry.head?.seq) ? entry.head.seq : null,
     }));
-  return list.length > 1 ? list : null;
+}
+
+// Whether a codebase added on this page turns it into a canvas: a one-plant page that reads the
+// live origin with the owner's token. A replay or a `?plant=` page has no origin to read the
+// list from, and an empty page or a canvas takes the codebase another way.
+export function upgradesOnAdd({ multi, empty, replay, plant, token }) {
+  return !multi && !empty && !replay && (plant === null || plant === undefined) && Boolean(token);
 }
 
 // The place of each project's layout origin, by id: left to right in list order, one `gap` apart,

@@ -15,20 +15,33 @@ import {
   pack,
   placeAfter,
   placesFrom,
+  projectEntries,
   projectList,
   readFrame,
   resumeStep,
   stepCursor,
   subscription,
   swapState,
+  upgradesOnAdd,
   worldBounds,
 } from "./projects.js";
 import { addPlate, installPlates, paintPlates } from "./nameplates.js";
 import { nearestGap, parkedClick, pinNear } from "./overlays.js";
 import { installParked } from "./parked.js";
-import { applyPlantScan, applyStreamed, feed, foldScanFrame, forgetToken, get, hold, setLink } from "./stream.js";
+import {
+  applyPlantScan,
+  applyStreamed,
+  feed,
+  foldScanFrame,
+  forgetToken,
+  get,
+  hold,
+  leaveOnePlant,
+  resumeOnePlant,
+  setLink,
+} from "./stream.js";
 import { scanFrameOf } from "./scanview.js";
-import { canvas, freeze, repoEl, state } from "./state.js";
+import { canvas, freeze, params, replay, repoEl, state } from "./state.js";
 
 const RECONNECT_MS = 1000;
 
@@ -85,6 +98,17 @@ export async function listProjects(token) {
   }
 }
 
+// GET /api/projects with the token, however many projects it lists, or null for a failed read.
+async function readProjects(token) {
+  try {
+    const res = await fetch("/api/projects", { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) return null;
+    return projectEntries(res.status, await res.json());
+  } catch {
+    return null;
+  }
+}
+
 // What the watch panels read of the other projects. See `installInbox`.
 export function installMulti(kit) {
   multi.kit = kit;
@@ -102,10 +126,14 @@ export function installMulti(kit) {
 
 // Puts a codebase added while the page is open on the canvas, to the right of the others, and flies
 // the camera to it. Its plant and log are read first, so a failed read leaves the canvas as it was.
-// The stream is opened again, so it carries the new codebase's events and its scan. Resolves to
-// false when this page keeps one plant, which cannot show it beside another without a reload.
+// The stream is opened again, so it carries the new codebase's events and its scan. A one-plant page
+// turns into a canvas first. Resolves to false when this page cannot show it without a reload.
 export async function attachProject(project) {
-  if (!canvasState.multi) return state.empty ? attachFirst(project) : false;
+  if (!canvasState.multi) {
+    if (state.empty) return attachFirst(project);
+    const page = { multi: canvasState.multi, empty: state.empty, replay, plant: params.get("plant"), token: state.token };
+    return upgradesOnAdd(page) ? upgradeToCanvas(project) : false;
+  }
   const [text, log] = await Promise.all([
     get(apiPath(project.id, "/api/plant")),
     get(apiPath(project.id, "/api/events?from=0")),
@@ -156,6 +184,38 @@ async function attachFirst(project) {
   // The sign-in panels and the workers read the first project, which they could not before.
   window.dispatchEvent(new Event("acan:attached"));
   flyProject(project.id);
+  requestRender();
+  return true;
+}
+
+// A codebase added to a one-plant page. The page reads the list again, which now holds the new
+// codebase, closes its one-plant stream and starts as a canvas of several, then flies to the new
+// plant. Resolves to false, and keeps the one-plant page, when the list or every plant fails to read.
+async function upgradeToCanvas(project) {
+  const listed = await readProjects(state.token);
+  if (listed === null) return false;
+  const fresh = { id: project.id, name: project.name, default: false, status: "mapping", head: null };
+  const list = listed.some((known) => known.id === project.id)
+    ? listed.map((known) => (known.id === project.id ? { ...known, status: "mapping" } : known))
+    : [...listed, fresh];
+  if (hold.on) multi.kit?.goLive?.();
+  leaveOnePlant();
+  let texts;
+  try {
+    texts = await startMulti(list);
+  } catch (err) {
+    console.error(`the page could not turn into a canvas for ${project.id}`, err);
+    canvasState.multi = false;
+    canvasState.list = [];
+    canvasState.active = null;
+    resumeOnePlant();
+    return false;
+  }
+  // The sign-in panels and the workers read the project routes now, which they did not before.
+  window.dispatchEvent(new Event("acan:attached"));
+  flyProject(project.id);
+  const text = texts.get(project.id);
+  if (text !== undefined) applyPlantScan(text);
   requestRender();
   return true;
 }
@@ -226,6 +286,8 @@ export function zoomAround(x, y, factor) {
   return state.app.zoom_at(x, y, hi);
 }
 
+// Starts the canvas of `list`. Resolves to each loaded plant's text, by id. Once it resolves, the
+// listeners and the list's refresh it set up stay, so a page starts its canvas once.
 export async function startMulti(list) {
   canvasState.multi = true;
   canvasState.list = list;
@@ -284,6 +346,7 @@ export async function startMulti(list) {
   } else {
     connectAll();
   }
+  return texts;
 }
 
 // Puts project `id`'s plant `text` on the canvas in the place it has, keeping its log. A kind the

@@ -158,7 +158,7 @@ test("an origin with no codebase opens no stream and calls no project route", ()
 
 test("the first codebase added to an empty origin turns the page on as a canvas of one", () => {
   const multi = readFileSync(new URL("../../www/multi.js", import.meta.url), "utf8");
-  assert.match(multi, /if \(!canvasState\.multi\) return state\.empty \? attachFirst\(project\) : false;/);
+  assert.match(multi, /if \(!canvasState\.multi\) \{\s*if \(state\.empty\) return attachFirst\(project\);/);
   assert.match(multi, /await startMulti\(\[\{ id: project\.id, name: project\.name, default: false, status: "mapping", head: null \}\]\);/);
   assert.match(multi, /state\.empty = false;\s*noteAttached\(\);/);
 });

@@ -425,7 +425,7 @@ impl App {
         let (kinds, edges) = plant.layout_input();
         let laid = layout(&kinds, &edges);
         let count = plant.machines.len() as u32;
-        self.show(plant, laid, [x, y]);
+        self.show(plant, laid, [x, y], true);
         Ok(count)
     }
 
@@ -1846,18 +1846,25 @@ impl App {
         let (kinds, edges) = plant.layout_input();
         let laid = layout(&kinds, &edges);
         let count = plant.machines.len() as u32;
-        self.show(plant, laid, [0.0; 2]);
+        self.show(plant, laid, [0.0; 2], true);
         count
     }
 
-    /// Puts `plant` on screen with its layout from the origin moved to `offset`, and fits it.
-    fn show(&mut self, plant: Plant, at_origin: Layout, offset: [f32; 2]) {
+    /// Puts `plant` on screen with its layout from the origin moved to `offset`, and fits it when
+    /// `fit`. The log is kept either way, and the view folds from it again on the next frame. A
+    /// plant that replaces the one on screen in place keeps the camera and the drones' eases, cut,
+    /// so the drones land where the new plant puts them instead of dropping in again.
+    fn show(&mut self, plant: Plant, at_origin: Layout, offset: [f32; 2], fit: bool) {
         let (loaded, plan) = self.build(plant, at_origin, offset);
         self.scan.load(loaded.machines.len());
         self.plan = Some(plan);
         self.view = None;
         self.marks = Marks::default();
-        self.motion = self.new_motion();
+        if fit {
+            self.motion = self.new_motion();
+        } else {
+            self.motion.cut();
+        }
         self.card_clash = None;
         self.tour_move = None;
         self.top_move = None;
@@ -1866,8 +1873,10 @@ impl App {
         self.dirty = true;
         self.plant = Some(loaded);
         self.refresh_fog();
-        // A new plant keeps the view it had, top-down or not.
-        self.fit_view();
+        if fit {
+            // A new plant keeps the view it had, top-down or not.
+            self.fit_view();
+        }
         self.sync_scene();
     }
 
@@ -2336,8 +2345,9 @@ impl App {
     }
 
     /// Puts project `id`'s plant on the canvas with its layout's origin at `(x, y)`. The first
-    /// project goes on screen and is fitted; a later one is parked beside it. A project the canvas
-    /// holds already takes the new plant in place and keeps its log. Returns the machine count.
+    /// project on an empty canvas goes on screen and is fitted; a later one is parked beside it. A
+    /// project the canvas holds already takes the new plant in place and keeps its log, and the
+    /// camera stays where it is. Returns the machine count.
     ///
     /// # Errors
     ///
@@ -2346,12 +2356,15 @@ impl App {
         let plant = from_scan_json(json).map_err(js_err)?;
         let count = plant.machines.len() as u32;
         let at_origin = self.laid_out(&plant);
+        // A one-plant page that turns into a canvas has its plant on screen from `set_plant`,
+        // outside the order. The first project takes that plant's place.
+        let in_place = self.plant.is_some() && (self.project == id || self.order.is_empty());
         if !self.order.iter().any(|known| known == id) {
             self.order.push(id.to_owned());
         }
-        if self.plant.is_none() || self.project == id {
+        if self.plant.is_none() || in_place {
             self.project = id.to_owned();
-            self.show(plant, at_origin, [x, y]);
+            self.show(plant, at_origin, [x, y], !in_place);
             return Ok(count);
         }
         let (loaded, plan) = self.build(plant, at_origin, [x, y]);
