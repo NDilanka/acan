@@ -10,6 +10,9 @@ dist/
 .env.*
 !.env.example
 
+# Local Acan state (tokens and settings written by `acan serve` into the repo it serves)
+.acan/
+
 # Editors and OS
 .vscode/
 .idea/

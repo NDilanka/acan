@@ -4,11 +4,12 @@
 use std::collections::BTreeMap;
 
 use acan_core::Locus;
+use serde::Serialize;
 
 use crate::plant::{Plant, PlantMachine};
 
 /// One machine's footprint on the plan.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PlanMachine {
     /// The machine name.
     pub name: String,
@@ -209,5 +210,15 @@ mod tests {
     #[test]
     fn the_same_plant_gives_the_same_plan() {
         assert_eq!(plan(), plan());
+    }
+
+    #[test]
+    fn footprints_serialize_as_name_min_and_size_in_plan_order() {
+        let json = serde_json::to_value(&plan().machines).expect("the plan serializes");
+        assert_eq!(
+            json[1],
+            serde_json::json!({ "name": "store", "min": [200.0, 0.0], "size": [96.0, 64.0] })
+        );
+        assert_eq!(json.as_array().map(Vec::len), Some(3));
     }
 }

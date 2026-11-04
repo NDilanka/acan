@@ -23,10 +23,14 @@ html[data-theme="dark"] {
   --soft: #c8c7bf;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.25);
   --on-ink: #1c1c1b;
-  --label: #b9b8b0;
+  --label: #dcdbd4;
   --halo: #262624;
   --leader: #77776f;
 }
+
+/* The dark desk's machine names are a size larger, so they read at a glance. Other looks keep
+   the page's own size. */
+html[data-theme="dark"] #labels .label { font-size: 13px; }
 
 html[data-theme="blueprint"] {
   --page: #1f3a5c;

@@ -16,11 +16,12 @@ import {
 } from "./cards.js";
 import { closeCommand, commandOpen, openCommand } from "./commandbar.js";
 import { clickMachine, closeCompose, composeOpen, orderHere } from "./compose.js";
+import { bindKindMenu, openKindMenuAt } from "./kindmenu.js";
 import { keyAction } from "./keys.js";
 import { closeSettings, installSettings, settingsOpen, toggleSettings } from "./settings.js";
 import { droneHover, paintMarks, pinAt, placeLabels } from "./marks.js";
 import { paintRide, paintStale, paintUsage, toggleHelp } from "./panels.js";
-import { syncSeals } from "./seal.js";
+import { syncOrigin } from "./origin.js";
 import { paintSlip } from "./slip.js";
 import {
   $,
@@ -37,7 +38,7 @@ import {
   setCanvas,
   state,
 } from "./state.js";
-import { markReplayReceipts, playOf, syncPlantViews } from "./plant.js";
+import { playOf } from "./plant.js";
 import { bindPlate, paintPlate, stepBy, toggleMode, togglePlay } from "./plate.js";
 import { startReplay } from "./replay.js";
 import { bindShell, startShell } from "./shell.js";
@@ -69,6 +70,8 @@ import { installMulti, nameOf, zoomAround } from "./multi.js";
 import { placePlates } from "./nameplates.js";
 import { placeParked } from "./parked.js";
 import { canvasState } from "./projects.js";
+import { placeStateMaps, readFootprints } from "./statemachine-paint.js";
+import { readStateMachines, setStateMachines } from "./statemachine.js";
 
 const ZOOM_KEY = 1.25;
 
@@ -151,6 +154,8 @@ function drawFrame(now = performance.now()) {
     // The parked names are placed before the plates, which move clear of them.
     placeParked();
     placePlates();
+    // A fading belt is redrawn each frame until it is gone. A replay's light waits for its entries.
+    if (placeStateMaps() && isLive()) requestRender();
     const next = nextFrame({ moving: turning, hidden: document.hidden, gapMs: state.app.frame_gap_ms() });
     if (next === "stop") {
       state.lastFrame = null;
@@ -182,14 +187,9 @@ function paint() {
   paintMarks();
   paintUsage();
   paintStale();
-  // A replay has no origin to ask, so it makes no plant-view or route call. Its receipts and
-  // scopes say what the replay lacks instead (see `markReplayReceipts` and the Seal block).
-  if (replay) {
-    markReplayReceipts(state);
-  } else {
-    syncPlantViews(state, get, paintPlate);
-    syncSeals(state, get, paintSlip);
-  }
+  // A replay has no origin to ask, so it makes no plant-view or route call. Its receipts and Seal
+  // blocks say what the replay lacks instead (see origin.js).
+  syncOrigin(state, get, { plate: paintPlate, slip: paintSlip }, replay);
   paintPlate();
   paintSlip();
   requestUsage(state, get, paintUsage);
@@ -217,16 +217,28 @@ function sizeCanvas() {
   }
 }
 
-// Tells the top-down fit where the shell bar's bottom and the right column's left edge are, so the
-// plant is framed clear of both. Read on a resize, at startup and on each turn to top-down.
+// Tells the top-down fit where the shell bar's bottom, the right column's left edge and the receipt
+// plate's right edge are, so the plant is framed clear of all three. Read on a resize, at startup,
+// on each turn to top-down, and when the receipt plate shows or hides.
 export function syncFitInset() {
   if (state.app === null) return;
   const canvasRect = canvas.getBoundingClientRect();
   const shell = document.getElementById("shell").getBoundingClientRect();
   const watch = document.getElementById("watch").getBoundingClientRect();
+  const receipt = document.getElementById("receipt");
+  const plate = receipt.hidden ? null : receipt.getBoundingClientRect();
   const top = shell.height > 0 ? shell.bottom - canvasRect.top + FIT_GAP_PX : 0;
   const right = watch.width > 0 ? canvasRect.right - watch.left + FIT_GAP_PX : 0;
-  state.app.set_fit_inset(top, right);
+  const left = plate !== null && plate.width > 0 ? Math.max(0, plate.right - canvasRect.left + FIT_GAP_PX) : 0;
+  state.app.set_fit_inset(top, right, left);
+}
+
+// Moves a top-down view clear of a panel at the edge that has just shown or hidden.
+export function refitForPanels() {
+  if (state.app === null) return;
+  syncFitInset();
+  state.app.refit_top_down(reducedNow());
+  requestRender();
 }
 
 function showNotice(text) {
@@ -280,7 +292,20 @@ function droneAt(x, y) {
 // Right drag, or Alt with left drag, orbits and tilts about the ground point under the screen
 // centre.
 function bindCanvas() {
-  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+  // A right press that does not move opens the Set kind menu on the machine under it. A right drag
+  // orbits, so it never opens the menu.
+  let rightPress = null;
+  canvas.addEventListener("pointerdown", (event) => {
+    rightPress = event.button === 2 ? { x: event.clientX, y: event.clientY } : null;
+  });
+  canvas.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    const press = rightPress;
+    rightPress = null;
+    if (press === null || Math.hypot(event.clientX - press.x, event.clientY - press.y) >= CLICK_PX) return;
+    openKindMenuAt(event.clientX, event.clientY);
+  });
+  bindKindMenu();
 
   canvas.addEventListener("pointerdown", (event) => {
     if (state.app === null || (event.button !== 0 && event.button !== 2)) return;
@@ -587,8 +612,10 @@ async function loadPlant() {
   // The token is adopted in every other mode, so the shell's calls can use it, even over a fixture.
   state.token = replay ? null : adoptToken();
   const source = params.get("plant");
+  // `?statemap=fixture` puts the fixture's state machines on the map in place of the plant's own.
+  const fixtureMachines = params.get("statemap") === "fixture" ? await readFixtureMachines() : null;
   if (replay) {
-    await startReplay();
+    await startReplay(fixtureMachines);
   } else if (source === "stress") {
     const machines = Number(params.get("machines") || 2000);
     const started = performance.now();
@@ -598,6 +625,7 @@ async function loadPlant() {
     const response = await fetch("fixtures/demo-plant.json");
     if (!response.ok) throw new Error(`fixture HTTP ${response.status}`);
     state.app.set_plant(await response.text());
+    readFootprints();
   } else {
     if (!state.token) {
       gate.hidden = false;
@@ -611,6 +639,7 @@ async function loadPlant() {
       setLink("failed");
     }
   }
+  if (fixtureMachines !== null) setStateMachines(fixtureMachines);
   repoEl.textContent = canvasState.multi ? nameOf(canvasState.active) : state.app.repo_name();
 }
 
@@ -623,6 +652,14 @@ const PLATE_FIXTURES = {
   fixture: "fixtures/plant-view-v1.json",
   plain: "fixtures/plant-view-v1-plain.json",
 };
+
+// The fixture's state machines, as a plant payload would carry them. Nothing on the page marks them
+// as a fixture.
+async function readFixtureMachines() {
+  const response = await fetch("fixtures/state-machines-v1.json");
+  if (!response.ok) throw new Error(`fixture HTTP ${response.status}`);
+  return readStateMachines(await response.text());
+}
 
 // Shows the receipt plate over a fixture plant view, marked FIXTURE, as if the origin had served it.
 async function loadPlateFixture(name) {

@@ -213,6 +213,14 @@ export async function startMulti(list) {
   }
 }
 
+// Puts project `id`'s plant `text` on the canvas in the place it has, keeping its log. A kind the
+// user set changes the drawing this way.
+export function replaceProjectPlant(id, text) {
+  multi.origin.set(id, Array.from(state.app.plant_bounds(text)));
+  const [x, y] = multi.places.get(id) ?? [0, 0];
+  state.app.add_project(id, text, x, y);
+}
+
 // Folds a project's whole log: the one on screen through the app's own load, which the feed
 // follows, and any other one beside it.
 function foldLog(id, text) {
