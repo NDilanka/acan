@@ -25,7 +25,9 @@ use sha2::{Digest, Sha256};
 
 use crate::release::Redaction;
 
-/// How many model calls a refinement may make when the settings do not say otherwise.
+/// How many model calls a refinement may make when the settings do not say otherwise. The settings
+/// own the real default; tests use this one.
+#[cfg(test)]
 pub(crate) const DEFAULT_CALL_LIMIT: u32 = 30;
 
 /// The most characters of input one job sends. The definition is always kept. Ranges and known
@@ -91,10 +93,7 @@ impl SettingsSource {
     pub(crate) fn current(&self) -> RefineSettings {
         RefineSettings {
             enabled: crate::settings::statemap_llm_enabled(&self.file, &self.project),
-            call_limit: crate::settings::file::load(&self.file)
-                .map_or(DEFAULT_CALL_LIMIT, |stored| {
-                    stored.budgets.call_limits.statemap
-                }),
+            call_limit: crate::settings::statemap_call_limit(&self.file),
         }
     }
 }
@@ -1543,6 +1542,87 @@ pub fn pay(order: &mut Order) {
         assert_eq!(plant.state_machines.len(), 1);
         assert_eq!(plant.state_machines[0].name, "AlphaStatus");
         assert_eq!(plant.state_candidates.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_changed_call_limit_applies_on_the_next_scan_without_a_restart() {
+        let (dir, mut first) = scanned(&[
+            (
+                "src/alpha.rs",
+                status_source("AlphaStatus", "Open", "Closed").as_str(),
+            ),
+            (
+                "src/beta.rs",
+                status_source("BetaStatus", "Open", "Closed").as_str(),
+            ),
+            (
+                "src/gamma.rs",
+                status_source("GammaStatus", "Open", "Closed").as_str(),
+            ),
+        ]);
+        let stub = routed()
+            .when(
+                Role::Statemap,
+                for_type("AlphaStatus"),
+                answer(json!({"transitions": [
+                    {"from": "Open", "to": "Closed", "file": "src/alpha.rs", "line": 6, "end_line": 6, "label": "Moves on."}
+                ]})),
+            )
+            .when(
+                Role::Statemap,
+                for_type("BetaStatus"),
+                answer(json!({"transitions": [
+                    {"from": "Open", "to": "Closed", "file": "src/beta.rs", "line": 6, "end_line": 6, "label": "Moves on."}
+                ]})),
+            )
+            .when(
+                Role::Statemap,
+                for_type("GammaStatus"),
+                answer(json!({"transitions": [
+                    {"from": "Open", "to": "Closed", "file": "src/gamma.rs", "line": 6, "end_line": 6, "label": "Moves on."}
+                ]})),
+            );
+        let settings_dir = tempfile::tempdir().expect("a temporary directory");
+        let settings_path = settings_dir.path().join(crate::settings::FILE);
+        let mut stored = crate::settings::Stored::default();
+        stored
+            .projects
+            .statemap_llm
+            .insert("acan-wip".to_owned(), true);
+        stored.budgets.call_limits.statemap = 1;
+        crate::settings::file::save(&settings_path, &stored).expect("the settings are saved");
+        // One source serves both runs, as the server keeps it for its whole life.
+        let source = SettingsSource::new(settings_path.clone(), "acan-wip".to_owned());
+
+        let report = refine(&stub, &mut first, source.current()).await;
+
+        assert_eq!(
+            report,
+            RefineReport {
+                calls: 1,
+                skipped: 2,
+                ..RefineReport::default()
+            },
+            "a limit of one call stops after the first machine"
+        );
+
+        stored.budgets.call_limits.statemap = 3;
+        crate::settings::file::save(&settings_path, &stored).expect("the settings are saved");
+
+        let mut second = acan_scan::scan(dir.path()).expect("scan again");
+        let again = refine(&stub, &mut second, source.current()).await;
+
+        assert_eq!(
+            again,
+            RefineReport {
+                calls: 2,
+                cached: 1,
+                ..RefineReport::default()
+            },
+            "the raised limit reaches the two machines the first run skipped"
+        );
+        assert_eq!(second.state_machines.len(), 3);
+        assert!(second.state_candidates.is_empty());
     }
 
     #[tokio::test]

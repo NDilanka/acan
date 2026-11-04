@@ -79,18 +79,7 @@ impl ProjectSet {
         let mut taken = BTreeSet::new();
         let projects: Vec<ProjectSpec> = repos
             .iter()
-            .map(|repo| {
-                let name = folder_name(repo);
-                let id = unique(slug(&name), &mut taken);
-                ProjectSpec {
-                    id,
-                    name,
-                    repo: repo.clone(),
-                    protected_branch: None,
-                    llm: None,
-                    witness_http_base_url: None,
-                }
-            })
+            .map(|repo| spec_for(repo, &mut taken))
             .collect();
         let default = projects
             .first()
@@ -213,6 +202,64 @@ impl ProjectSet {
         }
         Ok(())
     }
+
+    /// Applies the folders a settings change added and removed to the set. Removals come first, so
+    /// a folder that is removed and added again is served again. A folder the set already serves
+    /// is not added twice. A folder that cannot be served beside the others is left out, and the
+    /// result names it with the reason. When the default project is removed, the first project
+    /// that remains becomes the default.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the set that results does not validate.
+    pub fn apply_changes(
+        &mut self,
+        add: &[PathBuf],
+        remove: &[PathBuf],
+    ) -> anyhow::Result<Vec<(PathBuf, String)>> {
+        self.projects.retain(|project| {
+            !remove
+                .iter()
+                .any(|folder| same_folder(&project.repo, folder))
+        });
+        if !self
+            .projects
+            .iter()
+            .any(|project| project.id == self.default)
+        {
+            self.default = self
+                .projects
+                .first()
+                .map(|project| project.id.clone())
+                .unwrap_or_default();
+        }
+        let mut taken: BTreeSet<String> = self
+            .projects
+            .iter()
+            .map(|project| project.id.clone())
+            .collect();
+        let mut skipped = Vec::new();
+        for repo in add {
+            if self
+                .projects
+                .iter()
+                .any(|project| same_folder(&project.repo, repo))
+            {
+                continue;
+            }
+            let mut trial = taken.clone();
+            self.projects.push(spec_for(repo, &mut trial));
+            match self.validate() {
+                Ok(()) => taken = trial,
+                Err(err) => {
+                    self.projects.pop();
+                    skipped.push((repo.clone(), format!("{err:#}")));
+                }
+            }
+        }
+        self.validate()?;
+        Ok(skipped)
+    }
 }
 
 /// Whether `id` may be a project id: 1 to [`MAX_ID_LEN`] lowercase letters, digits or dashes,
@@ -260,6 +307,26 @@ fn unique(base: String, taken: &mut BTreeSet<String>) -> String {
         n += 1;
     }
     id
+}
+
+/// The spec of a project that serves `repo`, with an id from its folder name that `taken` does not
+/// hold. The id is recorded in `taken`.
+fn spec_for(repo: &Path, taken: &mut BTreeSet<String>) -> ProjectSpec {
+    let name = folder_name(repo);
+    let id = unique(slug(&name), taken);
+    ProjectSpec {
+        id,
+        name,
+        repo: repo.to_path_buf(),
+        protected_branch: None,
+        llm: None,
+        witness_http_base_url: None,
+    }
+}
+
+/// Whether `a` and `b` name the same existing folder. A folder that does not exist names none.
+pub(crate) fn same_folder(a: &Path, b: &Path) -> bool {
+    matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
 /// The last folder of `repo`, made absolute first so `.` names its folder.
@@ -403,5 +470,50 @@ mod tests {
     fn validation_refuses_an_empty_set() {
         let set = ProjectSet::from_repos(&[]);
         assert!(set.validate().is_err());
+    }
+
+    #[test]
+    fn a_settings_change_removes_then_adds_and_names_what_it_skips() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let a = repo(root.path(), "a");
+        let b = repo(root.path(), "b");
+        let c = repo(root.path(), "c");
+        let mut set = ProjectSet::from_repos(&[a.clone(), b.clone()]);
+
+        // The default goes, so the first project left becomes the default. Adding a folder the set
+        // already serves adds nothing.
+        let skipped = set
+            .apply_changes(std::slice::from_ref(&b), std::slice::from_ref(&a))
+            .expect("the change applies");
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let ids: Vec<&str> = set.projects.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["b"]);
+        assert_eq!(set.default, "b");
+
+        // A folder removed and added again in one change is served again.
+        let skipped = set
+            .apply_changes(std::slice::from_ref(&a), std::slice::from_ref(&a))
+            .expect("the change applies");
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let ids: Vec<&str> = set.projects.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["b", "a"]);
+
+        // A folder inside another project's state directory cannot be served. It is named and left
+        // out, and the others stay.
+        let inside = b.join(".acan").join("inner");
+        fs::create_dir_all(&inside).expect("the nested folder");
+        let skipped = set
+            .apply_changes(std::slice::from_ref(&inside), &[])
+            .expect("the change applies");
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert_eq!(skipped[0].0, inside);
+        assert!(skipped[0].1.contains("state directory"), "{skipped:?}");
+        assert_eq!(set.projects.len(), 2);
+
+        let skipped = set
+            .apply_changes(std::slice::from_ref(&c), &[])
+            .expect("the change applies");
+        assert!(skipped.is_empty());
+        assert_eq!(set.projects.len(), 3);
     }
 }

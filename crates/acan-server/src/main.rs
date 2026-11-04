@@ -11,8 +11,9 @@ use acan_server::receipt_cli::{self, Format, ShadowArgs};
 use acan_server::release::{self, Redaction};
 use acan_server::replay;
 use acan_server::{
-    DEFAULT_WITNESS_CONCURRENCY, Models, ServeConfig, VisionConfig, default_browser,
-    default_data_dir, settings_file_beside, start_projects_with_settings, tokens_file,
+    DEFAULT_WITNESS_CONCURRENCY, Models, ServeConfig, VisionConfig, apply_project_changes,
+    default_browser, default_data_dir, default_settings_file, settings_file_beside,
+    start_projects_with_settings, tokens_file,
 };
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -233,6 +234,15 @@ async fn serve(args: ServeArgs) -> Result<()> {
         );
     }
     projects.validate()?;
+    // The settings sit beside the model keys, so every project this user runs shares them. The
+    // folders settings added and removed are applied before the clients are built.
+    let settings = KeyFile::for_user().map_or_else(
+        || default_settings_file(&projects),
+        |keys| settings_file_beside(&keys),
+    );
+    for line in apply_project_changes(&mut projects, &settings)? {
+        println!("acan did not add a project: {line}");
+    }
 
     // The keys of every project's `.env` are loaded before the bug report's redaction is built.
     for project in &projects.projects {
@@ -281,9 +291,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .map(|project| tokens_file(&project.repo))
         .unwrap_or_else(|| tokens_file(Path::new(".")));
     let tokens = std::path::absolute(&tokens).unwrap_or(tokens);
-    // The settings sit beside the model keys, so every project this user runs shares them.
-    let settings = KeyFile::for_user().map(|keys| settings_file_beside(&keys));
-    let mut running = start_projects_with_settings(config, clients, settings).await?;
+    let mut running = start_projects_with_settings(config, clients, Some(settings)).await?;
     let terminal = io::stdout().is_terminal();
     if let Some(token) = &running.owner_token {
         for line in owner_token_lines(running.local_addr, token.as_str(), &tokens, terminal) {

@@ -13,7 +13,7 @@ use std::io;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use acan_core::{MemberId, TaskId};
+use acan_core::{Event, MemberId, Seq, TaskId};
 use acan_intent::{GetReceiptRequest, McpErrorCode, McpV1};
 use acan_llm::ModelClient;
 use anyhow::{Context, anyhow, bail, ensure};
@@ -33,7 +33,7 @@ use crate::intent_api::{self, IntentError};
 use crate::jobs::DEPS_DIR;
 use crate::release::{self, Redaction};
 use crate::replay;
-use crate::{DB_FILE, STATE_DIR};
+use crate::{DB_FILE, EventStore, STATE_DIR};
 
 /// Why anyone but the owner may not export the data.
 const ONLY_OWNER_EXPORTS: &str = "only the owner may export data";
@@ -152,7 +152,7 @@ pub(crate) async fn get_export<C: ModelClient + 'static>(
 ) -> Result<Response, ApiError> {
     require_owner(&host, &headers, &owner.founder, ONLY_OWNER_EXPORTS)?;
     let what = What::parse(query.what.as_deref()).ok_or(ApiError::BadRequest(WHAT_NAMES))?;
-    if what.replay() && !recorded(host.repo()) {
+    if what.replay() && !recorded(host.repo()).await.map_err(ApiError::Internal)? {
         return Err(ApiError::Conflict("no_recorded_run"));
     }
     let (redaction, secrets) = redaction_of(host.repo())?;
@@ -235,9 +235,28 @@ fn env_secrets(repo: &Path) -> anyhow::Result<Vec<String>> {
     Ok(secrets)
 }
 
-/// Whether the repository has a recorded run: its event database file.
-fn recorded(repo: &Path) -> bool {
-    repo.join(STATE_DIR).join(DB_FILE).is_file()
+/// Whether the repository has a recorded run: an event that is not part of starting a world. A new
+/// world's log holds its opening, the rescan the start makes, and the members and agents the start
+/// registers, so a fresh repository has no run yet. A missing database file has none either.
+async fn recorded(repo: &Path) -> anyhow::Result<bool> {
+    let db = repo.join(STATE_DIR).join(DB_FILE);
+    if !db.is_file() {
+        return Ok(false);
+    }
+    let store = EventStore::open(&db).await?;
+    let log = store.load_from(Seq::new(0)).await?;
+    Ok(log.iter().any(|stamped| !is_start_event(&stamped.event)))
+}
+
+/// Whether `event` is one a start writes, rather than work done in the world.
+fn is_start_event(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::WorldOpened { .. }
+            | Event::IndexUpdated { .. }
+            | Event::MemberAdded { .. }
+            | Event::AgentRegistered { .. }
+    )
 }
 
 /// Refuses anyone but the owner with `why`. An unknown token is refused as unauthorized, since
