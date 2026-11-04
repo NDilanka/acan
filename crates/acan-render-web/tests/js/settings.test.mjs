@@ -15,6 +15,7 @@ import {
   changedPaths,
   clearNote,
   conflictNote,
+  effectText,
   hasTokens,
   exportNote,
   fieldErrors,
@@ -24,8 +25,10 @@ import {
   keyRows,
   parseField,
   patchFor,
+  pendingProjectLines,
   providerLabel,
   roleRows,
+  sectionEffect,
   sectionsFor,
   setAt,
   statemapHint,
@@ -568,7 +571,7 @@ test("a key is stored without being returned, and the answer says it was stored"
   });
   assert.equal(put.status, 200);
   assert.deepEqual(put.body.keys, { baseten: "stored" });
-  assert.deepEqual(put.body.applied, { "models.keys.baseten.key": "live" });
+  assert.deepEqual(put.body.applied, { "models.keys.baseten": "live" });
   assert.deepEqual(
     put.body.settings.models.keys.find((key) => key.provider === "baseten"),
     { provider: "baseten", set: true, source: "saved" },
@@ -657,7 +660,39 @@ test("projects are added and removed, and the answer says they apply on restart"
   });
   assert.equal(put.status, 200);
   assert.deepEqual(put.body.applied, { "projects.add": "restart", "projects.remove": "restart" });
-  assert.deepEqual(put.body.settings.projects.map((project) => project.id), ["acan", "new-thing"]);
+  // The running projects do not change until the next start; the owner sees the pending changes.
+  assert.deepEqual(put.body.settings.projects.map((project) => project.id), ["acan", "acan-web"]);
+  assert.deepEqual(put.body.settings.project_changes, { add: ["repos/new-thing/"], remove: ["acan-web"] });
+});
+
+test("the owner sees pending project changes, and a member sees none", async () => {
+  const owner = createMockApi(fixture);
+  await owner.request("PUT", "/api/settings", { projects: { add: ["repos/new-thing/"] } });
+  const read = await owner.request("GET", "/api/settings");
+  assert.deepEqual(read.body.project_changes, { add: ["repos/new-thing/"], remove: [] });
+  const member = createMockApi({ ...fixture, you: "member" });
+  const seen = await member.request("GET", "/api/settings");
+  assert.equal("project_changes" in seen.body, false);
+});
+
+test("removing an unknown project, or the default one, is a 422 on projects.remove", async () => {
+  const api = createMockApi(fixture);
+  const unknown = await api.request("PUT", "/api/settings", { projects: { remove: ["nope"] } });
+  assert.equal(unknown.status, 422);
+  assert.deepEqual(unknown.body.fields, [{ path: "projects.remove", why: "must name a project the server runs" }]);
+  const dflt = await api.request("PUT", "/api/settings", { projects: { remove: ["acan"] } });
+  assert.deepEqual(dflt.body.fields, [{ path: "projects.remove", why: "the default project cannot be removed" }]);
+  const read = (await api.request("GET", "/api/settings")).body;
+  assert.deepEqual(read.project_changes, { add: [], remove: [] });
+});
+
+test("pending project changes read as lines: adds as paths, removes as ids", () => {
+  assert.deepEqual(pendingProjectLines({ add: ["repos/new-thing/"], remove: ["acan-web"] }), [
+    "+ repos/new-thing/",
+    "− acan-web",
+  ]);
+  assert.deepEqual(pendingProjectLines({ add: [], remove: [] }), []);
+  assert.deepEqual(pendingProjectLines(undefined), []);
 });
 
 test("a member sees no tokens, reads everything as not editable, and cannot write", async () => {
@@ -776,8 +811,50 @@ test("an export that downloads says so, and a 409 with no run gives the reason",
   assert.deepEqual(exportNote(200, null), { bad: false, text: "Export downloaded." });
   assert.deepEqual(exportNote(409, { error: "conflict", what: "no_recorded_run" }), {
     bad: false,
-    text: "No recorded run yet. Receipts still export.",
+    text: "No recorded run yet. Choose Receipts to export.",
   });
+});
+
+test("the effect label reads each server label, and a live or unknown one gets its own words", () => {
+  assert.equal(effectText("live"), "Live");
+  assert.equal(effectText("client"), "Live in this browser");
+  assert.equal(effectText("restart"), "After restart");
+  assert.equal(effectText("stored"), "Saved; not used yet");
+  assert.equal(effectText("mystery"), "");
+  assert.equal(effectText(undefined), "");
+});
+
+test("a section's shared label is the one most of its paths carry, and a tie goes to the first listed", () => {
+  assert.equal(sectionEffect({ "budgets.a": "stored", "budgets.b": "stored", "budgets.c": "live" }, "budgets"), "stored");
+  assert.equal(sectionEffect({ "projects.add": "restart", "projects.statemap_llm.a": "live" }, "projects"), "restart");
+  assert.equal(sectionEffect({ "look.theme": "client" }, "budgets"), undefined);
+  assert.equal(sectionEffect(undefined, "budgets"), undefined);
+});
+
+test("the fixture's applied map gives each section its shared label", async () => {
+  const { body } = await createMockApi(fixture).request("GET", "/api/settings");
+  assert.equal(sectionEffect(body.applied, "budgets"), "stored");
+  assert.equal(sectionEffect(body.applied, "projects"), "restart");
+  assert.equal(sectionEffect(body.applied, "models"), "live");
+  assert.equal(sectionEffect(body.applied, "harness"), "stored");
+  assert.equal(sectionEffect(body.applied, "look"), "client");
+});
+
+test("the fixture's applied map names every path the drawer can change, with its label", async () => {
+  const { body } = await createMockApi(fixture).request("GET", "/api/settings");
+  assert.equal(body.applied["budgets.call_limits.statemap"], "live");
+  assert.equal(body.applied["budgets.call_limits.worker"], "stored");
+  assert.equal(body.applied["look.theme"], "client");
+  assert.equal(body.applied["harness.roles.worker"], "stored");
+  assert.equal(body.applied["models.keys.baseten"], "live");
+  assert.equal(body.applied["projects.add"], "restart");
+  assert.equal(body.applied["projects.workers.acan"], "restart");
+  assert.equal(body.applied["projects.statemap_llm.acan"], "live");
+});
+
+test("an applied path with no label from the server is not shown", () => {
+  assert.equal(appliedFor({ "projects.workers.acan": "restart" }, "projects.workers.foo"), undefined);
+  assert.equal(effectText(appliedFor({ "projects.workers.acan": "restart" }, "projects.workers.foo")), "");
 });
 
 test("an export refused for an owner or a network reason says nothing was changed", () => {
@@ -849,12 +926,12 @@ test("the fixture has the statemap role, the statemap call limit and the project
   assert.ok(fixture.projects.every((project) => project.statemap_llm === false));
 });
 
-test("a statemap call limit is saved as a budget and reported stored", async () => {
+test("a statemap call limit is saved as a budget and reported live", async () => {
   const put = await createMockApi(fixture).request("PUT", "/api/settings", {
     budgets: { call_limits: { statemap: 40 } },
   });
   assert.equal(put.status, 200);
-  assert.deepEqual(put.body.applied, { "budgets.call_limits.statemap": "stored" });
+  assert.deepEqual(put.body.applied, { "budgets.call_limits.statemap": "live" });
   assert.equal(getAt(put.body.settings.budgets, "call_limits.statemap"), 40);
 });
 
@@ -876,7 +953,7 @@ test("a project's statemap flag is saved on or off, and applies live", async () 
   const api = createMockApi(fixture);
   const on = await api.request("PUT", "/api/settings", { projects: { statemap_llm: { acan: true } } });
   assert.equal(on.status, 200);
-  assert.deepEqual(on.body.applied, { "projects.statemap_llm": "live" });
+  assert.deepEqual(on.body.applied, { "projects.statemap_llm.acan": "live" });
   assert.equal(on.body.settings.projects.find((project) => project.id === "acan").statemap_llm, true);
   assert.equal(on.body.settings.projects.find((project) => project.id === "acan-web").statemap_llm, false);
 });
@@ -917,7 +994,7 @@ test("a worker count moves by one from 0 to 8, and stops at either end", () => {
 test("a worker count is saved per project, and applies at restart", async () => {
   const put = await createMockApi(fixture).request("PUT", "/api/settings", { projects: { workers: { acan: 4 } } });
   assert.equal(put.status, 200);
-  assert.deepEqual(put.body.applied, { "projects.workers": "restart" });
+  assert.deepEqual(put.body.applied, { "projects.workers.acan": "restart" });
   assert.equal(put.body.settings.projects.find((project) => project.id === "acan").workers, 4);
   assert.equal(put.body.settings.projects.find((project) => project.id === "acan-web").workers, 1);
 });

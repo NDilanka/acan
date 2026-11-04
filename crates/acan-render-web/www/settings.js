@@ -17,8 +17,12 @@ import {
   tokenFromRotate,
   testText,
   keyNotes,
+  appliedFor,
   appliedNote,
   changedPaths,
+  effectText,
+  pendingProjectLines,
+  sectionEffect,
   updateView,
   exportNote,
   clearNote,
@@ -147,9 +151,22 @@ function chip(kind, text) {
   return el("span", { class: `chip ${kind}` }, el("i", { "aria-hidden": "true" }), text ? el("span", { text }) : null);
 }
 
-function fieldNote(path) {
+// A field's line under it: a validation message in red, or else how its change takes effect. The
+// server keys effects by its own path, which is `effectPath` when it differs from the form path. A
+// label its section already shows at the top is not repeated under the field.
+function fieldNote(path, effectPath = path) {
   const why = invalid.get(path);
-  return why ? el("p", { class: "fieldnote", text: why }) : null;
+  if (why) return el("p", { class: "fieldnote", text: why });
+  const label = appliedFor(settings?.applied, effectPath);
+  if (!label || label === sectionEffect(settings?.applied, effectPath.split(".")[0])) return null;
+  const text = effectText(label);
+  return text ? el("p", { class: "effect", text }) : null;
+}
+
+// The label most of a section's fields share, shown once at the top of the section.
+function sectionEffectNode(id) {
+  const text = effectText(sectionEffect(settings?.applied, id));
+  return text ? el("p", { class: "sec-effect", text }) : null;
 }
 
 // Hint text, with the parts between backticks set as code.
@@ -587,7 +604,9 @@ function sectionNode(section) {
   );
   head.addEventListener("click", () => toggleSection(section.id));
   const parts = [el("h3", {}, head)];
-  if (isShown) parts.push(el("div", { class: "sec-body", id: `sec-${section.id}` }, bodyFor(section.id)));
+  if (isShown) {
+    parts.push(el("div", { class: "sec-body", id: `sec-${section.id}` }, sectionEffectNode(section.id), bodyFor(section.id)));
+  }
   return el("section", { class: "sec", "data-section": section.id }, parts);
 }
 
@@ -643,7 +662,12 @@ function seg(options, current, onPick, ctl) {
 }
 
 // A switch with its label on the left. `before` sits between the label and the switch.
-function toggleRow(label, checked, onToggle, { disabled = false, path = null, before = null, after = null } = {}) {
+function toggleRow(
+  label,
+  checked,
+  onToggle,
+  { disabled = false, path = null, effectPath = path, before = null, after = null } = {},
+) {
   const node = el("button", {
     type: "button",
     role: "switch",
@@ -662,7 +686,7 @@ function toggleRow(label, checked, onToggle, { disabled = false, path = null, be
     el("span", { class: "label", text: label }),
     before,
     node,
-    path ? fieldNote(path) : null,
+    path ? fieldNote(path, effectPath) : null,
     after,
   );
 }
@@ -699,7 +723,7 @@ function keyRowNodes(row) {
     ),
   ];
   if (note?.text) nodes.push(el("p", { class: `fill note${note.bad ? " bad" : ""}`, text: note.text }));
-  if (invalid.has(path)) nodes.push(fieldNote(path));
+  nodes.push(fieldNote(path));
   const out = [el("div", { class: "row", "data-path": path }, nodes)];
   if (editingKey === row.provider && !ro()) out.push(keyEditor(row.provider, path));
   return out;
@@ -819,7 +843,7 @@ function roleRowNode(role, keys) {
       ),
     );
   }
-  if (invalid.has(path)) nodes.push(fieldNote(path));
+  nodes.push(fieldNote(path));
   return el("div", { class: "row roles", "data-path": path }, nodes);
 }
 
@@ -998,13 +1022,14 @@ function projectRow(project) {
     ),
     el("span", { class: "acts" }, cf.buttons),
     cf.line,
+    removalRefusal(project.id),
     fieldNote(`projects.${project.id}`),
   );
   const statemap = toggleRow(
     "Refine state charts with an LLM (experimental, uses tokens)",
     project.statemap_llm === true,
     (value) => setStatemapLlm(project.id, value),
-    { path: `projects.${project.id}.statemap_llm` },
+    { path: `projects.${project.id}.statemap_llm`, effectPath: `projects.statemap_llm.${project.id}` },
   );
   const hint = statemapHint(settings.budgets);
   return el(
@@ -1042,7 +1067,7 @@ function workersRow(project) {
       el("span", { class: "count", "aria-live": "polite", text: String(n) }),
       step(1, `More workers for ${project.id}`),
     ),
-    fieldNote(path),
+    fieldNote(path, `projects.workers.${project.id}`),
   );
 }
 
@@ -1055,11 +1080,28 @@ function setStatemapLlm(id, value) {
   return put("projects", { projects: { statemap_llm: { [id]: value } } });
 }
 
+// The project whose Remove was pressed last, so a refusal of that removal shows beside its row.
+let removeTarget = null;
+
 // Projects are added and removed by path and id, and take effect on restart.
 function removeProject(id) {
   armed = null;
   clearTimeout(armTimer);
+  removeTarget = id;
   return put("projects", { projects: { remove: [id] } });
+}
+
+// A refusal of this row's removal, in red beside the row that was pressed. Nothing else shows here.
+function removalRefusal(id) {
+  return removeTarget === id && invalid.has("projects.remove") ? fieldNote("projects.remove") : null;
+}
+
+// The adds and removes the next start applies, under one note. Only the owner's view has them.
+function pendingGroup() {
+  const lines = pendingProjectLines(settings?.project_changes);
+  if (!lines.length) return null;
+  const rows = lines.map((line) => el("div", { class: "row wide" }, el("span", { class: "label", text: line })));
+  return group("Pending", "After restart", rows);
 }
 
 function addProject() {
@@ -1100,6 +1142,7 @@ function projectsBody() {
   );
   return [
     group("Projects", null, projects.length ? projects.map((project) => projectRow(project)) : [el("p", { class: "note", text: "No projects yet." })]),
+    pendingGroup(),
     group("Add a project", "A git repo on this machine.", [addRow]),
     statusLine("projects"),
   ];
@@ -1139,7 +1182,7 @@ function numberRow(field) {
     { class: "row wide", "data-path": path },
     el("span", { class: "label", text: field.label }),
     el("span", { class: "num" }, input, field.unit ? el("span", { class: "unit", text: field.unit }) : null),
-    why ? fieldNote(path) : null,
+    fieldNote(path),
   );
 }
 

@@ -271,13 +271,18 @@ mod tests {
         TaskId::from_str(&format!("t-{n}")).expect("a task id")
     }
 
-    /// Runs git in `dir`, failing the test on a non-zero exit.
+    /// Runs git in `dir`, failing the test on a non-zero exit. The author and committer are set
+    /// here, so a commit does not depend on the machine's git identity, which a CI runner lacks.
     fn git_in(dir: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
             .args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_AUTHOR_NAME", "Tester")
+            .env("GIT_AUTHOR_EMAIL", "tester@localhost")
+            .env("GIT_COMMITTER_NAME", "Tester")
+            .env("GIT_COMMITTER_EMAIL", "tester@localhost")
             .output()
             .expect("spawn git");
         assert!(

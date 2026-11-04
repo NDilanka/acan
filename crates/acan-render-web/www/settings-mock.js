@@ -4,15 +4,45 @@
 import { BUDGET_FIELDS, THEME_IDS, changedPaths, getAt, parseField } from "./settings-model.js";
 
 const LABEL_DENSITIES = ["sparse", "normal", "dense"];
-// How each section takes effect: live, client, restart, or stored (saved, no server path reads it yet).
-const APPLY = {
-  models: "live",
-  harness: "stored",
-  budgets: "stored",
-  look: "client",
-  notifications: "client",
-  projects: "restart",
-};
+// How a path's change takes effect, named as the server's `applied` names it: live, client, restart,
+// or stored (saved, no server path reads it yet). Models and the statemap budget are live; projects
+// restart, except the statemap flag, which is live.
+function labelFor(path) {
+  const [section, group, field] = path.split(".");
+  if (section === "models") return "live";
+  if (section === "harness") return "stored";
+  if (section === "projects") return group === "statemap_llm" ? "live" : "restart";
+  if (section === "budgets") return group === "call_limits" && field === "statemap" ? "live" : "stored";
+  if (section === "look" || section === "notifications") return "client";
+  return "stored";
+}
+
+// The server keys a provider's key by its name, so a change to one of its fields is that key.
+function appliedKey(path) {
+  return path.startsWith("models.keys.") ? path.split(".").slice(0, 3).join(".") : path;
+}
+
+// Every path the GET names, with its label. Names and labels only, never values.
+function appliedLabels(settings) {
+  const out = {};
+  const add = (path) => {
+    out[path] = labelFor(path);
+  };
+  for (const section of ["budgets", "look", "notifications"]) {
+    for (const path of changedPaths(settings[section], section)) add(path);
+  }
+  for (const role of Object.keys(settings.harness?.roles ?? {})) add(`harness.roles.${role}`);
+  add("harness.custom_command");
+  for (const row of settings.models?.roles ?? []) add(`models.roles.${row.role}`);
+  for (const row of settings.models?.keys ?? []) add(`models.keys.${row.provider}`);
+  add("projects.add");
+  add("projects.remove");
+  for (const project of settings.projects ?? []) {
+    add(`projects.workers.${project.id}`);
+    add(`projects.statemap_llm.${project.id}`);
+  }
+  return out;
+}
 const EXPORTS = ["receipts", "replay", "all"];
 const RECHECK = "Install it, then Recheck.";
 const CODEX_LOGIN = "Run `codex login`, then Recheck.";
@@ -121,7 +151,7 @@ function invalidSettings(body) {
 
 // A project's statemap flag must be on or off, and its worker count a whole number from 0 to 8. Each
 // must name a project on the list.
-function invalidProjects(projects, body = {}) {
+function invalidProjects(projects, body = {}, pending = { add: [], remove: [] }) {
   const fields = [];
   const known = (id) => projects.some((project) => project.id === id);
   for (const [id, on] of Object.entries(body.statemap_llm ?? {})) {
@@ -131,6 +161,12 @@ function invalidProjects(projects, body = {}) {
   for (const [id, n] of Object.entries(body.workers ?? {})) {
     if (!known(id)) fields.push({ path: `projects.${id}`, why: "unknown project" });
     else if (!Number.isInteger(n) || n < 0 || n > 8) fields.push({ path: `projects.${id}.workers`, why: "must be 0 to 8" });
+  }
+  // The first project is the default, which cannot be removed. Only a project the server runs, and
+  // not one already pending removal, can be removed.
+  for (const id of body.remove ?? []) {
+    if (id === projects[0]?.id) fields.push({ path: "projects.remove", why: "the default project cannot be removed" });
+    else if (!known(id) || pending.remove.includes(id)) fields.push({ path: "projects.remove", why: "must name a project the server runs" });
   }
   return fields;
 }
@@ -153,14 +189,11 @@ function modelConflicts(current, models) {
   return conflicts;
 }
 
-// Projects are added or removed by id, and take effect on restart.
-function projectsAfter(projects, { add = [], remove = [] }) {
-  const kept = projects.filter((project) => !remove.includes(project.id));
-  for (const path of add) {
-    const id = path.split("/").filter(Boolean).pop() ?? path;
-    if (!kept.some((project) => project.id === id)) kept.push({ id, name: id, workers: 1 });
-  }
-  return kept;
+// Adds and removes are kept as pending, and the next start applies them. The running projects do not
+// change until then.
+function recordProjects(pending, { add = [], remove = [] }) {
+  for (const path of add) if (!pending.add.includes(path)) pending.add.push(path);
+  for (const id of remove) if (!pending.remove.includes(id)) pending.remove.push(id);
 }
 
 export function createMockApi(initial) {
@@ -170,11 +203,15 @@ export function createMockApi(initial) {
   let agentRotations = 0;
   // Replays need a recorded run. The fixture has none yet, so they answer 409 until one exists.
   let hasRun = false;
+  // Adds and removes the next start applies. Only the owner's view shows them.
+  const pending = { add: [], remove: [] };
   const member = state.you !== "owner";
 
   // A member sees no tokens, and every setting reads as read only.
   function view(settings) {
     const copy = clone(settings);
+    copy.applied = appliedLabels(settings);
+    if (!member) copy.project_changes = clone(pending);
     if (member) {
       delete copy.tokens;
       copy.editable = false;
@@ -187,7 +224,7 @@ export function createMockApi(initial) {
     const next = clone(state);
     const fields = [];
     const keys = applyModels(next, body.models ?? {}, fields);
-    fields.push(...invalidSettings(body), ...invalidProjects(state.projects, body.projects));
+    fields.push(...invalidSettings(body), ...invalidProjects(state.projects, body.projects, pending));
     if (fields.length) return { status: 422, body: { error: "invalid", fields } };
     const conflicts = modelConflicts(state, body.models ?? {});
     if (conflicts.length) return { status: 409, body: { error: "conflict", what: conflicts[0] } };
@@ -196,7 +233,7 @@ export function createMockApi(initial) {
     if (body.budgets) merge(next.budgets, body.budgets);
     if (body.look) merge(next.look, body.look);
     if (body.notifications) merge(next.notifications, body.notifications);
-    if (body.projects) next.projects = projectsAfter(next.projects, body.projects);
+    if (body.projects) recordProjects(pending, body.projects);
     for (const [id, on] of Object.entries(body.projects?.statemap_llm ?? {})) {
       next.projects = next.projects.map((project) => (project.id === id ? { ...project, statemap_llm: on } : project));
     }
@@ -205,15 +242,11 @@ export function createMockApi(initial) {
     }
     state = next;
 
-    // One entry per changed field, keyed by its dotted path. A project's flag applies live; a worker
-    // count, or a project added or removed, applies at restart.
+    // Only the paths this request set, keyed as the server keys them, each with its label.
     const applied = {};
     for (const path of changedPaths(body)) {
-      const [section, field] = path.split(".");
-      if (section === "projects") {
-        const restarts = ["add", "remove", "workers"].includes(field);
-        applied[`projects.${field}`] = restarts ? "restart" : "live";
-      } else if (section in APPLY) applied[path] = APPLY[section];
+      const key = appliedKey(path);
+      applied[key] = labelFor(key);
     }
     return { status: 200, body: { settings: view(next), applied, keys } };
   }
