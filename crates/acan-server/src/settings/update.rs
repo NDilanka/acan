@@ -395,6 +395,27 @@ mod tests {
         );
     }
 
+    /// The release workflow names every file it publishes. The updater asks for the same names, so
+    /// an update never finds no asset after a rename. The workflow is read when the tests build.
+    #[test]
+    fn the_asset_names_are_the_ones_the_release_workflow_publishes() {
+        let workflow = include_str!("../../../../.github/workflows/release.yml");
+        let version = "0.1.0-pre.1";
+        for flavor in [Flavor::App, Flavor::Demo] {
+            for windows in [true, false] {
+                let template = asset_name(flavor, version, windows).replace(version, "$VERSION");
+                assert!(
+                    workflow.contains(&template),
+                    "the release workflow does not publish {template}"
+                );
+            }
+        }
+        assert!(
+            workflow.contains(&format!("archives/{SUMS_NAME}")),
+            "the release workflow does not upload {SUMS_NAME}"
+        );
+    }
+
     #[test]
     fn the_sums_line_is_found_by_its_exact_name() {
         let sums = "ABCDEF  acan-setup-1.exe\n0123 *acan-setup-1.exe.sig\n";
