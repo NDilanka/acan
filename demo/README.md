@@ -16,6 +16,12 @@ A live take needs provider keys. Copy `crates/acan-llm/.env.example` to `crates/
 
 Each take gets its own run folder, `<run root>\take-<yyyyMMdd-HHmmss>`. `<run root>\current.txt` names the latest one. `run.ps1` never reuses a folder, and it stops the previous take's processes without touching that folder. So an earlier take keeps its logs, and a stale process writes only into its own take.
 
+`run.ps1` checks before it starts anything. It looks for git, cargo and bun on PATH, reads the routing file (`-LlmFile`, default `crates\acan-llm\llm.toml`), and checks that each routed provider has its key in the key file (`-EnvFile`, default `crates\acan-llm\.env`) or in the environment. A missing tool, file or key stops the take and names what is missing, with no process stopped, no clone made and no model called. The key names are shown, never the values. `-CheckOnly` runs these checks and stops. A routing file that names a smaller model spends less per take.
+
+The server refuses writes until the codebase has mapped, and a mapping codebase can take several seconds. So `run.ps1` waits for the scan to finish before it registers the agents and posts the order. A take that is still mapping after 300 seconds stops with an error.
+
+`-Offline` rehearses a take with no keys and no routing file. Every model call gets the server's built-in offline reply, so nothing leaves the machine. No worker slot starts, so no task is built. Use it to check the start, the scan and the order at no cost. It refuses to run while a saved key file exists in `%APPDATA%\acan`, because the server would use that file.
+
 ## Run a take on Linux or macOS
 
 The POSIX scripts run the same take, in the same steps, with the same run folders and logs. They are `run.sh`, `watch.sh`, `stop.sh`, `worker-slot.sh` and `replay.sh`. `lib.sh` holds their shared helpers. `watch-lib.jq`, `watch-event.jq` and `watch-summary.jq` do the event work for `watch.sh`. The scripts need only `sh` and the tools listed below.

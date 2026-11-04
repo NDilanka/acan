@@ -34,17 +34,66 @@ param(
     [int]$WaitSecs = 900,
     # Follow the take in this process until it ends, so one background job holds the whole take.
     [switch]$Watch,
-    [ValidateRange(0, 3)][int]$Settle = 3
+    [ValidateRange(0, 3)][int]$Settle = 3,
+    # The routing file copied into the take. Empty means crates\acan-llm\llm.toml. A routing file that
+    # names a smaller model spends less per take. Ignored with -Offline.
+    [string]$LlmFile = '',
+    # The provider key file copied into the take. Empty means crates\acan-llm\.env. Ignored with -Offline.
+    [string]$EnvFile = '',
+    # Checks the tools, the routing file and the keys, then stops. Nothing is stopped, cloned, started or
+    # sent, so it costs nothing.
+    [switch]$CheckOnly,
+    # Runs with no routing file and no provider keys, so the server answers every model call from its
+    # built-in offline replies and no call leaves this machine. No worker slot starts, so no task is
+    # built. For rehearsal only: it exercises the start, the scan, the order and the registration, not
+    # the real models. Refuses to run beside a saved key file.
+    [switch]$Offline
 )
 
 . (Join-Path $PSScriptRoot 'lib.ps1')
 
 $repo = $script:WorktreeRoot
-$acan = Join-Path $repo 'target\debug\acan.exe'
-$worker = Join-Path $repo 'target\debug\acan-worker.exe'
+# cargo builds into CARGO_TARGET_DIR when it is set, so the binaries are looked for there too.
+$targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $repo 'target' }
+$acan = Join-Path $targetDir 'debug\acan.exe'
+$worker = Join-Path $targetDir 'debug\acan-worker.exe'
 $www = Join-Path $repo 'crates\acan-render-web\www'
-$llmSource = Join-Path $repo 'crates\acan-llm\llm.toml'
-$envSource = Join-Path $repo 'crates\acan-llm\.env'
+$llmSource = if ($LlmFile) { $LlmFile } else { Join-Path $repo 'crates\acan-llm\llm.toml' }
+$envSource = if ($EnvFile) { $EnvFile } else { Join-Path $repo 'crates\acan-llm\.env' }
+
+# Everything that costs nothing is checked first. A missing tool, routing file or key stops the take here:
+# no process is stopped, no clone is made, nothing is built, and no model is called.
+foreach ($tool in @('git', 'cargo', 'bun')) {
+    if (-not (Get-Command $tool -CommandType Application -ErrorAction SilentlyContinue)) {
+        throw "$tool is not on PATH. Nothing was started and no model was called."
+    }
+}
+if ($Offline) {
+    # A saved key would answer the model calls, so an offline take refuses to run beside one.
+    if (Test-Path -LiteralPath (Join-Path $env:APPDATA 'acan\keys.toml')) {
+        throw 'a saved key file exists in %APPDATA%\acan. -Offline would still use it, so the take stops here.'
+    }
+    # Every *_API_KEY variable is blanked for each process this take starts, so the environment adds no key.
+    # A blank variable counts as unset, so the server has no key and no routing file, and answers offline.
+    foreach ($item in @(Get-ChildItem -Path Env: | Where-Object { $_.Name -like '*_API_KEY' })) {
+        Set-Item -Path "Env:$($item.Name)" -Value ''
+    }
+} else {
+    if (-not (Test-Path -LiteralPath $llmSource)) { throw "no routing file at $llmSource; pass -LlmFile to choose one" }
+    $routedKeys = @(Get-RoutedKeyNames -LlmFile $llmSource)
+    Assert-KeysReady -RoutedKeys $routedKeys -EnvFile $envSource
+}
+if ($CheckOnly) {
+    Write-Output 'tools: git, cargo, bun found'
+    if ($Offline) {
+        Write-Output 'offline: no routing file and no provider keys; every model call gets a built-in offline reply'
+    } else {
+        Write-Output "routing file: $llmSource"
+        Write-Output "keys present for: $($routedKeys -join ', ') (in $envSource or the environment)"
+    }
+    Write-Output 'check only: nothing was stopped, cloned, started or sent'
+    exit 0
+}
 
 # The previous take's processes stop. Its folder stays as it was.
 $previous = Get-CurrentRunDir
@@ -72,6 +121,7 @@ $state = @{
     machine    = $Machine
     workers    = $Workers
     sentence   = $Sentence
+    offline    = [bool]$Offline
     processes  = New-Object System.Collections.ArrayList
 }
 Save-RunState -State $state -RunDir $RunDir
@@ -81,8 +131,11 @@ Add-Content -LiteralPath (Join-Path $RunDir '.git\info\exclude') -Value '/.env'
 
 $acanDir = Join-Path $RunDir '.acan'
 New-Item -ItemType Directory -Force -Path $acanDir | Out-Null
-Copy-Item -LiteralPath $llmSource -Destination (Join-Path $acanDir 'llm.toml')
-Copy-Item -LiteralPath $envSource -Destination (Join-Path $RunDir '.env')
+# An offline take copies neither the routing file nor the key file, so nothing in the take can reach a model.
+if (-not $Offline) {
+    Copy-Item -LiteralPath $llmSource -Destination (Join-Path $acanDir 'llm.toml')
+    Copy-Item -LiteralPath $envSource -Destination (Join-Path $RunDir '.env')
+}
 
 # Tokens go in before the first start, so the server loads them and mints no owner token of its own.
 $owner = 'acan_' + [guid]::NewGuid().ToString('N')
@@ -127,7 +180,10 @@ if (-not (Wait-Http200 -Url "http://127.0.0.1:$DemoPort/health" -Seconds 60)) {
     throw "the demo app did not answer on port $DemoPort; see $logs\demo-app.err.log"
 }
 
-$plant = Invoke-Api -Port $Port -Token $owner -Method GET -Path '/api/plant'
+# The server answers while its codebase maps, and it refuses writes with 503 until the scan commits. So the
+# take waits for the scan to finish before it registers an agent or posts the order.
+$plant = Wait-Mapped -Port $Port -Token $owner -Seconds 300
+Write-Output "codebase mapped: $($plant.scan.modules_total) module(s)"
 $machines = @($plant.machines | ForEach-Object { $_.name })
 Write-Output "plant machines: $($machines -join ', ')"
 if ($machines -notcontains $Machine) { throw "machine '$Machine' is not on the plant; pick one of the names above and pass -Machine" }
@@ -152,10 +208,11 @@ $state.orderPostedUtc = (Get-Date).ToUniversalTime().ToString('o')
 Save-RunState -State $state -RunDir $RunDir
 Write-Output "order posted: $($posted.Count) event(s) returned"
 
-# Each slot runs acan-worker again after every task, so the slots can build a split of any size.
+# Each slot runs acan-worker again after every task, so the slots can build a split of any size. An
+# offline take starts none: acan-worker builds with the routing file's model, and an offline take has none.
 $slot = Join-Path $PSScriptRoot 'worker-slot.ps1'
 $pwsh = [Environment]::ProcessPath
-for ($i = 1; $i -le $Workers; $i++) {
+for ($i = 1; $i -le $(if ($Offline) { 0 } else { $Workers }); $i++) {
     Start-Logged -State $state -RunDir $RunDir -Name "worker-$i" -File $pwsh -WorkingDirectory $RunDir -Arguments @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $slot,
         '-Name', "worker-$i", '-Agent', "agent-$i", '-RunDir', $RunDir,
@@ -167,7 +224,11 @@ for ($i = 1; $i -le $Workers; $i++) {
 $uiUrl = "http://127.0.0.1:$Port/#token=$owner"
 Set-Content -LiteralPath (Join-Path $logs 'ui-url.txt') -Value $uiUrl -Encoding utf8
 Write-Output "run folder: $RunDir"
-Write-Output "workers: $Workers slot(s), agents $($agents -join ', ')"
+if ($Offline) {
+    Write-Output "offline: no worker slot started, so no task is built; agents $($agents -join ', ') are registered"
+} else {
+    Write-Output "workers: $Workers slot(s), agents $($agents -join ', ')"
+}
 Write-Output "UI: http://127.0.0.1:$Port/  (open $logs\ui-url.txt for the URL with the owner token)"
 Write-Output "watch: pwsh $PSScriptRoot\watch.ps1 -RunDir `"$RunDir`" -Settle 3"
 Write-Output "stop: pwsh $PSScriptRoot\stop.ps1 -RunDir `"$RunDir`""
