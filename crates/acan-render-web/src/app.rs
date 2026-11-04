@@ -1721,6 +1721,22 @@ impl App {
             .as_ref()
             .map_or(0, |loaded| loaded.machines.len() as u32)
     }
+
+    /// The footprint of each machine on the plan, in plan order, as JSON `[{"name", "min",
+    /// "size"}]` in world units. Empty before a plant loads. A plant with no log has footprints
+    /// but no view, so the page places its state machines on these.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the footprints cannot be written as JSON.
+    pub fn plant_footprints(&self) -> Result<String, JsError> {
+        let machines = self
+            .plan
+            .as_ref()
+            .map(|plan| plan.machines.clone())
+            .unwrap_or_default();
+        serde_json::to_string(&machines).map_err(js_err)
+    }
 }
 
 impl App {

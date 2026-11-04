@@ -3,6 +3,7 @@
 // a time on the recorded clock, with a play or pause button and a progress bar. The page makes no API call, opens
 // no socket and sends no command.
 import { requestRender } from "./main.js";
+import { readFootprints } from "./statemachine-paint.js";
 import { noteLogEntry, readStateMachines, resetLight, setStateMachines } from "./statemachine.js";
 import { $, state } from "./state.js";
 import { setLink } from "./stream.js";
@@ -43,6 +44,7 @@ export async function startReplay(machines = null) {
   if (events.length === 0) throw new Error("the recording holds no events");
   const plant = await fetchText("plant.json");
   state.app.set_plant(plant);
+  readFootprints();
   setStateMachines(machines ?? readStateMachines(plant));
   playback.events = events;
   panel.hidden = false;

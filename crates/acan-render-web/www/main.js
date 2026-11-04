@@ -69,7 +69,7 @@ import { installMulti, nameOf, zoomAround } from "./multi.js";
 import { placePlates } from "./nameplates.js";
 import { placeParked } from "./parked.js";
 import { canvasState } from "./projects.js";
-import { placeStateMaps } from "./statemachine-paint.js";
+import { placeStateMaps, readFootprints } from "./statemachine-paint.js";
 import { readStateMachines, setStateMachines } from "./statemachine.js";
 
 const ZOOM_KEY = 1.25;
@@ -611,6 +611,7 @@ async function loadPlant() {
     const response = await fetch("fixtures/demo-plant.json");
     if (!response.ok) throw new Error(`fixture HTTP ${response.status}`);
     state.app.set_plant(await response.text());
+    readFootprints();
   } else {
     if (!state.token) {
       gate.hidden = false;

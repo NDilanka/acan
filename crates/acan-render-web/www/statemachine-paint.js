@@ -16,6 +16,14 @@ const STATION_PX = 3.2;
 
 const pools = new Map();
 let layer = null;
+// The plant's machines as `{ name, min, size }`, from the plan. A plant with no events has no view,
+// so the state machines are placed from these.
+let footprints = [];
+
+// Reads the footprints of the plant the page holds. Call it after every `set_plant`.
+export function readFootprints() {
+  footprints = JSON.parse(state.app.plant_footprints());
+}
 
 function svgLayer() {
   if (layer === null) layer = document.getElementById("statemap");
@@ -105,9 +113,9 @@ function hideAll() {
 // frame loop asks for the next frame; a replay's fade waits for its next entry instead.
 export function placeStateMaps() {
   const svg = svgLayer();
-  if (svg === null || state.app === null || state.view === null) return false;
+  if (svg === null || state.app === null) return false;
   const machines = allStateMachines();
-  if (machines.length === 0) {
+  if (machines.length === 0 || footprints.length === 0) {
     hideAll();
     return false;
   }
@@ -117,7 +125,7 @@ export function placeStateMaps() {
   };
   const detail = state.app.detail();
   const scene = sceneOf({
-    buildings: state.view.machines,
+    footprints,
     machines,
     project,
     riseAt: (x, y) => riseScale(project, x, y),

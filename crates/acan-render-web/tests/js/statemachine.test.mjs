@@ -74,7 +74,7 @@ test("only a transition touch is read as one, and an event that merely names it 
   assert.equal(touchOf('{"type":"transition_touched",'), null, "a broken touch is not a touch");
 });
 
-test("up to six states sit in a row, in the order of the states, centred on the building", () => {
+test("up to six states sit in a row along the plate's front edge, in the order of the states, centred", () => {
   const states = ["a", "b", "c", "d"].map((name) => ({ name }));
   const stations = stationLayout(states, FOOTPRINT);
   assert.deepEqual(stations.map((s) => s.name), ["a", "b", "c", "d"]);
@@ -82,10 +82,11 @@ test("up to six states sit in a row, in the order of the states, centred on the 
   assert.ok(stations.every((s, i) => i === 0 || s.x > stations[i - 1].x), "left to right");
   const mid = (stations[0].x + stations[3].x) / 2;
   assert.ok(Math.abs(mid - (FOOTPRINT.min[0] + FOOTPRINT.size[0] / 2)) < 1e-9, "centred on the building");
-  assert.ok(stations[0].y > FOOTPRINT.min[1] + FOOTPRINT.size[1], "the row stands in front of the building");
+  const front = FOOTPRINT.min[1] + FOOTPRINT.size[1];
+  assert.ok(stations[0].y < front && stations[0].y > front - FOOTPRINT.size[1] / 2, "the row stands inside the front edge of the plate");
 });
 
-test("more than six states sit on a ring round the building, clear of it", () => {
+test("more than six states sit on a ring inside the plate, on its rim and not over its middle", () => {
   const states = Array.from({ length: 8 }, (_, i) => ({ name: `s${i}` }));
   const stations = stationLayout(states, FOOTPRINT);
   assert.equal(stations.length, 8);
@@ -93,10 +94,38 @@ test("more than six states sit on a ring round the building, clear of it", () =>
   assert.equal(keys.size, 8, "every state has its own spot");
   const [x, y] = FOOTPRINT.min;
   const [w, d] = FOOTPRINT.size;
+  const cx = x + w / 2;
+  const cy = y + d / 2;
   for (const s of stations) {
     const inside = s.x > x && s.x < x + w && s.y > y && s.y < y + d;
-    assert.equal(inside, false, `${s.name} stands clear of the building`);
+    assert.ok(inside, `${s.name} stands inside the plate`);
+    const rim = ((s.x - cx) / (w / 2)) ** 2 + ((s.y - cy) / (d / 2)) ** 2;
+    assert.ok(rim > 0.5, `${s.name} stands on the rim`);
   }
+});
+
+test("stations and belts stay inside the plate for rows and rings, and a further machine stands further in", () => {
+  const [x, y] = FOOTPRINT.min;
+  const [w, d] = FOOTPRINT.size;
+  const inside = (p) => p.x > x && p.x < x + w && p.y > y && p.y < y + d;
+  for (const count of [2, 4, 6, 7, 8, 12]) {
+    const names = Array.from({ length: count }, (_, i) => `s${i}`);
+    const transitions = [
+      ...names.map((name, i) => transition(name, names[(i + 1) % count], "src/a.ts", 10 + i, 10 + i)),
+      transition(names[0], names[0], "src/a.ts", 40, 40),
+      transition("*", names[count - 1], "src/a.ts", 41, 41),
+    ];
+    for (const ring of [0, 1, 2]) {
+      const { stations, belts } = beltsOf(machine("a#Big", names, transitions), FOOTPRINT, ring);
+      assert.ok(stations.every(inside), `${count} states, ring ${ring}: every station is on the plate`);
+      for (const belt of belts) {
+        assert.ok(belt.points.every(inside), `${count} states, ring ${ring}: ${belt.from} to ${belt.to} stays on the plate`);
+      }
+    }
+  }
+  const own = stationLayout([{ name: "p" }, { name: "q" }], FOOTPRINT, 0);
+  const further = stationLayout([{ name: "p" }, { name: "q" }], FOOTPRINT, 1);
+  assert.ok(further[0].y < own[0].y, "the further machine's row stands further in");
 });
 
 test("a belt runs between its two stations' centres and bows to one side", () => {
@@ -112,15 +141,17 @@ test("a belt runs between its two stations' centres and bows to one side", () =>
   assert.ok(Math.abs(points[5].y) > 0.5, "the belt is curved, not straight");
 });
 
-test("a loop starts and ends at its station, and a stub enters its station from outside", () => {
+test("a loop starts and ends at its station and bulges toward the building, and a stub enters from the building's side", () => {
   const station = { x: 4, y: 6 };
-  const loop = loopPoints(station, 2);
+  const centre = { x: 4, y: 0 };
+  const loop = loopPoints(station, centre, 2);
   assert.ok(Math.abs(loop[0].x - 4) < 1e-9 && Math.abs(loop[0].y - 6) < 1e-9);
   assert.ok(Math.abs(loop.at(-1).x - 4) < 1e-9 && Math.abs(loop.at(-1).y - 6) < 1e-9);
-  const centre = { x: 0, y: 0 };
+  assert.ok(Math.min(...loop.map((p) => p.y)) < station.y, "the loop bulges toward the building");
   const stub = stubPoints(station, centre, 2);
   assert.deepEqual(stub.at(-1), station, "the stub ends on the station");
-  assert.ok(Math.hypot(stub[0].x, stub[0].y) > Math.hypot(station.x, station.y), "the stub starts outside the station");
+  const dist = (p) => Math.hypot(p.x - centre.x, p.y - centre.y);
+  assert.ok(dist(stub[0]) < dist(station), "the stub starts on the building's side of the station");
 });
 
 test("belts follow the transitions, a stub stands for a transition from *, and an unknown state is left out", () => {
@@ -237,9 +268,9 @@ test("a dial's lit tick is the state the latest touch lands in, and none before 
 
 test("a scene puts a dial on the roof, and stations and belts on the ground only when near", () => {
   setStateMachines([machine("a#X", ["p", "q", "r"], [transition("p", "q")])]);
-  const buildings = [{ name: "a", min: [0, 0], size: [10, 10] }];
+  const footprints = [{ name: "a", min: [0, 0], size: [10, 10] }];
   const common = {
-    buildings,
+    footprints,
     machines: allStateMachines(),
     project: (x, y) => [x * 10, y * 10],
     riseAt: () => 5,
@@ -253,7 +284,7 @@ test("a scene puts a dial on the roof, and stations and belts on the ground only
   assert.equal(far.belts.length, 0);
   const near = sceneOf({ ...common, near: true });
   assert.equal(near.stations.length, 3, "one station per state");
-  assert.ok(near.stations.every((s) => s.y > 100), "the row stands in front of the building, on the ground");
+  assert.ok(near.stations.every((s) => s.y > 50 && s.y < 100 && s.x > 0 && s.x < 100), "the row stands on the plate, inside its footprint");
   assert.equal(near.belts.length, 1);
   assert.equal(near.fading, false);
 });
@@ -265,7 +296,7 @@ test("a second machine of a building stands further out, and a claim lights only
   ]);
   noteTouch({ machine: "a#Y", file: "src/a.ts", line: 5, end_line: 5, from: "p", to: "q", task: 3, stage: "declared" }, 1000);
   const scene = sceneOf({
-    buildings: [{ name: "a", min: [0, 0], size: [10, 10] }],
+    footprints: [{ name: "a", min: [0, 0], size: [10, 10] }],
     machines: allStateMachines(),
     project: (x, y) => [x * 10, y * 10],
     riseAt: () => 5,
@@ -274,7 +305,7 @@ test("a second machine of a building stands further out, and a claim lights only
     now: 1001,
   });
   assert.equal(scene.dials.length, 2, "each machine gets a dial on the roof");
-  assert.ok(scene.stations[2].y > scene.stations[0].y, "the second machine's row stands further out");
+  assert.ok(scene.stations[2].y < scene.stations[0].y, "the second machine's row stands further in, on the same plate");
   assert.deepEqual(scene.belts.map((b) => b.lit?.kind ?? null), [null, "held"]);
   assert.equal(scene.belts[1].lit.task, 3);
 });

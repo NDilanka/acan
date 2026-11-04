@@ -7,6 +7,7 @@ import { requestRender } from "./main.js";
 import { listProjects, startMulti } from "./multi.js";
 import { apiPath, target } from "./projects.js";
 import { createFeed, createHold, eventsBefore } from "./scrub.js";
+import { readFootprints } from "./statemachine-paint.js";
 import { noteTouch, readStateMachines, setStateMachines, touchOf } from "./statemachine.js";
 import { TOKEN_KEY, freeze, gate, link, replay, state, upto } from "./state.js";
 
@@ -127,6 +128,7 @@ export async function start() {
   }
   const plant = await get(apiPath(target(), "/api/plant"));
   state.app.set_plant(plant);
+  readFootprints();
   setStateMachines(readStateMachines(plant));
   await reload();
   if (freeze) {

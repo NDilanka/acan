@@ -16,6 +16,8 @@ export const FADE_MS = 4000;
 const RECORDS_MAX = 200;
 // Points sampled along a belt.
 const SAMPLES = 10;
+// How far a ring's belt bows aside, as a share of its chord.
+const RING_BOW = 0.2;
 
 // The machines of a plant payload's `state_machines`, as the spec lists them: a machine has at least
 // two states and one transition, and a payload without the field has none. Other entries are dropped.
@@ -53,28 +55,49 @@ export function tileSize(footprint) {
   return Math.max(1, Math.min(footprint.size[0], footprint.size[1]) * 0.2);
 }
 
-// Where each state's station stands on the ground, in plan units, in the order of `states`. At most
-// ROW_MAX states sit in a row in front of the building, centred on it. More sit on a ring round it.
-// `footprint` is a building's `{ min, size }` from the view.
-export function stationLayout(states, footprint) {
+// How far a rail of stations stands in from the footprint's edge: half a tile for a building's own
+// stations, and a tile and a fifth further for each further machine it carries. Never past three
+// tenths of the shorter side, so the rail keeps a ring inside the footprint.
+function railInset(footprint, ring) {
+  const [w, d] = footprint.size;
+  return Math.min(tileSize(footprint) * (0.5 + 1.2 * ring), Math.min(w, d) * 0.3);
+}
+
+// Where each state's station stands on the building's plate, in plan units, in the order of
+// `states`. Every station stands inside the footprint, inset from its edge. At most ROW_MAX states
+// sit in a row along the front edge; more sit on a ring round the building. `ring` is 0 for a
+// building's own stations and counts up for each further machine it carries, which stand further
+// in. `footprint` is a building's `{ min, size }` from the view.
+export function stationLayout(states, footprint, ring = 0) {
   const [x, y] = footprint.min;
   const [w, d] = footprint.size;
-  const tile = tileSize(footprint);
+  const inset = railInset(footprint, ring);
   const n = states.length;
   if (n <= ROW_MAX) {
-    const gap = tile * 1.6;
-    const left = x + w / 2 - ((n - 1) * gap) / 2;
-    const row = y + d + tile * 1.2;
-    return states.map((state, i) => ({ name: state.name, x: left + i * gap, y: row }));
+    const row = y + d - inset;
+    const span = w - 2 * inset;
+    return states.map((state, i) => ({
+      name: state.name,
+      x: n === 1 ? x + w / 2 : x + inset + (span * i) / (n - 1),
+      y: row,
+    }));
   }
   const cx = x + w / 2;
   const cy = y + d / 2;
-  const rx = w / 2 + tile * 1.6;
-  const ry = d / 2 + tile * 1.6;
+  const rx = w / 2 - inset;
+  const ry = d / 2 - inset;
   return states.map((state, i) => {
     const angle = -Math.PI / 2 + (2 * Math.PI * i) / n;
     return { name: state.name, x: cx + rx * Math.cos(angle), y: cy + ry * Math.sin(angle) };
   });
+}
+
+// The unit vector from `from` toward `to`, or straight down the plan when they are the same point.
+function towards(from, to) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const length = Math.hypot(dx, dy);
+  return length === 0 ? { x: 0, y: 1 } : { x: dx / length, y: dy / length };
 }
 
 // Points along a curve from `a` to `b`, both ends included. The control point sits to one side of
@@ -97,27 +120,29 @@ export function curvePoints(a, b, bow = 0.2) {
   return points;
 }
 
-// A transition from a state to itself: a small loop that starts and ends at the station, on the
-// side away from the building.
-export function loopPoints(station, tile) {
+// A transition from a state to itself: a small loop that starts and ends at the station and bulges
+// toward the building's centre, so it stays on the plate.
+export function loopPoints(station, centre, tile) {
+  const u = towards(station, centre);
+  const v = { x: -u.y, y: u.x };
   const r = tile * 0.5;
-  const cx = station.x;
-  const cy = station.y + r;
+  const cx = station.x + u.x * r;
+  const cy = station.y + u.y * r;
   const points = [];
   for (let i = 0; i <= SAMPLES; i += 1) {
     const angle = (2 * Math.PI * i) / SAMPLES;
-    points.push({ x: cx + r * Math.sin(angle), y: cy - r * Math.cos(angle) });
+    const c = Math.cos(angle);
+    const s = Math.sin(angle);
+    points.push({ x: cx + r * (-u.x * c + v.x * s), y: cy + r * (-u.y * c + v.y * s) });
   }
   return points;
 }
 
 // The stub of a transition from "*", whose source the scan cannot name: a short straight run that
-// enters the target station from the side the building lies away from.
+// enters the target station from the building's side.
 export function stubPoints(station, centre, tile) {
-  const dx = station.x - centre.x;
-  const dy = station.y - centre.y;
-  const length = Math.hypot(dx, dy) || 1;
-  const start = { x: station.x + (dx / length) * tile, y: station.y + (dy / length) * tile };
+  const u = towards(station, centre);
+  const start = { x: station.x + u.x * tile, y: station.y + u.y * tile };
   const points = [];
   for (let i = 0; i <= 4; i += 1) {
     const t = i / 4;
@@ -126,15 +151,17 @@ export function stubPoints(station, centre, tile) {
   return points;
 }
 
-// The stations and belts of one state machine on the ground. Each transition with both of its
-// states known becomes a belt, in the order of `transitions`; a transition from "*" becomes a stub.
-// A transition that names a state the machine does not list is left out and counted.
-export function beltsOf(machine, footprint) {
-  const stations = stationLayout(machine.states, footprint);
+// The stations and belts of one state machine on the building's plate. Each transition with both of
+// its states known becomes a belt, in the order of `transitions`; a transition from "*" becomes a
+// stub. A transition that names a state the machine does not list is left out and counted. A row's
+// belts run straight along the front edge, and a ring's curve across the plate.
+export function beltsOf(machine, footprint, ring = 0) {
+  const stations = stationLayout(machine.states, footprint, ring);
   const byName = new Map(stations.map((station) => [station.name, station]));
   const centre = { x: footprint.min[0] + footprint.size[0] / 2, y: footprint.min[1] + footprint.size[1] / 2 };
   const tile = tileSize(footprint);
   const low = machine.confidence === "low";
+  const bow = machine.states.length <= ROW_MAX ? 0 : RING_BOW;
   const belts = [];
   let left = 0;
   machine.transitions.forEach((transition, index) => {
@@ -153,7 +180,7 @@ export function beltsOf(machine, footprint) {
       left += 1;
       return;
     }
-    const points = from === to ? loopPoints(to, tile) : curvePoints(from, to);
+    const points = from === to ? loopPoints(to, centre, tile) : curvePoints(from, to, bow);
     belts.push({ ...belt, stub: false, points });
   });
   return { stations, belts, left };
@@ -292,16 +319,13 @@ export function lastTouchedState(machine) {
   return -1;
 }
 
-// Each further machine of a building stands this many tile sizes further out in front of it.
-const STACK_TILES = 2.5;
-
 // The marks one frame draws. A dial stands on each shown machine's building roof, and at near
-// detail the stations and belts of every machine stand on the ground in front of the building.
-// The callbacks come from the page: `project(x, y)` is the screen point of a ground point,
-// `riseAt(x, y)` the screen px per world unit of height there, and `topOf(building)` the roof's
-// height in world units. `buildings` are the view's machines. Returns the shapes in screen px,
+// detail the stations and belts of every machine stand on the building's plate. The callbacks come
+// from the page: `project(x, y)` is the screen point of a ground point, `riseAt(x, y)` the screen
+// px per world unit of height there, and `topOf(building)` the roof's height in world units.
+// `footprints` are the plant's machines as `{ name, min, size }`. Returns the shapes in screen px,
 // and `fading`, whether any belt is still fading.
-export function sceneOf({ buildings, machines, project, riseAt, topOf, near, now }) {
+export function sceneOf({ footprints, machines, project, riseAt, topOf, near, now }) {
   const byModule = new Map();
   for (const machine of machines) {
     const list = byModule.get(machine.module);
@@ -310,7 +334,7 @@ export function sceneOf({ buildings, machines, project, riseAt, topOf, near, now
   }
   const light = lightAt(now);
   const scene = { dials: [], more: [], stations: [], belts: [], fading: false };
-  for (const building of buildings) {
+  for (const building of footprints) {
     const list = byModule.get(building.name);
     if (list === undefined) continue;
     const { shown, more } = stackPlan(list);
@@ -326,9 +350,9 @@ export function sceneOf({ buildings, machines, project, riseAt, topOf, near, now
     });
     if (more > 0) scene.more.push({ x: hub[0] + ((shown.length + 1) / 2) * DIAL_GAP_PX, y: hub[1], text: `+${more}` });
     if (!near) continue;
-    const tile = tileSize({ min: [x, y], size: [w, d] });
+    // A building's further machines ring further in, so their stations and belts stay on its plate.
     list.forEach((machine, k) => {
-      const layout = beltsOf(machine, { min: [x, y + k * tile * STACK_TILES], size: [w, d] });
+      const layout = beltsOf(machine, { min: [x, y], size: [w, d] }, k);
       for (const station of layout.stations) {
         const p = project(station.x, station.y);
         scene.stations.push({ x: p[0], y: p[1], name: station.name });
