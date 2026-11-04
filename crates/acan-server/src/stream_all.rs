@@ -168,6 +168,10 @@ async fn pump<C: ModelClient + 'static>(
         close(&mut socket, CLOSE_UNAUTHORIZED, "unauthorized".to_owned()).await;
         return;
     }
+    // A page on this stream views every project it reads, which starts their held scans.
+    for member in &members {
+        member.host.note_view();
+    }
 
     let subscription = tokio::select! {
         () = shutting_down(&mut shutdown) => {
@@ -529,6 +533,7 @@ mod tests {
             witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
             vision: None,
             local_workers: 0,
+            map_on_first_view: false,
         };
         let clients = repos
             .iter()

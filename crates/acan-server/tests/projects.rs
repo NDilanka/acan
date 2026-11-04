@@ -67,6 +67,7 @@ fn config(repos: &[PathBuf], addr: SocketAddr) -> ServeConfig {
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
         vision: None,
         local_workers: 0,
+        map_on_first_view: false,
     }
 }
 

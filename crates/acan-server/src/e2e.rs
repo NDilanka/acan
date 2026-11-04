@@ -3016,6 +3016,7 @@ async fn start_pair(root: &Path, other: &Path) -> Running {
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
         vision: None,
         local_workers: 0,
+        map_on_first_view: false,
     };
     let first = Offline::default();
     let first_ledger = first.ledger().clone();

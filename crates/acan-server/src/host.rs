@@ -120,6 +120,9 @@ struct Inner<C> {
     /// Whether the code index is committed, so the project takes writes. `None` while the
     /// codebase maps, `Some(Ok)` once it is open, and `Some(Err)` when mapping failed.
     mapped: watch::Sender<Option<Result<(), String>>>,
+    /// Whether a page has connected to the project. A project that maps on first view waits for
+    /// it before its scan starts.
+    viewed: watch::Sender<bool>,
     #[cfg(test)]
     mapping_hold: crate::stream::Hold,
 }
@@ -250,6 +253,7 @@ impl<C: ModelClient> Host<C> {
                 ruling_hold: crate::stream::Hold::default(),
                 feed,
                 mapped: watch::channel(if mapping { None } else { Some(Ok(())) }).0,
+                viewed: watch::channel(false).0,
                 #[cfg(test)]
                 mapping_hold: crate::stream::Hold::default(),
             }),
@@ -497,6 +501,24 @@ impl<C: ModelClient> Host<C> {
     /// The live feed of the current scan.
     pub(crate) fn scan_feed(&self) -> Arc<ScanFeed> {
         Arc::clone(&self.inner.feed)
+    }
+
+    /// Marks the project as waiting for its first page before the codebase maps. Called before the
+    /// mapping task starts, so the feed never reports a scan that has not begun.
+    pub(crate) fn hold_until_viewed(&self) {
+        self.inner.feed.wait();
+    }
+
+    /// Records that a page connected to the project, which starts a held scan.
+    pub(crate) fn note_view(&self) {
+        self.inner.viewed.send_replace(true);
+    }
+
+    /// Resolves once a page has connected to the project.
+    pub(crate) async fn wait_viewed(&self) {
+        let mut viewed = self.inner.viewed.subscribe();
+        // The sender lives as long as the host, so the wait ends only when the flag is set.
+        let _ = viewed.wait_for(|seen| *seen).await;
     }
 
     /// Whether the codebase is mapped, so the project takes writes.
@@ -807,5 +829,33 @@ mod mapping_tests {
         host.submit(add_member("newcomer"))
             .await
             .expect("writes are accepted once the project is open");
+    }
+
+    /// A project held for its first view reports `waiting` and resolves its view only once a
+    /// page has connected. Nothing else starts the scan.
+    #[tokio::test]
+    async fn a_held_codebase_waits_for_its_first_view() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = dir.path();
+        std::fs::create_dir_all(repo.join("model")).expect("model dir");
+        std::fs::write(
+            repo.join("model/store.ts"),
+            "export function load() {\n  return 1;\n}\n",
+        )
+        .expect("write fixture");
+        let (host, _shutdown) = mapping_host(repo, Stub::default()).await;
+        host.hold_until_viewed();
+        assert_eq!(host.scan_feed().status().stage, Stage::Waiting);
+        assert!(
+            timeout(Duration::from_millis(100), host.wait_viewed())
+                .await
+                .is_err(),
+            "no page has connected, so the scan has not started"
+        );
+
+        host.note_view();
+        timeout(WAIT, host.wait_viewed())
+            .await
+            .expect("a page's view starts the scan");
     }
 }

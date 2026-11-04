@@ -178,6 +178,8 @@ async fn pump<C: ModelClient>(
             authenticated
         }
     };
+    // A page on an authenticated stream starts the codebase's scan when the server maps on first view.
+    host.note_view();
     // Cleared when the revocation channel closes, so the loop stops polling it.
     let mut watching = true;
 

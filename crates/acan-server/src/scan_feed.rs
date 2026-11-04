@@ -18,6 +18,9 @@ use crate::host::LIVE_BUFFER;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Stage {
+    /// The codebase is known, but its scan waits for the first page to connect. Used only when
+    /// the server maps on first view.
+    Waiting,
     /// The machines are known, and their modules are not all filled yet.
     Skeleton,
     /// Modules are filling in.
@@ -141,6 +144,14 @@ impl ScanFeed {
     /// The status of the current scan.
     pub(crate) fn status(&self) -> Status {
         self.lock().clone()
+    }
+
+    /// Marks the scan as waiting for the first page. The scan's own skeleton step replaces the
+    /// mark once the scan starts.
+    pub(crate) fn wait(&self) {
+        let mut status = self.lock();
+        status.stage = Stage::Waiting;
+        self.send(&status, None);
     }
 
     /// Records one step of the scan, and sends it as a frame.

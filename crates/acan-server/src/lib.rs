@@ -173,6 +173,11 @@ pub struct ServeConfig {
     /// that project another count. Zero runs none. Each loop has its own agent, `local-1` and so
     /// on, in every project.
     pub local_workers: usize,
+    /// Whether each project's codebase maps when its first page connects, rather than as the server
+    /// starts. A waiting project shows no machines and takes no writes until then. Such a server
+    /// must be started with [`start_projects_serving`], since waiting for the maps would wait for a
+    /// page that may never come.
+    pub map_on_first_view: bool,
 }
 
 impl From<ServerConfig> for ServeConfig {
@@ -190,6 +195,7 @@ impl From<ServerConfig> for ServeConfig {
             witness_concurrency: config.witness_concurrency,
             vision: config.vision,
             local_workers: 0,
+            map_on_first_view: false,
         }
     }
 }
@@ -424,6 +430,10 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
     clients: Vec<(C, UsageLedger)>,
     settings_file: Option<PathBuf>,
 ) -> anyhow::Result<Running> {
+    ensure!(
+        !config.map_on_first_view,
+        "a server that maps on first view waits for a page, so it must start with start_projects_serving"
+    );
     let running = start_projects_serving(config, clients, settings_file).await?;
     if let Err(err) = running.wait_mapped().await {
         let _ = running.stop().await;
@@ -586,6 +596,9 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
             Arc::clone(&slots),
             Some(statemap),
         );
+        if config.map_on_first_view {
+            host.hold_until_viewed();
+        }
         entries.push(Entry {
             id: spec.id,
             name: spec.name,
@@ -605,6 +618,7 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
             entry.host.clone(),
             founder.clone(),
             worker_tokens.len(),
+            config.map_on_first_view,
         )));
     }
 
@@ -672,8 +686,17 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
 
 /// Maps one project's codebase in the background: scans it, commits its index, registers its local
 /// workers, and opens it to writes. A failure is recorded on the project, which then takes no
-/// writes, and the server keeps running so the page can show why.
-async fn map_project<C: ModelClient + 'static>(host: Host<C>, founder: MemberId, workers: usize) {
+/// writes, and the server keeps running so the page can show why. With `on_view`, the scan starts
+/// only once a page has connected to the project.
+async fn map_project<C: ModelClient + 'static>(
+    host: Host<C>,
+    founder: MemberId,
+    workers: usize,
+    on_view: bool,
+) {
+    if on_view {
+        host.wait_viewed().await;
+    }
     let mapped = async {
         host.scan_and_commit().await?;
         for index in 0..workers {
