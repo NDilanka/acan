@@ -76,6 +76,12 @@ const WHEEL_RATE = 0.0015;
 
 const TURN_DEG = 45;
 
+// One grid step, in the top-down view: the grid lines run along the screen edges at each step.
+const TOP_TURN_DEG = 90;
+
+// The gap the top-down fit keeps between the plant and the shell bar and the right column, in CSS px.
+const FIT_GAP_PX = 12;
+
 // A press that moves less than this is a click, and a click within PIN_PICK_PX of a clash pin's
 // tip opens its card.
 const CLICK_PX = 4;
@@ -200,8 +206,21 @@ function sizeCanvas() {
   const { rect, dpr } = setDrawingSize();
   if (state.app !== null) {
     state.app.resize(rect.width, rect.height, dpr);
+    syncFitInset();
     requestRender();
   }
+}
+
+// Tells the top-down fit where the shell bar's bottom and the right column's left edge are, so the
+// plant is framed clear of both. Read on a resize, at startup and on each turn to top-down.
+export function syncFitInset() {
+  if (state.app === null) return;
+  const canvasRect = canvas.getBoundingClientRect();
+  const shell = document.getElementById("shell").getBoundingClientRect();
+  const watch = document.getElementById("watch").getBoundingClientRect();
+  const top = shell.height > 0 ? shell.bottom - canvasRect.top + FIT_GAP_PX : 0;
+  const right = watch.width > 0 ? canvasRect.right - watch.left + FIT_GAP_PX : 0;
+  state.app.set_fit_inset(top, right);
 }
 
 function showNotice(text) {
@@ -215,8 +234,10 @@ function zoomAtCentre(factor) {
   requestRender();
 }
 
-function turn(degrees) {
-  state.app.turn(degrees);
+// Q and E turn the map one grid step in the top-down view, and TURN_DEG otherwise.
+function turnBy(dir) {
+  if (state.app.top_down()) state.app.turn_top_down(dir * TOP_TURN_DEG, reducedNow());
+  else state.app.turn(dir * TURN_DEG);
   requestRender();
 }
 
@@ -227,6 +248,7 @@ function reducedNow() {
 
 // Turns the map to top-down, or back, as `V` and the top-down button ask.
 function toggleTopDown() {
+  syncFitInset();
   state.app.toggle_top_down(reducedNow());
   requestRender();
 }
@@ -261,6 +283,7 @@ function bindCanvas() {
       x: event.clientX,
       y: event.clientY,
       orbit: event.button === 2 || event.altKey,
+      turned: false,
     };
     state.press = event.button === 0 ? { x: event.clientX, y: event.clientY } : null;
     canvas.classList.add("dragging");
@@ -270,6 +293,7 @@ function bindCanvas() {
     if (state.drag === null) return void droneHover(event.clientX - canvas.getBoundingClientRect().left, event.clientY - canvas.getBoundingClientRect().top);
     if (state.drag.orbit) {
       state.app.orbit(event.clientX - state.drag.x, event.clientY - state.drag.y);
+      state.drag.turned = true;
     } else {
       const rect = canvas.getBoundingClientRect();
       state.app.drag(
@@ -289,9 +313,15 @@ function bindCanvas() {
   // click. A click on a machine opens the compose panel there, to post an order on it.
   const endDrag = (event) => {
     const pressed = state.press;
+    // An orbit that turned the view ends on the nearest grid step, in the top-down view.
+    const turned = state.drag?.orbit === true && state.drag.turned;
     state.press = null;
     state.drag = null;
     canvas.classList.remove("dragging");
+    if (turned) {
+      state.app.settle_top_down(reducedNow());
+      requestRender();
+    }
     if (event.type !== "pointerup" || pressed === null) return;
     if (Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) >= CLICK_PX) return;
     const rect = canvas.getBoundingClientRect();
@@ -412,7 +442,7 @@ function runKey(action, event) {
       requestRender();
       break;
     case "turn":
-      turn(action.dir * TURN_DEG);
+      turnBy(action.dir);
       break;
     case "play":
       togglePlay();
@@ -639,7 +669,7 @@ async function boot() {
     startShell();
     installFirstRun();
     installSettings({ app: state.app, requestRender, token: () => state.token, onToken: rotateToken,
-      fixture: params.get("settings") === "fixture" });
+      syncFit: syncFitInset, fixture: params.get("settings") === "fixture" });
   }
   // `?plate=fixture` or `?plate=plain` shows the receipt plate over a fixture plant view, without
   // the origin. The plate is watermarked FIXTURE.

@@ -11,9 +11,17 @@ use serde_json::Value;
 pub enum Entry {
     /// An event this build reads.
     Known(Stamped),
-    /// An event this build cannot read, by its position. The page passes over it.
+    /// An event this build cannot read, by its position. The page passes over it and counts it.
     Unknown(Seq),
+    /// An event the origin redacted for this reader, by its position: a member-only field is null.
+    /// The page passes over it without counting it, since the reader was never to see that field.
+    Redacted(Seq),
 }
+
+/// The member-only fields the origin sets to null for a reader who is not a member, by event type.
+/// See `redact.rs` in the origin. A null here is a redaction, not an event this build cannot read.
+const MEMBER_ONLY: [(&str, &str); 2] =
+    [("scope_drafted", "draft"), ("scope_draft_failed", "reason")];
 
 /// Reads a JSON array of stamped events, one entry per event.
 ///
@@ -39,9 +47,27 @@ fn entry_of(value: Value) -> Result<Entry, serde_json::Error> {
         Ok(stamped) => Ok(Entry::Known(stamped)),
         // The position must be readable, or the page could not pass over the event.
         Err(err) => serde_json::from_value::<Seq>(value["seq"].clone())
-            .map(Entry::Unknown)
+            .map(|seq| {
+                if redacted(&value) {
+                    Entry::Redacted(seq)
+                } else {
+                    Entry::Unknown(seq)
+                }
+            })
             .map_err(|_| err),
     }
+}
+
+/// Whether the event is one the origin redacted: its type has a member-only field, and that field
+/// is null.
+fn redacted(value: &Value) -> bool {
+    let event = &value["event"];
+    let Some(kind) = event["type"].as_str() else {
+        return false;
+    };
+    MEMBER_ONLY
+        .iter()
+        .any(|(name, field)| kind == *name && event[*field].is_null())
 }
 
 #[cfg(test)]
@@ -80,6 +106,38 @@ mod tests {
         let text = stamped_json(7, json!({ "type": "vision_checked" })).to_string();
         assert_eq!(
             entry(&text).expect("the event parses"),
+            Entry::Unknown(Seq::new(7))
+        );
+    }
+
+    #[test]
+    fn a_scope_draft_the_origin_redacted_is_redacted_not_unread() {
+        let redacted = stamped_json(
+            5,
+            json!({ "type": "scope_drafted", "order": "o-1", "rev": 0, "draft": null }),
+        );
+        assert_eq!(
+            entry(&redacted.to_string()).expect("the event parses"),
+            Entry::Redacted(Seq::new(5))
+        );
+        let failed = stamped_json(
+            6,
+            json!({ "type": "scope_draft_failed", "order": "o-1", "rev": 0, "reason": null }),
+        );
+        assert_eq!(
+            entry(&failed.to_string()).expect("the event parses"),
+            Entry::Redacted(Seq::new(6))
+        );
+    }
+
+    #[test]
+    fn a_scope_draft_this_build_cannot_read_is_still_unread() {
+        let later = stamped_json(
+            7,
+            json!({ "type": "scope_drafted", "order": "o-1", "rev": 0, "draft": { "later": true } }),
+        );
+        assert_eq!(
+            entry(&later.to_string()).expect("the event parses"),
             Entry::Unknown(Seq::new(7))
         );
     }

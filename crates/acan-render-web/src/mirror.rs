@@ -144,6 +144,7 @@ impl Mirror {
     pub fn ingest_entry(&mut self, entry: Entry) -> Result<(), ReplayError> {
         match entry {
             Entry::Unknown(seq) => self.pass_over(seq),
+            Entry::Redacted(seq) => self.skip_position(seq).map(|_| ()),
             Entry::Known(stamped) => match self.ingest(&stamped) {
                 Err(ReplayError::InvalidEvent { .. }) if self.not_shown > 0 => {
                     self.pass_over(stamped.seq)
@@ -159,14 +160,20 @@ impl Mirror {
         self.not_shown
     }
 
-    /// Moves the replica past one position without applying its event.
+    /// Passes over an event this build cannot read, and counts it.
     fn pass_over(&mut self, seq: Seq) -> Result<(), ReplayError> {
-        let before = self.replica.next_seq();
-        self.replica.skip(seq)?;
-        if self.replica.next_seq() != before {
+        if self.skip_position(seq)? {
             self.not_shown += 1;
         }
         Ok(())
+    }
+
+    /// Moves the replica past one position without applying its event. Returns whether it moved,
+    /// which it does not for a position already passed.
+    fn skip_position(&mut self, seq: Seq) -> Result<bool, ReplayError> {
+        let before = self.replica.next_seq();
+        self.replica.skip(seq)?;
+        Ok(self.replica.next_seq() != before)
     }
 
     /// The seq the next event will carry. The stream resumes from here.
@@ -1281,6 +1288,43 @@ mod tests {
             mirror.next_seq(),
             Seq::new(u64::try_from(count).expect("a short log"))
         );
+    }
+
+    #[test]
+    fn a_redacted_event_folds_past_without_counting_as_unread() {
+        let (_origin, log, _index) = scripted();
+        let count = log.len();
+        let mut mirror = Mirror::from_log(log[..count - 2].to_vec()).expect("the prefix replays");
+
+        let next = feed::entry(&serde_json::to_string(&log[count - 1]).expect("it serializes"))
+            .expect("it parses");
+        mirror
+            .ingest_entry(Entry::Redacted(log[count - 2].seq))
+            .expect("the redacted event is passed over");
+        mirror.ingest_entry(next).expect("the event after it folds");
+        assert_eq!(mirror.not_shown(), 0);
+        assert_eq!(
+            mirror.next_seq(),
+            Seq::new(u64::try_from(count).expect("a short log"))
+        );
+    }
+
+    #[test]
+    fn the_recorded_replay_folds_with_nothing_passed_over() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../replay/events.json"
+        ))
+        .expect("the replay is in the repository");
+        let entries = feed::entries(&text).expect("the replay parses one event at a time");
+        assert!(
+            entries
+                .iter()
+                .all(|entry| !matches!(entry, Entry::Unknown(_))),
+            "every event is read, or redacted for this reader"
+        );
+        let mirror = Mirror::from_entries(entries).expect("the replay folds");
+        assert_eq!(mirror.not_shown(), 0);
     }
 
     #[test]
