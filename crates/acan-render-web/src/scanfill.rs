@@ -29,8 +29,8 @@ pub const GHOST_OFFSET: f32 = 3.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Stage {
-    /// The codebase is known, but its scan waits for the first page. The plant has no machines
-    /// yet, so the map is blank until the scan starts.
+    /// The codebase is known, but its scan waits for the first page. The map stays blank until the
+    /// scan starts: no body and no outline is drawn.
     Waiting,
     /// The machines are known, and their modules are not all filled yet.
     Skeleton,
@@ -95,6 +95,9 @@ pub struct ScanFill {
     /// Whether the page has shown a settled map. A page that has never shown one animates its
     /// first scan, and no other scan.
     settled: bool,
+    /// Whether the scan waits for its first page. A waiting map draws no body and no outline, even
+    /// though the plant already lists its machines.
+    waiting: bool,
 }
 
 impl ScanFill {
@@ -108,6 +111,7 @@ impl ScanFill {
     /// map that was settled before, builds every machine at once.
     pub fn apply(&mut self, stage: Stage, filled: &[usize]) {
         self.settled |= stage.ended();
+        self.waiting = stage == Stage::Waiting;
         let mut done = vec![false; self.phases.len()];
         for &index in filled {
             if let Some(slot) = done.get_mut(index) {
@@ -155,10 +159,11 @@ impl ScanFill {
         moving
     }
 
-    /// Whether machine `index` is an outline, so its body is not on the map yet.
+    /// Whether machine `index`'s body is not on the map yet: it is an outline, or the scan is
+    /// waiting for its first page.
     #[must_use]
     pub fn hidden(&self, index: usize) -> bool {
-        matches!(self.phases.get(index), Some(Phase::Outline))
+        self.waiting || matches!(self.phases.get(index), Some(Phase::Outline))
     }
 
     /// How far above its place machine `index`'s body stands, in plan units.
@@ -173,6 +178,9 @@ impl ScanFill {
     /// The opacity of machine `index`'s outline, or `None` when it has none to draw.
     #[must_use]
     pub fn ghost_alpha(&self, index: usize) -> Option<f32> {
+        if self.waiting {
+            return None;
+        }
         match self.phases.get(index)? {
             Phase::Outline => Some(GHOST_ALPHA),
             Phase::Filling(elapsed) => {
@@ -226,6 +234,7 @@ mod tests {
     use super::*;
 
     const ONE: [[f32; 4]; 1] = [[0.0, 0.0, 10.0, 5.0]];
+    const ONE_PER_TWO: [[f32; 4]; 2] = [[0.0, 0.0, 10.0, 5.0], [20.0, 0.0, 10.0, 5.0]];
 
     #[test]
     fn a_first_map_shows_each_unfilled_machine_as_an_outline() {
@@ -376,17 +385,31 @@ mod tests {
 
     #[test]
     fn a_waiting_codebase_draws_nothing_until_its_scan_starts() {
+        // The plant lists its machines before the scan starts, so the map has machines to hide.
         let mut fill = ScanFill::default();
-        fill.load(0);
+        fill.load(2);
         fill.apply(Stage::Waiting, &[]);
         assert!(
-            fill.ghosts(&[], 1.0).is_empty(),
+            fill.hidden(0) && fill.hidden(1),
+            "no body is drawn while waiting"
+        );
+        assert_eq!(fill.ghost_alpha(0), None);
+        assert!(
+            fill.ghosts(&ONE_PER_TWO, 1.0).is_empty(),
             "a blank map has no outlines"
         );
 
-        fill.load(1);
         fill.apply(Stage::Skeleton, &[]);
-        assert!(fill.hidden(0), "the scan's first machine is an outline");
+        assert!(
+            fill.hidden(0),
+            "once the scan starts, an unfilled machine is an outline"
+        );
+        assert_eq!(fill.ghost_alpha(0), Some(GHOST_ALPHA));
+        assert_eq!(
+            fill.ghosts(&ONE_PER_TWO, 1.0).len(),
+            8,
+            "two outlines of four strokes"
+        );
     }
 
     impl ScanFill {
