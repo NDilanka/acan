@@ -122,11 +122,12 @@ pub const GRID_STEP: f32 = 5.0;
 /// A level shows while its on-screen spacing is between these device pixels, so levels cross
 /// fade as the zoom changes.
 pub const GRID_SHOW_PX: (f32, f32) = (6.0, 30.0);
-/// Ink of a grid line, as black alpha on the white page. A level is minor while the finer
-/// level under it is still hidden and turns major as that level appears. A pixel takes the
-/// strongest level, never the sum, so the grid stays under the machine line art.
-pub const GRID_MINOR_ALPHA: f32 = 0.05;
-pub const GRID_MAJOR_ALPHA: f32 = 0.11;
+/// Opacity of a grid line. The look's grid colour is its `SLOT_GRID` palette entry, and that
+/// entry's alpha scales these. A level is minor while the finer level under it is still hidden and
+/// turns major as that level appears. A pixel takes the strongest level, never the sum, so the grid
+/// stays under the machine line art.
+pub const GRID_MINOR_ALPHA: f32 = 0.10;
+pub const GRID_MAJOR_ALPHA: f32 = 0.16;
 
 /// The contact shadow: how far it reaches past the footprint, in plan units, and how far the
 /// light pushes it toward the camera's right.
@@ -252,7 +253,7 @@ const DARK: [[f32; 4]; PALETTE_LEN] = [
     rgb(0xd99a1e, 1.0),  // lit
     rgb(0xf2f2f2, 1.0),  // glass
     rgb(0x000000, 0.30), // contact shadow
-    rgb(0xffffff, 1.0),  // grid, at its alpha
+    rgb(0xffffff, 0.6),  // grid, at its alpha
     rgb(0x26262a, 1.0),  // hi
     rgb(0x8a8a8f, 1.0),  // mid
     rgb(0xb4b4b8, 1.0),  // lo
@@ -277,7 +278,7 @@ const BLUEPRINT: [[f32; 4]; PALETTE_LEN] = [
     rgb(0xd99a1e, 1.0),  // lit
     rgb(0xf2f2f2, 1.0),  // glass
     rgb(0x0a1626, 0.35), // contact shadow
-    rgb(0xffffff, 1.0),  // grid, at its alpha
+    rgb(0x8cbef0, 0.7),  // grid, at its alpha: a pale blue line on the blue desk
     rgb(0x26324f, 1.0),  // hi
     rgb(0x8a94b4, 1.0),  // mid
     rgb(0xb4bcd8, 1.0),  // lo
@@ -557,20 +558,21 @@ mod tests {
     fn the_grid_stays_under_the_line_art() {
         for look in LOOKS {
             let palette = look.colours();
-            // A dark desk has a white grid, a light one a black grid.
+            // The grid reads against its desk, and its opacity scales the line ink.
             let grid = palette[SLOT_GRID as usize];
             assert!(
-                grid[..3] == [0.0; 3] || grid[..3] == [1.0; 3],
-                "{look:?} grid is black or white"
+                contrast(grid, palette[SLOT_PAGE as usize]) >= 2.0,
+                "{look:?} grid reads on the desk"
             );
+            let major = GRID_MAJOR_ALPHA * grid[3];
             let faintest_line = [SLOT_EDGE, SLOT_LINE, SLOT_BELT_EDGE]
                 .map(|slot| ink(palette[slot as usize]))
                 .into_iter()
                 .chain([CONTOUR_FAR_ALPHA * ink(palette[SLOT_LINE as usize])])
                 .fold(f32::INFINITY, f32::min);
             assert!(
-                GRID_MAJOR_ALPHA < faintest_line,
-                "{look:?}: major grid ink {GRID_MAJOR_ALPHA} must stay under every line, {faintest_line}"
+                major < faintest_line,
+                "{look:?}: major grid ink {major} must stay under every line, {faintest_line}"
             );
         }
     }
