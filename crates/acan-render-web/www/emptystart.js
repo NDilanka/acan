@@ -55,7 +55,7 @@ export function isEmptyWorld(status, body) {
   return status === 200 && Array.isArray(body) && body.length === 0;
 }
 
-// The "Add a codebase" hint. It shows while the origin has no codebase, and once the first plant
+// The "Add a codebase with +" hint. It shows while the origin has no codebase, and once the first plant
 // attaches it is hidden for good: it does not come back, even if the list is read empty again.
 export function createEmptyWorld() {
   let attached = false;
@@ -77,16 +77,11 @@ export function createEmptyWorld() {
 
 // The page's hint. Its state is kept here, so a list read again cannot bring it back.
 const world = createEmptyWorld();
-let watchingResize = false;
 
-// Called with the project list when it reads empty: the hint shows, and it is pointed again on resize.
+// Called with the project list when it reads empty: the hint shows.
 export function noteEmptyList(list) {
   world.listed(list);
   paintEmptyHint(document, world.showing);
-  if (!watchingResize) {
-    watchingResize = true;
-    window.addEventListener("resize", () => paintEmptyHint(document, world.showing));
-  }
 }
 
 // Called once the first plant is on the canvas: the hint is hidden and does not come back.
@@ -95,31 +90,11 @@ export function noteAttached() {
   paintEmptyHint(document, false);
 }
 
-// Paints the hint in `doc`: shown or hidden, and when shown, a line from its text to the "+".
+// Paints the hint in `doc`: shown or hidden, with the "+" lit while it shows.
 export function paintEmptyHint(doc, showing) {
   const hint = doc.getElementById("empty-hint");
-  if (hint === null) return;
-  hint.hidden = !showing;
-  if (showing) pointAtAddButton(doc);
-}
-
-function pointAtAddButton(doc) {
-  const text = doc.getElementById("empty-hint-text");
-  const line = doc.getElementById("empty-hint-line");
-  const button = doc.getElementById("add-plant");
-  if (!text || !line || !button || typeof text.getBoundingClientRect !== "function") return;
-  const from = text.getBoundingClientRect();
-  const to = button.getBoundingClientRect();
-  const x1 = from.left - 10;
-  const y1 = from.top + from.height / 2;
-  const x2 = to.left + to.width / 2;
-  const y2 = to.bottom + 4;
-  const length = Math.hypot(x2 - x1, y2 - y1);
-  const angle = Math.atan2(y2 - y1, x2 - x1) * (180 / Math.PI);
-  line.style.left = `${x1}px`;
-  line.style.top = `${y1}px`;
-  line.style.width = `${length}px`;
-  line.style.transform = `rotate(${angle}deg)`;
+  if (hint !== null) hint.hidden = !showing;
+  doc.getElementById("add-plant")?.classList?.toggle("beckon", showing);
 }
 
 // Shows the sign-in gate with the expired-link line. The gate's token form is still there, so the

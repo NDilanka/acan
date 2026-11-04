@@ -45,6 +45,10 @@ const FIT_FLAG_RIGHT_CSS: f32 = 60.0;
 /// about 30 pixels, and four rows stack above a machine in a clash. Measured against the shots:
 /// three rows leave about 70 pixels of margin, four about 40.
 const FIT_FLAG_TOP_CSS: f32 = 100.0;
+/// Room a fly to a project leaves under its plant, in CSS pixels: the nameplate hangs 30 px under
+/// the plant's lowest ground corner and is about 26 px tall, and the bottom island, such as the
+/// notice that no model key is set, takes about 92 px under it with its margin, plus a 12 px gap.
+const FIT_PLATE_CSS: f32 = 160.0;
 /// Degrees of orbit per CSS pixel of drag.
 const ORBIT_DEG_PER_PX: f32 = 0.4;
 /// Degrees of tilt per CSS pixel of drag.
@@ -1858,10 +1862,7 @@ impl App {
         // A fly to this plant aimed at its old framing; it lands on the new one instead.
         let flying_here = !fit
             && self.tour_move.as_ref().is_some_and(|movement| {
-                let old = self
-                    .plant
-                    .as_ref()
-                    .map(|loaded| self.pose_of(&loaded.framing));
+                let old = self.plant.as_ref().map(|loaded| self.fly_pose(loaded));
                 old.is_some_and(|old| same_pose(old, movement.to))
             });
         let (loaded, plan) = self.build(plant, at_origin, offset);
@@ -1883,7 +1884,7 @@ impl App {
         self.fit_after_leave = false;
         self.dirty = true;
         if flying_here {
-            let to = self.pose_of(&loaded.framing);
+            let to = self.fly_pose(&loaded);
             if let Some(movement) = self.tour_move.as_mut() {
                 movement.to = to;
             }
@@ -2229,19 +2230,13 @@ impl App {
         self.camera.set_fog_bounds(bounds);
     }
 
-    /// The pivot and zoom that fit `framing` at the framing angles.
-    fn pose_of(&self, framing: &[Aabb]) -> tour::Pose {
+    /// The pivot and zoom that fit `framing` at the framing angles, keeping `room`.
+    fn pose_of(&self, framing: &[Aabb], room: FitRoom) -> tour::Pose {
         let mut probe = self.camera;
         let (azimuth, elevation) = self.framing_angles();
         probe.set_angles(azimuth, elevation);
         let clear = self.clear_for(elevation);
-        fit_clear(
-            &mut probe,
-            framing,
-            FIT_MARGIN_CSS * self.dpr,
-            self.fit_room(),
-            clear,
-        );
+        fit_clear(&mut probe, framing, FIT_MARGIN_CSS * self.dpr, room, clear);
         (probe.pivot(), probe.zoom())
     }
 
@@ -2581,21 +2576,37 @@ impl App {
         if self.ride.is_some() {
             return false;
         }
-        let framing = if id == self.project {
-            self.plant.as_ref().map(|loaded| loaded.framing.clone())
+        let loaded = if id == self.project {
+            self.plant.as_ref()
         } else {
             self.parked
                 .iter()
                 .find(|parked| parked.id == id)
-                .map(|parked| parked.loaded.framing.clone())
+                .map(|parked| &parked.loaded)
         };
-        let Some(framing) = framing else {
+        let Some(loaded) = loaded else {
             return false;
         };
+        let to = self.fly_pose(loaded);
         self.turn = None;
-        let to = self.pose_of(&framing);
         self.ease_to(to, reduced);
         true
+    }
+
+    /// The pose a fly to a plant ends at: the plant fitted with its nameplate in view. The plate
+    /// hangs under the ground box the page's `boundsOf` gives, which the framing leaves out, so that
+    /// box joins the framing, and the bottom keeps the plate's room.
+    fn fly_pose(&self, loaded: &Loaded) -> tour::Pose {
+        let [x0, y0, x1, y1] = loaded.layout.bounds;
+        let base = loaded.base.bounds;
+        let mut framing = loaded.framing.clone();
+        framing.push(Aabb {
+            min: [x0.min(base.min[0]), y0.min(base.min[1]), 0.0],
+            max: [x1.max(base.max[0]), y1.max(base.max[1]), 0.0],
+        });
+        let mut room = self.fit_room();
+        room.bottom = room.bottom.max(FIT_PLATE_CSS * self.dpr);
+        self.pose_of(&framing, room)
     }
 
     /// The project whose plant holds the ground under the CSS point, or the nearest one. Empty

@@ -124,11 +124,32 @@ test("a plant replaced in place mid-fly lets the camera land, on the new plant's
   // A fly aimed at the old plant's framing is aimed again at the new one.
   assert.match(show, /let flying_here = !fit\s*&& self\.tour_move\.as_ref\(\)\.is_some_and\(/);
   assert.match(show, /same_pose\(old, movement\.to\)/);
-  assert.match(show, /if flying_here \{\s*let to = self\.pose_of\(&loaded\.framing\);\s*if let Some\(movement\) = self\.tour_move\.as_mut\(\) \{\s*movement\.to = to;/);
+  assert.match(show, /if flying_here \{\s*let to = self\.fly_pose\(&loaded\);\s*if let Some\(movement\) = self\.tour_move\.as_mut\(\) \{\s*movement\.to = to;/);
   assert.ok(show.indexOf("if flying_here") < show.indexOf("self.plant = Some(loaded);"));
   assert.match(app, /fn same_pose\(a: tour::Pose, b: tour::Pose\) -> bool \{/);
   // fly_to keeps its target pose, so the ease runs on through the replacement.
-  assert.match(app, /let to = self\.pose_of\(&framing\);\s*self\.ease_to\(to, reduced\);/);
+  assert.match(app, /let to = self\.fly_pose\(loaded\);\s*self\.turn = None;\s*self\.ease_to\(to, reduced\);/);
+});
+
+test("a fly frames the plant with its nameplate and the bottom island in view", () => {
+  const app = read("../../src/app.rs");
+  const plates = read("../../www/nameplates.js");
+  const drop = Number(/const DROP_PX = (\d+);/.exec(plates)[1]);
+  const room = Number(/const FIT_PLATE_CSS: f32 = ([\d.]+);/.exec(app)[1]);
+  // The plate's drop, its height and the bottom island all fit in the room under the plant.
+  assert.ok(room >= drop + 26 + 92, `${room} px keeps the plate clear of the bottom island`);
+  const fly = app.slice(app.indexOf("fn fly_pose("), app.indexOf("fn fly_pose(") + 1200);
+  // The ground box the plate hangs under (boundsOf: the layout and the drawn plant) joins the framing.
+  assert.match(fly, /let \[x0, y0, x1, y1\] = loaded\.layout\.bounds;\s*let base = loaded\.base\.bounds;/);
+  assert.match(fly, /min: \[x0\.min\(base\.min\[0\]\), y0\.min\(base\.min\[1\]\), 0\.0\],\s*max: \[x1\.max\(base\.max\[0\]\), y1\.max\(base\.max\[1\]\), 0\.0\],/);
+  assert.match(fly, /room\.bottom = room\.bottom\.max\(FIT_PLATE_CSS \* self\.dpr\);\s*self\.pose_of\(&framing, room\)/);
+  // Every fly, from the + and from a plate, uses this pose; the one-plant fit is untouched.
+  const flyTo = app.slice(app.indexOf("pub fn fly_to("), app.indexOf("fn fly_pose("));
+  assert.match(flyTo, /self\.fly_pose\(loaded\)/);
+  const fit = app.slice(app.indexOf("fn fit_view("), app.indexOf("fn framing_angles("));
+  assert.doesNotMatch(fit, /FIT_PLATE_CSS|fly_pose/);
+  const multi = read("../../www/multi.js");
+  assert.match(multi, /state\.app\.fly_to\(id, reducedMotion\.matches\)/);
 });
 
 test("the kind menu changes a canvas plant in place too", () => {

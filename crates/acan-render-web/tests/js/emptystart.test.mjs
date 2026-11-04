@@ -1,5 +1,5 @@
 // The first run on an origin with no codebase: the sign-in link's fragment, its exchange, the empty
-// world's detection, and the "Add a codebase" hint. Run with:
+// world's detection, and the "Add a codebase with +" hint. Run with:
 //   node --test crates/acan-render-web/tests/js/emptystart.test.mjs
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -17,14 +17,21 @@ import {
   signInCodeOf,
 } from "../../www/emptystart.js";
 
-// A stand-in document: elements by id, with the geometry the hint reads.
+// A stand-in document: elements by id.
 function fakeDoc(elements) {
   const byId = new Map(Object.entries(elements));
   return { getElementById: (id) => byId.get(id) ?? null };
 }
 
-function box(left, top, width, height) {
-  return { left, top, width, height, bottom: top + height, getBoundingClientRect() { return this; } };
+// A stand-in element with a class list.
+function classed() {
+  const names = new Set();
+  return {
+    classList: {
+      toggle: (name, on) => (on ? names.add(name) : names.delete(name), on),
+      contains: (name) => names.has(name),
+    },
+  };
 }
 
 test("the sign-in fragment yields its code, and no other fragment does", () => {
@@ -122,18 +129,35 @@ test("a list with a codebase never shows the hint", () => {
   assert.equal(world.showing, false);
 });
 
-test("painting the hint shows it, points a line at the + and hides it again", () => {
+test("painting the hint shows it with the + lit, and hiding it puts the + out", () => {
   const hint = { hidden: true };
-  const text = box(500, 300, 120, 20);
-  const line = { style: {} };
-  const add = box(12, 12, 28, 28);
-  const doc = fakeDoc({ "empty-hint": hint, "empty-hint-text": text, "empty-hint-line": line, "add-plant": add });
+  const add = classed();
+  const doc = fakeDoc({ "empty-hint": hint, "add-plant": add });
   paintEmptyHint(doc, true);
   assert.equal(hint.hidden, false);
-  assert.match(line.style.transform, /^rotate\(-?[\d.]+deg\)$/);
-  assert.match(line.style.width, /^[\d.]+px$/);
+  assert.equal(add.classList.contains("beckon"), true);
   paintEmptyHint(doc, false);
   assert.equal(hint.hidden, true);
+  assert.equal(add.classList.contains("beckon"), false, "the first plant puts the + out");
+});
+
+test("the hint names the + in the middle of the page, with no line drawn to it", () => {
+  const html = readFileSync(new URL("../../www/index.html", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../../www/emptystart.js", import.meta.url), "utf8");
+  assert.doesNotMatch(html, /empty-hint-line/);
+  assert.doesNotMatch(source, /empty-hint-line|pointAtAddButton|rotate\(/);
+  assert.match(html, /<div id="empty-hint" hidden aria-hidden="true"><p id="empty-hint-text">Add a codebase with <kbd>\+<\/kbd><\/p><\/div>/);
+  assert.match(html, /#empty-hint \{ position: fixed; inset: 0; display: grid; place-items: center;/);
+  // The lit + is an ink fill from the theme, as a pressed key in the shell is, in every theme.
+  const lit = /#shell #add-plant\.beckon \{([^}]*)\}/.exec(html);
+  assert.ok(lit, "the + has a lit rule");
+  assert.match(lit[1], /background: var\(--ink\);/);
+  assert.match(lit[1], /color: var\(--on-ink\);/);
+  assert.match(lit[1], /border-color: var\(--ink\);/);
+  assert.doesNotMatch(lit[1], /#[0-9a-f]{3,8}\b|animation|red|amber/i);
+  // noteAttached paints the hint hidden, which puts the + out.
+  assert.match(source, /export function noteAttached\(\) \{\s*world\.attach\(\);\s*paintEmptyHint\(document, false\);/);
+  assert.match(source, /classList\?\.toggle\("beckon", showing\)/);
 });
 
 test("the page takes the sign-in fragment before any other work, and exchanges it on boot", () => {
