@@ -1258,6 +1258,10 @@ mod tests {
         git(dir.path(), &["init", "-q", "-b", "main"]);
         git(dir.path(), &["config", "user.name", "Tester"]);
         git(dir.path(), &["config", "user.email", "tester@localhost"]);
+        // A commit can start git's background maintenance, which takes a lock under .git/objects
+        // after a test has snapshotted the git directory. Turn it off before the commit.
+        git(dir.path(), &["config", "gc.auto", "0"]);
+        git(dir.path(), &["config", "maintenance.auto", "false"]);
         for (path, text) in files {
             let full = dir.path().join(path);
             fs::create_dir_all(full.parent().expect("a file has a parent")).expect("directory");
