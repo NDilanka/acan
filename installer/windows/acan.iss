@@ -125,7 +125,9 @@ end;
 // Stops every acan and acan-worker process that runs from this install folder, so its files can
 // be replaced or removed. The shortcuts start the server with no window, so Restart Manager may not
 // find one to close. This stop covers installs, updates and uninstalls.
-// Each process is asked to stop first and gets 3 seconds, then any that is left is forced.
+// Stop-Process runs first, then a wait of up to 3 seconds, then -Force for any process left.
+// This is not a clean shutdown: the user's own processes end on the first call, and the detached
+// server gets no Ctrl events to shut down on.
 // After that, the single-server files of acan open (server.lock, server.pid, server.port) are
 // removed when the process named in server.pid is gone, so a server from another folder keeps its
 // files. The logs next to them stay.
