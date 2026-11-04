@@ -123,6 +123,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "toml",
  "tree-sitter",
  "tree-sitter-javascript",
  "tree-sitter-rust",
