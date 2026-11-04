@@ -32,6 +32,15 @@ pub fn index(kind: Kind) -> usize {
         .expect("ALL lists every kind")
 }
 
+/// The wire name of `kind`, such as `switchboard`, as the plant JSON and the page's menu spell it.
+#[must_use]
+pub fn wire_name(kind: Kind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
 /// A kind's plan footprint as `(width, depth)`, from acan-iso's table.
 pub trait PlanFootprint {
     fn footprint(self) -> (f32, f32);
@@ -66,5 +75,23 @@ mod tests {
             assert_eq!(ALL[index(kind)], kind);
         }
         assert_eq!(ALL.len(), Kind::ALL.len());
+    }
+
+    #[test]
+    fn wire_names_are_the_plant_json_names() {
+        assert_eq!(wire_name(Kind::Switchboard), "switchboard");
+        assert_eq!(wire_name(Kind::Assembler), "assembler");
+    }
+
+    #[test]
+    fn the_menu_offers_every_kind_by_its_wire_name() {
+        const MENU: &str = include_str!("../www/kinds.js");
+        for kind in Kind::ALL {
+            let name = wire_name(kind);
+            assert!(
+                MENU.contains(&format!("\"{name}\"")),
+                "{name} is missing from the Set kind menu"
+            );
+        }
     }
 }

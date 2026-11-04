@@ -1698,6 +1698,15 @@ impl App {
             .map_or_else(String::new, |machine| machine.name.clone())
     }
 
+    /// The wire name of machine `name`'s kind, such as `gate`, or an empty string when the plant
+    /// has no such machine. The Set kind menu marks the kind a machine has now.
+    pub fn machine_kind(&self, name: &str) -> String {
+        self.plant
+            .as_ref()
+            .and_then(|loaded| loaded.machines.iter().find(|machine| machine.name == name))
+            .map_or_else(String::new, |machine| crate::kind::wire_name(machine.kind))
+    }
+
     pub fn machine_files(&self, index: u32) -> u32 {
         self.plant
             .as_ref()
@@ -1720,6 +1729,22 @@ impl App {
         self.plant
             .as_ref()
             .map_or(0, |loaded| loaded.machines.len() as u32)
+    }
+
+    /// The footprint of each machine on the plan, in plan order, as JSON `[{"name", "min",
+    /// "size"}]` in world units. Empty before a plant loads. A plant with no log has footprints
+    /// but no view, so the page places its state machines on these.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the footprints cannot be written as JSON.
+    pub fn plant_footprints(&self) -> Result<String, JsError> {
+        let machines = self
+            .plan
+            .as_ref()
+            .map(|plan| plan.machines.clone())
+            .unwrap_or_default();
+        serde_json::to_string(&machines).map_err(js_err)
     }
 }
 

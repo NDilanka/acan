@@ -16,6 +16,7 @@ import {
 } from "./cards.js";
 import { closeCommand, commandOpen, openCommand } from "./commandbar.js";
 import { clickMachine, closeCompose, composeOpen, orderHere } from "./compose.js";
+import { bindKindMenu, openKindMenuAt } from "./kindmenu.js";
 import { keyAction } from "./keys.js";
 import { closeSettings, installSettings, settingsOpen, toggleSettings } from "./settings.js";
 import { droneHover, paintMarks, pinAt, placeLabels } from "./marks.js";
@@ -69,6 +70,8 @@ import { installMulti, nameOf, zoomAround } from "./multi.js";
 import { placePlates } from "./nameplates.js";
 import { placeParked } from "./parked.js";
 import { canvasState } from "./projects.js";
+import { placeStateMaps, readFootprints } from "./statemachine-paint.js";
+import { readStateMachines, setStateMachines } from "./statemachine.js";
 
 const ZOOM_KEY = 1.25;
 
@@ -151,6 +154,8 @@ function drawFrame(now = performance.now()) {
     // The parked names are placed before the plates, which move clear of them.
     placeParked();
     placePlates();
+    // A fading belt is redrawn each frame until it is gone. A replay's light waits for its entries.
+    if (placeStateMaps() && isLive()) requestRender();
     const next = nextFrame({ moving: turning, hidden: document.hidden, gapMs: state.app.frame_gap_ms() });
     if (next === "stop") {
       state.lastFrame = null;
@@ -287,7 +292,20 @@ function droneAt(x, y) {
 // Right drag, or Alt with left drag, orbits and tilts about the ground point under the screen
 // centre.
 function bindCanvas() {
-  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+  // A right press that does not move opens the Set kind menu on the machine under it. A right drag
+  // orbits, so it never opens the menu.
+  let rightPress = null;
+  canvas.addEventListener("pointerdown", (event) => {
+    rightPress = event.button === 2 ? { x: event.clientX, y: event.clientY } : null;
+  });
+  canvas.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    const press = rightPress;
+    rightPress = null;
+    if (press === null || Math.hypot(event.clientX - press.x, event.clientY - press.y) >= CLICK_PX) return;
+    openKindMenuAt(event.clientX, event.clientY);
+  });
+  bindKindMenu();
 
   canvas.addEventListener("pointerdown", (event) => {
     if (state.app === null || (event.button !== 0 && event.button !== 2)) return;
@@ -594,8 +612,10 @@ async function loadPlant() {
   // The token is adopted in every other mode, so the shell's calls can use it, even over a fixture.
   state.token = replay ? null : adoptToken();
   const source = params.get("plant");
+  // `?statemap=fixture` puts the fixture's state machines on the map in place of the plant's own.
+  const fixtureMachines = params.get("statemap") === "fixture" ? await readFixtureMachines() : null;
   if (replay) {
-    await startReplay();
+    await startReplay(fixtureMachines);
   } else if (source === "stress") {
     const machines = Number(params.get("machines") || 2000);
     const started = performance.now();
@@ -605,6 +625,7 @@ async function loadPlant() {
     const response = await fetch("fixtures/demo-plant.json");
     if (!response.ok) throw new Error(`fixture HTTP ${response.status}`);
     state.app.set_plant(await response.text());
+    readFootprints();
   } else {
     if (!state.token) {
       gate.hidden = false;
@@ -618,6 +639,7 @@ async function loadPlant() {
       setLink("failed");
     }
   }
+  if (fixtureMachines !== null) setStateMachines(fixtureMachines);
   repoEl.textContent = canvasState.multi ? nameOf(canvasState.active) : state.app.repo_name();
 }
 
@@ -630,6 +652,14 @@ const PLATE_FIXTURES = {
   fixture: "fixtures/plant-view-v1.json",
   plain: "fixtures/plant-view-v1-plain.json",
 };
+
+// The fixture's state machines, as a plant payload would carry them. Nothing on the page marks them
+// as a fixture.
+async function readFixtureMachines() {
+  const response = await fetch("fixtures/state-machines-v1.json");
+  if (!response.ok) throw new Error(`fixture HTTP ${response.status}`);
+  return readStateMachines(await response.text());
+}
 
 // Shows the receipt plate over a fixture plant view, marked FIXTURE, as if the origin had served it.
 async function loadPlateFixture(name) {

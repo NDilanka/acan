@@ -3,6 +3,8 @@
 // a time on the recorded clock, with a play or pause button and a progress bar. The page makes no API call, opens
 // no socket and sends no command.
 import { requestRender } from "./main.js";
+import { readFootprints } from "./statemachine-paint.js";
+import { noteLogEntry, readStateMachines, resetLight, setStateMachines } from "./statemachine.js";
 import { $, state } from "./state.js";
 import { setLink } from "./stream.js";
 
@@ -31,15 +33,19 @@ async function fetchText(name) {
 }
 
 // Loads the recording and starts it. The manifest comes first, so a page built for another
-// format says so instead of misreading the files.
-export async function startReplay() {
+// format says so instead of misreading the files. `machines`, when given, stands in for the
+// plant's own state machines, so they are in place before the first event folds.
+export async function startReplay(machines = null) {
   const manifest = JSON.parse(await fetchText("manifest.json"));
   if (manifest.format !== 1) {
     throw new Error(`this page reads replay format 1, not ${manifest.format}`);
   }
   const events = JSON.parse(await fetchText("events.json"));
   if (events.length === 0) throw new Error("the recording holds no events");
-  state.app.set_plant(await fetchText("plant.json"));
+  const plant = await fetchText("plant.json");
+  state.app.set_plant(plant);
+  readFootprints();
+  setStateMachines(machines ?? readStateMachines(plant));
   playback.events = events;
   panel.hidden = false;
   setLink("replay");
@@ -51,6 +57,8 @@ export async function startReplay() {
 function restart() {
   clearTimer();
   state.app.load_log(JSON.stringify(playback.events.slice(0, 1)));
+  resetLight();
+  noteLogEntry(playback.events[0]);
   playback.next = 1;
   setPlaying(true);
 }
@@ -96,6 +104,7 @@ function step() {
     paint();
     return;
   }
+  noteLogEntry(event);
   playback.next += 1;
   requestRender();
   const following = playback.events[playback.next];

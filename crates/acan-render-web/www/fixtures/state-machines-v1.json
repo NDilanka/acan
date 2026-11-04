@@ -1,0 +1,42 @@
+{
+  "state_machines": [
+    {
+      "id": "src/store.ts#OrderState",
+      "name": "OrderState",
+      "file": "src/store.ts",
+      "line": 3,
+      "module": "store",
+      "confidence": "high",
+      "states": [
+        { "name": "created", "line": 5 },
+        { "name": "paid", "line": 6 },
+        { "name": "shipped", "line": 7 },
+        { "name": "closed", "line": 8 }
+      ],
+      "transitions": [
+        { "from": "created", "to": "paid", "file": "src/store.ts", "line": 20, "end_line": 22, "via": "pay" },
+        { "from": "paid", "to": "shipped", "file": "src/store.ts", "line": 31, "end_line": 31, "via": "ship" },
+        { "from": "shipped", "to": "closed", "file": "src/store.ts", "line": 40, "end_line": 42, "via": "close" },
+        { "from": "*", "to": "closed", "file": "src/store.ts", "line": 48, "end_line": 49, "via": "cancel" }
+      ]
+    },
+    {
+      "id": "src/ratelimit.ts#WindowPhase",
+      "name": "WindowPhase",
+      "file": "src/ratelimit.ts",
+      "line": 4,
+      "module": "ratelimit",
+      "confidence": "low",
+      "states": [
+        { "name": "open", "line": 6 },
+        { "name": "tripped", "line": 7 },
+        { "name": "cooling", "line": 8 }
+      ],
+      "transitions": [
+        { "from": "open", "to": "tripped", "file": "src/ratelimit.ts", "line": 14, "end_line": 15, "via": "trip" },
+        { "from": "tripped", "to": "cooling", "file": "src/ratelimit.ts", "line": 22, "end_line": 22, "via": "cool" },
+        { "from": "cooling", "to": "open", "file": "src/ratelimit.ts", "line": 27, "end_line": 29, "via": "reset" }
+      ]
+    }
+  ]
+}
