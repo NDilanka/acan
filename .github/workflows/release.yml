@@ -103,6 +103,8 @@ jobs:
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      # The binaries report this version, so it is set for every cargo build in this job.
+      ACAN_VERSION: ${{ needs.version.outputs.version }}
       DEMO_SHA: f91962156841332d5753d869554839f7c4cdea79
     steps:
       - uses: actions/checkout@v4
@@ -116,6 +118,16 @@ jobs:
           path: dist/web
       - name: Build acan
         run: cargo build -p acan-server --bin acan --release --locked
+      - name: Check that acan reports the release version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = if ($IsWindows) { './target/release/acan.exe' } else { './target/release/acan' }
+          $reported = & $bin --version
+          if ($LASTEXITCODE -ne 0) { throw "$bin --version failed" }
+          $reported = ($reported | Out-String).Trim()
+          if ($reported -ne "acan $env:VERSION") { throw "acan reports '$reported', expected 'acan $env:VERSION'" }
+          Write-Host "acan reports: $reported"
       - name: Build acan-worker
         run: cargo build -p acan-agent --bin acan-worker --release --locked
       # The demo pin: DEMO_SHA above and the ref below must name the same commit.
@@ -144,6 +156,8 @@ jobs:
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      # The binaries report this version, so it is set for every cargo build in this job.
+      ACAN_VERSION: ${{ needs.version.outputs.version }}
       DEMO_SHA: f91962156841332d5753d869554839f7c4cdea79
     steps:
       - uses: actions/checkout@v4
@@ -157,6 +171,16 @@ jobs:
           path: dist/web
       - name: Build acan
         run: cargo build -p acan-server --bin acan --release --locked
+      - name: Check that acan reports the release version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = if ($IsWindows) { './target/release/acan.exe' } else { './target/release/acan' }
+          $reported = & $bin --version
+          if ($LASTEXITCODE -ne 0) { throw "$bin --version failed" }
+          $reported = ($reported | Out-String).Trim()
+          if ($reported -ne "acan $env:VERSION") { throw "acan reports '$reported', expected 'acan $env:VERSION'" }
+          Write-Host "acan reports: $reported"
       - name: Build acan-worker
         run: cargo build -p acan-agent --bin acan-worker --release --locked
       # The demo pin: DEMO_SHA above and the ref below must name the same commit.
