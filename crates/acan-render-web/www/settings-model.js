@@ -220,7 +220,7 @@ export function changedPaths(body, base = "") {
 // wins, then the longest prefix (projects.workers covers projects.workers.acan). The older answer
 // keyed whole sections, which the same lookup reads as prefixes. Unknown gives undefined.
 export function appliedFor(applied, path) {
-  if (!applied || typeof applied !== "object") return undefined;
+  if (!applied || typeof applied !== "object" || typeof path !== "string") return undefined;
   if (typeof applied[path] === "string") return applied[path];
   for (let at = path.lastIndexOf("."); at > 0; at = path.lastIndexOf(".", at - 1)) {
     const prefix = path.slice(0, at);
@@ -238,12 +238,52 @@ export function appliedNote(applied, paths = Object.keys(applied ?? {})) {
   return "";
 }
 
+// The label a field shows under it for how its change takes effect, as the server's `applied` names
+// each path. An unknown label gets no text.
+const EFFECT_TEXT = {
+  live: "Live",
+  client: "Live in this browser",
+  restart: "After restart",
+  stored: "Saved; not used yet",
+};
+export function effectText(label) {
+  return EFFECT_TEXT[label] ?? "";
+}
+
+// The label most of a section's paths share, so the section can show it once. A tie goes to the
+// label the server lists first. Undefined when the section has no labelled paths.
+export function sectionEffect(applied, section) {
+  const counts = new Map();
+  for (const [path, label] of Object.entries(applied ?? {})) {
+    if (path.split(".")[0] !== section || !effectText(label)) continue;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  let best;
+  let most = 0;
+  for (const [label, count] of counts) {
+    if (count > most) {
+      best = label;
+      most = count;
+    }
+  }
+  return best;
+}
+
 // The line under the statemap toggle: the most a scan can spend, from the statemap call limit. No
 // limit means no figure, so no line.
 export function statemapHint(budgets) {
   const calls = getAt(budgets, "call_limits.statemap");
   if (!Number.isFinite(calls)) return "";
   return `Uses up to ${calls} calls × 3k tokens per scan`;
+}
+
+// The projects the next start adds and removes, one line each. Adds are folder paths; removes are
+// project ids. The owner's GET carries `project_changes`; a member's has none, so nothing shows.
+export function pendingProjectLines(changes) {
+  return [
+    ...(changes?.add ?? []).map((path) => `+ ${path}`),
+    ...(changes?.remove ?? []).map((id) => `− ${id}`),
+  ];
 }
 
 // The server's 409 names its conflict in `what`. Each code gets a short sentence; an unknown code
@@ -283,11 +323,12 @@ const REFUSED = {
   403: "Only the owner can do this. Nothing changed.",
 };
 
-// A data export's answer. A 409 with no recorded run is not a failure: receipts still export.
+// A data export's answer. A 409 with no recorded run is not a failure, but it refuses replays and All,
+// so the note points to Receipts, which still export.
 export function exportNote(status, body) {
   if (status === 200) return { bad: false, text: "Export downloaded." };
   if (status === 409 && body?.what === "no_recorded_run") {
-    return { bad: false, text: "No recorded run yet. Receipts still export." };
+    return { bad: false, text: "No recorded run yet. Choose Receipts to export." };
   }
   if (status === 404) return { bad: false, text: "Not on this server yet." };
   return { bad: true, text: REFUSED[status] ?? "Not exported. Nothing changed." };
