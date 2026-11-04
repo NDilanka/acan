@@ -1,10 +1,15 @@
 //! The machine models. Each kind has one file here. Every model is pure and deterministic, centred on the origin
 //! with its base on z = 0.
 
+mod antenna;
 mod assembler;
+mod console;
+mod conveyor;
 // `crate` is a reserved word, so the crate's file cannot be named `crate.rs`.
 mod crate_box;
+mod gantry;
 mod gate;
+mod horn;
 mod intake;
 mod kiosk;
 mod mould;
@@ -119,10 +124,11 @@ pub fn model(kind: Kind) -> Model {
         Kind::Mould => mould::build(),
         Kind::Switchbox => switchbox::build(),
         Kind::Toolrack => toolrack::build(),
-        // Kinds without a figure yet draw as the assembler.
-        Kind::Conveyor | Kind::Horn | Kind::Gantry | Kind::Console | Kind::Antenna => {
-            assembler::build()
-        }
+        Kind::Conveyor => conveyor::build(),
+        Kind::Horn => horn::build(),
+        Kind::Gantry => gantry::build(),
+        Kind::Console => console::build(),
+        Kind::Antenna => antenna::build(),
     }
 }
 
@@ -142,10 +148,11 @@ pub fn footprint(kind: Kind) -> Footprint {
         Kind::Mould => mould::FOOTPRINT,
         Kind::Switchbox => switchbox::FOOTPRINT,
         Kind::Toolrack => toolrack::FOOTPRINT,
-        // Until their figures land, the new kinds take the assembler's footprint.
-        Kind::Conveyor | Kind::Horn | Kind::Gantry | Kind::Console | Kind::Antenna => {
-            assembler::FOOTPRINT
-        }
+        Kind::Conveyor => conveyor::FOOTPRINT,
+        Kind::Horn => horn::FOOTPRINT,
+        Kind::Gantry => gantry::FOOTPRINT,
+        Kind::Console => console::FOOTPRINT,
+        Kind::Antenna => antenna::FOOTPRINT,
     }
 }
 
