@@ -10,6 +10,7 @@ const ENDED = new Set(["done", "failed"]);
 // The status line for a first map, or null when there is none to show. A failed map keeps its writes off.
 export function mappingText(status) {
   if (status.stage === "failed") return "Mapping failed, so writes are off.";
+  if (status.stage === "waiting") return "Waiting to map the codebase…";
   const { modules_done: done = 0, modules_total: total = 0 } = status;
   return total > 0 ? `Mapping the codebase… ${done}/${total} modules` : "Mapping the codebase…";
 }

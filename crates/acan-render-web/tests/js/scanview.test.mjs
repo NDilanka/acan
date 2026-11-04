@@ -44,6 +44,20 @@ test("the status line counts the modules and says when there are none yet", () =
   assert.equal(mappingText({ stage: "failed", modules_done: 1, modules_total: 3 }), "Mapping failed, so writes are off.");
 });
 
+test("a waiting codebase says it waits, and its map starts when the page connects", () => {
+  assert.equal(mappingText({ stage: "waiting", modules_done: 0, modules_total: 0 }), "Waiting to map the codebase…");
+  const { app, shown, view } = fresh();
+  view.applyPlant(plant("waiting"));
+  assert.deepEqual(app.calls, [["set_scan", '{"stage":"waiting","filled":[]}']]);
+  assert.equal(shown.at(-1).stage, "waiting");
+  assert.equal(historyBlock("send", false), "Mapping the codebase first.");
+
+  assert.equal(view.fold(scanFrameOf(status("skeleton"))), null);
+  assert.equal(shown.at(-1).stage, "skeleton");
+  assert.equal(view.fold(scanFrameOf(status("done"))), "reload", "the scan that started and ended is read again");
+  assert.equal(historyBlock("send", false), null);
+});
+
 test("a write waits for the first map, and a failed map says why", () => {
   assert.equal(writeReason({ stage: "states" }), "Mapping the codebase first.");
   assert.equal(writeReason({ stage: "failed" }), "The codebase did not map, so writes are off.");

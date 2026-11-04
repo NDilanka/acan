@@ -29,6 +29,9 @@ pub const GHOST_OFFSET: f32 = 3.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Stage {
+    /// The codebase is known, but its scan waits for the first page. The plant has no machines
+    /// yet, so the map is blank until the scan starts.
+    Waiting,
     /// The machines are known, and their modules are not all filled yet.
     Skeleton,
     /// Modules are filling in.
@@ -362,8 +365,28 @@ mod tests {
         assert_eq!(summary.stage, Stage::Skeleton);
         assert!(summary.filled.is_empty());
 
+        let waiting = parse_status(r#"{"type":"scan_status","stage":"waiting"}"#)
+            .expect("a waiting scan reads");
+        assert_eq!(waiting.stage, Stage::Waiting);
+
         assert!(parse_status(r#"{"stage":"reticulating"}"#).is_err());
         assert!(Stage::Failed.ended() && Stage::Done.ended() && !Stage::States.ended());
+        assert!(!Stage::Waiting.ended(), "a waiting scan has not ended");
+    }
+
+    #[test]
+    fn a_waiting_codebase_draws_nothing_until_its_scan_starts() {
+        let mut fill = ScanFill::default();
+        fill.load(0);
+        fill.apply(Stage::Waiting, &[]);
+        assert!(
+            fill.ghosts(&[], 1.0).is_empty(),
+            "a blank map has no outlines"
+        );
+
+        fill.load(1);
+        fill.apply(Stage::Skeleton, &[]);
+        assert!(fill.hidden(0), "the scan's first machine is an outline");
     }
 
     impl ScanFill {
