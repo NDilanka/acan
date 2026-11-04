@@ -428,11 +428,16 @@ mod tests {
 
     #[test]
     fn the_stress_footprint_stays_within_two_and_a_half_to_one() {
+        // The footprint is the machines' placement alone, so the belts are not routed here.
         for count in [100_usize, 500, 2000] {
             let plant = stress(count);
             let (kinds, edges, districts) = plant.layout_input();
-            let laid = crate::layout::layout(&kinds, &edges, &districts);
-            let [x0, y0, x1, y1] = laid.bounds;
+            let tops = crate::place::place(&kinds, &edges, &districts);
+            let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for (kind, [x, y]) in kinds.iter().zip(tops) {
+                let (w, d) = crate::kind::PlanFootprint::footprint(*kind);
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + w), y1.max(y + d));
+            }
             let (w, d) = (x1 - x0, y1 - y0);
             let aspect = w.max(d) / w.min(d);
             assert!(

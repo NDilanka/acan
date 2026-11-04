@@ -2,12 +2,15 @@
 //!
 //! [`route`] finds, for each request, a path from the plinth of one machine to the plinth of
 //! another. The path keeps [`CLEARANCE`] plan units from every machine it does not start or end
-//! at, runs only on axis-aligned segments, and stays inside the frame it is given.
+//! at, stays out of every keep-out area (where machine names hang), runs only on axis-aligned
+//! segments, and stays inside the frame it is given.
 //!
 //! The search runs over a lattice of the lines that matter: every footprint edge pushed out by
 //! the clearance, the frame, and a midline in each gap wider than two belt steps (footprints no
 //! wider than that add their centre line instead). A lattice node strictly inside a footprint
-//! grown by the clearance is blocked. The grown edges are lines and at least one line runs
+//! grown by the clearance, or strictly inside a keep-out area, is blocked. Lines are never more
+//! than two belt steps apart, so a keep-out area wider and deeper than that has a line strictly
+//! inside it each way and no step jumps across it. The grown edges are lines and at least one line runs
 //! strictly between them, so a step between two adjacent free nodes is free along its whole
 //! length.
 
@@ -42,6 +45,9 @@ const SCALE: f32 = 64.0;
 const TURN: u64 = 24 * 64;
 const SHORT_RUN: u64 = 40 * 64;
 const CROSSING: u64 = 60 * 64;
+/// How far past the box round its two machines a route is first searched for, in plan units:
+/// a street and a bit.
+const REACH: f32 = 120.0;
 /// Factor on a lattice edge that a belt from another machine already uses.
 const OVERLAP: u64 = 400;
 /// Divisor on a lattice edge that a belt from the same machine already uses, so its belts
@@ -59,7 +65,9 @@ const HORIZONTAL: usize = 0;
 const VERTICAL: usize = 1;
 
 /// Routes each request in order over the plan. `boxes` are machine footprints as
-/// `[min x, min y, max x, max y]` in plan units. `frame` bounds every route, in the same units.
+/// `[min x, min y, max x, max y]` in plan units. No route runs strictly inside a `keep_out`
+/// rectangle, given the same way; each is wider and deeper than two belt steps. `frame` bounds
+/// every route, in the same units.
 ///
 /// Returns one centre line per request, in request order: at least two points, axis-aligned
 /// segments, starting on an edge of `boxes[from]` and ending on an edge of `boxes[to]`. `None`
@@ -67,6 +75,7 @@ const VERTICAL: usize = 1;
 /// same machine share a trunk, and belts from different machines keep off each other's track.
 pub fn route(
     boxes: &[[f32; 4]],
+    keep_out: &[[f32; 4]],
     frame: [f32; 4],
     requests: &[Request],
 ) -> Vec<Option<Vec<[f32; 2]>>> {
@@ -74,7 +83,8 @@ pub fn route(
     if !usable {
         return vec![None; requests.len()];
     }
-    let lattice = Lattice::new(boxes, frame, &[]);
+    let plan = Plan { boxes, keep_out };
+    let lattice = Lattice::new(plan, frame, &[]);
     let Some(mut search) = Search::new(&lattice) else {
         return vec![None; requests.len()];
     };
@@ -88,16 +98,26 @@ pub fn route(
             if !valid {
                 return None;
             }
-            let query = Query {
-                boxes,
+            let near = Query {
+                plan,
                 lattice: &lattice,
                 occupancy: &occupancy,
                 request,
                 mode: Mode::Clear,
+                reach: REACH,
             };
+            // Most routes stay near the box round their two machines. Searching only there
+            // saves exploring the whole plan for a route that pays to cross other belts; a
+            // route that needs to go further still finds its way on the second search.
             let points = search
-                .run(&query)
-                .or_else(|| tight(boxes, frame, request))?;
+                .run(&near)
+                .or_else(|| {
+                    search.run(&Query {
+                        reach: f32::INFINITY,
+                        ..near
+                    })
+                })
+                .or_else(|| tight(plan, frame, request))?;
             occupancy.mark(&lattice, &points, request.from);
             Some(points)
         })
@@ -107,18 +127,26 @@ pub fn route(
 /// Routes one request in [`Mode::Tight`], on a lattice that also has the edges of its end
 /// footprints. It is the rare fallback, so it builds its own buffers and does not see the
 /// routes placed before it.
-fn tight(boxes: &[[f32; 4]], frame: [f32; 4], request: Request) -> Option<Vec<[f32; 2]>> {
-    let ends = [boxes[request.from], boxes[request.to]];
-    let lattice = Lattice::new(boxes, frame, &ends);
+fn tight(plan: Plan, frame: [f32; 4], request: Request) -> Option<Vec<[f32; 2]>> {
+    let ends = [plan.boxes[request.from], plan.boxes[request.to]];
+    let lattice = Lattice::new(plan, frame, &ends);
     let occupancy = Occupancy::new(&lattice);
     let query = Query {
-        boxes,
+        plan,
         lattice: &lattice,
         occupancy: &occupancy,
         request,
         mode: Mode::Tight,
+        reach: f32::INFINITY,
     };
     Search::new(&lattice)?.run(&query)
+}
+
+/// What routes go round: the machine footprints and the keep-out areas.
+#[derive(Clone, Copy)]
+struct Plan<'a> {
+    boxes: &'a [[f32; 4]],
+    keep_out: &'a [[f32; 4]],
 }
 
 /// How a request treats the machines it starts and ends at.
@@ -144,16 +172,16 @@ struct Lattice {
 }
 
 impl Lattice {
-    /// The lattice over `boxes` inside `frame`. The edges of the footprints in `ends` become
+    /// The lattice over `plan` inside `frame`. The edges of the footprints in `ends` become
     /// lines too, for routes that start and end right on them.
-    fn new(boxes: &[[f32; 4]], frame: [f32; 4], ends: &[[f32; 4]]) -> Self {
-        let xs = lines(boxes, ends, frame[0], frame[2], 0);
-        let ys = lines(boxes, ends, frame[1], frame[3], 1);
+    fn new(plan: Plan, frame: [f32; 4], ends: &[[f32; 4]]) -> Self {
+        let xs = lines(plan, ends, frame[0], frame[2], 0);
+        let ys = lines(plan, ends, frame[1], frame[3], 1);
         let (px, py) = (prefix(&xs), prefix(&ys));
         let nx = xs.len();
         let mut cover = vec![0u16; nx * ys.len()];
-        for b in boxes {
-            let grown = inflate(*b, CLEARANCE);
+        let grown = plan.boxes.iter().map(|b| inflate(*b, CLEARANCE));
+        for grown in grown.chain(plan.keep_out.iter().copied()) {
             let (i0, i1) = inner(&xs, grown[0], grown[2]);
             let (j0, j1) = inner(&ys, grown[1], grown[3]);
             for j in j0..j1 {
@@ -245,7 +273,8 @@ struct Move {
 /// The lattice lines along one axis, sorted, merged and clipped to `[lo, hi]`. Each footprint
 /// gives its grown edges and its centre line; the centre keeps a step from spanning the whole
 /// grown footprint between two free nodes.
-fn lines(boxes: &[[f32; 4]], ends: &[[f32; 4]], lo: f32, hi: f32, axis: usize) -> Vec<f32> {
+fn lines(plan: Plan, ends: &[[f32; 4]], lo: f32, hi: f32, axis: usize) -> Vec<f32> {
+    let boxes = plan.boxes;
     let mut raw = Vec::with_capacity(boxes.len() * 3 + ends.len() * 2 + 2);
     raw.extend([lo, hi]);
     let mut keep = |v: f32| {
@@ -460,11 +489,13 @@ struct Port {
 
 /// One request in one mode, with everything the search reads.
 struct Query<'a> {
-    boxes: &'a [[f32; 4]],
+    plan: Plan<'a>,
     lattice: &'a Lattice,
     occupancy: &'a Occupancy,
     request: Request,
     mode: Mode,
+    /// How far past the box round both end machines the search may go, in plan units.
+    reach: f32,
 }
 
 impl Query<'_> {
@@ -477,7 +508,8 @@ impl Query<'_> {
             Mode::Clear => cover > 0,
             Mode::Tight => {
                 let p = self.lattice.point(node);
-                let ends = [self.boxes[self.request.from], self.boxes[self.request.to]];
+                let boxes = self.plan.boxes;
+                let ends = [boxes[self.request.from], boxes[self.request.to]];
                 let own = ends
                     .iter()
                     .filter(|b| strictly_inside(inflate(**b, CLEARANCE), p))
@@ -488,10 +520,12 @@ impl Query<'_> {
     }
 
     fn stub_clear(&self, own: usize, a: [f32; 2], b: [f32; 2]) -> bool {
-        self.boxes
+        let plan = self.plan;
+        plan.boxes
             .iter()
             .enumerate()
             .all(|(m, r)| m == own || !segment_hits(inflate(*r, CLEARANCE), a, b))
+            && plan.keep_out.iter().all(|r| !segment_hits(*r, a, b))
     }
 
     /// The ports of machine `own`; `leaving` gives the travel direction out of it, otherwise
@@ -499,7 +533,7 @@ impl Query<'_> {
     fn ports(&self, own: usize, leaving: bool) -> Vec<Port> {
         let lattice = self.lattice;
         let nx = lattice.xs.len();
-        let b = self.boxes[own];
+        let b = self.plan.boxes[own];
         let off = match self.mode {
             Mode::Clear => CLEARANCE,
             Mode::Tight => 0.0,
@@ -643,7 +677,16 @@ impl Search {
         let lattice = query.lattice;
         let occupancy = query.occupancy;
         let from = query.request.from;
-        let target = lattice.span(inflate(query.boxes[query.request.to], CLEARANCE));
+        let target = lattice.span(inflate(query.plan.boxes[query.request.to], CLEARANCE));
+        let (a, b) = (query.plan.boxes[from], query.plan.boxes[query.request.to]);
+        let around_both = [
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[2].max(b[2]),
+            a[3].max(b[3]),
+        ];
+        // An infinite reach would make an empty span, so it is capped well past any frame.
+        let window = lattice.span(inflate(around_both, query.reach.min(1e9)));
         let nx = lattice.xs.len();
         for goal in &goals {
             self.goal[goal.node] = round;
@@ -689,7 +732,9 @@ impl Search {
                 let Some(m) = lattice.go(i, j, dir) else {
                     continue;
                 };
-                if back == Some(m.node) || query.blocked(m.node) {
+                let outside =
+                    m.i < window[0] || m.i > window[2] || m.j < window[1] || m.j > window[3];
+                if outside || back == Some(m.node) || query.blocked(m.node) {
                     continue;
                 }
                 let next = axis(dir);
@@ -878,7 +923,7 @@ mod tests {
 
     /// Routes and checks, and requires every request to get a route.
     fn routed(boxes: &[[f32; 4]], frame: [f32; 4], requests: &[Request]) -> Vec<Vec<[f32; 2]>> {
-        let routes = route(boxes, frame, requests);
+        let routes = route(boxes, &[], frame, requests);
         assert_eq!(
             check(boxes, frame, requests, &routes),
             0,
@@ -1074,7 +1119,7 @@ mod tests {
     fn route_rejects_bad_requests() {
         let boxes = [[0.0, 0.0, 40.0, 40.0], [100.0, 0.0, 140.0, 40.0]];
         let frame = frame_around(&boxes, 24.0);
-        let routes = route(&boxes, frame, &requests(&[(0, 0), (0, 5), (0, 1)]));
+        let routes = route(&boxes, &[], frame, &requests(&[(0, 0), (0, 5), (0, 1)]));
         assert!(routes[0].is_none() && routes[1].is_none());
         assert!(routes[2].is_some());
     }
@@ -1103,7 +1148,7 @@ mod tests {
         ];
         let frame = [-24.0, -30.0, 264.0, 70.0];
         let reqs = requests(&[(0, 2), (0, 1)]);
-        let routes = route(&boxes, frame, &reqs);
+        let routes = route(&boxes, &[], frame, &reqs);
         assert_eq!(check(&boxes, frame, &reqs, &routes), 1);
         assert!(routes[0].is_none());
     }
@@ -1113,7 +1158,7 @@ mod tests {
         let (boxes, frame, reqs) = serpentine();
         assert_eq!(boxes.len(), 46);
         let start = Instant::now();
-        let routes = route(&boxes, frame, &reqs);
+        let routes = route(&boxes, &[], frame, &reqs);
         let elapsed = start.elapsed();
         let missing = check(&boxes, frame, &reqs, &routes);
         let shared = shared(&reqs, &routes);
@@ -1129,8 +1174,27 @@ mod tests {
     }
 
     #[test]
+    fn route_keeps_out_of_keep_out_areas() {
+        // The straight belt between the two machines would cross the band; it goes round.
+        let boxes = [[0.0, 0.0, 40.0, 40.0], [200.0, 0.0, 240.0, 40.0]];
+        let band = [80.0, -40.0, 160.0, 80.0];
+        let frame = [-24.0, -120.0, 264.0, 160.0];
+        let reqs = requests(&[(0, 1), (1, 0)]);
+        let routes = route(&boxes, &[band], frame, &reqs);
+        assert_eq!(check(&boxes, frame, &reqs, &routes), 0);
+        for path in routes.iter().flatten() {
+            for s in path.windows(2) {
+                assert!(!segment_hits(band, s[0], s[1]), "{path:?} crosses the band");
+            }
+        }
+    }
+
+    #[test]
     fn route_is_deterministic() {
         let (boxes, frame, reqs) = serpentine();
-        assert_eq!(route(&boxes, frame, &reqs), route(&boxes, frame, &reqs));
+        assert_eq!(
+            route(&boxes, &[], frame, &reqs),
+            route(&boxes, &[], frame, &reqs)
+        );
     }
 }

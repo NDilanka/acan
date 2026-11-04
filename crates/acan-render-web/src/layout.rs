@@ -9,9 +9,13 @@ use crate::route::{self, Request};
 
 /// Positions snap to this grid, in plan units.
 pub const GRID: f32 = 8.0;
+/// How far a machine's label band reaches past its plate, in plan units (see [`label_band`]).
+/// About where the bottom of the label falls at the zoom that fits a plant of a few dozen
+/// machines.
+pub const LABEL_BAND: f32 = 32.0;
 /// Room beyond the outermost machines that belts may use, in plan units. Belts can run round the
-/// outside of the plant through it.
-const MARGIN: f32 = 24.0;
+/// outside of the plant through it, past the label bands of the outermost machines.
+const MARGIN: f32 = LABEL_BAND + 16.0;
 
 /// A directed import between two machines, by index. `from` imports `to`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,7 +131,11 @@ pub fn layout(kinds: &[Kind], edges: &[Edge], districts: &[u32]) -> Layout {
         })
         .collect();
     let mut paths: Vec<Option<Vec<[f32; 2]>>> = vec![None; edges.len()];
-    for (&k, path) in order.iter().zip(route::route(&boxes, frame, &requests)) {
+    let bands: Vec<[f32; 4]> = boxes.iter().map(|&b| label_band(b)).collect();
+    for (&k, path) in order
+        .iter()
+        .zip(route::route(&boxes, &bands, frame, &requests))
+    {
         paths[k] = path;
     }
 
@@ -148,6 +156,21 @@ pub fn layout(kinds: &[Kind], edges: &[Edge], districts: &[u32]) -> Layout {
         belts,
         bounds,
     }
+}
+
+/// The plan rectangle a machine's name hangs over, which belts keep out of: the quarter of the
+/// plate nearest the viewer and the ground in front of it, `LABEL_BAND` deep. The default camera
+/// looks from 45 degrees round, so the plate's front is its corner at the greatest x and y, and
+/// the label hangs below that corner on screen, centred on it, about as wide as the plate (see
+/// `labels`). Belts still leave the plate from the far half of those two sides.
+pub fn label_band(footprint: [f32; 4]) -> [f32; 4] {
+    let [x0, y0, x1, y1] = footprint;
+    [
+        (x0 + x1) / 2.0,
+        (y0 + y1) / 2.0,
+        x1 + LABEL_BAND,
+        y1 + LABEL_BAND,
+    ]
 }
 
 /// `[min x, min y, max x, max y]` over the footprints, or zeros for none.
@@ -287,12 +310,14 @@ mod tests {
         (kinds, edges)
     }
 
-    fn inside(footprint: [f32; 4], p: [f32; 2]) -> bool {
+    /// Whether the axis-aligned segment `a`-`b` runs inside the rectangle `r` anywhere, by
+    /// more than half a plan unit.
+    fn crosses(r: [f32; 4], a: [f32; 2], b: [f32; 2]) -> bool {
         let inset = 0.5;
-        p[0] > footprint[0] + inset
-            && p[0] < footprint[2] - inset
-            && p[1] > footprint[1] + inset
-            && p[1] < footprint[3] - inset
+        a[0].max(b[0]) > r[0] + inset
+            && a[0].min(b[0]) < r[2] - inset
+            && a[1].max(b[1]) > r[1] + inset
+            && a[1].min(b[1]) < r[3] - inset
     }
 
     fn on_boundary(footprint: [f32; 4], p: [f32; 2]) -> bool {
@@ -341,18 +366,19 @@ mod tests {
                     belt.from,
                     belt.to
                 );
-                let steps = ((b[0] - a[0]).abs() + (b[1] - a[1]).abs()).ceil() as usize;
-                for s in 0..=steps {
-                    let t = s as f32 / steps.max(1) as f32;
-                    let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
-                    for (m, footprint) in boxes.iter().enumerate() {
-                        assert!(
-                            !inside(*footprint, p),
-                            "belt {}->{} runs under machine {m} at {p:?}",
-                            belt.from,
-                            belt.to
-                        );
-                    }
+                for (m, footprint) in boxes.iter().enumerate() {
+                    assert!(
+                        !crosses(*footprint, a, b),
+                        "belt {}->{} runs under machine {m} from {a:?} to {b:?}",
+                        belt.from,
+                        belt.to
+                    );
+                    assert!(
+                        !crosses(label_band(*footprint), a, b),
+                        "belt {}->{} runs through the label of machine {m} from {a:?} to {b:?}",
+                        belt.from,
+                        belt.to
+                    );
                 }
             }
             let first = path[0];
@@ -497,7 +523,11 @@ mod tests {
         let (kinds, edges, districts) = workspace().layout_input();
         let laid = layout(&kinds, &edges, &districts);
         let aspect = aspect(laid.bounds);
-        assert!(aspect < 2.0, "plant spans {:?}, aspect {aspect}", laid.bounds);
+        assert!(
+            aspect < 2.0,
+            "plant spans {:?}, aspect {aspect}",
+            laid.bounds
+        );
         let boxes: Vec<[f32; 4]> = laid.machines.iter().map(Placed::footprint).collect();
         for (i, own) in districts.iter().enumerate() {
             let nearest = |mate: bool| {
@@ -511,6 +541,34 @@ mod tests {
                     mate < other,
                     "machine {i} is {mate} from its district and {other} from another"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn belts_keep_clear_of_every_label_band() {
+        let demo = from_scan_json(FIXTURE).expect("fixture parses");
+        for plant in [demo, workspace(), stress(200)] {
+            let (kinds, edges, districts) = plant.layout_input();
+            let laid = layout(&kinds, &edges, &districts);
+            assert_eq!(laid.belts.len(), edges.len(), "every import is routed");
+            let bands: Vec<[f32; 4]> = laid
+                .machines
+                .iter()
+                .map(|m| label_band(m.footprint()))
+                .collect();
+            for belt in &laid.belts {
+                for s in belt.path.windows(2) {
+                    for (m, band) in bands.iter().enumerate() {
+                        assert!(
+                            !crosses(*band, s[0], s[1]),
+                            "belt {}->{} runs through the label of machine {m}: {:?}",
+                            belt.from,
+                            belt.to,
+                            belt.path
+                        );
+                    }
+                }
             }
         }
     }

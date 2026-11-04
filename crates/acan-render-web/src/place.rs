@@ -1,22 +1,34 @@
 //! Plan placement. Machines grow out of the centre of the plan as districts, on the floor grid.
 //!
-//! A district is one group of machines, such as one crate (see `Plant::districts`). The most
-//! connected district is placed first, at the centre. Each later district is the one most
-//! connected to the districts already placed. It starts beside the machines it imports or is
-//! imported by, or beside the middle of the town when it has none, and grows there as one
-//! block: each of its machines takes the free slot nearest both the machines it is tied to and
-//! its district's machines placed before it. Imports stay close, a district forms a block, and
-//! the plant spreads out round its core like a town. Machines of one district keep a belt's
-//! width apart, and machines of two districts keep a street apart. The result depends only on
-//! the input, so the same plant always places the same way.
+//! A district is one group of machines, such as one crate (see `Plant::districts`). Each district
+//! is laid out first as a block on its own: its machines in rows and columns about a machine
+//! plate apart, each machine in the slot nearest the district mates it imports or is imported by.
+//! Then the blocks go onto the floor one at a time. The most connected district goes first, at
+//! the centre. Each later one is the one most connected to the districts already placed, and
+//! takes the free spot nearest the machines it is tied to, drawn a little toward the centre; a
+//! district with no ties takes the free spot nearest the centre. So the town fills a round plan
+//! ring by ring, with the most connected districts in its middle and the loose ones round the
+//! rim. Blocks of two districts keep a street apart.
+//!
+//! The plan is kept round on purpose. The default camera looks at it from 45 degrees round and
+//! 30 degrees up, which already shows a round plan as a blob about twice as wide as it is tall on
+//! screen. A plan stretched along one axis shows as a diagonal band instead. The result depends
+//! only on the input, so the same plant always places the same way.
 
 use crate::kind::{Kind, PlanFootprint};
 use crate::layout::{Edge, GRID};
 
-/// Clear cells between two machines of one district: a belt runs through them.
-const DISTRICT_CELLS: i32 = 3;
+/// Clear cells between two machines of one district: about one machine plate, so a belt has room
+/// to turn between them.
+const DISTRICT_CELLS: i32 = 9;
 /// Clear cells between machines of two districts: the street.
-const STREET_CELLS: i32 = 6;
+const STREET_CELLS: i32 = 13;
+/// How much wider than deep a district's block of machines is laid out. Near square, so a big
+/// district stays a block rather than a row.
+const BLOCK_ASPECT: f32 = 1.2;
+/// How hard the centre of the plan pulls a district, against the pull of the machines it is tied
+/// to. Without it a chain of districts each placed beside the last walks off to one side.
+const PULL: f32 = 0.5;
 
 /// The top-left corner of each machine on the floor grid, in plan units, in machine order. Every
 /// corner is on the grid, and no two machines are closer than their gap requires. `districts`
@@ -58,13 +70,11 @@ pub fn place(kinds: &[Kind], edges: &[Edge], districts: &[u32]) -> Vec<[f32; 2]>
     }
     let order = district_order(&members, &district, &adj);
 
-    let mut placer = Placer::new(sizes, district, count);
+    let mut placer = Placer::new(sizes, district);
     for d in order {
+        let block = Block::new(&members[d], &placer.sizes, &adj);
         let anchor = placer.anchor(&members[d], &adj);
-        for &i in &members[d] {
-            let target = placer.target(i, &adj, anchor);
-            placer.put(i, target);
-        }
+        placer.put(&block, anchor);
     }
     placer
         .slot
@@ -117,8 +127,9 @@ fn adjacency(n: usize, edges: &[Edge]) -> Vec<Vec<(usize, f32)>> {
 }
 
 /// The order districts are placed in: first the one with the most imports to the others, then
-/// each one with the most imports to the districts already placed. Ties go to the bigger
-/// district, then the one that comes first.
+/// each one with the most imports to the districts already placed. Ties go to the district with
+/// more imports to districts not yet placed, then the bigger one, then the one that comes first,
+/// so loose districts fill in biggest first and the smallest end up on the rim.
 fn district_order(
     members: &[Vec<usize>],
     district: &[u32],
@@ -141,14 +152,10 @@ fn district_order(
     let mut placed = vec![false; count];
     let mut order = Vec::with_capacity(count);
     while order.len() < count {
-        let first = order.is_empty();
         let next = (0..count).filter(|&d| !placed[d]).max_by(|&a, &b| {
-            let (wa, wb) = if first {
-                (outside[a], outside[b])
-            } else {
-                (linked[a], linked[b])
-            };
-            wa.total_cmp(&wb)
+            linked[a]
+                .total_cmp(&linked[b])
+                .then(outside[a].total_cmp(&outside[b]))
                 .then(members[a].len().cmp(&members[b].len()))
                 .then(b.cmp(&a))
         });
@@ -161,7 +168,6 @@ fn district_order(
     }
     order
 }
-
 /// The footprint of a kind in grid cells, rounded up.
 fn cells(kind: Kind) -> (i32, i32) {
     let (w, d) = kind.footprint();
@@ -179,6 +185,7 @@ fn middle(cx: i32, cy: i32, sw: i32, sh: i32) -> [f32; 2] {
     ]
 }
 
+/// The distance from `a` to `b`, squared.
 fn distance2(a: [f32; 2], b: [f32; 2]) -> f32 {
     let (dx, dy) = (a[0] - b[0], a[1] - b[1]);
     dx * dx + dy * dy
@@ -203,8 +210,110 @@ impl Mean {
     }
 }
 
+/// One district laid out on its own: each machine's corner from the block's top-left, in cells.
+struct Block {
+    /// `(machine, x, y)` for every member.
+    spots: Vec<(usize, i32, i32)>,
+    /// Width and depth of the block in cells, from its top-left to its furthest machine edge.
+    size: (i32, i32),
+}
+
+impl Block {
+    /// Lays out `members` (core machines first) in rows and columns. The grid is as close to
+    /// [`BLOCK_ASPECT`] as it can be without many empty slots. Each machine takes the free slot
+    /// nearest the members placed before it that it imports or is imported by, else the one
+    /// nearest the middle, so the core sits in the middle and imports stay short. Each column is
+    /// as wide as its widest machine and each row as deep as its deepest, with about a machine
+    /// plate between them.
+    fn new(members: &[usize], sizes: &[(i32, i32)], adj: &[Vec<(usize, f32)>]) -> Self {
+        let k = members.len();
+        let wide = members.iter().map(|&i| sizes[i].0).max().unwrap_or(1) + DISTRICT_CELLS;
+        let deep = members.iter().map(|&i| sizes[i].1).max().unwrap_or(1) + DISTRICT_CELLS;
+        let (cols, rows) = shape(k, wide, deep);
+        let mid = [cols as f32 / 2.0, rows as f32 / 2.0];
+        let mut taken = vec![false; cols * rows];
+        let mut at: Vec<Option<(usize, usize)>> = vec![None; sizes.len()];
+        let mut chosen = Vec::with_capacity(k);
+        for &i in members {
+            let mut best: Option<(f32, f32, usize)> = None;
+            for s in (0..cols * rows).filter(|&s| !taken[s]) {
+                let (c, r) = (s % cols, s / cols);
+                let p = [c as f32 + 0.5, r as f32 + 0.5];
+                let ties: f32 = adj[i]
+                    .iter()
+                    .filter_map(|&(j, w)| {
+                        let (jc, jr) = at[j]?;
+                        Some(w * (c.abs_diff(jc) + r.abs_diff(jr)) as f32)
+                    })
+                    .sum();
+                let key = (ties, distance2(p, mid), s);
+                if best.is_none_or(|b| key < b) {
+                    best = Some(key);
+                }
+            }
+            let Some((.., s)) = best else { break };
+            taken[s] = true;
+            at[i] = Some((s % cols, s / cols));
+            chosen.push((i, s % cols, s / cols));
+        }
+
+        let mut col_w = vec![0; cols];
+        let mut row_d = vec![0; rows];
+        for &(i, c, r) in &chosen {
+            col_w[c] = col_w[c].max(sizes[i].0);
+            row_d[r] = row_d[r].max(sizes[i].1);
+        }
+        // Empty columns and rows at the edge take no room; inner ones keep the block regular.
+        let starts = |extent: &[i32]| -> Vec<i32> {
+            let mut at = 0;
+            extent
+                .iter()
+                .map(|&e| {
+                    let here = at;
+                    if e > 0 {
+                        at += e + DISTRICT_CELLS;
+                    }
+                    here
+                })
+                .collect()
+        };
+        let (xs, ys) = (starts(&col_w), starts(&row_d));
+        let spots: Vec<(usize, i32, i32)> = chosen
+            .iter()
+            .map(|&(i, c, r)| {
+                let (w, d) = sizes[i];
+                (i, xs[c] + (col_w[c] - w) / 2, ys[r] + (row_d[r] - d) / 2)
+            })
+            .collect();
+        let size = spots.iter().fold((0, 0), |(bw, bd), &(i, x, y)| {
+            (bw.max(x + sizes[i].0), bd.max(y + sizes[i].1))
+        });
+        Self { spots, size }
+    }
+}
+
+/// Columns and rows for `k` slots of `wide` by `deep` cells: the grid whose shape is nearest
+/// [`BLOCK_ASPECT`], with a cost for every slot left empty. Ties go to fewer columns.
+fn shape(k: usize, wide: i32, deep: i32) -> (usize, usize) {
+    let k = k.max(1);
+    let mut best = (f32::INFINITY, 1, k);
+    for cols in 1..=k {
+        let rows = k.div_ceil(cols);
+        if cols > 1 && (cols - 1) * rows >= k {
+            continue;
+        }
+        let ratio = (cols as f32 * wide as f32) / (rows as f32 * deep as f32);
+        let empty = (cols * rows - k) as f32 / k as f32;
+        let cost = (ratio / BLOCK_ASPECT).ln().abs() + empty;
+        if cost < best.0 {
+            best = (cost, cols, rows);
+        }
+    }
+    (best.1, best.2)
+}
+
 /// The state of a placement in progress: the floor, and for each machine its district, its
-/// size, its corner and middle once placed, with the middle of each district and of the town.
+/// size, and its corner and middle once placed.
 struct Placer {
     grid: Grid,
     district: Vec<u32>,
@@ -212,12 +321,10 @@ struct Placer {
     slot: Vec<(i32, i32)>,
     centre: Vec<[f32; 2]>,
     placed: Vec<bool>,
-    blocks: Vec<Mean>,
-    town: Mean,
 }
 
 impl Placer {
-    fn new(sizes: Vec<(i32, i32)>, district: Vec<u32>, districts: usize) -> Self {
+    fn new(sizes: Vec<(i32, i32)>, district: Vec<u32>) -> Self {
         let n = sizes.len();
         Self {
             grid: Grid::new(&sizes),
@@ -226,63 +333,48 @@ impl Placer {
             slot: vec![(0, 0); n],
             centre: vec![[0.0; 2]; n],
             placed: vec![false; n],
-            blocks: vec![Mean::default(); districts],
-            town: Mean::default(),
         }
     }
 
-    /// Adds the placed machines that machine `i` imports or is imported by to `mean`, weighted by
-    /// the imports.
-    fn ties(&self, i: usize, adj: &[Vec<(usize, f32)>], mean: &mut Mean) {
-        for &(j, w) in &adj[i] {
-            if self.placed[j] {
-                mean.add(self.centre[j], w);
-            }
-        }
-    }
-
-    /// The point a district grows from before any of its machines is placed: the middle of the
-    /// placed machines it is tied to, or the middle of the town, or the origin at the start.
+    /// The point a district grows from: the middle of the placed machines its members import or
+    /// are imported by, weighted by the imports, or the centre of the plan when it has none.
+    /// The centre is fixed, not the middle of what is placed so far, so a town of loose districts
+    /// grows evenly round it instead of creeping off to one side.
     fn anchor(&self, members: &[usize], adj: &[Vec<(usize, f32)>]) -> [f32; 2] {
         let mut tied = Mean::default();
         for &i in members {
-            self.ties(i, adj, &mut tied);
+            for &(j, w) in &adj[i] {
+                if self.placed[j] {
+                    tied.add(self.centre[j], w);
+                }
+            }
         }
-        tied.get().or(self.town.get()).unwrap_or([0.0; 2])
+        tied.get().unwrap_or([0.0; 2])
     }
 
-    /// Where machine `i` would best stand: halfway between the placed machines it is tied to and
-    /// the placed machines of its district, so it keeps both its belts short and its district
-    /// one block. With only one of the two, that one; with neither, `anchor`.
-    fn target(&self, i: usize, adj: &[Vec<(usize, f32)>], anchor: [f32; 2]) -> [f32; 2] {
-        let mut tied = Mean::default();
-        self.ties(i, adj, &mut tied);
-        match (tied.get(), self.blocks[self.district[i] as usize].get()) {
-            (Some(a), Some(b)) => [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0],
-            (a, b) => a.or(b).unwrap_or(anchor),
-        }
-    }
-
-    /// Places machine `i` in the free slot nearest `target`, and records it.
-    fn put(&mut self, i: usize, target: [f32; 2]) {
-        let (sw, sh) = self.sizes[i];
-        let district = self.district[i];
-        let (cx, cy) = loop {
-            if let Some(slot) = self.nearest(target, sw, sh, district) {
-                break slot;
+    /// Places `block` where its middle is nearest `anchor`, and records its machines.
+    fn put(&mut self, block: &Block, anchor: [f32; 2]) {
+        let Some(&(first, ..)) = block.spots.first() else {
+            return;
+        };
+        let district = self.district[first];
+        let (bx, by) = loop {
+            if let Some(corner) = self.nearest(block, anchor, district) {
+                break corner;
             }
             self.widen();
         };
-        self.grid.mark(cx, cy, sw, sh, district);
-        let centre = middle(cx, cy, sw, sh);
-        self.slot[i] = (cx, cy);
-        self.centre[i] = centre;
-        self.placed[i] = true;
-        self.blocks[district as usize].add(centre, 1.0);
-        self.town.add(centre, 1.0);
+        for &(i, x, y) in &block.spots {
+            let (sw, sh) = self.sizes[i];
+            let (cx, cy) = (bx + x, by + y);
+            self.grid.mark(cx, cy, sw, sh, district);
+            self.slot[i] = (cx, cy);
+            self.centre[i] = middle(cx, cy, sw, sh);
+            self.placed[i] = true;
+        }
     }
 
-    /// A floor twice as wide, with every placed machine marked on it again, for a machine that
+    /// A floor twice as wide, with every placed machine marked on it again, for a block that
     /// finds no room on the floor as it is.
     fn widen(&mut self) {
         let mut grid = Grid::with_side(self.grid.side * 2);
@@ -295,28 +387,71 @@ impl Placer {
         self.grid = grid;
     }
 
-    /// The free corner for a `sw` by `sh` machine of `district` whose middle is nearest `target`,
-    /// or `None` when the floor has no room for it. Of corners as near as each other, the one
-    /// nearer the middle of the town wins, so the town grows round instead of towards one side;
-    /// then the topmost, then the leftmost. The search goes outward in rings of cells, so the
-    /// result is the same every time.
-    fn nearest(&self, target: [f32; 2], sw: i32, sh: i32, district: u32) -> Option<(i32, i32)> {
-        let want_x = ((target[0] - sw as f32 * GRID / 2.0) / GRID).round() as i32;
-        let want_y = ((target[1] - sh as f32 * GRID / 2.0) / GRID).round() as i32;
-        let town = self.town.get().unwrap_or(target);
-        let mut best: Option<(f32, f32, i32, i32)> = None;
-        for r in 0..=self.grid.side {
-            // A corner on ring `r` has its middle at least `r - 1` cells from the target.
-            if best.is_some_and(|(d2, ..)| (r as f32 - 1.0) * GRID > d2.sqrt()) {
+    /// The free top-left corner for `block` whose middle is nearest `target`, with the centre
+    /// of the plan pulling too (see [`PULL`]), or `None` when the floor has no room for it. Of
+    /// corners as near as each other, the one nearer the centre wins, then the one at the
+    /// smaller angle round it, so ties never favour one side. The search goes outward in rings
+    /// of tiles, so the result is the same every time.
+    fn nearest(&self, block: &Block, target: [f32; 2], district: u32) -> Option<(i32, i32)> {
+        // Distance to the target plus `PULL` times distance to the centre is, up to a constant,
+        // the distance to this one point between them, so the search can aim straight at it.
+        let aim = [target[0] / (1.0 + PULL), target[1] / (1.0 + PULL)];
+        let (bw, bh) = block.size;
+        let want_x = ((aim[0] - bw as f32 * GRID / 2.0) / GRID).round() as i32;
+        let want_y = ((aim[1] - bh as f32 * GRID / 2.0) / GRID).round() as i32;
+        let fits = |cx: i32, cy: i32| {
+            block.spots.iter().all(|&(i, x, y)| {
+                let (sw, sh) = self.sizes[i];
+                self.grid.fits(cx + x, cy + y, sw, sh, district)
+            })
+        };
+        // The search walks the cell under the top-left of the block's first machine, which must
+        // be free, a tile at a time outward from where it would be at the aim, and skips tiles
+        // with no free cell. A district is put once, so no cell is near its machines yet, and a
+        // cell it may build on is a free one.
+        let &(_, ox, oy) = block.spots.first()?;
+        let tile0 = self.grid.tile_of(want_x + ox, want_y + oy);
+        // A cell `r` tiles out on its ring puts the block's middle at least `r - 1` tiles from
+        // the aim.
+        let floor = (TILE as f32 * GRID).powi(2);
+        let tiles = self.grid.tiles;
+        let mut best: Option<(f32, f32, f32, i32, i32)> = None;
+        for r in 0..=2 * tiles + tile0.0.abs().max(tile0.1.abs()) {
+            if best.is_some_and(|(d2, ..)| (r as f32 - 1.0).max(0.0).powi(2) * floor > d2) {
                 break;
             }
-            for (cx, cy) in ring(want_x, want_y, r) {
-                let centre = middle(cx, cy, sw, sh);
-                let key = (distance2(centre, target), distance2(centre, town), cy, cx);
-                if best.is_some_and(|b| key >= b) || !self.grid.fits(cx, cy, sw, sh, district) {
+            for (tx, ty) in ring(tile0.0, tile0.1, r) {
+                if !self.grid.has_free(tx, ty) {
                     continue;
                 }
-                best = Some(key);
+                let (x0, y0) = self.grid.tile_corner(tx, ty);
+                // The nearest the block's middle can come to the aim from this tile.
+                let lo = middle(x0 - ox, y0 - oy, bw, bh);
+                let hi = middle(x0 - ox + TILE - 1, y0 - oy + TILE - 1, bw, bh);
+                let near = [aim[0].clamp(lo[0], hi[0]), aim[1].clamp(lo[1], hi[1])];
+                if best.is_some_and(|(d2, ..)| distance2(near, aim) > d2) {
+                    continue;
+                }
+                for y in y0..y0 + TILE {
+                    for x in x0..x0 + TILE {
+                        if !self.grid.fits(x, y, 1, 1, district) {
+                            continue;
+                        }
+                        let (cx, cy) = (x - ox, y - oy);
+                        let centre = middle(cx, cy, bw, bh);
+                        let key = (
+                            distance2(centre, aim),
+                            distance2(centre, [0.0; 2]),
+                            centre[1].atan2(centre[0]),
+                            cy,
+                            cx,
+                        );
+                        if best.is_some_and(|b| key >= b) || !fits(cx, cy) {
+                            continue;
+                        }
+                        best = Some(key);
+                    }
+                }
             }
         }
         best.map(|(.., cy, cx)| (cx, cy))
@@ -352,10 +487,18 @@ enum Cell {
     Taken,
 }
 
-/// The floor, one [`Cell`] per grid cell, centred on the origin.
+/// The side of a tile of the floor, in cells. The floor counts the cells of each tile that are
+/// not free, so a search can skip a tile with none free at once.
+const TILE: i32 = 16;
+
+/// The floor, one [`Cell`] per grid cell, centred on the origin, in tiles of [`TILE`] cells.
 struct Grid {
     side: i32,
     cells: Vec<Cell>,
+    /// Tiles along each side.
+    tiles: i32,
+    /// For each tile, how many of its cells are not free.
+    used: Vec<u32>,
 }
 
 impl Grid {
@@ -370,12 +513,15 @@ impl Grid {
         Self::with_side(((area as f64).sqrt() * 2.0) as i32 + 64)
     }
 
-    /// An empty floor about `side` cells wide, rounded up to an even width.
+    /// An empty floor about `side` cells wide, rounded up to a whole number of tiles.
     fn with_side(side: i32) -> Self {
-        let side = side + side % 2;
+        let tiles = (side.max(1) + TILE - 1) / TILE;
+        let side = tiles * TILE;
         Self {
             side,
             cells: vec![Cell::Free; (side as usize) * (side as usize)],
+            tiles,
+            used: vec![0; (tiles as usize) * (tiles as usize)],
         }
     }
 
@@ -386,6 +532,24 @@ impl Grid {
             return None;
         }
         Some((v * self.side + u) as usize)
+    }
+
+    /// The tile holding cell `(x, y)`, which may be off the floor.
+    fn tile_of(&self, x: i32, y: i32) -> (i32, i32) {
+        let half = self.side / 2;
+        ((x + half).div_euclid(TILE), (y + half).div_euclid(TILE))
+    }
+
+    /// The top-left cell of tile `(tx, ty)`.
+    fn tile_corner(&self, tx: i32, ty: i32) -> (i32, i32) {
+        let half = self.side / 2;
+        (tx * TILE - half, ty * TILE - half)
+    }
+
+    /// Whether tile `(tx, ty)` is on the floor and has a free cell.
+    fn has_free(&self, tx: i32, ty: i32) -> bool {
+        let on = (0..self.tiles).contains(&tx) && (0..self.tiles).contains(&ty);
+        on && self.used[(ty * self.tiles + tx) as usize] < (TILE * TILE) as u32
     }
 
     /// Whether a `sw` by `sh` machine of `district` may stand at `(cx, cy)`: every cell under it
@@ -413,6 +577,10 @@ impl Grid {
                 };
                 let close = (cx - pad..cx + sw + pad).contains(&x)
                     && (cy - pad..cy + sh + pad).contains(&y);
+                if self.cells[i] == Cell::Free {
+                    let (tx, ty) = self.tile_of(x, y);
+                    self.used[(ty * self.tiles + tx) as usize] += 1;
+                }
                 let cell = &mut self.cells[i];
                 *cell = match *cell {
                     _ if close => Cell::Taken,
@@ -424,7 +592,6 @@ impl Grid {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,6 +599,53 @@ mod tests {
 
     fn stress_input(count: usize) -> (Vec<Kind>, Vec<Edge>, Vec<u32>) {
         crate::plant::stress(count).layout_input()
+    }
+
+    /// A plant of `count` machines in districts of one to six, with few imports: about one
+    /// machine in five imports a district mate, and one district in four imports the one before
+    /// it, the way a repository of crates with tests and examples scans.
+    fn sparse_town(count: usize) -> (Vec<Kind>, Vec<Edge>, Vec<u32>) {
+        const SIZES: [usize; 9] = [3, 1, 5, 2, 6, 4, 1, 2, 3];
+        const KINDS: [Kind; 6] = [
+            Kind::Assembler,
+            Kind::Crate,
+            Kind::Intake,
+            Kind::Crate,
+            Kind::Tank,
+            Kind::Gate,
+        ];
+        let mut districts = Vec::with_capacity(count);
+        let mut starts = Vec::new();
+        let mut d = 0;
+        while districts.len() < count {
+            starts.push(districts.len());
+            let size = SIZES[d % SIZES.len()].min(count - districts.len());
+            districts.extend(std::iter::repeat_n(d as u32, size));
+            d += 1;
+        }
+        let kinds = (0..count)
+            .map(|i| KINDS[(i * 7 + i / 3) % KINDS.len()])
+            .collect();
+        let mut edges = Vec::new();
+        for i in 1..count {
+            if i % 5 == 0 && districts[i] == districts[i - 1] {
+                edges.push(Edge {
+                    from: i,
+                    to: i - 1,
+                    imports: 1 + (i % 4) as u32,
+                });
+            }
+        }
+        for (d, &start) in starts.iter().enumerate().skip(1) {
+            if d % 4 == 0 {
+                edges.push(Edge {
+                    from: start,
+                    to: starts[d - 1],
+                    imports: 2,
+                });
+            }
+        }
+        (kinds, edges, districts)
     }
 
     /// `[min x, min y, max x, max y]` of each machine placed at `tops`.
@@ -555,12 +769,17 @@ mod tests {
     #[test]
     fn a_full_floor_widens_instead_of_stacking_machines() {
         let size = cells(Kind::Tank);
-        let mut placer = Placer::new(vec![size; 6], (0..6).collect(), 6);
+        let sizes = vec![size; 6];
+        let mut placer = Placer::new(sizes.clone(), (0..6).collect());
         placer.grid = Grid::with_side(16);
         for i in 0..6 {
-            placer.put(i, [0.0; 2]);
+            placer.put(&Block::new(&[i], &sizes, &adjacency(6, &[])), [0.0; 2]);
         }
-        assert!(placer.grid.side > 16, "the floor stayed {}", placer.grid.side);
+        assert!(
+            placer.grid.side > 16,
+            "the floor stayed {}",
+            placer.grid.side
+        );
         let (w, h) = size;
         for (i, &(ax, ay)) in placer.slot.iter().enumerate() {
             for (j, &(bx, by)) in placer.slot.iter().enumerate().skip(i + 1) {
@@ -577,186 +796,51 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
-    fn zz_diag() {
-        let Ok(path) = std::env::var("LAYOUT_DIAG_PLANT") else {
-            return;
-        };
-        let text = std::fs::read_to_string(path).expect("read");
-        let plant = crate::plant::from_scan_json(&text).expect("parse");
-        let (kinds, edges, districts) = plant.layout_input();
-        let old_edges: Vec<crate::old_layout::Edge> = edges
-            .iter()
-            .map(|e| crate::old_layout::Edge {
-                from: e.from,
-                to: e.to,
-                imports: e.imports,
-            })
-            .collect();
-        let old = crate::old_layout::layout(&kinds, &old_edges);
-        let [x0, y0, x1, y1] = old.bounds;
-        eprintln!(
-            "OLD layered layout on self: bounds {:?} w {} h {} aspect {}",
-            old.bounds,
-            x1 - x0,
-            y1 - y0,
-            (x1 - x0).max(y1 - y0) / (x1 - x0).min(y1 - y0)
-        );
-        summary("self", &kinds, &edges, &districts);
-        let tops = place(&kinds, &edges, &districts);
-        {
-            let bx = boxes(&kinds, &tops);
-            let (dd, _) = district_index(kinds.len(), &districts);
-            let x0 = bx.iter().map(|b| b[0]).fold(f32::MAX, f32::min);
-            let y0 = bx.iter().map(|b| b[1]).fold(f32::MAX, f32::min);
-            let x1 = bx.iter().map(|b| b[2]).fold(f32::MIN, f32::max);
-            let y1 = bx.iter().map(|b| b[3]).fold(f32::MIN, f32::max);
-            let s = 16.0;
-            let (cw, ch) = (((x1 - x0) / s).ceil() as usize, ((y1 - y0) / s).ceil() as usize);
-            let mut rows = vec![vec!['.'; cw]; ch];
-            for (i, b) in bx.iter().enumerate() {
-                let ch_ = (b'a' + dd[i] as u8) as char;
-                for y in ((b[1] - y0) / s) as usize..((b[3] - y0) / s).ceil() as usize {
-                    for x in ((b[0] - x0) / s) as usize..((b[2] - x0) / s).ceil() as usize {
-                        rows[y.min(ch - 1)][x.min(cw - 1)] = ch_;
-                    }
-                }
+    fn loose_districts_spread_as_a_round_blob_at_any_size() {
+        for count in [20, 33, 46, 100] {
+            let (kinds, edges, districts) = sparse_town(count);
+            let boxes = boxes(&kinds, &place(&kinds, &edges, &districts));
+            let x0 = boxes.iter().map(|b| b[0]).fold(f32::MAX, f32::min);
+            let y0 = boxes.iter().map(|b| b[1]).fold(f32::MAX, f32::min);
+            let x1 = boxes.iter().map(|b| b[2]).fold(f32::MIN, f32::max);
+            let y1 = boxes.iter().map(|b| b[3]).fold(f32::MIN, f32::max);
+            let aspect = (x1 - x0) / (y1 - y0);
+            assert!(
+                (0.7..=1.45).contains(&aspect),
+                "{count} machines span {} by {}, aspect {aspect}",
+                x1 - x0,
+                y1 - y0
+            );
+
+            // The spread of the machines along their longest and shortest axes: a line has one
+            // far longer than the other, a blob two of a size.
+            let centres: Vec<[f32; 2]> = boxes.iter().map(|&b| centre(b)).collect();
+            let n = centres.len() as f32;
+            let mx = centres.iter().map(|c| c[0]).sum::<f32>() / n;
+            let my = centres.iter().map(|c| c[1]).sum::<f32>() / n;
+            let (mut sxx, mut syy, mut sxy) = (0.0_f32, 0.0_f32, 0.0_f32);
+            for c in &centres {
+                let (dx, dy) = (c[0] - mx, c[1] - my);
+                sxx += dx * dx / n;
+                syy += dy * dy / n;
+                sxy += dx * dy / n;
             }
-            for row in rows {
-                eprintln!("    {}", row.into_iter().collect::<String>());
-            }
-        }
-        let (district, count) = district_index(kinds.len(), &districts);
-        for d in 0..count as u32 {
-            let own: Vec<usize> = (0..kinds.len()).filter(|&i| district[i] == d).collect();
-            let mut c = [0.0_f32; 2];
-            for &i in &own {
-                let b = boxes(&kinds[i..=i], &tops[i..=i])[0];
-                c[0] += centre(b)[0] / own.len() as f32;
-                c[1] += centre(b)[1] / own.len() as f32;
-            }
-            eprintln!(
-                "  district {d:2} {:<28} {:2} machines centroid ({:7.1},{:7.1})",
-                plant.machines[own[0]].name,
-                own.len(),
-                c[0],
-                c[1]
+            let half = (sxx + syy) / 2.0;
+            let root = (((sxx - syy) / 2.0).powi(2) + sxy * sxy).sqrt();
+            let elongation = ((half + root) / (half - root)).sqrt();
+            assert!(
+                elongation < 2.0,
+                "{count} machines spread {elongation} times longer one way than the other"
+            );
+
+            // The middle of the town stays near the centre of the plan, rather than creeping off.
+            let reach = (x1 - x0).max(y1 - y0) / 2.0;
+            let off = ((x0 + x1) / 2.0).hypot((y0 + y1) / 2.0);
+            assert!(
+                off < reach * 0.25,
+                "{count} machines: town middle {off} from the centre, reach {reach}"
             );
         }
-        let demo = crate::plant::from_scan_json(include_str!("../www/fixtures/demo-plant.json"))
-            .expect("demo");
-        let (k, e, d) = demo.layout_input();
-        summary("demo", &k, &e, &d);
-        for count in [200, 400] {
-            let (k, e, d) = stress_input(count);
-            summary(&format!("stress{count}"), &k, &e, &d);
-        }
-    }
-
-    fn summary(name: &str, kinds: &[Kind], edges: &[Edge], districts: &[u32]) {
-        let t0 = std::time::Instant::now();
-        let tops = place(kinds, edges, districts);
-        let t_place = t0.elapsed();
-        let t1 = std::time::Instant::now();
-        let laid = crate::layout::layout(kinds, edges, districts);
-        let t_layout = t1.elapsed();
-        let [x0, y0, x1, y1] = laid.bounds;
-        let bx = boxes(kinds, &tops);
-        let centres: Vec<[f32; 2]> = bx.iter().map(|&b| centre(b)).collect();
-        let (district, count) = district_index(kinds.len(), districts);
-        let mut intrusions = 0;
-        let mut spread = 0.0_f32;
-        let mut multi = 0;
-        let mut strays = 0;
-        for d in 0..count as u32 {
-            let own: Vec<usize> = (0..kinds.len()).filter(|&i| district[i] == d).collect();
-            if own.len() < 2 {
-                continue;
-            }
-            multi += 1;
-            let mut c = [0.0_f32; 2];
-            let mut bb = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-            for &i in &own {
-                c[0] += centres[i][0] / own.len() as f32;
-                c[1] += centres[i][1] / own.len() as f32;
-                bb = [
-                    bb[0].min(bx[i][0]),
-                    bb[1].min(bx[i][1]),
-                    bb[2].max(bx[i][2]),
-                    bb[3].max(bx[i][3]),
-                ];
-                let nearest = (0..kinds.len())
-                    .filter(|&j| j != i)
-                    .min_by(|&a, &b| gap(bx[i], bx[a]).total_cmp(&gap(bx[i], bx[b])));
-                if nearest.is_some_and(|j| district[j] != d) {
-                    strays += 1;
-                }
-            }
-            spread += own.iter().map(|&i| manhattan(centres[i], c)).sum::<f32>() / own.len() as f32;
-            intrusions += (0..kinds.len())
-                .filter(|&j| district[j] != d)
-                .filter(|&j| {
-                    let p = centres[j];
-                    p[0] > bb[0] && p[0] < bb[2] && p[1] > bb[1] && p[1] < bb[3]
-                })
-                .count();
-        }
-        let belt_len: f32 = laid
-            .belts
-            .iter()
-            .map(|b| {
-                b.path
-                    .windows(2)
-                    .map(|p| manhattan(p[0], p[1]))
-                    .sum::<f32>()
-            })
-            .sum::<f32>()
-            / laid.belts.len().max(1) as f32;
-        let reach = tops
-            .iter()
-            .map(|t| (t[0] / GRID).abs().max((t[1] / GRID).abs()))
-            .fold(0.0_f32, f32::max);
-        let mid = [(x0 + x1) / 2.0, (y0 + y1) / 2.0];
-        let offset = (mid[0].hypot(mid[1])) / ((x1 - x0).max(y1 - y0) / 2.0);
-        let mut degree = vec![0_usize; kinds.len()];
-        for e in edges {
-            degree[e.from] += 1;
-            degree[e.to] += 1;
-        }
-        let mut sorted = degree.clone();
-        sorted.sort_unstable();
-        let cut = sorted[sorted.len() * 9 / 10];
-        let dist = |i: usize| (centres[i][0] - mid[0]).hypot(centres[i][1] - mid[1]);
-        let core: Vec<usize> = (0..kinds.len()).filter(|&i| degree[i] >= cut.max(1)).collect();
-        let core_ratio = if core.is_empty() {
-            f32::NAN
-        } else {
-            (core.iter().map(|&i| dist(i)).sum::<f32>() / core.len() as f32)
-                / ((0..kinds.len()).map(dist).sum::<f32>() / kinds.len() as f32)
-        };
-        eprintln!(
-            "{name}: offset {offset:.2} core ratio {core_ratio:.2} ({} core) route {:?}",
-            core.len(),
-            t_layout.saturating_sub(t_place)
-        );
-        eprintln!(
-            "{name}: n {} bounds {:?} w {} h {} aspect {:.3} belts {}/{} mean belt {:.0} district spread {:.0} intrusions {} strays {} reach {} of {} place {:?} layout {:?}",
-            kinds.len(),
-            laid.bounds,
-            x1 - x0,
-            y1 - y0,
-            (x1 - x0).max(y1 - y0) / (x1 - x0).min(y1 - y0),
-            laid.belts.len(),
-            edges.len(),
-            belt_len,
-            spread / multi.max(1) as f32,
-            intrusions,
-            strays,
-            reach,
-            Grid::new(&kinds.iter().map(|&k| cells(k)).collect::<Vec<_>>()).side / 2,
-            t_place,
-            t_layout
-        );
     }
 
     #[test]
