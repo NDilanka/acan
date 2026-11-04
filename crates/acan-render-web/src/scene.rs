@@ -417,8 +417,8 @@ mod tests {
     #[test]
     fn a_ride_measures_each_machine_from_its_model_alone() {
         let plant = from_scan_json(FIXTURE).expect("fixture parses");
-        let (kinds, edges) = plant.layout_input();
-        let laid = layout(&kinds, &edges);
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
         let models = models();
         let boxes = machine_model_boxes(&laid, &models);
         assert_eq!(boxes.len(), laid.machines.len());
@@ -441,8 +441,8 @@ mod tests {
     #[test]
     fn the_scene_places_each_machine_at_its_footprint_centre() {
         let plant = from_scan_json(FIXTURE).expect("fixture parses");
-        let (kinds, edges) = plant.layout_input();
-        let laid = layout(&kinds, &edges);
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
         let scene = plant_scene(&laid, &models());
         assert_eq!(scene.instances.len(), plant.machines.len());
         for (placed, inst) in laid.machines.iter().zip(&scene.instances) {
@@ -456,8 +456,8 @@ mod tests {
     #[test]
     fn the_scene_bounds_hold_every_machine_and_belt() {
         let plant = stress(200);
-        let (kinds, edges) = plant.layout_input();
-        let laid = layout(&kinds, &edges);
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
         let scene = plant_scene(&laid, &models());
         for placed in &laid.machines {
             let f = placed.footprint();
@@ -480,8 +480,8 @@ mod tests {
             from_scan_json(FIXTURE).expect("fixture parses"),
             stress(200),
         ] {
-            let (kinds, edges) = plant.layout_input();
-            let laid = layout(&kinds, &edges);
+            let (kinds, edges, districts) = plant.layout_input();
+            let laid = layout(&kinds, &edges, &districts);
             for ribbon in &plant_scene(&laid, &models()).ribbons {
                 let c = &ribbon.centre;
                 for i in 0..c.len() {

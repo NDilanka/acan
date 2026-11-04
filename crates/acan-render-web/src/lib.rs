@@ -13,6 +13,10 @@ pub mod lanes;
 pub mod layout;
 pub mod marks;
 pub mod mirror;
+#[cfg(test)]
+#[allow(dead_code)]
+mod old_layout;
+pub mod place;
 pub mod plan;
 pub mod plant;
 pub mod plant_view;

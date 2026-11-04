@@ -1827,8 +1827,8 @@ impl App {
 impl App {
     /// Puts `plant` on screen, with the plan placing its machines where the layout puts them.
     fn load(&mut self, plant: Plant) -> u32 {
-        let (kinds, edges) = plant.layout_input();
-        let laid = layout(&kinds, &edges);
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
         let count = plant.machines.len() as u32;
         self.show(plant, laid, [0.0; 2]);
         count
@@ -2210,8 +2210,8 @@ impl App {
         if let Some(laid) = self.layouts.get(&key) {
             return laid.clone();
         }
-        let (kinds, edges) = plant.layout_input();
-        let laid = layout(&kinds, &edges);
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
         self.layouts.insert(key, laid.clone());
         laid
     }

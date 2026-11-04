@@ -33,13 +33,43 @@ pub struct PlantMachine {
 }
 
 impl Plant {
-    /// The kinds and edges the layout takes, in machine order.
-    pub fn layout_input(&self) -> (Vec<Kind>, Vec<Edge>) {
+    /// The kinds, edges and districts the layout takes, in machine order.
+    pub fn layout_input(&self) -> (Vec<Kind>, Vec<Edge>, Vec<u32>) {
         (
             self.machines.iter().map(|m| m.kind).collect(),
             self.edges.clone(),
+            self.districts(),
         )
     }
+
+    /// The district of each machine, as an index into the sorted district names. A machine's
+    /// district is the first two folders of its first file, so `crates/acan-server` or `src/auth`.
+    /// A machine with no file takes the folders of its name.
+    pub fn districts(&self) -> Vec<u32> {
+        let names: Vec<String> = self.machines.iter().map(district_name).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        names
+            .iter()
+            .map(|name| sorted.binary_search(name).unwrap_or(0) as u32)
+            .collect()
+    }
+}
+
+/// The first two folders of a machine's first file, or of its name when it has no file.
+fn district_name(machine: &PlantMachine) -> String {
+    let source = machine
+        .paths
+        .first()
+        .map_or(machine.name.as_str(), String::as_str);
+    let folder = source.rsplit_once('/').map_or("", |(folder, _)| folder);
+    folder
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .take(2)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -400,8 +430,8 @@ mod tests {
     fn the_stress_footprint_stays_within_two_and_a_half_to_one() {
         for count in [100_usize, 500, 2000] {
             let plant = stress(count);
-            let (kinds, edges) = plant.layout_input();
-            let laid = crate::layout::layout(&kinds, &edges);
+            let (kinds, edges, districts) = plant.layout_input();
+            let laid = crate::layout::layout(&kinds, &edges, &districts);
             let [x0, y0, x1, y1] = laid.bounds;
             let (w, d) = (x1 - x0, y1 - y0);
             let aspect = w.max(d) / w.min(d);
