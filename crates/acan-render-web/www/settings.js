@@ -20,6 +20,7 @@ import {
   appliedNote,
   changedPaths,
   updateView,
+  installNote,
   exportNote,
   clearNote,
   conflictNote,
@@ -557,7 +558,7 @@ function summaryOf(id) {
     case "data":
       return { text: "export" };
     case "about": {
-      const newer = update !== null && updateView(update).state === "newer";
+      const newer = update !== null && updateView(update).state === "available";
       return { text: newer ? "update" : `v${s.about?.version ?? ""}`, newer };
     }
     default:
@@ -1474,20 +1475,14 @@ function dataBody() {
 
 // ---- About and update -----------------------------------------------------------------------
 
-const UPDATE_LINES = {
-  starting: "starting…",
-  downloading: "downloading…",
-  verifying: "verifying SHA256…",
-  installing: "installing · Acan restarts",
-  restarting: "restarting…",
-};
-
+// The drawer asks GET /api/settings/update/check, and an owner's install posts to
+// POST /api/settings/update. A member can check but not install.
 async function checkUpdate() {
   updateBusy = true;
   render();
   let ok = false;
   try {
-    const res = await api.request("GET", "/api/update");
+    const res = await api.request("GET", "/api/settings/update/check");
     ok = res.status === 200 && res.body !== null;
     if (ok) update = res.body;
   } catch {
@@ -1498,42 +1493,48 @@ async function checkUpdate() {
   render();
 }
 
-// The page posts once and shows the state the server returns.
+// The page posts once and shows the answer: installing, downloaded, or the reason it was refused.
 async function startUpdate() {
   updateStatus = { state: "starting" };
   render();
-  let body = null;
+  let note;
   try {
-    const res = await api.request("POST", "/api/update");
-    body = res.status === 200 ? res.body : null;
+    const res = await api.request("POST", "/api/settings/update");
+    note = installNote(res.status, res.body);
   } catch {
-    body = null;
+    note = installNote(0, null);
   }
-  updateStatus = { state: typeof body?.state === "string" ? body.state : "failed" };
+  updateStatus = note;
   render();
 }
 
 function updateNodes() {
   const plain = (text, cls = "") => el("p", { class: `ustatus ${cls}`.trim(), text });
-  const state = updateStatus?.state ?? null;
+  const owner = !ro();
   if (updateBusy) return [plain("checking…"), act("Check", "check", () => checkUpdate(), { disabled: true })];
-  if (UPDATE_LINES[state]) return [plain(UPDATE_LINES[state])];
-  if (state === "failed" || state === "mismatch" || state === "check-failed") {
-    const chipText = state === "mismatch" ? "hash mismatch" : state === "check-failed" ? "check failed" : "download failed";
-    const tail = state === "mismatch" ? "Installer deleted. Nothing ran." : "Nothing ran.";
-    const retry = state === "check-failed" ? () => checkUpdate() : () => startUpdate();
-    return [el("p", { class: "ustatus bad" }, chip("failed", chipText)), plain(tail), act("Retry", "retry", retry)];
+  const state = updateStatus?.state ?? null;
+  if (state === "starting") return [plain("Starting…")];
+  if (state === "installing" || state === "downloaded") return [plain(updateStatus.text, "ink")];
+  if (state === "failed") {
+    const nodes = [el("p", { class: "ustatus bad" }, chip("failed", "not installed")), plain(updateStatus.text)];
+    if (owner) nodes.push(act("Retry", "retry", () => startUpdate()));
+    return nodes;
+  }
+  if (state === "check-failed") {
+    return [
+      el("p", { class: "ustatus bad" }, chip("failed", "check failed")),
+      plain("Could not check for updates. Nothing changed."),
+      act("Retry", "retry", () => checkUpdate()),
+    ];
   }
   if (update) {
     const view = updateView(update);
-    if (view.state === "newer") {
-      const nodes = [plain(view.text, "ink")];
-      if (update.asset) nodes.push(plain(String(update.asset)));
-      if (update.notes) nodes.push(el("details", {}, el("summary", { text: "notes" }), el("pre", { text: String(update.notes) })));
+    const nodes = [plain(view.text, view.state === "available" ? "ink" : "")];
+    if (view.state === "available" && owner) {
       nodes.push(act("Update", "update", () => startUpdate(), { class: "primary" }));
-      return nodes;
     }
-    return [plain(view.text), act("Check", "check", () => checkUpdate())];
+    nodes.push(act("Check", "check", () => checkUpdate()));
+    return nodes;
   }
   return [plain("Not checked yet."), act("Check", "check", () => checkUpdate())];
 }

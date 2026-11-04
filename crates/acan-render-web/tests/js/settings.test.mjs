@@ -32,6 +32,7 @@ import {
   stepWorkers,
   testText,
   themeLabel,
+  installNote,
   tokenFromRotate,
   updateView,
 } from "../../www/settings-model.js";
@@ -455,20 +456,6 @@ test("the note follows only the fields this save changed, in either answer shape
   assert.equal(appliedNote({ projects: "restart", look: "client" }, ["look.theme"]), "");
 });
 
-test("the update view reads up to date when latest is the current version", () => {
-  assert.deepEqual(updateView({ current: "0.1.0-pre.1", latest: "0.1.0-pre.1" }), {
-    state: "current",
-    text: "Up to date · 0.1.0-pre.1",
-  });
-});
-
-test("the update view offers a newer latest version", () => {
-  assert.deepEqual(updateView({ current: "0.1.0-pre.1", latest: "0.1.1-pre.1" }), {
-    state: "newer",
-    text: "0.1.1-pre.1 available",
-  });
-});
-
 // The mock API
 
 test("the owner's read is the fixture's settings, with the tokens", async () => {
@@ -673,7 +660,8 @@ test("a member sees no tokens, reads everything as not editable, and cannot writ
   assert.equal((await api.request("POST", "/api/settings/tokens/owner/rotate")).status, 403);
   assert.equal((await api.request("POST", "/api/settings/tokens/agents/rotate")).status, 403);
   assert.equal((await api.request("POST", "/api/settings/models/roles/foreman/test")).status, 403);
-  assert.equal((await api.request("POST", "/api/update")).status, 403);
+  assert.equal((await api.request("GET", "/api/settings/update/check")).status, 403);
+  assert.equal((await api.request("POST", "/api/settings/update")).status, 403);
   assert.equal((await api.request("GET", "/api/settings")).body.look.theme, "paper");
 });
 
@@ -756,15 +744,57 @@ test("the adapter list holds the nine harnesses, and its rows read as the drawer
   ]);
 });
 
-test("the update check compares the versions, and an update starts by verifying", async () => {
+test("the update check reads the server's state, and an owner's install shows Installing", async () => {
   const api = createMockApi(fixture);
-  const check = await api.request("GET", "/api/update");
+  const check = await api.request("GET", "/api/settings/update/check");
   assert.equal(check.body.current, "0.1.0-pre.1");
-  assert.deepEqual(updateView(check.body), { state: "newer", text: "0.1.1-pre.1 available" });
-  assert.deepEqual(await api.request("POST", "/api/update"), {
-    status: 200,
-    body: { state: "verifying" },
+  assert.deepEqual(updateView(check.body), { state: "available", text: "0.1.1-pre.1 available" });
+  const install = await api.request("POST", "/api/settings/update");
+  assert.deepEqual(install, { status: 202, body: { status: "installing" } });
+  assert.deepEqual(installNote(install.status, install.body), { state: "installing", text: "Installing…" });
+});
+
+test("each update state reads as the drawer words it", () => {
+  assert.deepEqual(updateView({ state: "current", current: "0.1.0-pre.1", latest: "0.1.0-pre.1" }), {
+    state: "current",
+    text: "Up to date · 0.1.0-pre.1",
   });
+  assert.deepEqual(updateView({ state: "available", current: "0.1.0-pre.1", latest: "0.1.1-pre.1" }), {
+    state: "available",
+    text: "0.1.1-pre.1 available",
+  });
+  assert.deepEqual(updateView({ state: "no_prerelease", current: "0.1.0-pre.1" }), {
+    state: "no_prerelease",
+    text: "No pre-release is published yet.",
+  });
+  assert.deepEqual(updateView({ state: "offline", current: "0.1.0-pre.1" }), {
+    state: "offline",
+    text: "GitHub could not be reached.",
+  });
+  assert.deepEqual(updateView(null), { state: "unchecked", text: "Not checked yet." });
+});
+
+test("an install's answer says what happened, and a refusal gives its reason and that nothing ran", () => {
+  assert.deepEqual(installNote(202, { status: "installing" }), { state: "installing", text: "Installing…" });
+  assert.deepEqual(installNote(200, { status: "downloaded", path: "/tmp/x.tar.gz", version: "0.1.1-pre.1" }), {
+    state: "downloaded",
+    text: "Downloaded 0.1.1-pre.1. Saved at /tmp/x.tar.gz.",
+  });
+  assert.deepEqual(installNote(409, { error: "conflict", what: "checksum_mismatch" }), {
+    state: "failed",
+    text: "The download does not match SHA256SUMS. Nothing ran.",
+  });
+  assert.deepEqual(installNote(409, { error: "conflict", what: "no_prerelease" }), {
+    state: "failed",
+    text: "No pre-release is published yet. Nothing ran.",
+  });
+  assert.deepEqual(installNote(409, { error: "conflict", what: "unknown_reason" }), {
+    state: "failed",
+    text: "The update was refused. Nothing ran.",
+  });
+  assert.deepEqual(installNote(403, null), { state: "failed", text: "Only the owner can do this. Nothing changed." });
+  assert.deepEqual(installNote(0, null), { state: "failed", text: "Could not reach acan. Nothing ran." });
+  assert.deepEqual(installNote(500, null), { state: "failed", text: "The update did not start. Nothing ran." });
 });
 
 test("a route the mock does not know is a 404", async () => {

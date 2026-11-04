@@ -272,10 +272,38 @@ export function hasTokens(tokens) {
   return typeof tokens?.owner === "string" && tokens.owner !== "";
 }
 
-export function updateView(update) {
-  const { current, latest } = update ?? {};
-  if (latest === current) return { state: "current", text: `Up to date · ${current}` };
-  return { state: "newer", text: `${latest} available` };
+// The update check's answer from GET /api/settings/update/check, as the drawer words it.
+export function updateView(check) {
+  const { state, current, latest } = check ?? {};
+  if (state === "available") return { state: "available", text: `${latest} available` };
+  if (state === "current") return { state: "current", text: `Up to date · ${current}` };
+  if (state === "no_prerelease") return { state: "no_prerelease", text: "No pre-release is published yet." };
+  if (state === "offline") return { state: "offline", text: "GitHub could not be reached." };
+  return { state: "unchecked", text: "Not checked yet." };
+}
+
+// Why an install was refused, by the 409 body's `what`. Each one ran nothing.
+const UPDATE_REFUSALS = {
+  no_flavor: "This install has no FLAVOR file, so acan cannot tell which build to fetch. Nothing ran.",
+  offline: "GitHub could not be reached. Nothing ran.",
+  no_prerelease: "No pre-release is published yet. Nothing ran.",
+  no_asset: "The pre-release has no build for this install. Nothing ran.",
+  checksum_mismatch: "The download does not match SHA256SUMS. Nothing ran.",
+};
+
+// An install's answer from POST /api/settings/update: 202 on Windows, 200 with the saved path on
+// Linux, or a refusal that gives its reason.
+export function installNote(status, body) {
+  if (status === 202) return { state: "installing", text: "Installing…" };
+  if (status === 200 && body?.status === "downloaded") {
+    return { state: "downloaded", text: `Downloaded ${body.version}. Saved at ${body.path}.` };
+  }
+  if (status === 403) return { state: "failed", text: "Only the owner can do this. Nothing changed." };
+  if (status === 409) {
+    return { state: "failed", text: UPDATE_REFUSALS[body?.what] ?? "The update was refused. Nothing ran." };
+  }
+  if (status === 0) return { state: "failed", text: "Could not reach acan. Nothing ran." };
+  return { state: "failed", text: "The update did not start. Nothing ran." };
 }
 
 const REFUSED = {
