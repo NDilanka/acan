@@ -89,8 +89,8 @@ mod tests {
     #[test]
     fn a_baked_offset_moves_every_footprint_belt_and_the_bounds() {
         let plant = from_scan_json(FIXTURE).expect("fixture parses");
-        let (kinds, edges) = plant.layout_input();
-        let laid = layout(&kinds, &edges);
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
         let by = [1000.0, -40.0];
         let moved = laid.translated(by);
         assert_eq!(moved.machines.len(), laid.machines.len());
@@ -121,8 +121,8 @@ mod tests {
         let demo = from_scan_json(FIXTURE).expect("fixture parses");
         let big = stress(60);
         let lay = |plant: &crate::plant::Plant| {
-            let (kinds, edges) = plant.layout_input();
-            layout(&kinds, &edges)
+            let (kinds, edges, districts) = plant.layout_input();
+            layout(&kinds, &edges, &districts)
         };
         let (a, b) = (lay(&demo), lay(&big));
         // Left to right: the second starts one gap past the first's right edge, tops aligned.
@@ -216,8 +216,8 @@ mod tests {
         let models = scene::models();
         let lay = |json: &str| {
             let plant = from_scan_json(json).expect("fixture parses");
-            let (kinds, edges) = plant.layout_input();
-            layout(&kinds, &edges)
+            let (kinds, edges, districts) = plant.layout_input();
+            layout(&kinds, &edges, &districts)
         };
         let (demo, shop) = (lay(FIXTURE), lay(SHOP));
         let boxes = [drawn_bounds(&demo, &models), drawn_bounds(&shop, &models)];

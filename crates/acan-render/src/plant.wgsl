@@ -332,6 +332,50 @@ fn fs_ribbon(v: RibbonOut) -> @location(0) vec4<f32> {
     return vec4<f32>(mix(colour, page, fog), 1.0);
 }
 
+// District pads: a faint rounded rectangle on the ground under each district, with a fine line
+// just inside its edge, drawn over the grid and under the belts.
+
+struct PadIn {
+    @location(0) position: vec2<f32>,
+    @location(1) rect: vec4<f32>,
+}
+
+struct PadOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) local: vec2<f32>,
+    @location(1) @interpolate(flat) rect: vec4<f32>,
+}
+
+@vertex
+fn vs_pad(v: PadIn) -> PadOut {
+    var out: PadOut;
+    out.clip = to_clip(vec3<f32>(v.position, 0.0));
+    out.local = v.position;
+    out.rect = v.rect;
+    return out;
+}
+
+@fragment
+fn fs_pad(v: PadOut) -> @location(0) vec4<f32> {
+    // Signed distance to the rounded rectangle, negative inside, in plan units.
+    let centre = 0.5 * (v.rect.xy + v.rect.zw);
+    let half = 0.5 * (v.rect.zw - v.rect.xy);
+    let radius = min(PAD_RADIUS, min(half.x, half.y));
+    let q = abs(v.local - centre) - half + vec2<f32>(radius);
+    let d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+    let per_px = max(length(vec2<f32>(dpdx(d), dpdy(d))), 1e-6);
+    let inside = clamp(0.5 - d / per_px, 0.0, 1.0);
+    let line = inside * clamp(PAD_EDGE_PX + 0.5 + d / per_px, 0.0, 1.0);
+    let fill = theme.palette[SLOT_PAD];
+    let edge = theme.palette[SLOT_PAD_EDGE];
+    let alpha = max(fill.a * inside, edge.a * line);
+    let colour = mix(fill.rgb, edge.rgb, edge.a * line / max(alpha, 1e-6));
+    let world = vec3<f32>(v.local, 0.0);
+    let fog = fog_at(world);
+    let page = theme.palette[SLOT_PAGE].rgb;
+    return vec4<f32>(mix(colour, page, fog), alpha * (1.0 - fog));
+}
+
 // Contact shadow: a short soft falloff on the ground around each footprint, pushed a little
 // away from the light, drawn before the machines.
 

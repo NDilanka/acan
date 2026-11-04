@@ -8,7 +8,7 @@ import { canvas, flagsEl, labelsEl, leadersEl, state } from "./state.js";
 import { requestRender } from "./main.js";
 import {
   BADGE_PX, GHOST_HOLD_MS, LAST_SEEN_KEY, agentFlagShown, badgeBoxes, boxAt, clearOf, flagSpot, foldColumn, inView,
-  isDraftPlot, markWords, placeOverlays, plotLeads, seenOnReturn, standsBeside, unnamedSpots,
+  isDraftPlot, markWords, overlaps, placeOverlays, plotLeads, seenOnReturn, standsBeside, unnamedSpots,
 } from "./place.js";
 import { questionOfFlag } from "./question.js";
 import { isLive } from "./stream.js";
@@ -18,6 +18,9 @@ const ID_PREFIX = { order: "o", clash: "c", question: "q", task: "t" };
 const LABEL_OFFSET_PX = 6;
 
 const LABEL_PAD_PX = 4;
+
+// A district's sign stands this far above its spot on screen, inside the front edge of its pad.
+const SIGN_OFFSET_PX = 4;
 
 const PIN_PICK_PX = 18;
 
@@ -81,15 +84,18 @@ export function placeLabels() {
     height,
     pad: LABEL_PAD_PX,
   });
-  shown.forEach(({ el, x, y, opacity }, i) => {
+  const taken = [...placedBoxes];
+  shown.forEach(({ el, x, y, w, h, opacity }, i) => {
     el.style.visibility = labelShown[i] ? "visible" : "hidden";
     el.style.opacity = String(opacity);
     el.style.transform = `translate(${x}px, ${y}px) translate(-50%, ${LABEL_OFFSET_PX}px)`;
+    if (labelShown[i]) taken.push(boxAt(x - w / 2, y + LABEL_OFFSET_PX, w, h, LABEL_PAD_PX));
   });
   let next = leaders;
   plots.forEach((plot, i) => {
     const visible = showFlag(plot.el, plot.left, plotTops[i]);
     plot.el.placed = visible ? { left: plot.left, top: plotTops[i], w: plot.w, h: plot.h } : null;
+    if (visible) taken.push(boxAt(plot.left, plotTops[i], plot.w, plot.h, LABEL_PAD_PX));
     const leader = plotLeaders[i];
     if (visible && leader !== null) {
       // The leader takes the flag's own tint, so it reads as that flag's.
@@ -99,6 +105,7 @@ export function placeLabels() {
     }
   });
   hideLeadersFrom(next);
+  placeSigns(taken, width, height);
   for (const [index, el] of state.labels) {
     if (el.generation !== state.labelGeneration) {
       el.remove();
@@ -107,6 +114,56 @@ export function placeLabels() {
   }
   placeCompose();
   placeQuestion();
+}
+
+// Each district's sign element, by sign index.
+const signs = new Map();
+
+// One quiet name per district, standing just inside the front edge of its ground pad beside its
+// front machine. The wasm side gives each sign its spots best first; the sign takes the first one
+// in view and clear of the machine names and flags, which are placed before it, so a sign never
+// hides a machine's name. A sign with no clear spot stays hidden. A plant that reads as one place
+// has no pads and no signs.
+function placeSigns(taken, width, height) {
+  const triples = state.app.district_layout();
+  const spots = new Map();
+  for (let k = 0; k < triples.length; k += 3) {
+    const index = triples[k];
+    if (!spots.has(index)) spots.set(index, []);
+    spots.get(index).push([triples[k + 1], triples[k + 2]]);
+  }
+  for (const [index, list] of spots) {
+    const name = state.app.district_sign(index);
+    let el = signs.get(index);
+    if (el === undefined) {
+      el = document.createElement("div");
+      el.className = "sign";
+      labelsEl.appendChild(el);
+      signs.set(index, el);
+    }
+    if (el.textContent !== name) {
+      el.textContent = name;
+      el.size = undefined;
+    }
+    if (el.size === undefined) el.size = [el.offsetWidth, el.offsetHeight];
+    const [w, h] = el.size;
+    const boxOf = ([x, y]) => boxAt(x - w / 2, y - h - SIGN_OFFSET_PX, w, h, LABEL_PAD_PX);
+    const spot = name === "" ? undefined : list.find((at) => {
+      const box = boxOf(at);
+      return inView(box, width, height) && taken.every((other) => !overlaps(box, other));
+    });
+    el.style.visibility = spot === undefined ? "hidden" : "visible";
+    if (spot === undefined) continue;
+    taken.push(boxOf(spot));
+    const [x, y] = spot;
+    el.style.transform = `translate(${x}px, ${y}px) translate(-50%, ${-h - SIGN_OFFSET_PX}px)`;
+  }
+  for (const [index, el] of signs) {
+    if (!spots.has(index)) {
+      el.remove();
+      signs.delete(index);
+    }
+  }
 }
 
 // The label element of machine `index`, made on first use and measured, with its size.
@@ -186,7 +243,11 @@ function hudBoxes() {
 function makeLabel(index) {
   const el = document.createElement("div");
   el.className = "label";
-  el.textContent = state.app.machine_name(index);
+  // The label shows the short name; the full name is the tooltip and what a screen reader reads.
+  const name = state.app.machine_name(index);
+  el.textContent = state.app.machine_label(index) || name;
+  el.title = name;
+  el.setAttribute("aria-label", name);
   const files = state.app.machine_files(index);
   const count = document.createElement("span");
   count.className = "count";

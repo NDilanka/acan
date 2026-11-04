@@ -2,7 +2,7 @@
 //! the layout and the acan-iso models.
 
 use acan_iso::{BODY_RADIUS, Overlay};
-use acan_render::{Aabb, HueLine, Instance, Model, Ribbon, Scene};
+use acan_render::{Aabb, HueLine, Instance, Model, Pad, Ribbon, Scene};
 
 use crate::bends;
 use crate::kind::{self, ALL, Kind, PlanFootprint};
@@ -92,15 +92,27 @@ pub fn mark_kinds() -> MarkKinds {
     }
 }
 
-/// The plant: a ribbon for each belt and an instance for each machine. `models` is indexed the
-/// way [`kind::index`] indexes kinds.
+/// The plant: a pad for each district, a ribbon for each belt and an instance for each machine.
+/// `models` is indexed the way [`kind::index`] indexes kinds.
 pub fn plant_scene(layout: &Layout, models: &[Model]) -> Scene {
     let ribbons = belt_ribbons(&layout.belts);
+    let pads: Vec<Pad> = layout
+        .districts
+        .iter()
+        .map(|district| Pad {
+            rect: district.rect,
+        })
+        .collect();
     let mut bounds = Aabb::EMPTY;
     for ribbon in &ribbons {
         for &[x, y] in &ribbon.centre {
             bounds.include([x, y, 0.0]);
         }
+    }
+    for pad in &pads {
+        let [x0, y0, x1, y1] = pad.rect;
+        bounds.include([x0, y0, 0.0]);
+        bounds.include([x1, y1, 0.0]);
     }
 
     let mut instances = Vec::with_capacity(layout.machines.len());
@@ -131,6 +143,7 @@ pub fn plant_scene(layout: &Layout, models: &[Model]) -> Scene {
         });
     }
     Scene {
+        pads,
         ribbons,
         instances,
         hue_lines: Vec::new(),
@@ -417,8 +430,8 @@ mod tests {
     #[test]
     fn a_ride_measures_each_machine_from_its_model_alone() {
         let plant = from_scan_json(FIXTURE).expect("fixture parses");
-        let (kinds, edges) = plant.layout_input();
-        let laid = layout(&kinds, &edges);
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
         let models = models();
         let boxes = machine_model_boxes(&laid, &models);
         assert_eq!(boxes.len(), laid.machines.len());
@@ -441,8 +454,8 @@ mod tests {
     #[test]
     fn the_scene_places_each_machine_at_its_footprint_centre() {
         let plant = from_scan_json(FIXTURE).expect("fixture parses");
-        let (kinds, edges) = plant.layout_input();
-        let laid = layout(&kinds, &edges);
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
         let scene = plant_scene(&laid, &models());
         assert_eq!(scene.instances.len(), plant.machines.len());
         for (placed, inst) in laid.machines.iter().zip(&scene.instances) {
@@ -456,8 +469,8 @@ mod tests {
     #[test]
     fn the_scene_bounds_hold_every_machine_and_belt() {
         let plant = stress(200);
-        let (kinds, edges) = plant.layout_input();
-        let laid = layout(&kinds, &edges);
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
         let scene = plant_scene(&laid, &models());
         for placed in &laid.machines {
             let f = placed.footprint();
@@ -480,8 +493,8 @@ mod tests {
             from_scan_json(FIXTURE).expect("fixture parses"),
             stress(200),
         ] {
-            let (kinds, edges) = plant.layout_input();
-            let laid = layout(&kinds, &edges);
+            let (kinds, edges, districts) = plant.layout_input();
+            let laid = layout(&kinds, &edges, &districts);
             for ribbon in &plant_scene(&laid, &models()).ribbons {
                 let c = &ribbon.centre;
                 for i in 0..c.len() {

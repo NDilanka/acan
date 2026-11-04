@@ -15,7 +15,7 @@ use bytemuck::{Pod, Zeroable};
 use crate::camera::{Camera, NEAR_FRACTION, ORTHO_FAR, Projection};
 use crate::geometry::{
     self, DotVertex, EdgeVertex, HaloVertex, HueVertex, InstanceRaw, LineVertex, MeshVertex,
-    RibbonVertex, Strokes,
+    PadVertex, RibbonVertex, Strokes,
 };
 use crate::model::{Mesh, Model};
 use crate::scene::{Lod, Scene};
@@ -173,6 +173,7 @@ struct HueBuffers {
 
 struct Pipelines {
     grid: wgpu::RenderPipeline,
+    pad: wgpu::RenderPipeline,
     ribbon: wgpu::RenderPipeline,
     mesh: wgpu::RenderPipeline,
     silhouette: wgpu::RenderPipeline,
@@ -221,6 +222,7 @@ pub struct Renderer {
     quads: Option<wgpu::Buffer>,
     /// Six halo vertices per kind, kind by kind.
     halos: Option<wgpu::Buffer>,
+    pads: Option<(wgpu::Buffer, u32)>,
     ribbons: Option<(wgpu::Buffer, u32)>,
     hue: Option<HueBuffers>,
     /// The kinds whose hidden instances draw as silhouettes, as the scene named them.
@@ -357,6 +359,7 @@ impl Renderer {
             models: Vec::new(),
             quads: None,
             halos: None,
+            pads: None,
             ribbons: None,
             hue: None,
             silhouettes: Vec::new(),
@@ -478,6 +481,19 @@ impl Renderer {
     ///
     /// If an instance names a kind that `set_models` did not upload.
     pub fn set_scene(&mut self, scene: &Scene) {
+        let pads = geometry::pad_vertices(&scene.pads);
+        self.pads = (!pads.is_empty()).then(|| {
+            (
+                upload(
+                    &self.device,
+                    &self.queue,
+                    "pads",
+                    wgpu::BufferUsages::VERTEX,
+                    &pads,
+                ),
+                pads.len() as u32,
+            )
+        });
         let ribbons = geometry::ribbon_vertices(&scene.ribbons);
         self.ribbons = Some((
             upload(
@@ -633,6 +649,11 @@ impl Renderer {
         pass.set_bind_group(0, &self.uniform_bind, &[]);
         pass.set_pipeline(&self.pipelines.grid);
         pass.draw(0..3, 0..1);
+        if let Some((pads, count)) = &self.pads {
+            pass.set_pipeline(&self.pipelines.pad);
+            pass.set_vertex_buffer(0, pads.slice(..));
+            pass.draw(0..*count, 0..1);
+        }
 
         let Some(instances) = &self.instances else {
             return;
@@ -1027,6 +1048,11 @@ impl Pipelines {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32, 2 => Float32, 3 => Float32, 4 => Float32],
         };
+        let pad_vertex = wgpu::VertexBufferLayout {
+            array_stride: size_of::<PadVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
+        };
         let halo_vertex = wgpu::VertexBufferLayout {
             array_stride: size_of::<HaloVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -1106,6 +1132,17 @@ impl Pipelines {
                 Some(depth(true, wgpu::CompareFunction::Always)),
                 scene_samples,
                 &[colour(None)],
+            ),
+            // A pad lies on the ground under the belts, blended over the grid, and writes no depth.
+            pad: make(
+                "pads",
+                &scene_layout,
+                ("vs_pad", "fs_pad"),
+                &[Some(pad_vertex)],
+                triangles,
+                Some(depth(false, wgpu::CompareFunction::Always)),
+                scene_samples,
+                &[colour(alpha)],
             ),
             // Belts and shadows lie on the ground, which is drawn first and lies under them, so
             // they skip the depth test. Testing them against the ground's per-pixel depth lets

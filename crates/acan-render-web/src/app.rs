@@ -258,8 +258,14 @@ struct Loaded {
     framing: Vec<Aabb>,
     /// The solid box of every machine, each with its machine index, for label occlusion.
     occluders: Vec<(usize, Aabb)>,
-    /// Each machine's label half width in CSS pixels, estimated from its name.
+    /// Each machine's label half width in CSS pixels, estimated from its label.
     label_half_px: Vec<f32>,
+    /// Each machine's short name, which its label shows. See `Plant::machine_labels`.
+    labels: Vec<String>,
+    /// Each district's sign name, by district. See `Plant::district_labels`.
+    district_labels: Vec<String>,
+    /// Each machine's district, in the layout's machine order. See `Plant::districts`.
+    districts: Vec<u32>,
     /// Whether each machine carries a name at rest once it is large enough on screen.
     rest: Vec<bool>,
     /// The machines and belts as the layout places them, before any mark is added.
@@ -1762,6 +1768,57 @@ impl App {
             .map_or_else(String::new, |machine| machine.name.clone())
     }
 
+    /// The short name machine `index`'s label shows, such as `src` for
+    /// `crates/acan-server/src`, or an empty string. Its full name is `machine_name`.
+    pub fn machine_label(&self, index: u32) -> String {
+        self.plant
+            .as_ref()
+            .and_then(|loaded| loaded.labels.get(index as usize))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Where each district sign may stand on screen, as flat `[sign index, css x, css y]`
+    /// triples, best first for each sign: just inside the front edges of the district's pad,
+    /// level with its machines, the one lowest on screen first (see `layout::sign_spots`). The
+    /// page shows a sign at its first spot clear of the machine names. Empty when the plant has
+    /// no pads. See `district_sign`.
+    pub fn district_layout(&self) -> Vec<f32> {
+        let Some(loaded) = &self.plant else {
+            return Vec::new();
+        };
+        let camera = self.drawn_camera();
+        let depth = |[x, y]: [f32; 2]| camera.world_to_screen([x, y, 0.0])[1];
+        let mut out = Vec::new();
+        for (i, pad) in loaded.layout.districts.iter().enumerate() {
+            let machines: Vec<[f32; 4]> = loaded
+                .layout
+                .machines
+                .iter()
+                .zip(&loaded.districts)
+                .filter(|(_, district)| **district == pad.district)
+                .map(|(placed, _)| placed.footprint())
+                .collect();
+            for [x, y] in crate::layout::sign_spots(pad.rect, &machines, depth) {
+                let [sx, sy] = camera.world_to_screen([x, y, 0.0]);
+                out.extend([i as f32, sx / self.dpr, sy / self.dpr]);
+            }
+        }
+        out
+    }
+
+    /// The name district sign `index` shows, such as `acan-server`, as `district_layout`
+    /// numbers the signs, or an empty string.
+    pub fn district_sign(&self, index: u32) -> String {
+        self.plant
+            .as_ref()
+            .and_then(|loaded| {
+                let pad = loaded.layout.districts.get(index as usize)?;
+                loaded.district_labels.get(pad.district as usize).cloned()
+            })
+            .unwrap_or_default()
+    }
+
     /// The wire name of machine `name`'s kind, such as `gate`, or an empty string when the plant
     /// has no such machine. The Set kind menu marks the kind a machine has now.
     pub fn machine_kind(&self, name: &str) -> String {
@@ -1827,8 +1884,8 @@ impl App {
 impl App {
     /// Puts `plant` on screen, with the plan placing its machines where the layout puts them.
     fn load(&mut self, plant: Plant) -> u32 {
-        let (kinds, edges) = plant.layout_input();
-        let laid = layout(&kinds, &edges);
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
         let count = plant.machines.len() as u32;
         self.show(plant, laid, [0.0; 2]);
         count
@@ -1923,6 +1980,9 @@ impl App {
         let drone_reach = stand::reach(&self.models[usize::from(scene::mark_kinds().body)]);
         let framing = scene::fit_boxes(&laid, &self.models, &self.kind_spots, drone_reach);
         let machine_bounds = scene::machine_model_boxes(&laid, &self.models);
+        let labels = plant.machine_labels();
+        let district_labels = plant.district_labels();
+        let districts = plant.districts();
         let loaded = Loaded {
             machine_bounds,
             repo: plant.repo,
@@ -1933,11 +1993,13 @@ impl App {
                 }
                 named
             },
-            label_half_px: plant
-                .machines
+            label_half_px: labels
                 .iter()
-                .map(|m| m.name.chars().count() as f32 * labels::CHAR_CSS_PX * 0.5)
+                .map(|label| label.chars().count() as f32 * labels::CHAR_CSS_PX * 0.5)
                 .collect(),
+            labels,
+            district_labels,
+            districts,
             machines: plant.machines,
             layout: laid,
             framing,
@@ -2036,6 +2098,7 @@ impl App {
         for parked in &mut self.parked {
             let base = &parked.loaded.base;
             let start = scene.instances.len();
+            scene.pads.extend(base.pads.iter().copied());
             scene.ribbons.extend(base.ribbons.iter().cloned());
             scene.instances.extend(base.instances.iter().copied());
             let own = &mut parked.marks;
@@ -2210,8 +2273,8 @@ impl App {
         if let Some(laid) = self.layouts.get(&key) {
             return laid.clone();
         }
-        let (kinds, edges) = plant.layout_input();
-        let laid = layout(&kinds, &edges);
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
         self.layouts.insert(key, laid.clone());
         laid
     }
@@ -2788,6 +2851,23 @@ impl App {
         loaded
             .and_then(|loaded| loaded.machines.get(index as usize))
             .map_or_else(String::new, |machine| machine.name.clone())
+    }
+
+    /// The short name machine `index` on project `id`'s plant shows on its label, or an empty
+    /// string. See `machine_label`.
+    pub fn project_machine_label(&self, id: &str, index: u32) -> String {
+        let loaded = if id == self.project {
+            self.plant.as_ref()
+        } else {
+            self.parked
+                .iter()
+                .find(|parked| parked.id == id)
+                .map(|parked| &parked.loaded)
+        };
+        loaded
+            .and_then(|loaded| loaded.labels.get(index as usize))
+            .cloned()
+            .unwrap_or_default()
     }
 }
 

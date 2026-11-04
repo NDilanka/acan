@@ -59,6 +59,14 @@ pub struct Ribbon {
     pub width: f32,
 }
 
+/// A district's ground: a faint rounded rectangle lying on the ground with a fine outline, under
+/// the belts and the machines.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Pad {
+    /// `[min x, min y, max x, max y]` on the plan.
+    pub rect: [f32; 4],
+}
+
 /// A thin line along a belt's centre, in one tint. It lies on the ground and fades toward both
 /// ends, so it reads as the belt's colour without covering it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -72,6 +80,8 @@ pub struct HueLine {
 /// What the renderer draws, set once per plant change.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scene {
+    /// District pads, drawn on the ground under everything else.
+    pub pads: Vec<Pad>,
     /// Belts, drawn in order. A later ribbon covers an earlier one where they cross.
     pub ribbons: Vec<Ribbon>,
     pub instances: Vec<Instance>,

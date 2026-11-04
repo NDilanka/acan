@@ -7,7 +7,7 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::edges::{self, Fold};
 use crate::model::{Aabb, Detail, Dot3, Line3, Mesh};
-use crate::scene::{Beam, HueLine, Instance, Ribbon};
+use crate::scene::{Beam, HueLine, Instance, Pad, Ribbon};
 use crate::theme::{SHADOW_REACH, SHADOW_SHIFT, dot_slot, flat_code, ink_slot};
 
 /// A ribbon's miter never stretches its width by more than this at a sharp turn.
@@ -109,6 +109,15 @@ pub struct HueVertex {
 pub struct HaloVertex {
     pub position: [f32; 3],
     /// The model's footprint in model space: min x, min y, max x, max y.
+    pub rect: [f32; 4],
+}
+
+/// One corner of a district pad's quad, with the pad's rectangle.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, PartialEq)]
+pub struct PadVertex {
+    pub position: [f32; 2],
+    /// The pad: min x, min y, max x, max y.
     pub rect: [f32; 4],
 }
 
@@ -355,6 +364,31 @@ pub fn halo_vertices(bounds: &Aabb) -> [HaloVertex; 6] {
         corner(x0, y1),
     );
     [a, b, c, a, c, d]
+}
+
+/// Six vertices per pad, over its rectangle. The shader draws the outline just inside the edge,
+/// so the quad needs no bleed. An empty or inside-out pad draws nothing.
+pub fn pad_vertices(pads: &[Pad]) -> Vec<PadVertex> {
+    let mut out = Vec::with_capacity(pads.len() * 6);
+    for pad in pads {
+        let rect = pad.rect;
+        if rect[2] <= rect[0] || rect[3] <= rect[1] {
+            continue;
+        }
+        let corner = |x: f32, y: f32| PadVertex {
+            position: [x, y],
+            rect,
+        };
+        let [x0, y0, x1, y1] = rect;
+        let (a, b, c, d) = (
+            corner(x0, y0),
+            corner(x1, y0),
+            corner(x1, y1),
+            corner(x0, y1),
+        );
+        out.extend([a, b, c, a, c, d]);
+    }
+    out
 }
 
 /// Two triangles per centre-line segment of every ribbon. Corners are mitred, so a ribbon
@@ -655,6 +689,22 @@ mod tests {
             );
         }
         assert!(vertices.iter().all(|v| v.length == 20.0 && v.half == 2.0));
+    }
+
+    #[test]
+    fn a_pad_covers_its_rectangle_and_an_empty_one_draws_nothing() {
+        let rect = [10.0, 20.0, 110.0, 70.0];
+        let vertices = pad_vertices(&[Pad { rect }, Pad { rect: [5.0; 4] }]);
+        assert_eq!(vertices.len(), 6, "the empty pad draws nothing");
+        for v in &vertices {
+            assert_eq!(v.rect, rect);
+        }
+        let xs = vertices.iter().map(|v| v.position[0]);
+        let ys = vertices.iter().map(|v| v.position[1]);
+        assert!(xs.clone().fold(f32::INFINITY, f32::min) <= rect[0]);
+        assert!(xs.fold(f32::NEG_INFINITY, f32::max) >= rect[2]);
+        assert!(ys.clone().fold(f32::INFINITY, f32::min) <= rect[1]);
+        assert!(ys.fold(f32::NEG_INFINITY, f32::max) >= rect[3]);
     }
 
     #[test]
