@@ -18,8 +18,8 @@ A hackathon pre-release. The files are not code-signed, so Windows SmartScreen m
 
 1. Start the Acan Demo first. It needs no keys.
 2. For your own project, start Acan and add the folder of a git repository. On Windows, the Start
-   menu opens an empty canvas in your browser, and its plus button adds the folder. On Linux, open
-   the address that Acan prints.
+   menu opens an empty canvas in your browser, and its plus button adds the folder. On Linux, run
+   `acan open`.
 3. To use a model, paste a key on the setup page of the server, or set `META_API_KEY`,
    `BASETEN_API_KEY` or `FIREWORKS_API_KEY`. Keys stay on your machine.
 
