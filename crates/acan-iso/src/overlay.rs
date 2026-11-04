@@ -53,38 +53,17 @@ pub fn bar_count(files: usize) -> Option<u8> {
     }
 }
 
-/// The model of `overlay` on a machine of `kind`. Machines of the kinds without their own figure draw as the
-/// assembler, so their marks sit where the assembler's do.
+/// The model of `overlay` on a machine of `kind`, on that kind's own figure and top deck.
 #[must_use]
 pub fn overlay_model(kind: Kind, overlay: Overlay) -> Model {
-    let figure = figure_of(kind);
-    let f = Frame::of(footprint(figure));
+    let f = Frame::of(footprint(kind));
     let mut p = Part::new();
     match overlay {
-        Overlay::Bars(count) => bars(&mut p, f, deck(figure), count),
+        Overlay::Bars(count) => bars(&mut p, f, deck(kind), count),
         Overlay::Groove { broken } => groove(&mut p, f, broken),
         Overlay::FailedTick => failed_tick(&mut p, f),
     }
     p.finish()
-}
-
-/// The kind whose figure a machine of `kind` draws: its own, or the assembler for the kinds without one yet.
-fn figure_of(kind: Kind) -> Kind {
-    match kind {
-        Kind::Intake
-        | Kind::Gate
-        | Kind::Tank
-        | Kind::Splitter
-        | Kind::Valve
-        | Kind::Crate
-        | Kind::Switchboard
-        | Kind::Kiosk
-        | Kind::Mould
-        | Kind::Switchbox
-        | Kind::Toolrack
-        | Kind::Assembler => kind,
-        _ => Kind::Assembler,
-    }
 }
 
 /// Where a figure's file bars go: the top deck, its back edge, and how long the bars are.
@@ -167,7 +146,37 @@ fn deck(kind: Kind) -> Deck {
             centre: 28.0,
             length: 24.0,
         },
-        _ => Deck {
+        Kind::Conveyor => Deck {
+            back: 4.0,
+            top: 18.0,
+            centre: 18.0,
+            length: 10.0,
+        },
+        Kind::Horn => Deck {
+            back: 6.0,
+            top: 9.0,
+            centre: 20.0,
+            length: 10.0,
+        },
+        Kind::Gantry => Deck {
+            back: 18.0,
+            top: 44.0,
+            centre: 71.0,
+            length: 12.0,
+        },
+        Kind::Console => Deck {
+            back: 6.0,
+            top: 23.0,
+            centre: 20.0,
+            length: 14.0,
+        },
+        Kind::Antenna => Deck {
+            back: 6.0,
+            top: 9.0,
+            centre: 28.0,
+            length: 12.0,
+        },
+        Kind::Assembler => Deck {
             back: 8.0,
             top: 24.0,
             centre: 32.0,
@@ -314,19 +323,16 @@ mod tests {
     }
 
     #[test]
-    fn the_kinds_without_a_figure_take_the_assemblers_marks() {
-        for kind in [
-            Kind::Conveyor,
-            Kind::Horn,
-            Kind::Gantry,
-            Kind::Console,
-            Kind::Antenna,
-        ] {
-            for overlay in Overlay::ALL {
-                assert_eq!(
-                    overlay_model(kind, overlay),
-                    overlay_model(Kind::Assembler, overlay),
-                    "{kind:?} {overlay:?}"
+    fn every_kind_draws_its_own_file_bars_not_the_assemblers() {
+        for kind in Kind::ALL
+            .into_iter()
+            .filter(|&kind| kind != Kind::Assembler)
+        {
+            for count in 1..=3 {
+                assert_ne!(
+                    overlay_model(kind, Overlay::Bars(count)),
+                    overlay_model(Kind::Assembler, Overlay::Bars(count)),
+                    "{kind:?} bars {count} take the assembler's deck"
                 );
             }
         }
