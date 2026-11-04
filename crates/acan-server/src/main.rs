@@ -138,7 +138,7 @@ struct ServeArgs {
     workers: usize,
     /// Maps each project's codebase when its first page connects, not as the server starts.
     ///
-    /// Until a page connects, the project shows no machines, runs no scan and takes no writes. The
+    /// Until a page connects, the project's map stays blank, runs no scan and takes no writes. The
     /// first page's stream starts the scan, so the map builds while that page watches. Without the
     /// flag, the codebase maps as the server starts, which is the default.
     #[arg(long)]

@@ -174,7 +174,7 @@ pub struct ServeConfig {
     /// on, in every project.
     pub local_workers: usize,
     /// Whether each project's codebase maps when its first page connects, rather than as the server
-    /// starts. A waiting project shows no machines and takes no writes until then. Such a server
+    /// starts. A waiting project's map stays blank and takes no writes until then. Such a server
     /// must be started with [`start_projects_serving`], since waiting for the maps would wait for a
     /// page that may never come.
     pub map_on_first_view: bool,

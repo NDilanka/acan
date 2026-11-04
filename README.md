@@ -119,7 +119,7 @@ The UI and API use port 7311, and the demo app uses port 7312. Both are set with
 
 ### Map the codebase on first view
 
-By default, `acan serve` starts the codebase scan when the server starts. Pass `--map-on-first-view` to wait instead: the scan starts when the first authenticated page connects. Until then the project shows no machines and takes no writes. The first page then sees the map fill in from blank.
+By default, `acan serve` starts the codebase scan when the server starts. Pass `--map-on-first-view` to wait instead: the scan starts when the first authenticated page connects. Until then the map stays blank and the project takes no writes. The first page then sees the map fill in from blank.
 
 ```
 acan serve --repo <path> --map-on-first-view
