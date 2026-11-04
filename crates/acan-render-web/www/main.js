@@ -20,7 +20,7 @@ import { keyAction } from "./keys.js";
 import { closeSettings, installSettings, settingsOpen, toggleSettings } from "./settings.js";
 import { droneHover, paintMarks, pinAt, placeLabels } from "./marks.js";
 import { paintRide, paintStale, paintUsage, toggleHelp } from "./panels.js";
-import { syncSeals } from "./seal.js";
+import { syncOrigin } from "./origin.js";
 import { paintSlip } from "./slip.js";
 import {
   $,
@@ -37,7 +37,7 @@ import {
   setCanvas,
   state,
 } from "./state.js";
-import { playOf, syncPlantViews } from "./plant.js";
+import { playOf } from "./plant.js";
 import { bindPlate, paintPlate, stepBy, toggleMode, togglePlay } from "./plate.js";
 import { startReplay } from "./replay.js";
 import { bindShell, startShell } from "./shell.js";
@@ -182,9 +182,10 @@ function paint() {
   paintMarks();
   paintUsage();
   paintStale();
-  syncPlantViews(state, get, paintPlate);
+  // A replay has no origin to ask, so it makes no plant-view or route call. Its receipts and Seal
+  // blocks say what the replay lacks instead (see origin.js).
+  syncOrigin(state, get, { plate: paintPlate, slip: paintSlip }, replay);
   paintPlate();
-  syncSeals(state, get, paintSlip);
   paintSlip();
   requestUsage(state, get, paintUsage);
   syncVision();
