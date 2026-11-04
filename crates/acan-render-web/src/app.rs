@@ -515,6 +515,19 @@ impl App {
         Ok(())
     }
 
+    /// Applies the stage a live `scan_progress` step reports, so a waiting map starts. A step does
+    /// not list the modules that filled, so the machines keep their phases.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the JSON is not a scan status.
+    pub fn set_scan_stage(&mut self, json: &str) -> Result<(), JsError> {
+        let status = scanfill::parse_status(json).map_err(js_err)?;
+        self.scan.step(status.stage);
+        self.sync_scene();
+        Ok(())
+    }
+
     /// Starts the machine named `name` filling in, as its module finishes. A page that asks for
     /// reduced motion, or a settled map, builds it at once. Returns whether the plant has it.
     pub fn scan_fill(&mut self, name: &str, reduced: bool) -> bool {

@@ -72,8 +72,12 @@ export function scanView({ app, paint, reduced }) {
       const { frame } = scan;
       if (scan.kind === "status") {
         app.set_scan(scan.json);
-      } else if (frame.module !== undefined && frame.module !== null) {
-        app.scan_fill(frame.module.name, reduced());
+      } else {
+        // A step gives the renderer its stage, so a waiting map starts; a module that filled starts its fill.
+        app.set_scan_stage(scan.json);
+        if (frame.module !== undefined && frame.module !== null) {
+          app.scan_fill(frame.module.name, reduced());
+        }
       }
       status = frame;
       if (!ENDED.has(frame.stage)) {

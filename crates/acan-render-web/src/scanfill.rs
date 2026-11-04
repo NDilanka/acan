@@ -106,12 +106,19 @@ impl ScanFill {
         self.phases = vec![Phase::Built; machines];
     }
 
+    /// Folds the stage a live step reports. The first step past the wait ends the wait, so the
+    /// outlines show even before a status frame comes. A step does not list the modules that
+    /// filled, so the phases stay as they are.
+    pub fn step(&mut self, stage: Stage) {
+        self.settled |= stage.ended();
+        self.waiting = stage == Stage::Waiting;
+    }
+
     /// Folds a status into the phases. The machines `filled` names by index are built. A machine
     /// that has not filled is an outline, unless its fill is already running. An ended scan, or a
     /// map that was settled before, builds every machine at once.
     pub fn apply(&mut self, stage: Stage, filled: &[usize]) {
-        self.settled |= stage.ended();
-        self.waiting = stage == Stage::Waiting;
+        self.step(stage);
         let mut done = vec![false; self.phases.len()];
         for &index in filled {
             if let Some(slot) = done.get_mut(index) {
@@ -381,6 +388,21 @@ mod tests {
         assert!(parse_status(r#"{"stage":"reticulating"}"#).is_err());
         assert!(Stage::Failed.ended() && Stage::Done.ended() && !Stage::States.ended());
         assert!(!Stage::Waiting.ended(), "a waiting scan has not ended");
+    }
+
+    #[test]
+    fn a_live_step_ends_the_wait_and_keeps_the_phases() {
+        // A `scan_progress` step carries no list of filled modules, so the wait ends on its stage.
+        let mut fill = ScanFill::default();
+        fill.load(2);
+        fill.apply(Stage::Waiting, &[]);
+        assert!(fill.hidden(0), "no body is drawn while waiting");
+        fill.step(Stage::Skeleton);
+        assert!(
+            fill.hidden(0) && fill.hidden(1),
+            "the machines are outlines once the scan starts"
+        );
+        assert_eq!(fill.ghost_alpha(1), Some(GHOST_ALPHA));
     }
 
     #[test]
