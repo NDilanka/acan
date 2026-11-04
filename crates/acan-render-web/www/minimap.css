@@ -1,0 +1,32 @@
+/* The projects map, bottom right on a canvas of several projects: each plant's box north-up, and
+   the ground the screen shows over them. Theme colours only, so every look works, and no
+   transitions. The right rail ends above it through --minimap-room, which minimap.js sets. */
+#minimap { right: 12px; bottom: 12px; z-index: 1; width: 200px; box-sizing: border-box; padding: 6px;
+  font: 11px var(--mono); color: var(--ink); }
+#minimap.collapsed { width: auto; padding: 4px; }
+#minimap .head { display: flex; align-items: center; gap: 6px; height: 18px; margin-bottom: 4px; }
+#minimap.collapsed .head { margin-bottom: 0; }
+#minimap-toggle { height: 18px; padding: 0 6px; font: 11px/16px var(--mono); color: var(--ink); background: var(--card);
+  border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+#minimap-toggle:hover { border-color: var(--ink); }
+#minimap-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+#minimap.collapsed #minimap-name { display: none; }
+#minimap-map { position: relative; height: 124px; box-sizing: border-box; overflow: hidden; background: var(--card);
+  border: 1px solid var(--rule); border-radius: 4px; touch-action: none; user-select: none; cursor: default; }
+#minimap .plant { position: absolute; box-sizing: border-box; margin: 0; padding: 0; overflow: hidden; background: var(--face);
+  border: 1px solid var(--soft); border-radius: 2px; cursor: pointer; }
+/* A plant the scan is still filling, or has not reached, is dashed; the bar is its built share. */
+#minimap .plant.filling, #minimap .plant.unmapped { border-style: dashed; border-color: var(--muted); }
+#minimap .plant.here { border-width: 1.5px; border-color: var(--ink); }
+#minimap .plant .bar { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--ink); }
+#minimap .plant:not(.filling) .bar { display: none; }
+#minimap .plant:focus-visible, #minimap-toggle:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+#minimap-view { position: absolute; inset: 0; width: 100%; height: 100%; overflow: hidden; pointer-events: none; }
+#minimap-view .fill { fill: var(--ink); fill-opacity: 0.07; stroke: none; }
+#minimap-view .edge, #minimap-view .top, #minimap-view .tick { fill: none; stroke: var(--ink); stroke-width: 1; }
+/* The top edge stops short of the horizon in a low view, so it is drawn cut. */
+#minimap-view .top.cut { stroke-dasharray: 3 2; }
+#minimap-view .off { fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+body:has(#replay:not([hidden])) #minimap { bottom: 56px; }
+/* A narrow window has no corner free of the centred alpha banner. */
+@media (max-width: 719px) { #minimap { display: none; } }

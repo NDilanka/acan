@@ -2928,6 +2928,68 @@ impl App {
     }
 }
 
+/// The projects map in the corner of a canvas of several projects. See [`crate::minimap`].
+#[wasm_bindgen]
+impl App {
+    /// Each project's plant box and its built share, as flat `[min x, min y, max x, max y, built]`
+    /// quints in `canvas_order` order. The box is the layout's, the one `project_under` picks
+    /// from. `built` is the share of the plant on screen whose machines the scan has filled, and 1
+    /// for a parked plant. A project with no plant gives five NaNs, so the places stay aligned.
+    /// Empty on a page with one plant.
+    pub fn canvas_boxes(&self) -> Vec<f32> {
+        let mut out = Vec::with_capacity(self.order.len() * 5);
+        for id in &self.order {
+            let entry = if *id == self.project {
+                self.plant.as_ref().map(|loaded| {
+                    let built = crate::minimap::built_share(loaded.machines.len(), |index| {
+                        self.scan.hidden(index)
+                    });
+                    (loaded.layout.bounds, built)
+                })
+            } else {
+                self.parked
+                    .iter()
+                    .find(|parked| parked.id == *id)
+                    .map(|parked| (parked.loaded.layout.bounds, 1.0))
+            };
+            match entry {
+                Some((bounds, built)) => {
+                    out.extend(bounds);
+                    out.push(built);
+                }
+                None => out.extend([f32::NAN; 5]),
+            }
+        }
+        out
+    }
+
+    /// The ground the screen shows, as `[TL x, y, TR x, y, BR x, y, BL x, y, cut, pivot x, pivot
+    /// y]` in plan units, corners in screen order, `cut` 1 when the top edge came down short of
+    /// the top of the screen. The stored camera, so a ride's bob does not move it. Empty with no
+    /// plant, or when the bottom of the screen sees no ground. See [`crate::minimap::view_quad`].
+    pub fn minimap_view(&self) -> Vec<f32> {
+        if self.plant.is_none() {
+            return Vec::new();
+        }
+        crate::minimap::view_floats(&self.camera)
+    }
+
+    /// Eases the camera's pivot to the plan point `(x, y)` at the same zoom, as a tour step moves,
+    /// or jumps there with `reduced`. A top-down turn in progress stops where it is; a Q or E turn
+    /// runs on. Returns false while riding, with no plant, or for a point that is not finite.
+    pub fn pan_to(&mut self, x: f32, y: f32, reduced: bool) -> bool {
+        if self.ride.is_some() || self.plant.is_none() {
+            return false;
+        }
+        let Some(to) = crate::minimap::pan_pose(&self.camera, [x, y]) else {
+            return false;
+        };
+        self.cancel_top_move();
+        self.ease_to(to, reduced);
+        true
+    }
+}
+
 /// The box `[min x, min y, max x, max y]` in CSS px that a plan box covers on the ground.
 fn screen_box(camera: &Camera, b: [f32; 4], dpr: f32) -> [f32; 4] {
     let corners = [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]]
