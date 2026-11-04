@@ -856,7 +856,7 @@ mod tests {
         let all = [
             ("LOCALAPPDATA", "/local"),
             ("XDG_STATE_HOME", "/state"),
-            ("HOME", "/home/me"),
+            ("HOME", "/users/me"),
         ];
         assert_eq!(
             run_dir_from(true, vars(&all)),
@@ -867,18 +867,18 @@ mod tests {
             Some(PathBuf::from("/state/acan"))
         );
         assert_eq!(
-            run_dir_from(false, vars(&[("HOME", "/home/me")])),
-            Some(PathBuf::from("/home/me/.local/state/acan"))
+            run_dir_from(false, vars(&[("HOME", "/users/me")])),
+            Some(PathBuf::from("/users/me/.local/state/acan"))
         );
         assert_eq!(
             run_dir_from(
                 false,
-                vars(&[("XDG_STATE_HOME", "state"), ("HOME", "/home/me")])
+                vars(&[("XDG_STATE_HOME", "state"), ("HOME", "/users/me")])
             ),
-            Some(PathBuf::from("/home/me/.local/state/acan")),
+            Some(PathBuf::from("/users/me/.local/state/acan")),
             "a relative XDG_STATE_HOME is ignored"
         );
-        assert_eq!(run_dir_from(true, vars(&[("HOME", "/home/me")])), None);
+        assert_eq!(run_dir_from(true, vars(&[("HOME", "/users/me")])), None);
         assert_eq!(run_dir_from(false, vars(&[])), None);
     }
 
@@ -973,7 +973,7 @@ mod tests {
             "a commit hash is not a secret: {redacted}"
         );
         assert_eq!(
-            redact("key sk-secret here", &["sk-secret"]),
+            redact("key sk-secret-123 here", &["sk-secret-123"]),
             "key <redacted> here"
         );
     }
