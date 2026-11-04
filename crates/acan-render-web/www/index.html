@@ -452,6 +452,7 @@
   #watch .empty { margin: 0; font: 12px/1.4 var(--sans); color: var(--muted); }
   #watch .empty code { display: block; margin-top: 4px; font: 11px/1.4 var(--mono); color: var(--ink);
     overflow-wrap: anywhere; user-select: all; }
+  #lanes .empty > span code { display: inline; margin-top: 0; }
   #watch li.moved { animation: watch-glow 1200ms ease-out; }
   @keyframes watch-glow { from { background: #e6e6e1; } to { background: transparent; } }
   @media (prefers-reduced-motion: reduce) { #watch li.moved { animation: none; } }
