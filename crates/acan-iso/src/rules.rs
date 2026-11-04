@@ -13,7 +13,7 @@
 //!    is a Switchbox, not a server.
 //! 3. The path pass, only when the name matched no row. The machine's directory is matched the
 //!    same way, innermost segment first.
-//! 4. The file-name pass. The first row, Assembler aside, with a word in the stems of at least
+//! 4. The file-name pass. The first row, Assembler aside, with a word in the stems of more than
 //!    half the files wins, so a folder of `routes.ts` files is a Switchboard.
 //! 5. The import pass. The first row of [`IMPORT_RULES`] with a package that at least half the
 //!    files import wins, so a folder that imports `react` is a Kiosk.
@@ -570,7 +570,7 @@ fn by_segment(text: &str) -> Option<(Kind, String)> {
         .find_map(|segment| by_token(&words(segment)))
 }
 
-/// The first row of [`RULES`], the assembler aside, with a word in the stems of at least half of
+/// The first row of [`RULES`], the assembler aside, with a word in the stems of more than half of
 /// `paths`, the first such word, and the number of files with one.
 fn by_file_names(paths: &[&str]) -> Option<(Kind, String, usize)> {
     let stems: Vec<Vec<String>> = paths.iter().map(|path| words(stem(path))).collect();
@@ -587,7 +587,7 @@ fn by_file_names(paths: &[&str]) -> Option<(Kind, String, usize)> {
             })
             .collect();
         if let Some(word) = matched.first()
-            && matched.len() * 2 >= paths.len()
+            && matched.len() * 2 > paths.len()
         {
             return Some((kind, (*word).clone(), matched.len()));
         }
@@ -851,6 +851,8 @@ mod tests {
             "src/c/z.ts",
         ];
         assert_eq!(kind_of("feature", "src", &minority), Kind::Assembler);
+        let half = ["src/auth.ts", "src/server.ts"];
+        assert_eq!(kind_of("src", "src", &half), Kind::Assembler);
     }
 
     #[test]
