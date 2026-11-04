@@ -38,6 +38,7 @@ mod models;
 mod observations;
 mod observe;
 mod offline;
+pub mod open;
 mod plant_view;
 pub mod projects;
 mod public;
