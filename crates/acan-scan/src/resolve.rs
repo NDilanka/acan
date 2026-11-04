@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::extract::{RawImport, RawRef};
+use crate::manifest::RustCrates;
 use crate::model::{FileId, ImportRef, ImportTarget};
 
 /// Repo-relative path to file id, for the files that were scanned.
@@ -22,7 +23,12 @@ impl PathIndex {
     }
 }
 
-pub(crate) fn resolve_import(from: &str, raw: RawImport, index: &PathIndex) -> ImportRef {
+pub(crate) fn resolve_import(
+    from: &str,
+    raw: RawImport,
+    index: &PathIndex,
+    crates: &RustCrates,
+) -> ImportRef {
     let (specifier, target) = match raw.reference {
         RawRef::Module(specifier) => {
             let target = resolve_module(from, &specifier, index);
@@ -33,7 +39,7 @@ pub(crate) fn resolve_import(from: &str, raw: RawImport, index: &PathIndex) -> I
             (name, target)
         }
         RawRef::RustUse(path) => {
-            let target = resolve_rust_use(from, &path, index);
+            let target = resolve_rust_use(from, &path, index, crates);
             (path, target)
         }
     };
@@ -102,23 +108,36 @@ fn rust_module_dir(from: &str) -> String {
     }
 }
 
-/// Resolves `crate::a::b::Item` by the longest module prefix that is a scanned file. `self::` and `super::` are left unresolved, and other roots are external crates.
-fn resolve_rust_use(from: &str, path: &str, index: &PathIndex) -> ImportTarget {
-    let mut segments = path.split("::");
-    match segments.next() {
-        Some("crate") => {}
+/// Resolves `crate::a::b::Item`, and `name::a::b::Item` for a crate of the repo's own workspace, by the longest module prefix that is a scanned file. `self::` and `super::` are left unresolved, and other roots are external crates.
+fn resolve_rust_use(
+    from: &str,
+    path: &str,
+    index: &PathIndex,
+    crates: &RustCrates,
+) -> ImportTarget {
+    let mut segments = path.trim_start_matches("::").split("::");
+    let root_files = match segments.next() {
+        Some("crate") => {
+            let Some(src_dir) = crate_src_dir(from) else {
+                return ImportTarget::Unresolved;
+            };
+            vec![join(src_dir, "lib.rs"), join(src_dir, "main.rs")]
+        }
         Some("self" | "super") => return ImportTarget::Unresolved,
-        _ => return ImportTarget::External,
-    }
-    let Some(src_dir) = crate_src_dir(from) else {
-        return ImportTarget::Unresolved;
+        Some(name) => match crates.lib_root(from, name) {
+            Some(lib_root) => vec![lib_root.to_string()],
+            None => return ImportTarget::External,
+        },
+        None => return ImportTarget::External,
     };
+    // A crate root declares its modules into its own directory, whatever the file is called.
+    let src_dir = parent_dir(&root_files[0]);
     let modules: Vec<&str> = segments
         .filter(|segment| !segment.is_empty() && *segment != "*")
         .collect();
     for depth in (0..=modules.len()).rev() {
         let candidates = if depth == 0 {
-            vec![join(src_dir, "lib.rs"), join(src_dir, "main.rs")]
+            root_files.clone()
         } else {
             let base = modules[..depth]
                 .iter()
@@ -158,7 +177,7 @@ fn parent_dir(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(dir, _)| dir)
 }
 
-fn join(dir: &str, rest: &str) -> String {
+pub(crate) fn join(dir: &str, rest: &str) -> String {
     if dir.is_empty() {
         rest.to_string()
     } else {
@@ -167,7 +186,7 @@ fn join(dir: &str, rest: &str) -> String {
 }
 
 /// Removes `.` and resolves `..`. Returns `None` when the path climbs above the repo root.
-fn normalize(path: &str) -> Option<String> {
+pub(crate) fn normalize(path: &str) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
     for part in path.split('/') {
         match part {
@@ -179,4 +198,195 @@ fn normalize(path: &str) -> Option<String> {
         }
     }
     Some(parts.join("/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::model::{MachineId, Plant};
+
+    fn write(root: &Path, path: &str, text: &str) {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn workspace() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        );
+        write(
+            root,
+            "crates/alpha-core/Cargo.toml",
+            "[package]\nname = \"alpha-core\"\n",
+        );
+        write(root, "crates/alpha-core/src/lib.rs", "pub mod model;\n");
+        write(
+            root,
+            "crates/alpha-core/src/model.rs",
+            "pub struct Thing;\n",
+        );
+        write(
+            root,
+            "crates/beta/Cargo.toml",
+            "[package]\nname = \"beta\"\n[dependencies]\nalpha-core = { path = \"../alpha-core\" }\n",
+        );
+        write(
+            root,
+            "crates/beta/src/lib.rs",
+            "use alpha_core::model::Thing;\nuse serde::Serialize;\npub fn make() -> Thing { Thing }\n",
+        );
+        write(
+            root,
+            "crates/beta/tests/it.rs",
+            "use beta::make;\nuse alpha_core::model::{self, Thing};\nuse alpha_core::Missing;\n",
+        );
+        dir
+    }
+
+    fn targets(plant: &Plant, path: &str) -> Vec<(String, Option<String>)> {
+        let file = plant.files.iter().find(|file| file.path == path).unwrap();
+        file.imports
+            .iter()
+            .map(|import| {
+                let target = match import.target {
+                    ImportTarget::File { file } => Some(plant.files[file.0 as usize].path.clone()),
+                    _ => None,
+                };
+                (import.specifier.clone(), target)
+            })
+            .collect()
+    }
+
+    fn machine_of(plant: &Plant, path: &str) -> MachineId {
+        let file = plant
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap()
+            .id;
+        plant
+            .machines
+            .iter()
+            .find(|machine| machine.files.contains(&file))
+            .unwrap()
+            .id
+    }
+
+    #[test]
+    fn workspace_crate_uses_resolve_to_their_files() {
+        let dir = workspace();
+        let plant = crate::scan(dir.path()).unwrap();
+        let model = Some("crates/alpha-core/src/model.rs".to_string());
+        assert_eq!(
+            targets(&plant, "crates/beta/src/lib.rs"),
+            [
+                ("alpha_core::model::Thing".to_string(), model.clone()),
+                ("serde::Serialize".to_string(), None),
+            ]
+        );
+        assert_eq!(
+            targets(&plant, "crates/beta/tests/it.rs"),
+            [
+                (
+                    "beta::make".to_string(),
+                    Some("crates/beta/src/lib.rs".to_string())
+                ),
+                ("alpha_core::model".to_string(), model.clone()),
+                ("alpha_core::model::Thing".to_string(), model),
+                (
+                    "alpha_core::Missing".to_string(),
+                    Some("crates/alpha-core/src/lib.rs".to_string())
+                ),
+            ]
+        );
+        let serde = &plant
+            .files
+            .iter()
+            .find(|file| file.path == "crates/beta/src/lib.rs")
+            .unwrap()
+            .imports[1];
+        assert_eq!(serde.target, ImportTarget::External);
+
+        let from = machine_of(&plant, "crates/beta/src/lib.rs");
+        let to = machine_of(&plant, "crates/alpha-core/src/model.rs");
+        assert_ne!(from, to);
+        assert!(
+            plant
+                .belts
+                .iter()
+                .any(|belt| belt.from == from && belt.to == to)
+        );
+    }
+
+    #[test]
+    fn single_crate_tests_import_it_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "Cargo.toml", "[package]\nname = \"solo-tool\"\n");
+        write(root, "src/lib.rs", "pub mod parse;\n");
+        write(root, "src/parse/mod.rs", "pub fn run() {}\n");
+        write(root, "tests/it.rs", "use solo_tool::parse::run;\n");
+        write(root, "examples/demo.rs", "use ::solo_tool::parse;\n");
+        let plant = crate::scan(root).unwrap();
+        let parse = Some("src/parse/mod.rs".to_string());
+        assert_eq!(
+            targets(&plant, "tests/it.rs"),
+            [("solo_tool::parse::run".to_string(), parse.clone())]
+        );
+        assert_eq!(
+            targets(&plant, "examples/demo.rs"),
+            [("::solo_tool::parse".to_string(), parse)]
+        );
+    }
+
+    #[test]
+    fn lib_name_override_and_malformed_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"core\", \"app\"]\n",
+        );
+        write(
+            root,
+            "core/Cargo.toml",
+            "[package]\nname = \"core-pkg\"\n[lib]\nname = \"engine\"\n",
+        );
+        write(root, "core/src/lib.rs", "pub struct Engine;\n");
+        write(root, "app/Cargo.toml", "[package\nname = \"app\"");
+        write(
+            root,
+            "app/src/main.rs",
+            "use engine::Engine;\nuse core_pkg::Engine;\n",
+        );
+        let plant = crate::scan(root).unwrap();
+        assert_eq!(
+            targets(&plant, "app/src/main.rs"),
+            [
+                (
+                    "engine::Engine".to_string(),
+                    Some("core/src/lib.rs".to_string())
+                ),
+                ("core_pkg::Engine".to_string(), None),
+            ]
+        );
+
+        write(root, "Cargo.toml", "[workspace\nmembers = ");
+        let plant = crate::scan(root).unwrap();
+        assert_eq!(
+            targets(&plant, "app/src/main.rs"),
+            [
+                ("engine::Engine".to_string(), None),
+                ("core_pkg::Engine".to_string(), None),
+            ]
+        );
+    }
 }
