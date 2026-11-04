@@ -1855,6 +1855,15 @@ impl App {
     /// plant that replaces the one on screen in place keeps the camera and the drones' eases, cut,
     /// so the drones land where the new plant puts them instead of dropping in again.
     fn show(&mut self, plant: Plant, at_origin: Layout, offset: [f32; 2], fit: bool) {
+        // A fly to this plant aimed at its old framing; it lands on the new one instead.
+        let flying_here = !fit
+            && self.tour_move.as_ref().is_some_and(|movement| {
+                let old = self
+                    .plant
+                    .as_ref()
+                    .map(|loaded| self.pose_of(&loaded.framing));
+                old.is_some_and(|old| same_pose(old, movement.to))
+            });
         let (loaded, plan) = self.build(plant, at_origin, offset);
         self.scan.load(loaded.machines.len());
         self.plan = Some(plan);
@@ -1866,11 +1875,19 @@ impl App {
             self.motion.cut();
         }
         self.card_clash = None;
-        self.tour_move = None;
-        self.top_move = None;
+        if fit {
+            self.tour_move = None;
+            self.top_move = None;
+        }
         self.ride = None;
         self.fit_after_leave = false;
         self.dirty = true;
+        if flying_here {
+            let to = self.pose_of(&loaded.framing);
+            if let Some(movement) = self.tour_move.as_mut() {
+                movement.to = to;
+            }
+        }
         self.plant = Some(loaded);
         self.refresh_fog();
         if fit {
@@ -2841,6 +2858,12 @@ fn screen_box(camera: &Camera, b: [f32; 4], dpr: f32) -> [f32; 4] {
         },
     )
 }
+/// Whether two poses are the same up to float noise, as the same framing fitted twice gives.
+fn same_pose(a: tour::Pose, b: tour::Pose) -> bool {
+    let near = |x: f32, y: f32| (x - y).abs() <= 1e-3 * x.abs().max(y.abs()).max(1.0);
+    near(a.0[0], b.0[0]) && near(a.0[1], b.0[1]) && near(a.1, b.1)
+}
+
 /// The box round two boxes. An empty box adds nothing.
 fn joined(a: Aabb, b: Aabb) -> Aabb {
     let mut out = a;

@@ -115,6 +115,22 @@ test("a plant that replaces the one on screen keeps the camera; only a plant on 
   assert.equal((app.match(/self\.show\(/g) ?? []).length, 3);
 });
 
+test("a plant replaced in place mid-fly lets the camera land, on the new plant's framing", () => {
+  const app = read("../../src/app.rs");
+  const show = app.slice(app.indexOf("fn show("), app.indexOf("fn build("));
+  // Camera moves stop only on the fitting path; an in-place plant never calls fit_view, which ends a turn.
+  assert.match(show, /if fit \{\s*self\.tour_move = None;\s*self\.top_move = None;\s*\}/);
+  assert.doesNotMatch(show.replace(/if fit \{\s*self\.tour_move = None;\s*self\.top_move = None;\s*\}/, ""), /self\.(tour_move|top_move|turn) = None;/);
+  // A fly aimed at the old plant's framing is aimed again at the new one.
+  assert.match(show, /let flying_here = !fit\s*&& self\.tour_move\.as_ref\(\)\.is_some_and\(/);
+  assert.match(show, /same_pose\(old, movement\.to\)/);
+  assert.match(show, /if flying_here \{\s*let to = self\.pose_of\(&loaded\.framing\);\s*if let Some\(movement\) = self\.tour_move\.as_mut\(\) \{\s*movement\.to = to;/);
+  assert.ok(show.indexOf("if flying_here") < show.indexOf("self.plant = Some(loaded);"));
+  assert.match(app, /fn same_pose\(a: tour::Pose, b: tour::Pose\) -> bool \{/);
+  // fly_to keeps its target pose, so the ease runs on through the replacement.
+  assert.match(app, /let to = self\.pose_of\(&framing\);\s*self\.ease_to\(to, reduced\);/);
+});
+
 test("the kind menu changes a canvas plant in place too", () => {
   const kinds = read("../../www/kindmenu.js");
   assert.match(kinds, /if \(canvasState\.multi\) replaceProjectPlant\(canvasState\.active, text\);\s*else state\.app\.set_plant\(text\);/);
