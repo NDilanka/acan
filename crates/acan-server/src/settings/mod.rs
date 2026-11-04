@@ -133,31 +133,90 @@ named! {
 }
 
 /// What the settings file holds. Model keys are never here, since they live in the keys file.
-/// A missing section, or field, reads as its default.
+/// A missing section, or field, reads as its default. A key this version does not use is kept in
+/// an `unknown` map at each level and written back on save, so a file another build wrote still
+/// loads, and its keys are not lost. See [`Stored::unknown_keys`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub(crate) struct Stored {
     pub(crate) harness: Harness,
     pub(crate) projects: Projects,
     pub(crate) budgets: Budgets,
     pub(crate) look: Look,
     pub(crate) notifications: Notifications,
+    /// Top-level keys this version does not use, with their values as the file holds them.
+    #[serde(flatten)]
+    pub(crate) unknown: BTreeMap<String, Value>,
+}
+
+impl Stored {
+    /// The keys of the settings file this version does not use, as dotted paths such as
+    /// `projects.live`. Only the names are returned, never the values.
+    pub(crate) fn unknown_keys(&self) -> Vec<String> {
+        let mut keys = named("", &self.unknown);
+        keys.extend(named("harness.", &self.harness.unknown));
+        keys.extend(named("projects.", &self.projects.unknown));
+        keys.extend(named("budgets.", &self.budgets.unknown));
+        keys.extend(named(
+            "budgets.call_limits.",
+            &self.budgets.call_limits.unknown,
+        ));
+        keys.extend(named("look.", &self.look.unknown));
+        keys.extend(named("notifications.", &self.notifications.unknown));
+        keys
+    }
+
+    /// These settings with every key this version does not use left out, at each level that
+    /// [`Stored::unknown_keys`] reads. A response shows these, so it names only the settings the
+    /// server takes, and a page that sends a section back as it read it is not refused for a key
+    /// the API does not take.
+    fn without_unknown(&self) -> Self {
+        let mut known = self.clone();
+        known.unknown.clear();
+        known.harness.unknown.clear();
+        known.projects.unknown.clear();
+        known.budgets.unknown.clear();
+        known.budgets.call_limits.unknown.clear();
+        known.look.unknown.clear();
+        known.notifications.unknown.clear();
+        known
+    }
+}
+
+/// The keys of `unknown`, each with `prefix` in front.
+fn named(prefix: &str, unknown: &BTreeMap<String, Value>) -> Vec<String> {
+    unknown.keys().map(|key| format!("{prefix}{key}")).collect()
+}
+
+/// Logs one warning when the settings the server started with hold keys it does not use. The
+/// warning names the keys and no values. The keys are kept in the file and ignored.
+pub(crate) fn warn_unknown_keys(stored: &Stored) {
+    let keys = stored.unknown_keys();
+    if !keys.is_empty() {
+        tracing::warn!(
+            keys = %keys.join(", "),
+            "the settings file has keys this version does not use; they are kept and ignored"
+        );
+    }
 }
 
 /// The adapter each role runs through, and the command the `custom` adapter runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub(crate) struct Harness {
     /// The adapter of each role that has one. A role with no entry runs the `builtin` adapter.
     pub(crate) roles: BTreeMap<Role, Adapter>,
     /// The command the `custom` adapter runs, one argument per entry. Empty when none is set.
     pub(crate) custom_command: Vec<String>,
+    /// Keys this version does not use, kept as the file holds them. See [`Stored`].
+    #[serde(flatten)]
+    pub(crate) unknown: BTreeMap<String, Value>,
 }
 
 /// The projects a change records. Adds and removals take effect at the next start, and stay in
 /// effect until a later change undoes them. The worker counts are what each project runs with.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub(crate) struct Projects {
     /// The local worker count of each project, by id. A project with no entry runs the count the
     /// server started with.
@@ -171,12 +230,15 @@ pub(crate) struct Projects {
     /// Whether each project uses the LLM refinement of scanned state charts, by id. A project with
     /// no entry does not use it. This takes effect at once, since the flag is read on each use.
     pub(crate) statemap_llm: BTreeMap<String, bool>,
+    /// Keys this version does not use, kept as the file holds them. See [`Stored`].
+    #[serde(flatten)]
+    pub(crate) unknown: BTreeMap<String, Value>,
 }
 
 /// The limits the budgets set. The repair rounds and the call limits are the ones the server
 /// offers; see [`Budgets::default`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub(crate) struct Budgets {
     /// The repair rounds an order gets. Matches the budget acan-core offers before the first
     /// confirmation of an order.
@@ -195,6 +257,9 @@ pub(crate) struct Budgets {
     pub(crate) stuck_build_ms: u64,
     /// How far a plant may drift before it is flagged, in percent.
     pub(crate) drift_threshold: u32,
+    /// Keys this version does not use, kept as the file holds them. See [`Stored`].
+    #[serde(flatten)]
+    pub(crate) unknown: BTreeMap<String, Value>,
 }
 
 impl Default for Budgets {
@@ -208,13 +273,14 @@ impl Default for Budgets {
             stuck_declare_ms: 300_000,
             stuck_build_ms: 900_000,
             drift_threshold: 50,
+            unknown: BTreeMap::new(),
         }
     }
 }
 
 /// The most calls one role may make, by role.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub(crate) struct CallLimits {
     pub(crate) foreman: u32,
     pub(crate) worker: u32,
@@ -223,6 +289,9 @@ pub(crate) struct CallLimits {
     pub(crate) director: u32,
     pub(crate) wonder: u32,
     pub(crate) statemap: u32,
+    /// Keys this version does not use, kept as the file holds them. See [`Stored`].
+    #[serde(flatten)]
+    pub(crate) unknown: BTreeMap<String, Value>,
 }
 
 /// The call limit every role starts with.
@@ -238,6 +307,7 @@ impl Default for CallLimits {
             director: DEFAULT_CALL_LIMIT,
             wonder: DEFAULT_CALL_LIMIT,
             statemap: DEFAULT_CALL_LIMIT,
+            unknown: BTreeMap::new(),
         }
     }
 }
@@ -259,7 +329,7 @@ impl CallLimits {
 
 /// How the page looks. The server stores these and the page applies them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub(crate) struct Look {
     pub(crate) theme: Theme,
     /// Whether the page opens top-down. The isometric view is the default.
@@ -268,6 +338,9 @@ pub(crate) struct Look {
     pub(crate) idle_bob: bool,
     pub(crate) reduced_motion: bool,
     pub(crate) label_density: LabelDensity,
+    /// Keys this version does not use, kept as the file holds them. See [`Stored`].
+    #[serde(flatten)]
+    pub(crate) unknown: BTreeMap<String, Value>,
 }
 
 impl Default for Look {
@@ -279,17 +352,21 @@ impl Default for Look {
             idle_bob: true,
             reduced_motion: false,
             label_density: LabelDensity::Normal,
+            unknown: BTreeMap::new(),
         }
     }
 }
 
 /// What the page notifies the tester about. The server stores these and the page applies them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub(crate) struct Notifications {
     pub(crate) needs_you: bool,
     pub(crate) sound: bool,
     pub(crate) browser: bool,
+    /// Keys this version does not use, kept as the file holds them. See [`Stored`].
+    #[serde(flatten)]
+    pub(crate) unknown: BTreeMap<String, Value>,
 }
 
 impl Default for Notifications {
@@ -298,6 +375,7 @@ impl Default for Notifications {
             needs_you: true,
             sound: false,
             browser: false,
+            unknown: BTreeMap::new(),
         }
     }
 }
@@ -442,8 +520,10 @@ impl<C: ModelClient + 'static> Settings<C> {
         &default.host
     }
 
-    /// The document `GET /api/settings` returns to `caller`. It holds no key.
+    /// The document `GET /api/settings` returns to `caller`. It holds no key, and no setting this
+    /// version does not use.
     fn view(&self, caller: Caller, stored: &Stored) -> View {
+        let stored = &stored.without_unknown();
         View {
             version: DOCUMENT_VERSION,
             you: match caller {
@@ -1299,6 +1379,81 @@ mod tests {
         assert!(!look.top_down_default);
         assert_eq!(look.theme, Theme::Paper);
         assert_eq!(look.label_density, LabelDensity::Normal);
+    }
+
+    #[test]
+    fn the_settings_shown_leave_out_every_key_this_version_does_not_use() {
+        let mut stored = Stored::default();
+        stored.budgets.repair_rounds = 5;
+        for unknown in [
+            &mut stored.unknown,
+            &mut stored.harness.unknown,
+            &mut stored.projects.unknown,
+            &mut stored.budgets.unknown,
+            &mut stored.budgets.call_limits.unknown,
+            &mut stored.look.unknown,
+            &mut stored.notifications.unknown,
+        ] {
+            unknown.insert("extra".to_owned(), json!("hidden-value"));
+        }
+        assert_eq!(stored.unknown_keys().len(), 7, "each level holds one");
+
+        let shown = stored.without_unknown();
+        assert!(shown.unknown_keys().is_empty());
+        let text = serde_json::to_string(&shown).expect("the settings serialize");
+        assert!(!text.contains("extra"), "shown: {text}");
+        assert!(!text.contains("hidden-value"), "shown: {text}");
+        let mut expected = Stored::default();
+        expected.budgets.repair_rounds = 5;
+        assert_eq!(shown, expected, "only the unknown keys are left out");
+    }
+
+    #[test]
+    fn the_unknown_keys_warning_names_the_keys_and_no_value() {
+        /// A log writer the test reads back.
+        #[derive(Clone, Default)]
+        struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("lock poisoned").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .finish();
+        let mut stored = Stored::default();
+        stored
+            .projects
+            .unknown
+            .insert("live".to_owned(), json!(["/some/folder"]));
+        stored
+            .look
+            .unknown
+            .insert("glow".to_owned(), json!("unshown-value"));
+        tracing::subscriber::with_default(subscriber, || {
+            warn_unknown_keys(&stored);
+            warn_unknown_keys(&Stored::default());
+        });
+
+        let bytes = captured.0.lock().expect("lock poisoned").clone();
+        let text = String::from_utf8(bytes).expect("the log is text");
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "one warning, none for no keys: {text}"
+        );
+        assert!(text.contains("projects.live, look.glow"), "log: {text}");
+        assert!(!text.contains("/some/folder"), "log: {text}");
+        assert!(!text.contains("unshown-value"), "log: {text}");
     }
 
     #[test]
