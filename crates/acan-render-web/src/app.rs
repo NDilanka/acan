@@ -432,8 +432,8 @@ impl App {
     /// Returns an error when the JSON is not the plant's shape.
     pub fn set_plant_at(&mut self, json: &str, x: f32, y: f32) -> Result<u32, JsError> {
         let plant = from_scan_json(json).map_err(js_err)?;
-        let (kinds, edges) = plant.layout_input();
-        let laid = layout(&kinds, &edges);
+        let (kinds, edges, districts) = plant.layout_input();
+        let laid = layout(&kinds, &edges, &districts);
         let count = plant.machines.len() as u32;
         self.show(plant, laid, [x, y], true);
         Ok(count)
