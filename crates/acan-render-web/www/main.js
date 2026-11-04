@@ -16,6 +16,7 @@ import {
 } from "./cards.js";
 import { closeCommand, commandOpen, openCommand } from "./commandbar.js";
 import { clickMachine, closeCompose, composeOpen, orderHere } from "./compose.js";
+import { bindKindMenu, openKindMenuAt } from "./kindmenu.js";
 import { keyAction } from "./keys.js";
 import { closeSettings, installSettings, settingsOpen, toggleSettings } from "./settings.js";
 import { droneHover, paintMarks, pinAt, placeLabels } from "./marks.js";
@@ -232,7 +233,20 @@ function droneAt(x, y) {
 // Right drag, or Alt with left drag, orbits and tilts about the ground point under the screen
 // centre.
 function bindCanvas() {
-  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+  // A right press that does not move opens the Set kind menu on the machine under it. A right drag
+  // orbits, so it never opens the menu.
+  let rightPress = null;
+  canvas.addEventListener("pointerdown", (event) => {
+    rightPress = event.button === 2 ? { x: event.clientX, y: event.clientY } : null;
+  });
+  canvas.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    const press = rightPress;
+    rightPress = null;
+    if (press === null || Math.hypot(event.clientX - press.x, event.clientY - press.y) >= CLICK_PX) return;
+    openKindMenuAt(event.clientX, event.clientY);
+  });
+  bindKindMenu();
 
   canvas.addEventListener("pointerdown", (event) => {
     if (state.app === null || (event.button !== 0 && event.button !== 2)) return;
