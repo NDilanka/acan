@@ -3,11 +3,12 @@
 // the timeline scrubber holds the map in the past, the stream keeps every event in the hold
 // instead, and the scrubber folds them all when the map goes live again.
 import { linkQuiet } from "./chrome.js";
-import { requestRender } from "./main.js";
+import { reducedNow, requestRender } from "./main.js";
 import { listProjects, startMulti } from "./multi.js";
 import { apiPath, target } from "./projects.js";
 import { createFeed, createHold, eventsBefore } from "./scrub.js";
 import { TOKEN_KEY, freeze, gate, link, replay, state, upto } from "./state.js";
+import { paintMapping, scanFrameOf, scanView } from "./scanview.js";
 
 const RECONNECT_MS = 1000;
 
@@ -115,6 +116,37 @@ export async function get(path) {
   return res.text();
 }
 
+// The page's view of the scan of the plant on screen. Made on first use, when the app exists.
+let scanning = null;
+
+function scanner() {
+  scanning ??= scanView({ app: state.app, paint: paintMapping, reduced: reducedNow });
+  return scanning;
+}
+
+// Shows the scan of a plant the page has just read, such as the first plant of a canvas.
+export function applyPlantScan(text) {
+  scanner().applyPlant(text);
+}
+
+// Folds one live scan frame into the plant on screen. When a scan ends while the page watches it,
+// the plant is read again, so the map shows the machines and belts the scan found.
+export function foldScanFrame(scan) {
+  if (scanner().fold(scan) === "reload") reloadPlant(target());
+  requestRender();
+}
+
+async function reloadPlant(id) {
+  try {
+    const text = await get(apiPath(id, "/api/plant"));
+    state.app.set_plant(text);
+    scanner().applyPlant(text);
+    requestRender();
+  } catch (err) {
+    console.error("the plant could not be read after its scan", err);
+  }
+}
+
 export async function start() {
   setLink("loading");
   // An origin that lists several projects puts them all on one canvas. Any other answer, such as
@@ -124,7 +156,9 @@ export async function start() {
     await startMulti(projects);
     return;
   }
-  state.app.set_plant(await get(apiPath(target(), "/api/plant")));
+  const plant = await get(apiPath(target(), "/api/plant"));
+  state.app.set_plant(plant);
+  scanner().applyPlant(plant);
   await reload();
   if (freeze) {
     setLink(`frozen · seq ${state.app.next_seq()}`);
@@ -177,6 +211,12 @@ function connect() {
 // Folds one streamed event of the map on screen, or keeps it in the hold while the map shows the
 // past. Returns false when the app refused it, so the stream reloads the log.
 export function applyStreamed(data) {
+  // A scan or a touch is not an event of the log, so it never reaches the app's ingest.
+  const scan = scanFrameOf(data);
+  if (scan !== null) {
+    foldScanFrame(scan);
+    return true;
+  }
   if (hold.on) {
     try {
       if (hold.push(JSON.parse(data))) heldMore();

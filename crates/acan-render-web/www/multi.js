@@ -23,7 +23,8 @@ import {
 import { installPlates, paintPlates } from "./nameplates.js";
 import { nearestGap, parkedClick, pinNear } from "./overlays.js";
 import { installParked } from "./parked.js";
-import { applyStreamed, feed, forgetToken, get, hold, setLink } from "./stream.js";
+import { applyPlantScan, applyStreamed, feed, foldScanFrame, forgetToken, get, hold, setLink } from "./stream.js";
+import { scanFrameOf } from "./scanview.js";
 import { canvas, freeze, repoEl, state } from "./state.js";
 
 const RECONNECT_MS = 1000;
@@ -181,6 +182,8 @@ export async function startMulti(list) {
     const [x, y] = multi.places.get(project.id);
     state.app.add_project(project.id, texts.get(project.id), x, y);
   }
+  // Only the project on screen follows its scan; the others read their plants as they stand.
+  applyPlantScan(texts.get(first.id));
   const logs = await Promise.allSettled(order.map((project) => get(apiPath(project.id, "/api/events?from=0"))));
   order.forEach((project, index) => {
     const result = logs[index];
@@ -260,6 +263,12 @@ function nextSeqOf(id) {
 }
 
 function onFrame(ws, data) {
+  // A scan or a touch of the project on screen is folded into its plant, never into its log.
+  const scan = scanFrameOf(data);
+  if (scan !== null) {
+    if (scan.project === null || scan.project === canvasState.active) foldScanFrame(scan);
+    return;
+  }
   const frame = readFrame(data);
   if (frame.kind === "resume") {
     if (resumeStep(multi.cursors, frame) === "reload") multi.reload.add(frame.project);
