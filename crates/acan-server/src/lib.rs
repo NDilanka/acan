@@ -8,6 +8,7 @@
 //! persisted batch. [`Running::stop`] is a barrier: it returns only when no write can still happen
 //! in any project.
 
+mod add;
 mod auth;
 pub mod deps;
 #[cfg(test)]
@@ -72,7 +73,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use acan_core::{Command, HumanCmd, MemberId, Origin, Seq, WorldId, WorldRef};
@@ -82,6 +83,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
+pub use add::ClientFactory;
 pub use auth::{Principal, Token, Tokens};
 pub use host::{Host, HostParts, LIVE_BUFFER, SubmitError};
 pub use index::{IndexError, Scan, code_index, scan};
@@ -96,6 +98,7 @@ pub use vision::{
 };
 pub use workers::{State as WorkerState, Status as WorkerStatus, WorkersView};
 
+use crate::add::LiveContext;
 use crate::projects::{ProjectSet, ProjectSpec};
 use crate::public::PublicRoot;
 use crate::registry::{Entry, Registry};
@@ -219,6 +222,8 @@ pub struct Running {
     mapping: Vec<JoinHandle<()>>,
     /// Each project's mapping state, by project id, for [`Running::wait_mapped`].
     mapped: Vec<(String, MappingState)>,
+    /// The runtimes of projects added while the server runs. Stop tears them down after the rest.
+    live_runtimes: Arc<Mutex<Vec<Runtime>>>,
     /// The multiplexed streams, which span projects, so shutdown waits for them first.
     streams: Arc<Mutex<JoinSet<()>>>,
     /// The default project's stream and ruling holds, which the tests park to hold a write.
@@ -230,12 +235,15 @@ pub struct Running {
 
 /// One project's background work: its job loop, its writer, and the streams open on it.
 #[derive(Debug)]
-struct Runtime {
+pub(crate) struct Runtime {
     id: String,
     jobs: JoinHandle<()>,
     worker_loops: Vec<JoinHandle<()>>,
     writer: Writer,
     streams: Arc<Mutex<JoinSet<()>>>,
+    /// The codebase mapping task of a project added while the server runs. Startup keeps its
+    /// mapping tasks in [`Running`] instead.
+    mapping: Option<JoinHandle<()>>,
 }
 
 impl Running {
@@ -333,6 +341,26 @@ impl Running {
         drain_streams(&self.streams, "every project").await;
         let mut written: anyhow::Result<()> = Ok(());
         for runtime in std::mem::take(&mut self.runtimes) {
+            runtime.jobs.abort();
+            let _ = runtime.jobs.await;
+            drain_streams(&runtime.streams, &runtime.id).await;
+            written = written.and(runtime.writer.shutdown().await);
+        }
+        let live = std::mem::take(
+            &mut *self
+                .live_runtimes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for mut runtime in live {
+            if let Some(mapping) = runtime.mapping.take() {
+                mapping.abort();
+                let _ = mapping.await;
+            }
+            for worker in std::mem::take(&mut runtime.worker_loops) {
+                worker.abort();
+                let _ = worker.await;
+            }
             runtime.jobs.abort();
             let _ = runtime.jobs.await;
             drain_streams(&runtime.streams, &runtime.id).await;
@@ -454,6 +482,31 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
     config: ServeConfig,
     clients: Vec<(C, UsageLedger)>,
     settings_file: Option<PathBuf>,
+) -> anyhow::Result<Running> {
+    start_listening(config, clients, settings_file, None).await
+}
+
+/// As [`start_projects_serving`], and a project added while the server runs is opened with
+/// `opener`. The settings' add endpoint then serves a new folder at once, with no restart, and
+/// starts its first scan. Without an opener, such adds are refused.
+///
+/// # Errors
+///
+/// Returns the errors [`start_projects_serving`] returns.
+pub async fn start_projects_adding<C: ModelClient + 'static>(
+    config: ServeConfig,
+    clients: Vec<(C, UsageLedger)>,
+    settings_file: Option<PathBuf>,
+    opener: ClientFactory<C>,
+) -> anyhow::Result<Running> {
+    start_listening(config, clients, settings_file, Some(opener)).await
+}
+
+async fn start_listening<C: ModelClient + 'static>(
+    config: ServeConfig,
+    clients: Vec<(C, UsageLedger)>,
+    settings_file: Option<PathBuf>,
+    opener: Option<ClientFactory<C>>,
 ) -> anyhow::Result<Running> {
     if !config.addr.ip().is_loopback() && !config.team {
         bail!(
@@ -605,6 +658,7 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
             host,
             board: workers::Board::new(worker_tokens.len()),
             head: tokio::sync::Mutex::new(None),
+            router: None,
         });
         project_workers.push(worker_tokens);
     }
@@ -641,6 +695,7 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
             worker_loops,
             writer: entry.host.writer(),
             streams: Arc::clone(entry.host.streams()),
+            mapping: None,
         });
     }
     #[cfg(test)]
@@ -648,10 +703,25 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
     #[cfg(test)]
     let ruling_hold = entries[0].host.ruling_hold().clone();
     let streams = Arc::new(Mutex::new(JoinSet::new()));
+    let live_runtimes = Arc::new(Mutex::new(Vec::new()));
+    let live = opener.map(|open_client| LiveContext {
+        founder: founder.clone(),
+        local_addr,
+        shutdown: shutdown_rx.clone(),
+        slots: Arc::clone(&slots),
+        witness_concurrency: config.witness_concurrency,
+        local_workers: config.local_workers,
+        vision: config.vision.clone(),
+        settings_file: settings_file.clone(),
+        web: config.web.clone(),
+        open_client,
+        runtimes: Arc::clone(&live_runtimes),
+    });
     let registry = Arc::new(Registry::new(
         config.projects.default.clone(),
         entries,
         Arc::clone(&streams),
+        live,
     ));
     let shared_settings = Arc::new(Settings::new(
         settings_file,
@@ -676,6 +746,7 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
         runtimes,
         mapping,
         mapped,
+        live_runtimes,
         streams,
         #[cfg(test)]
         stream_hold,
@@ -688,7 +759,7 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
 /// workers, and opens it to writes. A failure is recorded on the project, which then takes no
 /// writes, and the server keeps running so the page can show why. With `on_view`, the scan starts
 /// only once a page has connected to the project.
-async fn map_project<C: ModelClient + 'static>(
+pub(crate) async fn map_project<C: ModelClient + 'static>(
     host: Host<C>,
     founder: MemberId,
     workers: usize,
@@ -794,7 +865,7 @@ struct Opening<C> {
 /// Opens a project's git state for worktrees, witnesses and landing. A directory that is not a
 /// usable repository still serves its world. The jobs that need git then report that they cannot
 /// run, so the gate records the failure instead of hanging.
-async fn open_git(project: &ProjectSpec) -> Option<acan_git::Repo> {
+pub(crate) async fn open_git(project: &ProjectSpec) -> Option<acan_git::Repo> {
     let opened = match &project.protected_branch {
         Some(branch) => acan_git::Repo::open_with_protected(&project.repo, branch).await,
         None => acan_git::Repo::open(&project.repo).await,
@@ -823,7 +894,7 @@ async fn open_git(project: &ProjectSpec) -> Option<acan_git::Repo> {
 }
 
 /// Creates the state directory. Its own `.gitignore` keeps the tokens and database out of git.
-fn prepare_state_dir(dir: &Path) -> anyhow::Result<()> {
+pub(crate) fn prepare_state_dir(dir: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let ignore = dir.join(".gitignore");
     if !ignore.exists() {
@@ -832,7 +903,7 @@ fn prepare_state_dir(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn world_ref(repo: &Path) -> anyhow::Result<WorldRef> {
+pub(crate) fn world_ref(repo: &Path) -> anyhow::Result<WorldRef> {
     let name = repo
         .file_name()
         .and_then(|name| name.to_str())

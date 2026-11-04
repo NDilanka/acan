@@ -311,7 +311,7 @@ fn unique(base: String, taken: &mut BTreeSet<String>) -> String {
 
 /// The spec of a project that serves `repo`, with an id from its folder name that `taken` does not
 /// hold. The id is recorded in `taken`.
-fn spec_for(repo: &Path, taken: &mut BTreeSet<String>) -> ProjectSpec {
+pub(crate) fn spec_for(repo: &Path, taken: &mut BTreeSet<String>) -> ProjectSpec {
     let name = folder_name(repo);
     let id = unique(slug(&name), taken);
     ProjectSpec {

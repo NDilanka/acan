@@ -6,14 +6,14 @@ use std::path::{Path, PathBuf};
 
 use acan_llm::{KeyFile, ModelClient};
 use acan_server::init_cli::{self, InitArgs};
-use acan_server::projects::ProjectSet;
+use acan_server::projects::{ProjectSet, ProjectSpec};
 use acan_server::receipt_cli::{self, Format, ShadowArgs};
 use acan_server::release::{self, Redaction};
 use acan_server::replay;
 use acan_server::{
-    DEFAULT_WITNESS_CONCURRENCY, Models, ServeConfig, VisionConfig, apply_project_changes,
-    default_browser, default_data_dir, default_settings_file, settings_file_beside,
-    start_projects_serving, start_projects_with_settings, tokens_file,
+    ClientFactory, DEFAULT_WITNESS_CONCURRENCY, Models, ServeConfig, VisionConfig,
+    apply_project_changes, default_browser, default_data_dir, default_settings_file,
+    settings_file_beside, start_projects_adding, tokens_file,
 };
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -300,13 +300,24 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .unwrap_or_else(|| tokens_file(Path::new(".")));
     let tokens = std::path::absolute(&tokens).unwrap_or(tokens);
     let map_on_view = args.map_on_first_view;
+    // A project added while the server runs is opened from its routing file, as a project at start
+    // is, so the settings can serve a new folder with no restart.
+    let opener: ClientFactory<Models> = Box::new(|project: &ProjectSpec| {
+        let llm = project
+            .llm
+            .clone()
+            .unwrap_or_else(|| project.repo.join(".acan").join("llm.toml"));
+        let models = Models::open(&llm, KeyFile::for_user())?;
+        let ledger = models.ledger();
+        Ok::<_, anyhow::Error>((models, ledger))
+    });
     // A server that maps on first view is listening before its codebases map, so it does not wait
-    // for them: the first page is what starts each map.
-    let mut running = if map_on_view {
-        start_projects_serving(config, clients, Some(settings)).await?
-    } else {
-        start_projects_with_settings(config, clients, Some(settings)).await?
-    };
+    // for them: the first page is what starts each map. Otherwise the start waits for every map.
+    let mut running = start_projects_adding(config, clients, Some(settings), opener).await?;
+    if !map_on_view && let Err(err) = running.wait_mapped().await {
+        let _ = running.stop().await;
+        return Err(err);
+    }
     let terminal = io::stdout().is_terminal();
     if let Some(token) = &running.owner_token {
         for line in owner_token_lines(running.local_addr, token.as_str(), &tokens, terminal) {

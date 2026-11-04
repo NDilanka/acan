@@ -3,6 +3,7 @@
 // folded, and one WebSocket (GET /api/stream/all) carries all their events. The project on screen
 // is the one whose marks and panels show; orders and every per-project call go to it.
 import { requestRender } from "./main.js";
+import { installAddPlant } from "./addplant.js";
 import {
   PACK_GAP,
   PLACES_KEY,
@@ -11,6 +12,7 @@ import {
   chooseTarget,
   closeAction,
   pack,
+  placeAfter,
   placesFrom,
   projectList,
   readFrame,
@@ -91,6 +93,42 @@ export function installMulti(kit) {
     fly: flyProject,
     counts: (counts) => paintPlates(counts),
   };
+  installAddPlant({ added: attachProject });
+}
+
+// Puts a codebase added while the page is open on the canvas, to the right of the others, and flies
+// the camera to it. Its plant and log are read first, so a failed read leaves the canvas as it was.
+// The stream is opened again, so it carries the new codebase's events and its scan. Resolves to
+// false when this page keeps one plant, which cannot show it beside another without a reload.
+export async function attachProject(project) {
+  if (!canvasState.multi) return false;
+  const [text, log] = await Promise.all([
+    get(apiPath(project.id, "/api/plant")),
+    get(apiPath(project.id, "/api/events?from=0")),
+  ]);
+  const origin = Array.from(state.app.plant_bounds(text));
+  let rightEdge = 0;
+  for (const known of canvasState.list) {
+    const box = boundsOf(known.id);
+    if (box !== null) rightEdge = Math.max(rightEdge, box[2]);
+  }
+  const place = placeAfter(rightEdge, origin);
+  canvasState.list.push({ id: project.id, name: project.name, default: false, status: "mapping", head: null });
+  multi.origin.set(project.id, origin);
+  multi.places.set(project.id, place);
+  state.app.add_project(project.id, text, place[0], place[1]);
+  foldLog(project.id, log);
+  multi.loaded.add(project.id);
+  if (!freeze) {
+    const old = state.socket;
+    state.socket = null;
+    old?.close();
+    connectAll();
+  }
+  flyProject(project.id);
+  applyPlantScan(text);
+  requestRender();
+  return true;
 }
 
 export function nameOf(id) {

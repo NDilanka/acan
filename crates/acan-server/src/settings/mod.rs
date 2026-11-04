@@ -32,6 +32,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::STATE_DIR;
+use crate::add;
 use crate::auth::{Principal, Tokens};
 use crate::host::Host;
 use crate::http::{ApiError, bearer};
@@ -164,6 +165,10 @@ pub(crate) struct Projects {
     /// Folders of projects that are not served, as absolute paths. A folder stays here until a
     /// change adds it again.
     pub(crate) remove: Vec<String>,
+    /// Folders a live add served while a server ran. Each is also in `add`, so the next start serves
+    /// it, but it is not pending: a running server already serves it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) live: Vec<String>,
     /// Whether each project uses the LLM refinement of scanned state charts, by id. A project with
     /// no entry does not use it. This takes effect at once, since the flag is read on each use.
     pub(crate) statemap_llm: BTreeMap<String, bool>,
@@ -429,13 +434,13 @@ impl<C: ModelClient + 'static> Settings<C> {
     }
 
     /// The project whose client holds the model keys: the default project.
-    fn default_host(&self) -> &Host<C> {
+    fn default_host(&self) -> Host<C> {
         let entries = self.projects.entries();
         let default = entries
             .iter()
             .find(|entry| entry.id == self.projects.default_id())
             .unwrap_or(&entries[0]);
-        &default.host
+        default.host.clone()
     }
 
     /// The document `GET /api/settings` returns to `caller`. It holds no key.
@@ -455,12 +460,24 @@ impl<C: ModelClient + 'static> Settings<C> {
             notifications: stored.notifications.clone(),
             applied: self.applied_fields(),
             project_changes: (caller == Caller::Owner).then(|| ProjectChangesView {
-                add: stored.projects.add.clone(),
+                add: Self::pending_adds(stored),
                 remove: stored.projects.remove.clone(),
             }),
             tokens: (caller == Caller::Owner).then(|| self.tokens_view()),
             about: release::version_info(),
         }
+    }
+
+    /// The folders the next start adds. A folder a live add served is not pending, since the server
+    /// that took the add already serves it.
+    fn pending_adds(stored: &Stored) -> Vec<String> {
+        stored
+            .projects
+            .add
+            .iter()
+            .filter(|folder| !stored.projects.live.contains(folder))
+            .cloned()
+            .collect()
     }
 
     /// How each setting a change can name takes effect, by its dotted path. The projects listed
@@ -727,9 +744,8 @@ async fn put_settings<C: ModelClient + 'static>(
     let patch = Patch::deserialize(&raw)
         .map_err(|_| ApiError::BadRequest("a JSON object of settings sections"))?;
     let _turn = state.changes.lock().await;
-    let running: Vec<(&str, PathBuf)> = state
-        .projects
-        .entries()
+    let entries = state.projects.entries();
+    let running: Vec<(&str, PathBuf)> = entries
         .iter()
         .map(|entry| (entry.id.as_str(), entry.host.repo().to_path_buf()))
         .collect();
@@ -745,7 +761,7 @@ async fn put_settings<C: ModelClient + 'static>(
     let mut keys = BTreeMap::new();
     if let Some(models) = &changes.models {
         refuse_model_conflicts(&host.client().key_status(), models)?;
-        keys = apply_models(host, models).await?;
+        keys = apply_models(&host, models).await?;
     }
     if changes
         .sections
@@ -768,6 +784,66 @@ async fn put_settings<C: ModelClient + 'static>(
         Json(json!({ "settings": settings, "applied": applied, "keys": keys })),
     )
         .into_response())
+}
+
+/// The body of `POST /api/settings/projects`: the folder to serve, as an absolute path.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddProject {
+    path: String,
+}
+
+/// `POST /api/settings/projects`. Only the owner may add a project. The folder is opened and its
+/// first scan starts at once, with no restart. The folder is also kept in the settings, so the next
+/// start serves it too. A failed open puts the settings back as they were.
+///
+/// Status codes: `202` with the new project's id, name and status `mapping`. `400` for a body with
+/// no path. `401` for an unknown token. `403` for any token but the owner's. `409` when the folder
+/// is already served, or the server was started without live adds. `422` with the reason when the
+/// path is not an existing absolute folder, sits inside another project's state folder, or is inside
+/// the public folder. `500` when the folder cannot be opened or the settings cannot be saved.
+async fn post_project<C: ModelClient + 'static>(
+    State(state): State<Arc<Settings<C>>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    if state.caller(&headers, ONLY_OWNER_CHANGES)? != Caller::Owner {
+        return Err(ApiError::Forbidden(ONLY_OWNER_CHANGES));
+    }
+    let request: AddProject = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::BadRequest("a JSON object with a path"))?;
+    let _turn = state.changes.lock().await;
+    let live = state
+        .projects
+        .live()
+        .ok_or(ApiError::Conflict("live_add_unavailable"))?;
+    let spec = add::check_new(&state.projects, &request.path, live.web.as_deref())?;
+    let folder = spec.repo.display().to_string();
+    let previous = state.stored();
+    let mut next = previous.clone();
+    next.projects.remove.retain(|kept| *kept != folder);
+    if !next.projects.live.contains(&folder) {
+        next.projects.live.push(folder.clone());
+    }
+    if !next.projects.add.contains(&folder) {
+        next.projects.add.push(folder);
+    }
+    file::save(&state.file, &next).map_err(|err| ApiError::Internal(err.into()))?;
+    *state.stored.write().unwrap_or_else(PoisonError::into_inner) = next;
+    match add::open(live, &state.projects, spec).await {
+        Ok((id, name)) => Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({ "id": id, "name": name, "status": "mapping" })),
+        )
+            .into_response()),
+        Err(err) => {
+            if let Err(restore) = file::save(&state.file, &previous) {
+                tracing::error!(error = %restore, "restoring the settings after a failed add");
+            }
+            *state.stored.write().unwrap_or_else(PoisonError::into_inner) = previous;
+            Err(ApiError::Internal(err))
+        }
+    }
 }
 
 /// Refuses a model change the current state does not allow, before any key is checked or saved.
@@ -988,7 +1064,8 @@ async fn test_role<C: ModelClient + 'static>(
     let role = name
         .parse::<Role>()
         .map_err(|_| ApiError::NotFound("role"))?;
-    let client = state.default_host().client();
+    let host = state.default_host();
+    let client = host.client();
     let Some(destination) = client.destination(role) else {
         return Ok(Json(RoleTest::no_key(role)));
     };
@@ -1020,6 +1097,7 @@ pub(crate) fn routes<C: ModelClient + 'static>(state: Arc<Settings<C>>) -> Route
             "/api/settings",
             get(get_settings::<C>).put(put_settings::<C>),
         )
+        .route("/api/settings/projects", post(post_project::<C>))
         .route("/api/settings/tokens/owner", get(get_owner_token::<C>))
         .route(
             "/api/settings/tokens/owner/rotate",

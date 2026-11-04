@@ -31,6 +31,7 @@ use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tower::ServiceExt as _;
 
 use crate::auth::Principal;
 use crate::host::{Host, SubmitError};
@@ -61,7 +62,7 @@ pub(crate) struct Mount<'a> {
 /// The routes one project's host answers under `mount`. The board is this project's own local
 /// workers, which `GET .../workers` reports. The owner names who may export or clear the project's
 /// data, and the project it belongs to.
-fn project_routes<C: ModelClient + 'static>(
+pub(crate) fn project_routes<C: ModelClient + 'static>(
     mount: Mount<'_>,
     host: Host<C>,
     board: Board,
@@ -217,12 +218,25 @@ pub(crate) fn router<C: ModelClient + 'static>(
             ));
         }
     }
+    let web = web.map(Arc::new);
+    router.fallback(move |request: Request| unmatched(Arc::clone(&projects), web.clone(), request))
+}
+
+/// Answers a request that no route of the router claims. A project added while the server runs has
+/// its routes in the registry, not in the router, so its requests go there first. Anything else is
+/// a public file, or not found.
+async fn unmatched<C: ModelClient + 'static>(
+    projects: Arc<Registry<C>>,
+    web: Option<Arc<PublicRoot>>,
+    request: Request,
+) -> Response {
+    if let Some(routes) = projects.live_router(request.uri().path()) {
+        let Ok(response) = routes.oneshot(request).await;
+        return response;
+    }
     match web {
-        Some(root) => {
-            let root = Arc::new(root);
-            router.fallback(move |request| public::serve(Arc::clone(&root), request))
-        }
-        None => router,
+        Some(root) => public::serve(root, request).await,
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

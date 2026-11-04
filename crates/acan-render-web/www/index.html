@@ -98,6 +98,13 @@
   .island { position: fixed; background: var(--face); border: 1px solid var(--rule); border-radius: var(--radius);
     box-shadow: var(--shadow); padding: 6px 12px; }
   #shell { top: 12px; left: 12px; display: flex; gap: 10px; align-items: baseline; }
+  #add-form { top: 52px; left: 12px; z-index: 3; width: 320px; box-sizing: border-box; display: grid; gap: 6px; padding: 10px 12px; }
+  #add-form[hidden] { display: none; }
+  #add-form label { font: 600 12px/1.3 var(--sans); }
+  #add-form input { font: 12px var(--mono); padding: 4px 6px; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--face); color: var(--ink); }
+  #add-form .row { display: flex; gap: 8px; align-items: center; }
+  #add-form .row input { flex: 1 1 auto; min-width: 0; }
+  #add-note { margin: 0; font-size: 12px; color: var(--muted); min-height: 1em; }
   /* At rest the shell is the brand and two keys; the repo and a healthy link show with the key bar. */
   #shell .repo:not(:empty), #shell #link { display: none; }
   #shell.open .repo:not(:empty), #shell.open #link, #shell #link:not(.quiet) { display: inline; }
@@ -538,7 +545,8 @@
 <div id="pov-frame" hidden></div>
 <svg id="pov-reticle" hidden aria-hidden="true"><path id="pov-bracket" d=""></path></svg>
 <div class="island" id="pov-chip" hidden><span class="dot" id="pov-dot"></span><span class="inside">inside</span><b id="pov-agent"></b><span class="line" id="pov-line"></span><kbd>Esc</kbd><span class="alt" id="pov-alt" hidden></span></div>
-<div class="island" id="shell"><span class="brand">Acan</span><span class="repo" id="repo"></span><span id="link" class="muted quiet">starting</span><span id="stale" class="stale" hidden></span><span id="version" class="version" hidden></span><button type="button" id="command-open" class="key" aria-label="Command bar" title="Command bar (/)">/</button><button type="button" id="topdown-toggle" class="key" aria-pressed="false" aria-label="Top-down view" title="Top-down view (V)">top</button><button type="button" id="help-toggle" class="key" aria-expanded="false" aria-controls="hint" aria-label="Keys" title="Keys (?)">?</button></div>
+<div class="island" id="shell"><span class="brand">Acan</span><span class="repo" id="repo"></span><span id="link" class="muted quiet">starting</span><span id="stale" class="stale" hidden></span><span id="version" class="version" hidden></span><button type="button" id="command-open" class="key" aria-label="Command bar" title="Command bar (/)">/</button><button type="button" id="topdown-toggle" class="key" aria-pressed="false" aria-label="Top-down view" title="Top-down view (V)">top</button><button type="button" id="help-toggle" class="key" aria-expanded="false" aria-controls="hint" aria-label="Keys" title="Keys (?)">?</button><button type="button" id="add-plant" class="key" aria-expanded="false" aria-controls="add-form" aria-label="Add a codebase" title="Add a codebase">+</button></div>
+<form class="island" id="add-form" aria-label="Add a codebase" hidden><label for="add-path">Folder path on this machine</label><div class="row"><input id="add-path" type="text" spellcheck="false" autocomplete="off" placeholder="/path/to/repo"><button type="submit" class="key">Add</button></div><p id="add-note" role="status"></p></form>
 <div class="island" id="mapping" role="status" hidden></div>
 <div class="island" id="alpha" hidden><span id="setup-banner" hidden><span id="setup-banner-text"></span><button id="setup-open" type="button">Set a key</button></span><span id="update" class="update" hidden><span id="update-text"></span> <a id="update-link" target="_blank" rel="noopener">open release</a></span><span class="alpha-actions"><button id="setup-manage" type="button" hidden>Model setup</button></span><span id="bug-note" class="muted" hidden></span></div>
 <dialog id="bug-dialog" aria-labelledby="bug-heading">

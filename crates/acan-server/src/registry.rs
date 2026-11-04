@@ -3,26 +3,32 @@
 //! The registry holds each project's host and nothing else. Which project a request reaches is
 //! decided by its path, so a request can only use the host of the project it names.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use acan_llm::ModelClient;
 use axum::Json;
+use axum::Router;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use serde::Serialize;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
+use crate::add::LiveContext;
 use crate::host::Host;
 use crate::http::{ApiError, bearer};
 use crate::workers::Board;
 
-/// Every project one server runs, and which of them answers the unprefixed routes.
+/// Every project one server runs, and which of them answers the unprefixed routes. A project added
+/// while the server runs joins the list, so the list is read through [`Registry::entries`].
 pub(crate) struct Registry<C> {
     default_id: String,
-    entries: Vec<Entry<C>>,
+    /// The projects, in the order the server was given them and then the order they were added.
+    entries: RwLock<Vec<Arc<Entry<C>>>>,
     /// The multiplexed streams, which span projects, so shutdown waits for them here.
     streams: Arc<Mutex<JoinSet<()>>>,
+    /// What a project added while the server runs is opened with. `None` refuses such adds.
+    live: Option<LiveContext<C>>,
 }
 
 /// One project as the server runs it.
@@ -38,21 +44,28 @@ pub(crate) struct Entry<C> {
     /// The protected branch head the list last read, with the seq of the snapshot it was read at.
     /// It is read again only when the snapshot moves, so the list does not run git per request.
     pub(crate) head: tokio::sync::Mutex<Option<(u64, Option<String>)>>,
+    /// The routes of a project added while the server runs. Those paths are not in the router the
+    /// server built at start, so requests for them reach these routes through the fallback. `None`
+    /// for a project the server started with.
+    pub(crate) router: Option<Router>,
 }
 
 impl<C> Registry<C> {
     /// A registry of `entries`, whose default is `default_id`. The entries must not be empty:
-    /// the server shuts down through the first project's signal.
+    /// the server shuts down through the first project's signal. `live` says how a project added
+    /// later is opened, and `None` refuses such adds.
     pub(crate) fn new(
         default_id: String,
         entries: Vec<Entry<C>>,
         streams: Arc<Mutex<JoinSet<()>>>,
+        live: Option<LiveContext<C>>,
     ) -> Self {
         assert!(!entries.is_empty(), "a registry holds at least one project");
         Self {
             default_id,
-            entries,
+            entries: RwLock::new(entries.into_iter().map(Arc::new).collect()),
             streams,
+            live,
         }
     }
 
@@ -61,9 +74,34 @@ impl<C> Registry<C> {
         &self.default_id
     }
 
-    /// Every project, in the order the server was given them.
-    pub(crate) fn entries(&self) -> &[Entry<C>] {
-        &self.entries
+    /// Every project, in the order it joined the registry.
+    pub(crate) fn entries(&self) -> Vec<Arc<Entry<C>>> {
+        self.entries
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Adds a project that was opened while the server runs.
+    pub(crate) fn add(&self, entry: Entry<C>) {
+        self.entries
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Arc::new(entry));
+    }
+
+    /// What a project added while the server runs is opened with, or `None` when such adds are off.
+    pub(crate) fn live(&self) -> Option<&LiveContext<C>> {
+        self.live.as_ref()
+    }
+
+    /// The routes of the live-added project whose id `path` names, if `path` names one.
+    pub(crate) fn live_router(&self, path: &str) -> Option<Router> {
+        let id = path.strip_prefix("/api/p/")?.split('/').next()?;
+        self.entries()
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .and_then(|entry| entry.router.clone())
     }
 
     /// The set the multiplexed streams are tracked in.
@@ -75,7 +113,7 @@ impl<C> Registry<C> {
 impl<C: ModelClient> Registry<C> {
     /// The server's shutdown signal, which every project's host shares.
     pub(crate) fn shutdown_signal(&self) -> watch::Receiver<bool> {
-        self.entries[0].host.shutdown_signal()
+        self.entries()[0].host.shutdown_signal()
     }
 }
 
@@ -130,7 +168,7 @@ pub(crate) async fn list_projects<C: ModelClient + 'static>(
         if entry.host.tokens().principal(token).is_none() {
             continue;
         }
-        views.push(view(entry, projects.default_id()).await);
+        views.push(view(&entry, projects.default_id()).await);
     }
     if views.is_empty() {
         return Err(ApiError::Unauthorized);

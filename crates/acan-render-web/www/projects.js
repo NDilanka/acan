@@ -73,6 +73,14 @@ export function worldBounds(bounds, place) {
   return [box[0] + place[0], box[1] + place[1], box[2] + place[0], box[3] + place[1]];
 }
 
+// The place of a project added while the page is open: its plant's left edge `gap` past
+// `rightEdge`, the right edge of the plants already on the canvas, with its top on the same line
+// as `pack` puts one. Nothing else moves. `bounds` are the new plant's bounds from its origin.
+export function placeAfter(rightEdge, bounds, gap = PACK_GAP) {
+  const box = validBox(bounds) ? bounds : PLACEHOLDER;
+  return [rightEdge + gap - box[0], 0 - box[1]];
+}
+
 // The saved places from local storage, or none for a missing or broken entry.
 export function placesFrom(text) {
   try {
