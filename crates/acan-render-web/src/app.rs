@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use acan_render::camera::{DEFAULT_AZIMUTH, DEFAULT_ELEVATION, FitRoom};
-use acan_render::{Aabb, Camera, Lod, Model, Renderer, Scene, wgpu};
+use acan_render::{Aabb, Camera, Instance, Lod, Model, Renderer, Scene, wgpu};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
@@ -248,6 +248,30 @@ struct Loaded {
     /// The plant as it arrived and its layout from the origin, so a move rebuilds it in place.
     source: Plant,
     at_origin: Layout,
+}
+
+impl Loaded {
+    /// The overlays of every plan machine, placed on its base instance. `instances` holds this
+    /// plant's base instances from `start` on, as a scene does once they are added.
+    fn overlays(
+        &self,
+        instances: &[Instance],
+        start: usize,
+        marks: &Marks,
+        staged: Option<&[bool]>,
+    ) -> Vec<Instance> {
+        let mut out = Vec::new();
+        for (plan_index, &instance) in self.plan_instance.iter().enumerate() {
+            let at = instances[start + instance].offset;
+            out.extend(scene::overlay_instances(
+                &self.machines[instance],
+                at,
+                marks.failed.get(plan_index).copied().unwrap_or(false),
+                marks::overlay_tint(plan_index, staged),
+            ));
+        }
+        out
+    }
 }
 
 #[wasm_bindgen]
@@ -1806,6 +1830,7 @@ impl App {
             scene.instances[instance].tint =
                 marks::machine_tint(&self.marks, plan_index, staged.as_deref());
         }
+        let overlays = loaded.overlays(&scene.instances, 0, &self.marks, staged.as_deref());
         self.motion.set_px_units(self.dpr / self.camera.zoom());
         let riding = self.riding_agent();
         let hovered = self.hovered.as_deref();
@@ -1819,6 +1844,12 @@ impl App {
         scene
             .beams
             .extend(marks::ghost_beams(&self.motion, &self.marks, self.dpr));
+        scene.beams.extend(marks::outline_beams(
+            &self.marks,
+            self.dpr,
+            staged.as_deref(),
+        ));
+        scene.instances.extend(overlays);
         scene.instances.extend(marks::mark_instances(
             &self.motion,
             &self.marks,
@@ -1838,6 +1869,10 @@ impl App {
                 scene.instances[start + instance].tint =
                     marks::machine_tint(&own.marks, plan_index, None);
             }
+            let overlays = parked
+                .loaded
+                .overlays(&scene.instances, start, &own.marks, None);
+            scene.instances.extend(overlays);
             own.motion.set_px_units(px_units);
             if !parked.far {
                 scene
@@ -1852,6 +1887,9 @@ impl App {
                 scene
                     .beams
                     .extend(marks::ghost_beams(&own.motion, &own.marks, dpr));
+                scene
+                    .beams
+                    .extend(marks::outline_beams(&own.marks, dpr, None));
             }
             scene.instances.extend(marks::mark_instances(
                 &own.motion,
