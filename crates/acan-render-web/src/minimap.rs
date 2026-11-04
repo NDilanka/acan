@@ -160,13 +160,19 @@ mod tests {
         let height = (length(left) + length(sub(br, tr))) * 0.5;
         let aspect = width / height;
         let want = VIEWPORT[0] / VIEWPORT[1];
-        assert!((aspect / want - 1.0).abs() < 0.03, "{aspect} against {want}");
+        assert!(
+            (aspect / want - 1.0).abs() < 0.03,
+            "{aspect} against {want}"
+        );
         let middle = [
             (tl[0] + tr[0] + br[0] + bl[0]) * 0.25,
             (tl[1] + tr[1] + br[1] + bl[1]) * 0.25,
         ];
         let off = length(sub(middle, camera.pivot()));
-        assert!(off < 0.02 * width, "middle {middle:?} is {off} from the pivot");
+        assert!(
+            off < 0.02 * width,
+            "middle {middle:?} is {off} from the pivot"
+        );
     }
 
     #[test]
@@ -174,7 +180,10 @@ mod tests {
         let camera = camera(180.0, topdown::ELEVATION, Projection::Perspective);
         let [tl, tr, _, _] = view_quad(&camera).expect("top-down sees ground").corners;
         let top = sub(tr, tl);
-        assert!(top[1] > 0.0 && top[0].abs() < 0.02 * top[1], "top edge {top:?}");
+        assert!(
+            top[1] > 0.0 && top[0].abs() < 0.02 * top[1],
+            "top edge {top:?}"
+        );
     }
 
     #[test]
@@ -186,7 +195,10 @@ mod tests {
         let limit = FAR_EYES * camera.eye_distance();
         for far in &quad.corners[..2] {
             let reach = length(sub(*far, camera.pivot()));
-            assert!(reach <= limit * 1.0001, "{far:?} is {reach} out, past {limit}");
+            assert!(
+                reach <= limit * 1.0001,
+                "{far:?} is {reach} out, past {limit}"
+            );
         }
         let [tl, tr, br, bl] = quad.corners;
         assert!(

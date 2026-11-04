@@ -68,6 +68,7 @@ import { nextFrame } from "./frames.js";
 import { closeViewer, installVision, paintViewer, placeVisionPins, syncVision, viewerOpen, viewerTakesEscape } from "./vision-pins.js";
 import { installMulti, nameOf, zoomAround } from "./multi.js";
 import { placePlates } from "./nameplates.js";
+import { placeMinimap } from "./minimap.js";
 import { placeParked } from "./parked.js";
 import { canvasState } from "./projects.js";
 import { placeStateMaps, readFootprints } from "./statemachine-paint.js";
@@ -154,6 +155,7 @@ function drawFrame(now = performance.now()) {
     // The parked names are placed before the plates, which move clear of them.
     placeParked();
     placePlates();
+    placeMinimap();
     // A fading belt is redrawn each frame until it is gone. A replay's light waits for its entries.
     if (placeStateMaps() && isLive()) requestRender();
     const next = nextFrame({ moving: turning, hidden: document.hidden, gapMs: state.app.frame_gap_ms() });

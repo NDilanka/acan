@@ -436,7 +436,7 @@
      overlap; the lists scroll when the window is short. A row that changed glows once. */
   /* The rail scrolls as one column, so each panel keeps its own height and its body: no panel
      shrinks to its head when the window is short. Long lists still cap and scroll inside. */
-  #watch { position: fixed; top: 12px; right: 12px; width: 300px; max-height: calc(100vh - 24px);
+  #watch { position: fixed; top: 12px; right: 12px; width: 300px; max-height: calc(100vh - 24px - var(--minimap-room, 0px));
     display: flex; flex-direction: column; gap: 8px; pointer-events: none; overflow-y: auto;
     overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--rule) transparent; }
   #watch > .island { position: static; flex: none; pointer-events: auto; padding: 10px 12px;
@@ -551,6 +551,7 @@
 </style>
 <link rel="stylesheet" href="review.css">
 <link rel="stylesheet" href="settings.css">
+<link rel="stylesheet" href="minimap.css">
 </head>
 <body>
 <canvas id="plant" tabindex="0"></canvas>
@@ -618,6 +619,12 @@
   <aside id="history" class="island" aria-label="orders" hidden></aside>
   <aside id="scrub" class="island" aria-label="timeline" hidden></aside>
 </div>
+<aside id="minimap" class="island" aria-label="Projects map" hidden>
+  <div class="head"><button type="button" id="minimap-toggle" aria-expanded="true" aria-controls="minimap-map" title="Projects map (G M)">map</button><span id="minimap-name" aria-hidden="true"></span></div>
+  <div id="minimap-map" role="group" aria-label="Projects, by place">
+    <svg id="minimap-view" aria-hidden="true"><polygon class="fill"></polygon><polyline class="edge"></polyline><line class="top"></line><path class="tick"></path><path class="off"></path></svg>
+  </div>
+</aside>
 <div id="pulses" aria-hidden="true"><div class="pulse target" id="compose-target" hidden></div></div>
 <aside id="compose" class="island" role="dialog" aria-labelledby="compose-title" hidden>
   <form id="compose-form" autocomplete="off">
