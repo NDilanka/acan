@@ -1706,6 +1706,18 @@ impl App {
             .map_or(-1.0, |stand| stand.top)
     }
 
+    /// Whether machine `name` is not on the map yet: its scan has not filled it, or the scan has
+    /// not started. A hidden machine takes no pointer. A name the plant lacks is not hidden.
+    pub fn machine_hidden(&self, name: &str) -> bool {
+        self.plant.as_ref().is_some_and(|loaded| {
+            loaded
+                .machines
+                .iter()
+                .position(|machine| machine.name == name)
+                .is_some_and(|index| self.scan.hidden(index))
+        })
+    }
+
     pub fn machine_count(&self) -> u32 {
         self.plant
             .as_ref()
