@@ -355,7 +355,7 @@ impl Sheet {
 }
 
 /// The starter `.acan/.gitignore`: the demo's runtime-state rules.
-const GITIGNORE: &str = "# Runtime state: stores, run output and tokens. The protected inputs next to this file stay tracked.\n*.db\n*.db-shm\n*.db-wal\ntokens.json\nstores/\nruns/\nobservations/\n";
+const GITIGNORE: &str = "# Runtime state: stores, run output and tokens. The protected inputs next to this file stay tracked.\n*.db\n*.db-shm\n*.db-wal\nworld.key\ntokens.json\nstores/\nruns/\nobservations/\n";
 
 fn refused(message: impl Into<String>) -> InitError {
     InitError::Refused(message.into())

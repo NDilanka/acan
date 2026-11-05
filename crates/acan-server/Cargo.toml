@@ -23,12 +23,15 @@ anyhow.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4", features = ["derive"] }
 dotenvy = "0.15"
+getrandom = "0.4"
+hmac = "0.12"
 percent-encoding = "2"
 reqwest = { version = "0.12", features = ["json"] }
 schemars = "1"
 semver = "1"
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 thiserror.workspace = true
 tempfile = "3"
