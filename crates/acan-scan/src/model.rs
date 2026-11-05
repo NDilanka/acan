@@ -23,6 +23,18 @@ pub struct Plant {
     pub machines: Vec<Machine>,
     pub belts: Vec<Belt>,
     pub files: Vec<SourceFile>,
+    #[serde(default)]
+    pub skipped: Vec<SkippedFile>,
+    /// The walk stopped at the file-count limit; additional paths were not visited.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// A source file omitted from this scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedFile {
+    pub path: String,
+    pub reason: String,
 }
 
 /// A replaceable module, a set of files that the foreman can regroup.

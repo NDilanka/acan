@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
+use std::time::Instant;
 
-use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{Node, ParseOptions, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::ScanError;
 use crate::lang::Lang;
@@ -50,11 +52,12 @@ impl Extractor {
         })
     }
 
-    pub(crate) fn extract(
+    pub(crate) fn extract_until(
         &mut self,
         lang: Lang,
         path: &str,
         source: &str,
+        deadline: Instant,
     ) -> Result<Extracted, ScanError> {
         self.parser
             .set_language(&lang.language())
@@ -62,12 +65,27 @@ impl Extractor {
                 lang,
                 source: error,
             })?;
-        let tree = self
-            .parser
-            .parse(source, None)
-            .ok_or_else(|| ScanError::ParseCancelled {
-                path: path.to_string(),
-            })?;
+        self.parser.reset();
+        let mut progress = |_: &tree_sitter::ParseState| {
+            if Instant::now() >= deadline {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        };
+        let bytes = source.as_bytes();
+        let tree = if Instant::now() >= deadline {
+            None
+        } else {
+            self.parser.parse_with_options(
+                &mut |offset, _| &bytes[offset..],
+                None,
+                Some(ParseOptions::new().progress_callback(&mut progress)),
+            )
+        }
+        .ok_or_else(|| ScanError::ParseCancelled {
+            path: path.to_string(),
+        })?;
         let queries = self
             .queries
             .get(&lang)

@@ -16,7 +16,10 @@ pub(crate) struct SourceEntry {
 }
 
 /// Lists the scannable files under `root`, honoring `.gitignore`, sorted by repo-relative path.
-pub(crate) fn source_files(root: &Path) -> Result<Vec<SourceEntry>, ScanError> {
+pub(crate) fn source_files(
+    root: &Path,
+    max_files: usize,
+) -> Result<(Vec<SourceEntry>, bool), ScanError> {
     let walker = WalkBuilder::new(root)
         .require_git(false)
         .filter_entry(|entry| {
@@ -28,6 +31,7 @@ pub(crate) fn source_files(root: &Path) -> Result<Vec<SourceEntry>, ScanError> {
         .build();
 
     let mut sources = Vec::new();
+    let mut truncated = false;
     for entry in walker {
         let entry = entry?;
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
@@ -35,6 +39,10 @@ pub(crate) fn source_files(root: &Path) -> Result<Vec<SourceEntry>, ScanError> {
         }
         let rel = relative_path(root, entry.path())?;
         if let Some(lang) = Lang::from_path(&rel) {
+            if sources.len() == max_files {
+                truncated = true;
+                break;
+            }
             sources.push(SourceEntry {
                 abs: entry.into_path(),
                 rel,
@@ -43,7 +51,7 @@ pub(crate) fn source_files(root: &Path) -> Result<Vec<SourceEntry>, ScanError> {
         }
     }
     sources.sort_by(|a, b| a.rel.cmp(&b.rel));
-    Ok(sources)
+    Ok((sources, truncated))
 }
 
 /// Joins the components with `/` so the same repo gives the same paths on Windows and Linux.
