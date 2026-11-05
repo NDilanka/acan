@@ -234,13 +234,19 @@ async function dispatch(op: Op) {
 }
 
 async function handle(line: string): Promise<void> {
-  let reply: unknown;
+  let reply: object;
+  let nonce: string | null = null;
   try {
-    reply = await dispatch(JSON.parse(line) as Op);
+    const op = JSON.parse(line);
+    if (typeof op.nonce !== "string" || !/^[0-9a-f-]{36}$/.test(op.nonce)) {
+      throw new Error("missing or invalid operation nonce");
+    }
+    nonce = op.nonce;
+    reply = await dispatch(op as Op);
   } catch (err) {
     reply = fail(message(err));
   }
-  process.stdout.write(`${JSON.stringify(reply)}\n`);
+  process.stdout.write(`${JSON.stringify({ ...reply, nonce })}\n`);
 }
 
 const lines = readline.createInterface({ input: process.stdin });

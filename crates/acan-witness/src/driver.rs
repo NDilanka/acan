@@ -98,6 +98,28 @@ pub(crate) struct Reply {
     pub truncated: bool,
 }
 
+#[derive(Serialize)]
+struct Request<'a, 'op> {
+    nonce: &'a str,
+    #[serde(flatten)]
+    op: &'a Op<'op>,
+}
+
+#[derive(Deserialize)]
+struct Response {
+    nonce: String,
+    #[serde(flatten)]
+    reply: Reply,
+}
+
+fn decode_reply(line: &str, nonce: &str) -> Result<Reply, CallError> {
+    let response: Response = serde_json::from_str(line).map_err(|_| CallError::Malformed)?;
+    if response.nonce != nonce {
+        return Err(CallError::Malformed);
+    }
+    Ok(response.reply)
+}
+
 /// Why an operation got no usable reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CallError {
@@ -290,7 +312,9 @@ impl Container {
     /// Returns [`CallError::Lost`] when the pipe is closed and [`CallError::Malformed`] when the
     /// reply is not a reply.
     pub(crate) async fn call(&mut self, op: &Op<'_>) -> Result<Reply, CallError> {
-        let mut line = serde_json::to_string(op).map_err(|_| CallError::Malformed)?;
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let mut line = serde_json::to_string(&Request { nonce: &nonce, op })
+            .map_err(|_| CallError::Malformed)?;
         line.push('\n');
         let stdin = self.stdin.as_mut().ok_or(CallError::Lost)?;
         stdin
@@ -304,7 +328,7 @@ impl Container {
             .await
             .map_err(|_| CallError::Lost)?
             .ok_or(CallError::Lost)?;
-        serde_json::from_str(&reply).map_err(|_| CallError::Malformed)
+        decode_reply(&reply, &nonce)
     }
 
     /// Waits briefly for the CLI to exit and returns what it wrote to stderr.
@@ -359,4 +383,54 @@ pub(crate) async fn keep_head(mut stderr: ChildStderr) -> String {
         head.extend_from_slice(&chunk[..read.min(room)]);
     }
     String::from_utf8_lossy(&head).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replies_require_the_outstanding_nonce() {
+        assert!(decode_reply(r#"{"ok":true}"#, "current").is_err());
+        assert!(decode_reply(r#"{"ok":true,"nonce":"previous"}"#, "current").is_err());
+        assert!(
+            decode_reply(r#"{"ok":true,"nonce":"current"}"#, "current")
+                .unwrap()
+                .ok
+        );
+        assert!(decode_reply(r#"{"ok":false,"nonce":"current"}"#, "current").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn calls_reject_replayed_replies_on_the_real_transport() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let docker = dir.path().join("docker");
+        std::fs::write(
+            &docker,
+            r#"#!/bin/sh
+previous=
+while IFS= read -r line; do
+    nonce=${line#*\"nonce\":\"}
+    nonce=${nonce%%\"*}
+    if [ -z "$previous" ]; then
+        printf '{"nonce":"%s","ok":true}\n' "$nonce"
+        previous=$nonce
+    else
+        printf '{"nonce":"%s","ok":true}\n' "$previous"
+    fi
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut container = Container::attach(&docker, "fake").unwrap();
+        assert!(container.call(&Op::Get { path: "/" }).await.unwrap().ok);
+        assert_eq!(
+            container.call(&Op::Get { path: "/" }).await.unwrap_err(),
+            CallError::Malformed
+        );
+        container.finish(false).await;
+    }
 }
