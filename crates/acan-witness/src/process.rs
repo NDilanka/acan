@@ -1,63 +1,112 @@
-//! Test-command checks: run through the platform shell with a timeout and a bounded tail.
+//! Test-command checks: run only in the pinned container, with a timeout and a bounded tail.
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use acan_core::WitnessOutcome;
+use acan_intent::ContainerPolicy;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::Limits;
+use crate::{Limits, docker, driver};
 
 /// How long to wait for piped output to drain after the command exits or is killed. A
 /// detached grandchild can hold a pipe open, so the drain is bounded.
 const DRAIN_GRACE: Duration = Duration::from_secs(5);
 
-/// The shell a test command runs through.
-#[derive(Debug, Clone, Copy)]
-struct Shell {
-    program: &'static str,
-    args: &'static [&'static str],
-}
-
-/// pwsh on Windows when it is on `PATH`, else cmd; sh elsewhere.
-#[cfg(windows)]
-fn default_shell() -> Shell {
-    let pwsh = std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("pwsh.exe").is_file()));
-    if pwsh {
-        Shell {
-            program: "pwsh",
-            args: &["-NoProfile", "-NonInteractive", "-Command"],
-        }
-    } else {
-        Shell {
-            program: "cmd",
-            args: &["/C"],
-        }
-    }
-}
-
-/// pwsh on Windows when it is on `PATH`, else cmd; sh elsewhere.
-#[cfg(not(windows))]
-fn default_shell() -> Shell {
-    Shell {
-        program: "sh",
-        args: &["-c"],
-    }
-}
-
-/// Runs `command` in `workdir` through the platform shell.
+/// Runs `command` inside Docker. Missing Docker or an image is an error, never host execution.
 pub(crate) async fn run_command(command: &str, workdir: &Path, limits: &Limits) -> WitnessOutcome {
-    run_as(default_shell(), command, workdir, limits).await
+    run_with(Path::new("docker"), command, workdir, limits).await
 }
 
-async fn run_as(shell: Shell, command: &str, workdir: &Path, limits: &Limits) -> WitnessOutcome {
-    let mut cmd = crate::child_env::command(shell.program);
-    cmd.args(shell.args)
-        .arg(command)
-        .current_dir(workdir)
+async fn run_with(docker: &Path, command: &str, workdir: &Path, limits: &Limits) -> WitnessOutcome {
+    let policy = ContainerPolicy::default_run();
+    let mut sandbox = match Sandbox::new(docker, workdir, &policy, command) {
+        Ok(sandbox) => sandbox,
+        Err(detail) => return WitnessOutcome::Error { detail },
+    };
+    let limits = Limits {
+        timeout: limits
+            .timeout
+            .min(Duration::from_millis(policy.timeout_ms.get())),
+        ..limits.clone()
+    };
+    let outcome = run_container(docker, &sandbox.args, &limits).await;
+    match driver::remove_bounded(docker, &sandbox.name, driver::REMOVE_DEADLINE).await {
+        Ok(()) => {
+            sandbox.removed = true;
+            outcome
+        }
+        Err(err) => WitnessOutcome::Error {
+            detail: format!("could not remove the test container: {err}"),
+        },
+    }
+}
+
+struct Sandbox {
+    docker: PathBuf,
+    name: String,
+    dir: PathBuf,
+    args: Vec<String>,
+    removed: bool,
+}
+
+impl Sandbox {
+    fn new(
+        docker: &Path,
+        workdir: &Path,
+        policy: &ContainerPolicy,
+        command: &str,
+    ) -> Result<Self, String> {
+        let workdir = workdir
+            .canonicalize()
+            .map_err(|err| format!("cannot resolve the worktree: {err}"))?;
+        // Docker follows bind sources and mount targets. Never let a candidate redirect an overlay.
+        for path in [".git", ".acan"] {
+            if std::fs::symlink_metadata(workdir.join(path))
+                .is_ok_and(|m| m.file_type().is_symlink())
+            {
+                return Err(format!("the test worktree's {path} must not be a symlink"));
+            }
+        }
+        let name = format!("acan-test-{}", uuid::Uuid::new_v4());
+        let dir = std::env::temp_dir().join(&name);
+        std::fs::create_dir(&dir).map_err(|err| format!("cannot create test sandbox: {err}"))?;
+        let mut sandbox = Self {
+            docker: docker.to_owned(),
+            name,
+            dir,
+            args: Vec::new(),
+            removed: true,
+        };
+        let sources = docker::MountSources {
+            worktree: &workdir,
+            snapshot: &sandbox.dir,
+            harness: &sandbox.dir,
+            empty: &sandbox.dir,
+            dependencies: None,
+        };
+        // A legacy check has no protected-head snapshot. Mask .acan rather than expose state.
+        let mounts = docker::mount_values(policy, &sources)?;
+        sandbox.args = docker::test_args(&sandbox.name, policy, &mounts, command)?;
+        sandbox.removed = false;
+        Ok(sandbox)
+    }
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        if !self.removed {
+            driver::remove_blocking(&self.docker, &self.name, driver::REMOVE_DEADLINE);
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+async fn run_container(docker: &Path, args: &[String], limits: &Limits) -> WitnessOutcome {
+    let mut cmd = crate::child_env::command(docker);
+    cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -69,7 +118,7 @@ async fn run_as(shell: Shell, command: &str, workdir: &Path, limits: &Limits) ->
         Ok(child) => child,
         Err(e) => {
             return WitnessOutcome::Error {
-                detail: format!("could not start {}: {e}", shell.program),
+                detail: format!("could not start Docker for the test: {e}"),
             };
         }
     };
@@ -112,6 +161,13 @@ async fn run_as(shell: Shell, command: &str, workdir: &Path, limits: &Limits) ->
         },
         Ok(Err(e)) => WitnessOutcome::Error {
             detail: format!("could not wait on the command: {e}"),
+        },
+        Ok(Ok(status)) if status.code() == Some(125) => WitnessOutcome::Error {
+            detail: detail(
+                "Docker could not start the isolated test".to_owned(),
+                &out,
+                &err,
+            ),
         },
         Ok(Ok(status)) if status.success() => WitnessOutcome::Pass,
         Ok(Ok(status)) => WitnessOutcome::Fail {
@@ -242,16 +298,109 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn a_shell_that_cannot_start_is_an_error() {
-        let shell = Shell {
-            program: "acan-witness-no-such-shell",
-            args: &[],
-        };
-        let outcome = run_as(shell, "exit 0", Path::new("."), &Limits::default()).await;
+    async fn missing_docker_never_falls_back_to_the_host_shell() {
+        let dir = tempfile::tempdir().expect("worktree");
+        let outcome = run_with(
+            Path::new("acan-witness-no-such-docker"),
+            "echo unsafe > host-executed",
+            dir.path(),
+            &Limits::default(),
+        )
+        .await;
         let WitnessOutcome::Error { detail } = outcome else {
             panic!("expected Error, got {outcome:?}");
         };
-        assert!(detail.contains("could not start"), "{detail}");
+        assert!(!dir.path().join("host-executed").exists(), "{detail}");
+    }
+
+    #[test]
+    fn legacy_tests_keep_the_probe_isolation_and_mask_server_state() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let sandbox = Sandbox::new(
+            Path::new("docker"),
+            worktree.path(),
+            &ContainerPolicy::default_run(),
+            "bun test",
+        )
+        .expect("sandbox");
+        let args = &sandbox.args;
+        for pair in [
+            ["--network", "none"],
+            ["--cap-drop", "ALL"],
+            ["--security-opt", "no-new-privileges"],
+            ["--user", "1000:1000"],
+            ["--pull", "never"],
+            ["--entrypoint", "sh"],
+        ] {
+            assert!(args.windows(2).any(|w| w == pair), "{pair:?}: {args:?}");
+        }
+        assert!(args.iter().any(|arg| arg == "--read-only"));
+        assert!(args.iter().any(|arg| arg.contains("@sha256:")));
+        assert!(
+            args.iter()
+                .any(|arg| arg.ends_with("target=/work/.acan,readonly"))
+        );
+        assert!(args.iter().any(|arg| arg == "HOME=/tmp"));
+        assert_eq!(&args[args.len() - 2..], ["-c", "bun test"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn isolated_exit_codes_output_and_timeout_are_reported_and_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        for (action, expected) in [
+            ("exit 0", "pass"),
+            ("echo tail-output; exit 3", "fail"),
+            ("exit 125", "error"),
+            ("exec sleep 30", "timeout"),
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let docker = dir.path().join("docker");
+            let log = dir.path().join("log");
+            std::fs::write(&docker, format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\ncase \"$1\" in\nrun) {action} ;;\nrm) exit 0 ;;\nesac\n", log.display()
+            )).expect("fake docker");
+            std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755))
+                .expect("executable");
+            let limits = Limits {
+                timeout: Duration::from_millis(200),
+                ..Limits::default()
+            };
+            let outcome =
+                run_with(&docker, "never evaluated on the host", dir.path(), &limits).await;
+            match (expected, outcome) {
+                ("pass", WitnessOutcome::Pass) => {}
+                ("fail", WitnessOutcome::Fail { detail }) => assert!(
+                    detail.contains("exit code 3") && detail.contains("tail-output"),
+                    "{detail}"
+                ),
+                ("error", WitnessOutcome::Error { .. }) => {}
+                ("timeout", WitnessOutcome::Error { detail }) => {
+                    assert!(detail.contains("timed out"), "{detail}")
+                }
+                (_, outcome) => panic!("{expected}: {outcome:?}"),
+            }
+            let log = std::fs::read_to_string(log).expect("log");
+            assert!(log.contains("rm\n--force\nacan-test-"), "{log}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_symlinks_cannot_redirect_container_overlays() {
+        for path in [".git", ".acan"] {
+            let dir = tempfile::tempdir().expect("worktree");
+            std::os::unix::fs::symlink("/etc", dir.path().join(path)).expect("symlink");
+            assert!(
+                Sandbox::new(
+                    Path::new("docker"),
+                    dir.path(),
+                    &ContainerPolicy::default_run(),
+                    "true"
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

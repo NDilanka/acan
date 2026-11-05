@@ -206,6 +206,24 @@ pub(crate) fn create_args(
     Ok(args)
 }
 
+/// Runs a legacy test under the same isolation as a probe, with no host-shell fallback.
+pub(crate) fn test_args(
+    name: &str,
+    policy: &ContainerPolicy,
+    mounts: &[String],
+    command: &str,
+) -> Result<Vec<String>, String> {
+    if !matches!(policy.network, ContainerNetwork::None {}) {
+        return Err("a test run never gets network egress".to_owned());
+    }
+    let mut args = shared_args(name, name, policy, mounts, false)?;
+    args[0] = "run".to_owned();
+    args.extend(["--entrypoint".to_owned(), "sh".to_owned()]);
+    args.push(image_ref(policy)?);
+    args.extend(["-c".to_owned(), command.to_owned()]);
+    Ok(args)
+}
+
 /// The `docker create` arguments of one install phase container: `argv[0]` is the entrypoint and
 /// the rest its arguments. The scratch directory is mounted read-write at the working directory,
 /// and the container has the policy's network egress and nothing else.

@@ -1,8 +1,8 @@
 //! Runs a witness check against a task's worktree and reports a [`WitnessOutcome`].
 //!
 //! The server's `RunWitness` job calls [`run`] once per gated witness. A test command runs
-//! through the platform shell (pwsh on Windows when present, else cmd; sh elsewhere) with a
-//! timeout that kills the whole process tree. An HTTP check waits for the app port to accept
+//! through `sh` inside the digest-pinned, network-isolated container, never a host shell. A
+//! timeout removes the whole container. An HTTP check waits for the app port to accept
 //! connections, sends one request, and compares the status and body against the expectation.
 //! A check that cannot run reports [`WitnessOutcome::Error`], which the gate never counts as
 //! a pass. Details are short, human-readable, and never echo the environment.

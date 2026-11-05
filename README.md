@@ -109,6 +109,9 @@ In progress. No numbers are published before the run finishes.
   Set provider keys in the user-wide setup page or the operator's environment.
 - The take and the worker slots pass each worker its per-take local acan agent token in the `ACAN_AGENT_TOKEN` variable, not on the command line, so the process list does not show it. The control identity's token goes the same way. These tokens are created by the take for its own server. They are not provider keys.
 - The probe driver runs in the same container as the candidate code. The container has a read-only root and all Linux capabilities dropped.
+- Legacy test witnesses also require Docker and the locally installed digest-pinned Bun image.
+  They run `sh` inside the probe container policy, with `.acan` masked and no host fallback.
+  Legacy tests still come from the candidate; use the scope-first receipt lane for protected-head probes.
 - `model_cost_micros` is stored in each order's repair budget, but no check reads it. The model cost cap is not enforced.
 - There is no hosted replay yet. The recorded receipts replay the provider calls, not the full UI.
 

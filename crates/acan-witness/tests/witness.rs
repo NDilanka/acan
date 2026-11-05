@@ -66,6 +66,22 @@ fn serve_once(status: u16, body: &'static str) -> (String, std::thread::JoinHand
 }
 
 #[tokio::test]
+async fn candidate_test_code_never_executes_on_the_host() {
+    let host = tempfile::tempdir().expect("host directory");
+    let worktree = tempfile::tempdir().expect("worktree");
+    let sentinel = host.path().join("compromised");
+    let check = Check::Test {
+        command: format!("echo compromised > '{}'", sentinel.display()),
+    };
+    let outcome = run(&check, worktree.path(), &limits()).await;
+    assert!(
+        !sentinel.exists(),
+        "candidate code wrote outside its container"
+    );
+    assert!(!matches!(outcome, WitnessOutcome::Pass), "{outcome:?}");
+}
+
+#[tokio::test]
 async fn a_passing_command_passes() {
     let check = Check::Test {
         command: "exit 0".to_string(),
@@ -76,10 +92,6 @@ async fn a_passing_command_passes() {
 
 #[tokio::test]
 async fn a_failing_command_fails_with_the_output_tail() {
-    // Windows runs commands through pwsh when present; these tests assume it.
-    #[cfg(windows)]
-    let command = "echo hello-fail; [Console]::Error.WriteLine('oops-stderr'); exit 3".to_string();
-    #[cfg(not(windows))]
     let command = "echo hello-fail; echo oops-stderr 1>&2; exit 3".to_string();
     let check = Check::Test { command };
     let outcome = run(&check, Path::new("."), &limits()).await;
@@ -95,15 +107,8 @@ async fn a_failing_command_fails_with_the_output_tail() {
 async fn a_timeout_kills_the_process_tree() {
     let dir = temp_dir("timeout");
     let sentinel = dir.join("written");
-    // Windows runs commands through pwsh; unix through sh. Both sleep past the timeout and
-    // then write a sentinel only a still-living tree could produce.
-    #[cfg(windows)]
-    let command = format!(
-        "Start-Sleep -Seconds 4; Set-Content -LiteralPath '{}' -Value done",
-        sentinel.display()
-    );
-    #[cfg(not(windows))]
-    let command = format!("sleep 4; echo done > '{}'", sentinel.display());
+    // Every platform now runs the same shell inside the container.
+    let command = "sleep 4; echo done > /work/written".to_owned();
     let check = Check::Test { command };
     let limits = Limits {
         timeout: Duration::from_secs(2),
@@ -126,9 +131,6 @@ async fn a_timeout_kills_the_process_tree() {
 
 #[tokio::test]
 async fn the_output_tail_is_bounded() {
-    #[cfg(windows)]
-    let command = "Write-Output ('START' + ('x' * 65536) + 'END'); exit 1".to_string();
-    #[cfg(not(windows))]
     let command =
         "printf START; head -c 65536 /dev/zero | tr '\\0' x; printf 'END\\n'; exit 1".to_string();
     let check = Check::Test { command };
