@@ -721,7 +721,7 @@ impl Worktree {
 impl Container {
     /// Checks that the docker CLI starts and its daemon answers.
     async fn answers(&self) -> Result<(), String> {
-        let mut version = Command::new(&self.docker);
+        let mut version = acan_witness::child_env::command(&self.docker);
         version
             .args(["version", "--format", "{{.Server.Version}}"])
             .stdin(Stdio::null())
@@ -749,7 +749,7 @@ impl Container {
     }
 
     async fn run(&self, name: &str, args: &[String], timeout: Duration) -> Result<String, String> {
-        let mut child = Command::new(&self.docker)
+        let mut child = acan_witness::child_env::command(&self.docker)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -793,7 +793,7 @@ impl Container {
     }
 
     async fn kill(&self, name: &str) {
-        let mut kill = Command::new(&self.docker);
+        let mut kill = acan_witness::child_env::command(&self.docker);
         kill.args(["kill", name])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

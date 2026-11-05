@@ -109,7 +109,7 @@ async fn render_in(browser: &Path, html: &str, dir: &Path) -> Result<Screenshot,
     let profile = dir.join("profile");
     // The candidate's HTML is untrusted: it is only ever opened inert, never as a live page.
     tokio::fs::write(&page, inert(html)).await?;
-    let mut command = tokio::process::Command::new(browser);
+    let mut command = acan_witness::child_env::command(browser);
     command
         .args(arguments(&page, &shot, &profile))
         .stdin(Stdio::null())

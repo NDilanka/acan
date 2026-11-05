@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use acan_core::{AgentId, MemberId};
@@ -73,8 +74,7 @@ impl Tokens {
             token: token.0.clone(),
             principal: Principal::Member(founder.clone()),
         }];
-        fs::write(&path, serde_json::to_string_pretty(&entries)?)
-            .with_context(|| format!("writing {}", path.display()))?;
+        write_entries(&path, &entries)?;
         Ok((Self::from_entries(entries)?, Some(token)))
     }
 
@@ -139,8 +139,7 @@ impl Tokens {
                         token: human.clone(),
                         principal: owner.clone(),
                     });
-                    fs::write(&path, serde_json::to_string_pretty(&entries)?)
-                        .with_context(|| format!("writing {}", path.display()))?;
+                    write_entries(&path, &entries)?;
                 }
             }
             tokens.push(Self::from_entries(entries)?);
@@ -199,10 +198,7 @@ impl Tokens {
             })
             .collect();
         let path = dir.join(TOKENS_FILE);
-        let temporary = dir.join(format!("{TOKENS_FILE}.tmp"));
-        fs::write(&temporary, serde_json::to_string_pretty(&entries)?)
-            .with_context(|| format!("writing {}", temporary.display()))?;
-        fs::rename(&temporary, &path).with_context(|| format!("writing {}", path.display()))
+        write_entries(&path, &entries)
     }
 
     fn from_entries(entries: Vec<Entry>) -> anyhow::Result<Self> {
@@ -224,11 +220,59 @@ impl fmt::Debug for Tokens {
     }
 }
 
+fn write_entries(path: &Path, entries: &[Entry]) -> anyhow::Result<()> {
+    let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4().simple()));
+    let written = (|| -> anyhow::Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(serde_json::to_string_pretty(entries)?.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written.with_context(|| format!("writing {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn every_tokens_write_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let other = tempfile::tempdir().expect("temp dir");
+        let owner = MemberId::from_str("owner").expect("member");
+        let (mut tokens, _) = Tokens::load_or_create(dir.path(), &owner).expect("tokens");
+        let path = dir.path().join(TOKENS_FILE);
+        assert_eq!(
+            fs::metadata(&path).expect("file").permissions().mode() & 0o777,
+            0o600
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("old mode");
+        tokens
+            .agent_token(dir.path(), &AgentId::from_str("agent").expect("agent"))
+            .expect("token");
+        Tokens::load_shared(&[dir.path(), other.path()], &owner).expect("shared tokens");
+        for path in [path, other.path().join(TOKENS_FILE)] {
+            assert_eq!(
+                fs::metadata(path).expect("file").permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
 
     #[test]
     fn an_agent_keeps_its_token_across_loads_and_each_agent_has_its_own() {

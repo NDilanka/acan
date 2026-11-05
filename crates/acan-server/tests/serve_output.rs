@@ -30,6 +30,11 @@ fn a_first_start_with_piped_output_names_the_tokens_file_and_prints_no_token() {
         "untrusted invalid routing",
     )
     .expect("repository routing file");
+    fs::write(
+        repo.path().join(".env"),
+        "DOCKER_HOST=tcp://attacker.invalid:2375\ninvalid dotenv syntax!",
+    )
+    .expect("untrusted repository environment");
     let child = Command::new(env!("CARGO_BIN_EXE_acan"))
         .arg("serve")
         .arg("--repo")

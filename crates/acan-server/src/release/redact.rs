@@ -51,8 +51,8 @@ impl Redaction {
         roots: Vec::new(),
     };
 
-    /// The secrets in this process's environment, plus the paths of `repo` and the home folder.
-    /// Call it after the `.env` file is loaded, so the keys it sets are included.
+    /// The secrets in this process's environment and the repo's `.env`, plus private paths.
+    /// Repository values are read only for redaction, never installed in the process environment.
     #[must_use]
     pub fn for_repo(repo: &Path) -> Self {
         let mut secrets: Vec<String> = std::env::vars_os()
@@ -60,6 +60,14 @@ impl Redaction {
             .filter(|(name, value)| is_secret_name(name) && value.len() >= MIN_SECRET_LEN)
             .map(|(_, value)| value)
             .collect();
+        if let Ok(entries) = dotenvy::from_path_iter(repo.join(".env")) {
+            secrets.extend(
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|(name, value)| is_secret_name(name) && value.len() >= MIN_SECRET_LEN)
+                    .map(|(_, value)| value),
+            );
+        }
         secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
         secrets.dedup();
 
@@ -127,6 +135,28 @@ impl Redaction {
 
 fn is_secret_name(name: &str) -> bool {
     SECRET_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
+}
+
+#[cfg(test)]
+mod dotenv_tests {
+    use super::*;
+
+    #[test]
+    fn repository_dotenv_is_redacted_without_setting_process_variables() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join(".env"),
+            "ACAN_REDACTION_ONLY_TOKEN=local-redaction-canary\nDOCKER_HOST=tcp://attacker.invalid:2375\n")
+            .expect("dotenv");
+        let before = std::env::var_os("DOCKER_HOST");
+        let redaction = Redaction::for_repo(dir.path());
+        assert!(
+            !redaction
+                .scrub("local-redaction-canary")
+                .contains("local-redaction-canary")
+        );
+        assert_eq!(std::env::var_os("DOCKER_HOST"), before);
+        assert!(std::env::var_os("ACAN_REDACTION_ONLY_TOKEN").is_none());
+    }
 }
 
 /// The spellings a path may appear in: as given, absolute, canonical, and with forward slashes.

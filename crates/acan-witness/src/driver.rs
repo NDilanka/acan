@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
@@ -123,7 +123,7 @@ pub(crate) enum CreateError {
 /// The caller runs this in its own task, so the create finishes even when the caller stops
 /// waiting: the id it returns is then the one the caller removes.
 pub(crate) async fn create(docker: PathBuf, args: Vec<String>) -> Result<String, CreateError> {
-    let output = Command::new(&docker)
+    let output = crate::child_env::command(&docker)
         .args(&args)
         .stdin(Stdio::null())
         .kill_on_drop(true)
@@ -170,7 +170,7 @@ pub(crate) async fn remove_bounded(
     let attempts = async {
         let mut last = String::new();
         for _ in 0..REMOVE_ATTEMPTS {
-            let output = Command::new(docker)
+            let output = crate::child_env::command(docker)
                 .args(["rm", "--force", target])
                 .stdin(Stdio::null())
                 .kill_on_drop(true)
@@ -206,7 +206,7 @@ pub(crate) async fn remove(docker: &Path, target: &str) {
 /// Removes `target` without awaiting, for a drop that cannot await. The removal is given
 /// `deadline`, after which the docker client is killed. A failed removal is not retried here.
 pub(crate) fn remove_blocking(docker: &Path, target: &str, deadline: Duration) {
-    let Ok(mut child) = std::process::Command::new(docker)
+    let Ok(mut child) = crate::child_env::std_command(docker)
         .args(["rm", "--force", target])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -250,7 +250,7 @@ impl Container {
     ///
     /// Returns the spawn error when the docker program cannot be started.
     pub(crate) fn attach(docker: &Path, id: &str) -> io::Result<Self> {
-        let mut child = Command::new(docker)
+        let mut child = crate::child_env::command(docker)
             .args(["start", "--attach", "--interactive", id])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

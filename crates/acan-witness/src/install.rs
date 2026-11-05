@@ -18,7 +18,6 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use acan_intent::ContainerPolicy;
-use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::docker;
@@ -145,7 +144,7 @@ async fn run(config: &RunnerConfig, args: Vec<String>) -> Result<(), InstallErro
     };
     // Dropping the child, when the install times out or its caller stops waiting, kills the
     // docker client. The container itself is removed by name.
-    let mut child = Command::new(&config.docker)
+    let mut child = crate::child_env::command(&config.docker)
         .args(["start", "--attach", &id])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

@@ -14,7 +14,7 @@ use acan_server::{
     DEFAULT_WITNESS_CONCURRENCY, Models, ServeConfig, VisionConfig, default_browser,
     default_data_dir, start_projects, tokens_file,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 
 /// Acan's local server: one world per repository, one or more repositories per server.
@@ -154,21 +154,8 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Loads the repository's `.env` file. A repository without one is the normal case. A file that
-/// exists but does not parse is an error, so the keys it was meant to set are not silently
-/// missing.
-fn load_dotenv(repo: &std::path::Path) -> Result<()> {
-    match dotenvy::from_path(repo.join(".env")) {
-        Ok(()) => Ok(()),
-        Err(dotenvy::Error::Io(err)) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).context("loading .env"),
-    }
-}
-
-/// Exports the recorded run. The keys of `.env` are loaded first, so the privacy scan removes
-/// them from the files as it would from a bug report.
+/// Exports the recorded run with repository secrets included in its local redaction list.
 async fn export_replay(args: ExportReplayArgs) -> Result<()> {
-    load_dotenv(&args.repo)?;
     let redaction = Redaction::for_repo(&args.repo);
     let exported = replay::export(&args.repo, &args.out, &redaction).await?;
     println!(
@@ -233,10 +220,6 @@ async fn serve(args: ServeArgs) -> Result<()> {
     }
     projects.validate()?;
 
-    // The keys of every project's `.env` are loaded before the bug report's redaction is built.
-    for project in &projects.projects {
-        load_dotenv(&project.repo)?;
-    }
     // The bug report removes what every project holds: its secrets and its repository's paths.
     release::configure(projects.redaction());
     tracing::info!(

@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use acan_core::WitnessOutcome;
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
 
 use crate::Limits;
 
@@ -55,7 +54,7 @@ pub(crate) async fn run_command(command: &str, workdir: &Path, limits: &Limits) 
 }
 
 async fn run_as(shell: Shell, command: &str, workdir: &Path, limits: &Limits) -> WitnessOutcome {
-    let mut cmd = Command::new(shell.program);
+    let mut cmd = crate::child_env::command(shell.program);
     cmd.args(shell.args)
         .arg(command)
         .current_dir(workdir)
@@ -214,7 +213,7 @@ async fn read_tail<R: AsyncRead + Unpin>(mut reader: R, cap: usize) -> Tail {
 /// gone, and a failure here leaves the timeout outcome an error either way.
 #[cfg(windows)]
 fn kill_tree(pid: u32) {
-    let _ = std::process::Command::new("taskkill")
+    let _ = crate::child_env::std_command("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

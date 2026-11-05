@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use acan_core::{Check, WitnessOutcome};
 
+pub mod child_env;
 mod docker;
 mod driver;
 mod http;

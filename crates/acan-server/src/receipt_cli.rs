@@ -756,7 +756,7 @@ async fn preflight(docker: &Path, image: &ImageName) -> Result<(), ShadowError> 
 
 /// Runs one docker command with a timeout. Its error is the first line of its stderr.
 async fn docker_command(docker: &Path, args: &[&str]) -> Result<(), String> {
-    let mut command = ProcessCommand::new(docker);
+    let mut command = acan_witness::child_env::command(docker);
     command
         .args(args)
         .stdin(Stdio::null())

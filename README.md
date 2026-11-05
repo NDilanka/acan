@@ -105,6 +105,8 @@ In progress. No numbers are published before the run finishes.
 - Live takes need your own provider keys. `llm.toml` and `.env` are git-ignored and are not in the repository.
 - `acan serve` uses user-wide model setup by default. A routing file needs an explicit `--llm`
   or projects-file entry and must use the catalog provider's HTTPS endpoint and key variable.
+- Served repositories' `.env` files are used only for redaction, never to configure the server.
+  Set provider keys in the user-wide setup page or the operator's environment.
 - The take and the worker slots pass each worker its per-take local acan agent token in the `ACAN_AGENT_TOKEN` variable, not on the command line, so the process list does not show it. The control identity's token goes the same way. These tokens are created by the take for its own server. They are not provider keys.
 - The probe driver runs in the same container as the candidate code. The container has a read-only root and all Linux capabilities dropped.
 - `model_cost_micros` is stored in each order's repair budget, but no check reads it. The model cost cap is not enforced.
