@@ -243,16 +243,39 @@ pub(crate) fn read_capture(
 
 /// The path a `Location` header sends the client to, when it stays on the app's own origin.
 pub(crate) fn same_origin_path(location: &str, port: u16) -> Option<String> {
-    if location.starts_with('/') && !location.starts_with("//") {
-        return Some(location.to_owned());
+    if !location.starts_with('/') && !location.starts_with("http://") {
+        return None;
     }
-    let origin = format!("http://127.0.0.1:{port}");
-    let rest = location.strip_prefix(&origin)?;
-    match rest.chars().next() {
-        None => Some("/".to_owned()),
-        Some('/' | '?') => Some(rest.to_owned()),
-        Some(_) => None,
+    let base = reqwest::Url::parse(&format!("http://127.0.0.1:{port}")).ok()?;
+    let url = same_origin_url(&base, location)?;
+    let mut path = url.path().to_owned();
+    if let Some(query) = url.query() {
+        path.push('?');
+        path.push_str(query);
     }
+    Some(path)
+}
+
+/// Resolves a URL without permitting authority, credential or scheme changes.
+pub(crate) fn same_origin_url(base: &reqwest::Url, location: &str) -> Option<reqwest::Url> {
+    if location.starts_with("//")
+        || location.contains('\\')
+        || location
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace())
+        || !matches!(base.scheme(), "http" | "https")
+        || !base.username().is_empty()
+        || base.password().is_some()
+    {
+        return None;
+    }
+    let url = base.join(location).ok()?;
+    (url.scheme() == base.scheme()
+        && url.host_str() == base.host_str()
+        && url.port_or_known_default() == base.port_or_known_default()
+        && url.username().is_empty()
+        && url.password().is_none())
+    .then_some(url)
 }
 
 /// The method as it appears on the request line.
@@ -330,6 +353,14 @@ mod tests {
         );
         assert_eq!(same_origin_path("http://example.com/z", 3000), None);
         assert_eq!(same_origin_path("//example.com/z", 3000), None);
+        for path in [
+            "/\\evil/x",
+            "\\\\evil/x",
+            "http://evil@127.0.0.1:3000/x",
+            "/\n/evil",
+        ] {
+            assert_eq!(same_origin_path(path, 3000), None);
+        }
     }
 
     fn reply(content_type: Option<&str>, body: &str) -> Reply {

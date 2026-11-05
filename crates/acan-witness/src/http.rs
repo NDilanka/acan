@@ -31,16 +31,21 @@ pub(crate) async fn run_http(
             };
         }
     };
+    if reqwest::Url::parse(path).is_ok() {
+        return WitnessOutcome::Error {
+            detail: "an http check needs a same-origin path, not an absolute URL".to_string(),
+        };
+    }
     let path = if path.starts_with('/') {
         path.to_string()
     } else {
         format!("/{path}")
     };
-    let url = match base.join(&path) {
-        Ok(url) => url,
-        Err(e) => {
+    let url = match crate::record::same_origin_url(&base, &path) {
+        Some(url) => url,
+        None => {
             return WitnessOutcome::Error {
-                detail: format!("the http path {path:?} is invalid: {e}"),
+                detail: "the http path must stay on the configured origin".to_string(),
             };
         }
     };
@@ -60,6 +65,7 @@ pub(crate) async fn run_http(
     }
 
     let client = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(limits.request_timeout)
         .build()
     {

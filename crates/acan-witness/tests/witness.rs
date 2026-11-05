@@ -256,6 +256,76 @@ async fn an_http_check_without_a_base_url_errors() {
 }
 
 #[tokio::test]
+async fn an_http_check_rejects_authority_and_scheme_overrides_before_connecting() {
+    let limits = Limits {
+        http_base_url: Some("http://127.0.0.1:1".into()),
+        ..limits()
+    };
+    for path in [
+        "//169.254.169.254/latest/meta-data",
+        "\\\\evil/x",
+        "/\\evil/x",
+        "https://evil@127.0.0.1/x",
+        "http://127.0.0.1:1/x",
+        "/\t/evil",
+    ] {
+        let check = Check::Http {
+            method: "GET".into(),
+            path: path.into(),
+            expect_status: 200,
+            expect_body: None,
+        };
+        let outcome = run(&check, Path::new("."), &limits).await;
+        let WitnessOutcome::Error { detail } = outcome else {
+            panic!("{path}: {outcome:?}")
+        };
+        assert!(detail.contains("origin"), "{path}: {detail}");
+    }
+}
+
+#[tokio::test]
+async fn an_http_check_does_not_follow_a_cross_origin_redirect() {
+    let _ports = PORTS.lock().await;
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    target.set_nonblocking(true).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let location = format!("http://{}/secret", target.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut buf = [0; 4096];
+            if stream.read(&mut buf).unwrap() == 0 {
+                continue;
+            }
+            write!(stream, "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            break;
+        }
+    });
+    let check = Check::Http {
+        method: "GET".into(),
+        path: "/".into(),
+        expect_status: 302,
+        expect_body: None,
+    };
+    let outcome = run(
+        &check,
+        Path::new("."),
+        &Limits {
+            http_base_url: Some(base),
+            ..limits()
+        },
+    )
+    .await;
+    assert!(matches!(outcome, WitnessOutcome::Pass), "{outcome:?}");
+    server.join().unwrap();
+    assert_eq!(
+        target.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[tokio::test]
 async fn a_screenshot_check_is_explicitly_unsupported() {
     let check = Check::Screenshot {
         route: "/".to_string(),
