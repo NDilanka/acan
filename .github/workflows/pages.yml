@@ -83,16 +83,20 @@ jobs:
           cp replay/manifest.json replay/plant.json replay/events.json _site/replay/
           touch _site/.nojekyll
           ls -la _site _site/replay
-      - name: Check the recording for private text
-        # The same kinds of text the bug report removes: keys, tokens, home and user-folder paths,
-        # Windows user paths, and the private repository name. A match fails the deploy.
+      - name: Check the site for private text
+        # Scan every asset, including binary and hidden files. Never print matched secrets.
         run: |
-          pattern='acan_[a-z_]*[0-9a-f]{32}|sk-[A-Za-z0-9_-]{16,}|Bearer [A-Za-z0-9._-]{16,}|/home/|/Users/|/root/|/tmp/|[A-Za-z]:\\Users\\'
-          if grep -rnE "$pattern" _site/replay; then
-            echo "The recording holds private text. Re-export it after removing the cause." >&2
+          pattern='gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|-----BEGIN [A-Z0-9 ]+-----|(AKIA|ASIA)[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{16,}|acan_[a-z_]*[0-9a-f]{32}|Bearer[[:space:]]+[A-Za-z0-9._~+/-]{16,}={0,2}|xox[baprs]-[A-Za-z0-9-]{10,}|/(home|Users|root|tmp|private|var/folders|var/tmp|run/user)/|(^|[^[:alnum:]])[A-Za-z]:[\\/]+|\\\\[^\\[:space:]]+\\'
+          status=0
+          LC_ALL=C grep -RaEi -- "$pattern" _site >/dev/null || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "The site holds private text. Remove it before publishing." >&2
+            exit 1
+          elif [ "$status" -ne 1 ]; then
+            echo "The site privacy scan failed; refusing to publish." >&2
             exit 1
           fi
-          echo "The recording holds no private text."
+          echo "The site holds no recognized private text."
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:

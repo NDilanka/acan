@@ -42,6 +42,7 @@ jobs:
           end
           RUBY
       - run: ruby scripts/test-action-pins.rb
+      - run: ruby scripts/test-pages-scan.rb
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt
