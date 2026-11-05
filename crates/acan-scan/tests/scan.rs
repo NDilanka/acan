@@ -426,3 +426,32 @@ fn plant_round_trips_through_json() {
 
     assert_eq!(back, plant);
 }
+
+#[test]
+fn deeply_nested_use_tree_does_not_abort_the_scan() {
+    let repo = tempfile::tempdir().unwrap();
+    let source = format!(
+        "use {}leaf{};\npub fn good() {{}}",
+        "a::{".repeat(16_000),
+        "}".repeat(16_000)
+    );
+    fs::write(repo.path().join("deep.rs"), source).unwrap();
+    fs::write(repo.path().join("good.rs"), "pub fn survives() {}").unwrap();
+    let plant = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || scan(repo.path()).unwrap())
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(
+        file(&plant, "good.rs")
+            .symbols
+            .iter()
+            .any(|s| s.name == "survives")
+    );
+    if let Some(deep) = plant.files.iter().find(|f| f.path == "deep.rs") {
+        assert!(deep.imports.is_empty());
+    } else {
+        assert!(plant.skipped.iter().any(|f| f.path == "deep.rs"));
+    }
+}

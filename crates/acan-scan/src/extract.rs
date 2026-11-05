@@ -434,22 +434,46 @@ fn rust_imports(query: &Query, root: Node, source: &[u8]) -> Vec<RawImport> {
 /// Expands a Rust use tree into full paths. `crate::{a::B, c::{self, D as E}}` gives three paths.
 pub(crate) fn expand_use(tree: &str) -> Vec<String> {
     let normalized = tree.split_whitespace().collect::<Vec<_>>().join(" ");
-    expand_tree(&normalized, "")
-}
-
-fn expand_tree(tree: &str, prefix: &str) -> Vec<String> {
-    let tree = tree.trim();
-    let Some(open) = tree.find('{') else {
-        let path = tree.split(" as ").next().unwrap_or_default().trim();
-        let full = format!("{prefix}{path}");
-        return vec![full.strip_suffix("::self").unwrap_or(&full).to_string()];
-    };
-    let base = format!("{prefix}{}", tree[..open].trim());
-    let close = matching_brace(tree, open);
-    split_top_level(&tree[open + 1..close])
-        .into_iter()
-        .flat_map(|part| expand_tree(part, &base))
-        .collect()
+    const MAX_DEPTH: usize = 128;
+    const MAX_PATHS: usize = 4096;
+    const MAX_PATH_BYTES: usize = 4096;
+    const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+    let mut pending = vec![(normalized.as_str(), String::new(), 0)];
+    let mut paths = Vec::new();
+    let mut output_bytes = 0;
+    while let Some((tree, prefix, depth)) = pending.pop() {
+        let tree = tree.trim();
+        if let Some(open) = tree.find('{') {
+            if depth == MAX_DEPTH || prefix.len() + open > MAX_PATH_BYTES {
+                return Vec::new();
+            }
+            let base = format!("{prefix}{}", tree[..open].trim());
+            let close = matching_brace(tree, open);
+            let parts = split_top_level(&tree[open + 1..close]);
+            if pending.len() + paths.len() + parts.len() > MAX_PATHS {
+                return Vec::new();
+            }
+            pending.extend(
+                parts
+                    .into_iter()
+                    .rev()
+                    .map(|part| (part, base.clone(), depth + 1)),
+            );
+        } else {
+            let path = tree.split(" as ").next().unwrap_or_default().trim();
+            if prefix.len() + path.len() > MAX_PATH_BYTES {
+                return Vec::new();
+            }
+            let full = format!("{prefix}{path}");
+            let full = full.strip_suffix("::self").unwrap_or(&full);
+            output_bytes += full.len();
+            if paths.len() == MAX_PATHS || output_bytes > MAX_OUTPUT_BYTES {
+                return Vec::new();
+            }
+            paths.push(full.to_string());
+        }
+    }
+    paths
 }
 
 fn matching_brace(tree: &str, open: usize) -> usize {
@@ -543,5 +567,20 @@ mod tests {
             expand_use("crate::é::{a, b}"),
             vec!["crate::é::a", "crate::é::b"],
         );
+    }
+
+    #[test]
+    fn bounds_nested_wide_and_amplified_use_trees() {
+        let nested = format!("{}leaf{}", "a::{".repeat(16_000), "}".repeat(16_000));
+        assert!(expand_use(&nested).is_empty());
+        assert_eq!(
+            expand_use(&format!("{}leaf{}", "a::{".repeat(128), "}".repeat(128))).len(),
+            1
+        );
+        let wide = format!("crate::{{{}}}", vec!["a"; 4097].join(","));
+        assert!(expand_use(&wide).is_empty());
+        let amplified = format!("{}::{{{}}}", "a".repeat(1024), vec!["b"; 1024].join(","));
+        assert!(expand_use(&amplified).is_empty());
+        assert!(expand_use(&"a".repeat(4097)).is_empty());
     }
 }
