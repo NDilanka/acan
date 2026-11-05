@@ -64,8 +64,13 @@ fn an_error_never_counts_as_a_pass() {
 }
 
 #[test]
-fn a_run_with_no_gated_witnesses_passes() {
-    assert_eq!(gate_run(&[], &[]).verdict(), GateVerdict::Passed);
+fn a_run_with_no_gated_witnesses_fails_closed() {
+    for run in [
+        gate_run(&[], &[]),
+        gate_run(&[], &[("w-0", WitnessOutcome::Pass)]),
+    ] {
+        assert_eq!(run.verdict(), GateVerdict::Failed { failing: vec![] });
+    }
 }
 
 #[test]
@@ -323,7 +328,7 @@ fn a_merged_task_lands_and_a_failed_merge_reopens_the_next() {
 }
 
 #[test]
-fn a_build_with_no_gated_witnesses_passes_at_once() {
+fn a_legacy_build_with_no_gated_witnesses_is_refused() {
     let mut fx = Fx::new();
     let (owner, a) = (fx.owner.clone(), fx.agent_a.clone());
     fx.human(
@@ -355,23 +360,58 @@ fn a_build_with_no_gated_witnesses_passes_at_once() {
         .expect("task")
         .id;
     let fence = fx.build(&a, task);
-    let batch = fx
-        .agent(
-            &a,
-            AgentCmd::ReportBuilt {
-                fence,
-                head: commit("doc1"),
-            },
-        )
-        .expect("report accepted");
-    assert!(events(&batch).iter().any(|e| matches!(
-        e,
-        Event::GateClosed {
-            verdict: GateVerdict::Passed,
-            ..
+    let before = fx.origin.world().clone();
+    let result = fx.agent(
+        &a,
+        AgentCmd::ReportBuilt {
+            fence,
+            head: commit("doc1"),
+        },
+    );
+    assert!(
+        matches!(result, Err(Rejection::Invalid { .. })),
+        "{result:?}"
+    );
+    assert_eq!(
+        fx.origin.world(),
+        &before,
+        "no build or passing gate was recorded"
+    );
+    assert!(fx.origin.world().land_queue().is_empty());
+}
+
+#[test]
+fn a_replayed_legacy_build_with_only_rulings_is_refused() {
+    let mut fx = Fx::new();
+    let agent = fx.agent_a.clone();
+    let fence = fx.build(&agent, fx.task1);
+    for stamped in &mut fx.log {
+        if let Event::OrderPosted {
+            order, witnesses, ..
+        } = &mut stamped.event
+            && *order == fx.order
+        {
+            witnesses[0].kind = acan_core::WitnessKind::Ruling {
+                question: "q-0".parse().expect("question"),
+                text: "not an executable check".to_owned(),
+            };
         }
-    )));
-    assert_eq!(fx.origin.world().land_queue(), vec![task]);
+    }
+    fx.origin = acan_core::Origin::replay(common::stored(&fx.log)).expect("legacy log replays");
+    let before = fx.origin.world().clone();
+    let result = fx.agent(
+        &agent,
+        AgentCmd::ReportBuilt {
+            fence,
+            head: commit("unchecked"),
+        },
+    );
+    assert!(
+        matches!(result, Err(Rejection::Invalid { .. })),
+        "{result:?}"
+    );
+    assert_eq!(fx.origin.world(), &before);
+    assert!(fx.origin.world().land_queue().is_empty());
 }
 
 fn rate_limit() -> acan_core::DeclarationInput {

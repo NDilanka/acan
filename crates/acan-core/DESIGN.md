@@ -137,6 +137,8 @@ A blocking clash dissolves when either party stops holding a declaration (its le
 **Order phase** is derived by `World::phase`, not stored. The order stores only `Splitting`, `Split` or `Cancelled`. Everything after the split comes from its tasks, its open question and its clashes, so the phase cannot drift from them.
 
 **Gate verdict** is derived from a run's results. A witness that errors never counts as a pass. A run's witness set is frozen when it starts.
+Legacy builds require at least one gated witness, and an empty legacy verdict fails closed.
+Orders may start without witnesses so a scope can be drafted; scope-first runs wait for their receipt instead.
 
 ## The code index contract
 

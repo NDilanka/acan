@@ -73,9 +73,9 @@ pub enum WitnessOutcome {
 pub enum GateVerdict {
     /// At least one frozen witness has no result yet.
     Running,
-    /// Every frozen witness passed.
+    /// At least one witness was frozen and every frozen witness passed.
     Passed,
-    /// Every frozen witness has a result and these did not pass.
+    /// No witness was frozen, or every frozen witness has a result and these did not pass.
     Failed {
         /// The witnesses that failed or errored.
         failing: Vec<WitnessId>,
@@ -83,9 +83,14 @@ pub enum GateVerdict {
 }
 
 impl GateRun {
-    /// Derives the verdict from the results. A run with no gated witnesses passes.
+    /// Derives a legacy verdict. Empty witnesses fail closed; scope-first runs use receipts.
     #[must_use]
     pub fn verdict(&self) -> GateVerdict {
+        if self.witnesses.is_empty() {
+            return GateVerdict::Failed {
+                failing: Vec::new(),
+            };
+        }
         if self.witnesses.iter().any(|w| !self.results.contains_key(w)) {
             return GateVerdict::Running;
         }
@@ -104,7 +109,7 @@ impl GateRun {
 }
 
 /// `ReportBuilt`: from `Building` only. Freezes the order's gated witnesses into a new run.
-/// A run with no gated witnesses closes as passed in the same batch.
+/// A legacy run needs at least one gated witness; a scope-first run waits for its receipt.
 pub(crate) fn decide_report_built(
     world: &World,
     ctx: &Ctx<'_>,
@@ -134,20 +139,20 @@ pub(crate) fn decide_report_built(
             .filter(|&w| world.witness(w).is_some_and(Witness::gated))
             .collect(),
     };
+    if witnesses.is_empty() && lane.is_none() {
+        return Err(Rejection::invalid(
+            "a legacy build needs at least one gated witness",
+        ));
+    }
     let run = world.next_gate_id()?;
-    let empty = witnesses.is_empty() && lane.is_none();
-    let mut events = vec![Event::BuildReported {
+    Ok(vec![Event::BuildReported {
         task: fence.task,
         generation: fence.generation,
         head,
         run,
         rev: order.rev,
         witnesses,
-    }];
-    if empty {
-        events.extend(close(ctx, fence, run, GateVerdict::Passed));
-    }
-    Ok(events)
+    }])
 }
 
 /// `WitnessResult`: rejected unless `run` is the task's current gating run and `witness` is
