@@ -19,8 +19,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check action pins
+        run: |
+          ruby <<'RUBY'
+          require "yaml"
+          check = lambda do |node, file|
+            case node
+            when Hash
+              node.each do |key, value|
+                if key == "uses" && !(value.is_a?(String) && value.match?(/\A[^@\s]+@[0-9a-f]{40}\z/i))
+                  abort "#{file}: every uses reference must end in a full commit SHA"
+                end
+                check.call(value, file)
+              end
+            when Array
+              node.each { |value| check.call(value, file) }
+            end
+          end
+          Dir.glob(".github/workflows/*.{yml,yaml}").each do |file|
+            check.call(YAML.safe_load(File.read(file), aliases: true), file)
+          end
+          RUBY
+      - run: ruby scripts/test-action-pins.rb
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -34,11 +56,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   package:
@@ -50,7 +72,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: pwsh ./scripts/package.ps1 -SelfTest
 
   test:
@@ -58,13 +80,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: NDilanka/acan-demo
           path: acan-demo
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo test --workspace --locked
         env:
           ACAN_DEMO_DIR: ${{ github.workspace }}/acan-demo
