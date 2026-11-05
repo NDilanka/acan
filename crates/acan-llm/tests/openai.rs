@@ -81,6 +81,56 @@ fn client_for(config: LlmConfig) -> OpenAiCompatible {
         })
 }
 
+#[tokio::test]
+async fn successful_replies_are_bounded_and_redact_echoed_keys() {
+    let meta = MockServer::start().await;
+    let baseten = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(text_reply(META_KEY))
+        .up_to_n_times(1)
+        .mount(&meta)
+        .await;
+    let client = client(&meta, &baseten, "meta");
+    let reply = client
+        .chat(Role::Foreman, ChatRequest::default())
+        .await
+        .expect("reply");
+    assert_eq!(reply.content.as_deref(), Some("<redacted>"));
+    meta.reset().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("x".repeat(4 * 1024 * 1024 + 1)))
+        .mount(&meta)
+        .await;
+    let err = client
+        .chat(Role::Foreman, ChatRequest::default())
+        .await
+        .expect_err("oversized reply");
+    assert!(
+        matches!(err, LlmError::MalformedResponse { detail, .. } if detail.contains("body limit"))
+    );
+}
+
+#[tokio::test]
+async fn provider_redirects_are_not_followed() {
+    let meta = MockServer::start().await;
+    let other = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(307).insert_header("location", other.uri()))
+        .mount(&meta)
+        .await;
+    client(&meta, &other, "meta")
+        .chat(Role::Foreman, ChatRequest::default())
+        .await
+        .expect_err("redirects are refused");
+    assert!(
+        other
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty()
+    );
+}
+
 async fn body_of(server: &MockServer, index: usize) -> Value {
     let requests = server.received_requests().await.unwrap_or_default();
     serde_json::from_slice(&requests[index].body).expect("request body is JSON")

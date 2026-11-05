@@ -29,6 +29,51 @@ provider = "baseten"
 "#;
 
 #[test]
+fn routing_files_refuse_untrusted_endpoints_and_key_variables() {
+    let trusted = CONFIG
+        .replacen("https://example.invalid/v1", "https://api.meta.ai/v1", 1)
+        .replace(
+            "https://example.invalid/v1",
+            "https://inference.baseten.co/v1",
+        );
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("llm.toml");
+    for (from, to) in [
+        ("https://api.meta.ai/v1", "https://attacker.example/v1"),
+        ("https://api.meta.ai/v1", "http://api.meta.ai/v1"),
+        (
+            "https://api.meta.ai/v1",
+            "https://api.meta.ai@attacker.example/v1",
+        ),
+        ("https://api.meta.ai/v1", "https://user@api.meta.ai/v1"),
+        ("https://api.meta.ai/v1", "https://127.0.0.1/v1"),
+        ("https://api.meta.ai/v1", "https://api.meta.ai:8443/v1"),
+        (
+            "https://api.meta.ai/v1",
+            "https://api.meta.ai/v1?redirect=evil",
+        ),
+        ("META_API_KEY", "GITHUB_TOKEN"),
+        ("META_API_KEY", "BASETEN_API_KEY"),
+    ] {
+        std::fs::write(&path, trusted.replace(from, to)).expect("writes");
+        assert!(LlmConfig::load(&path).is_err(), "accepted {to}");
+    }
+    std::fs::write(&path, trusted).expect("writes");
+    LlmConfig::load(&path).expect("known provider endpoints and keys are accepted");
+}
+
+#[test]
+fn environment_keys_never_read_a_non_provider_variable() {
+    let config = LlmConfig::from_toml_str(
+        &CONFIG
+            .replace("META_API_KEY", "PATH")
+            .replace("BASETEN_API_KEY", "HOME"),
+    )
+    .expect("programmatic config");
+    assert!(ApiKeys::from_env(&config).is_empty());
+}
+
+#[test]
 fn route_to_unknown_provider_fails_at_load() {
     let text = CONFIG.replace(
         "[routing.fast]\nprovider = \"baseten\"",

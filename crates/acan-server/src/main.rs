@@ -101,8 +101,8 @@ struct ServeArgs {
     /// the binary is served, when there is one.
     #[arg(long)]
     web: Option<PathBuf>,
-    /// The model routing file of the one project. Defaults to `<repo>/.acan/llm.toml`. When
-    /// serving several projects, set it per project in a projects file.
+    /// An explicit model routing file. Without it, uses the user-wide setup, never a repository
+    /// file. When serving several projects, set it per project in a projects file.
     #[arg(long)]
     llm: Option<PathBuf>,
     /// The branch finished work lands on. Defaults to the branch checked out in the repository.
@@ -251,11 +251,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let mut clients = Vec::with_capacity(projects.projects.len());
     let mut needs_key = false;
     for project in &projects.projects {
-        let llm = project
-            .llm
-            .clone()
-            .unwrap_or_else(|| project.repo.join(".acan").join("llm.toml"));
-        let models = Models::open(&llm, KeyFile::for_user())?;
+        let models = match project.llm.as_deref() {
+            Some(path) => Models::open(path, KeyFile::for_user())?,
+            None => Models::from_setup(KeyFile::for_user())?,
+        };
         // Model keys are user-wide, so every project reports the same key status.
         needs_key = !models.key_status().configured;
         let ledger = models.ledger();

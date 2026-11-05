@@ -132,7 +132,8 @@ impl LlmConfig {
         Ok(config)
     }
 
-    /// Reads and validates a config file.
+    /// Reads a routing file, allowing only catalog providers with their HTTPS endpoints and key
+    /// variables. Programmatic clients can use [`Self::from_toml_str`] for local test endpoints.
     ///
     /// # Errors
     ///
@@ -144,7 +145,18 @@ impl LlmConfig {
             path: path.to_owned(),
             source,
         })?;
-        Self::from_toml_str(&text)
+        let config = Self::from_toml_str(&text)?;
+        let catalog = crate::providers::catalog()?;
+        for provider in config.providers() {
+            let trusted = catalog.providers().iter().find(|p| p.name == provider.name);
+            if !trusted.is_some_and(|known| {
+                provider.base_url.trim_end_matches('/') == known.base_url
+                    && provider.api_key_env == known.api_key_env
+            }) {
+                return Err(ConfigError::UntrustedProvider(provider.name.clone()));
+            }
+        }
+        Ok(config)
     }
 
     pub fn providers(&self) -> &[ProviderConfig] {
@@ -220,7 +232,14 @@ impl LlmConfig {
                 return Err(ConfigError::DuplicateProvider(provider.name.clone()));
             }
             let base_url = provider.base_url.as_str();
-            if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+            if !reqwest::Url::parse(base_url).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+            }) {
                 return Err(ConfigError::InvalidBaseUrl {
                     provider: provider.name.clone(),
                     base_url: provider.base_url.clone(),
@@ -262,6 +281,9 @@ pub enum ConfigError {
 
     #[error("provider {provider} has base_url {base_url}, expected http or https")]
     InvalidBaseUrl { provider: String, base_url: String },
+
+    #[error("routing-file provider {0} must use its catalog HTTPS endpoint and key variable")]
+    UntrustedProvider(String),
 
     #[error("{role} routes to unknown provider {provider}")]
     UnknownProvider { role: Role, provider: String },

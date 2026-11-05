@@ -806,8 +806,8 @@ fn role<'a>(status: &'a Value, name: &str) -> &'a Value {
 const ROUTING: &str = r#"
 [[providers]]
 name = "meta"
-base_url = "http://127.0.0.1:9/v1"
-api_key_env = "ACAN_TEST_UNSET_META_KEY"
+base_url = "https://api.meta.ai/v1"
+api_key_env = "META_API_KEY"
 default_model = "muse-spark-1.3"
 
 [routing.foreman]

@@ -38,10 +38,16 @@ pub struct ApiKeys(BTreeMap<String, ApiKey>);
 impl ApiKeys {
     /// Reads each provider's `api_key_env` variable. Unset or blank variables are skipped.
     pub fn from_env(config: &LlmConfig) -> Self {
+        let catalog = crate::providers::catalog().expect("the provider catalog is valid");
         let keys = config
             .providers()
             .iter()
             .filter_map(|provider| {
+                if !catalog.providers().iter().any(|known| {
+                    known.name == provider.name && known.api_key_env == provider.api_key_env
+                }) {
+                    return None;
+                }
                 let value = std::env::var(&provider.api_key_env)
                     .ok()
                     .filter(|value| !value.trim().is_empty())?;

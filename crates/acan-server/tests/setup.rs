@@ -424,8 +424,8 @@ async fn a_routing_file_decides_and_a_saved_key_or_pick_is_refused() {
         r#"
 [[providers]]
 name = "meta"
-base_url = "http://127.0.0.1:9/v1"
-api_key_env = "ACAN_TEST_UNSET_SETUP_KEY"
+base_url = "https://api.meta.ai/v1"
+api_key_env = "META_API_KEY"
 default_model = "muse-spark-1.3"
 
 [routing.foreman]

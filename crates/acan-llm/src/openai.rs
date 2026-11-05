@@ -18,6 +18,8 @@ use crate::usage::{CallRecord, Usage, UsageLedger};
 /// Most bytes of a provider error body kept in an error, counted after credentials are redacted.
 const ERROR_BODY_LIMIT: usize = 512;
 
+const RESPONSE_BODY_LIMIT: usize = 4 * 1024 * 1024;
+
 /// Response headers that may carry the provider's request id, in the order they are checked.
 /// Baseten sends its id only under its own header name.
 const REQUEST_ID_HEADERS: &[&str] = &["x-request-id", "x-baseten-request-id"];
@@ -61,6 +63,7 @@ impl OpenAiCompatible {
             // reqwest's own retries would replay requests outside the 429 and 5xx policy.
             http: reqwest::Client::builder()
                 .retry(reqwest::retry::never())
+                .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             retry: RetryPolicy::default(),
             ledger: UsageLedger::default(),
@@ -200,7 +203,7 @@ impl OpenAiCompatible {
         let timeout = Duration::from_secs(provider.timeout_secs);
         let mut attempt: u32 = 1;
         loop {
-            let response = self
+            let mut response = self
                 .http
                 .post(&url)
                 .bearer_auth(key.expose())
@@ -212,11 +215,25 @@ impl OpenAiCompatible {
             let status = response.status();
 
             if status.is_success() {
-                let header_id = header_request_id(response.headers());
-                let text = response
-                    .text()
+                let header_id = header_request_id(response.headers()).map(|mut id| {
+                    id.value = self.keys.redact(&id.value);
+                    id
+                });
+                let mut bytes = Vec::new();
+                while let Some(chunk) = response
+                    .chunk()
                     .await
-                    .map_err(|err| transport_error(&provider.name, err))?;
+                    .map_err(|err| transport_error(&provider.name, err))?
+                {
+                    if chunk.len() > RESPONSE_BODY_LIMIT - bytes.len() {
+                        return Err(LlmError::MalformedResponse {
+                            provider: provider.name.clone(),
+                            detail: "reply exceeds the 4 MiB body limit".to_owned(),
+                        });
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                let text = self.keys.redact(&String::from_utf8_lossy(&bytes));
                 let completion: WireCompletion =
                     serde_json::from_str(&text).map_err(|err| LlmError::MalformedResponse {
                         provider: provider.name.clone(),

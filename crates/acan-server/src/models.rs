@@ -1,8 +1,8 @@
 //! The model client the server runs: the providers and role picks a tester saved from the setup
-//! page, or the providers in a repository's routing file, with the offline replies behind them.
+//! page, or the providers in an explicitly selected routing file, with offline replies behind them.
 //!
-//! A repository's routing file decides the providers, and its keys come from the environment or
-//! its `.env`. A role that needs Meta is off unless its route runs Muse Spark. Without a routing
+//! An explicit routing file decides the providers, and its keys come from the environment.
+//! A role that needs Meta is off unless its route runs Muse Spark. Without a routing
 //! file, each provider with a key (saved from the setup page, or set in the environment) serves
 //! the roles it is picked for, or the default provider for each role. A role with no provider is
 //! off, and the setup page says why. A role that needs Meta is off without a Meta key. An off role
@@ -158,6 +158,11 @@ impl Models {
             return Ok(models);
         }
 
+        Self::from_setup(keys_file)
+    }
+
+    /// Loads user-wide keys and picks without reading any repository routing file.
+    pub fn from_setup(keys_file: Option<KeyFile>) -> anyhow::Result<Self> {
         let models = Self::build(keys_file, false);
         let saved = match models.keys_file.as_ref().map(KeyFile::load) {
             Some(Ok(saved)) => saved,
@@ -542,8 +547,8 @@ mod tests {
             r#"
 [[providers]]
 name = "meta"
-base_url = "http://127.0.0.1:9/v1"
-api_key_env = "ACAN_TEST_UNSET_META_KEY"
+base_url = "https://api.meta.ai/v1"
+api_key_env = "META_API_KEY"
 default_model = "muse-spark-1.3"
 
 [routing.foreman]
@@ -675,8 +680,8 @@ provider = "meta"
             r#"
 [[providers]]
 name = "meta"
-base_url = "http://127.0.0.1:9/v1"
-api_key_env = "ACAN_TEST_UNSET_META_KEY"
+base_url = "https://api.meta.ai/v1"
+api_key_env = "META_API_KEY"
 default_model = "muse-spark-1.3"
 
 [routing.foreman]

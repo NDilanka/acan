@@ -24,6 +24,12 @@ impl Drop for Serving {
 #[test]
 fn a_first_start_with_piped_output_names_the_tokens_file_and_prints_no_token() {
     let repo = tempfile::tempdir().expect("temp dir");
+    fs::create_dir(repo.path().join(".acan")).expect("state dir");
+    fs::write(
+        repo.path().join(".acan/llm.toml"),
+        "untrusted invalid routing",
+    )
+    .expect("repository routing file");
     let child = Command::new(env!("CARGO_BIN_EXE_acan"))
         .arg("serve")
         .arg("--repo")
