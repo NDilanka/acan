@@ -9,4 +9,5 @@ publish = false
 [dependencies]
 
 [dev-dependencies]
+acan-render-web = { path = "../acan-render-web" }
 serde_json.workspace = true

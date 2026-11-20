@@ -68,6 +68,7 @@ dependencies = [
 name = "acan-layout"
 version = "0.1.0"
 dependencies = [
+ "acan-render-web",
  "serde_json",
 ]
 
