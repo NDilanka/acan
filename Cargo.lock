@@ -65,6 +65,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "acan-layout"
+version = "0.1.0"
+
+[[package]]
 name = "acan-llm"
 version = "0.1.0"
 dependencies = [
