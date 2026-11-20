@@ -1,6 +1,7 @@
-//! Test inputs for the layout: generated plants, a workspace of crates, and the demo plant. The generators copy the machines, sizes and imports of
-//! acan-render-web's stress plant and of its workspace test, so the checks run on the same shapes
-//! without the scan reader. The parity test in `tests/render_web_parity.rs` checks the copy.
+//! Test inputs for the layout: generated plants, a workspace of crates, and the demo plant. The
+//! generators copy the machines, sizes and imports of acan-render-web's stress plant and of its
+//! workspace test, so the checks run on the same shapes without the scan reader. The parity test
+//! in `tests/render_web_parity.rs` checks the copy.
 
 use crate::layout::Edge;
 

@@ -85,6 +85,7 @@ impl Layout {
     /// The same layout moved by `by` on the plan: every footprint, belt point and the bounds. A
     /// project on a canvas of several is laid out from the origin, then moved to its place, so its
     /// scene, framing and marks are all in world coordinates.
+    #[must_use]
     pub fn translated(&self, by: [f32; 2]) -> Layout {
         let [dx, dy] = by;
         Layout {
@@ -298,7 +299,8 @@ pub fn sign_spots(
 /// The plan rectangle a machine's name hangs over, which belts keep out of: the quarter of the
 /// plate nearest the viewer and the ground in front of it, `LABEL_BAND` deep. The default camera
 /// looks from 45 degrees round, so the plate's front is its corner at the greatest x and y, and
-/// the label hangs below that corner on screen, centred on it, about as wide as the plate, as the renderer draws it. Belts still leave the plate from the far half of those two sides.
+/// the label hangs below that corner on screen, centred on it, about as wide as the plate, as
+/// the renderer draws it. Belts still leave the plate from the far half of those two sides.
 pub fn label_band(footprint: [f32; 4]) -> [f32; 4] {
     let [x0, y0, x1, y1] = footprint;
     [
