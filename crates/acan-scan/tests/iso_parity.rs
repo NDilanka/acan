@@ -112,9 +112,9 @@ fn case(name: &str, dir: &str, paths: &[&str], packages: &[&'static str]) -> Cas
     }
 }
 
-/// The inputs: every rule family, the edges of each rule, and the fallback.
-fn cases() -> Vec<Case> {
-    let mut out = vec![
+/// The hand-written inputs: every rule family, the edges of each rule, and the fallback.
+fn hand_cases() -> Vec<Case> {
+    vec![
         // Crate reasons come before every other rule.
         case("auth", "src/auth", &[], &[]),
         case(
@@ -203,7 +203,12 @@ fn cases() -> Vec<Case> {
         case("plain", "src", &["src/x.ts"], &[]),
         case("", "", &["src/x.rs", "src/y.rs"], &[]),
         case("plain", "", &["src\\lib\\x.rs", "src\\lib\\y.rs"], &[]),
-    ];
+    ]
+}
+
+/// The inputs: the hand-written cases, then one case per row word and one per package.
+fn cases() -> Vec<Case> {
+    let mut out = hand_cases();
     for word in ROW_WORDS {
         let one = format!("src/{word}.ts");
         let two = format!("src/{word}-one.ts");
