@@ -44,7 +44,7 @@ pub enum Kind {
     Horn,
     /// Config, settings, environment, constants.
     Switchbox,
-    /// Infra, deploy, containers, IaC, CI.
+    /// Infra, deploy, containers, `IaC`, CI.
     Gantry,
     /// CLI, commands, scripts, tools.
     Console,
