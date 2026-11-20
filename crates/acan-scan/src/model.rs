@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use acan_iso::Kind;
 use serde::{Deserialize, Serialize};
 
 use crate::hash::ContentHash;
+use crate::kind::Kind;
 use crate::lang::Lang;
 
 /// Identifies a file within one plant.

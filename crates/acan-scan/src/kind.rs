@@ -1,17 +1,86 @@
-//! The kind of each machine, as the user sets it. The rules that guess a kind are in acan-iso's
-//! `classify`, which the renderer also runs, so a plant that carries no kinds draws the same ones.
+//! The kind of each machine, as the user sets it. The rules that guess a kind are in `rules.rs`.
 //! The user's choices live in `.acan/kinds.json`, and this module reads and writes them.
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::Path;
 
-use acan_iso::Kind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ScanError;
 use crate::model::Machine;
+
+/// The machine kinds: sixteen named kinds and the assembler fallback.
+///
+/// The names are the wire names in the plant JSON. A name this build does not know reads as
+/// [`Kind::Assembler`], so an older build shows a newer kind as the fallback.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// Entry points: servers, app bootstrap, main.
+    Intake,
+    /// Auth, sessions, permissions, guards.
+    Gate,
+    /// Data access, persistence, caching, migrations.
+    Tank,
+    /// Middleware, proxies, gateways.
+    Splitter,
+    /// Rate limits, throttles, quotas.
+    Valve,
+    /// Generated code, vendored output, tests, and machines with no files.
+    Crate,
+    /// Routes, controllers, handlers, endpoints.
+    Switchboard,
+    /// Web frontend: components, pages, screens, styles.
+    Kiosk,
+    /// Models, schemas, types, DTOs, protobuf.
+    Mould,
+    /// Background jobs, queues, workers, cron.
+    Conveyor,
+    /// Events, messaging, pub/sub, hooks.
+    Horn,
+    /// Config, settings, environment, constants.
+    Switchbox,
+    /// Infra, deploy, containers, IaC, CI.
+    Gantry,
+    /// CLI, commands, scripts, tools.
+    Console,
+    /// External API clients, SDKs, integrations.
+    Antenna,
+    /// Shared utilities, helpers, common, lib.
+    Toolrack,
+    /// Services, business logic, and anything no other rule names: the fallback.
+    /// It is last so that `serde(other)` can read unknown names as it.
+    #[default]
+    #[serde(other)]
+    Assembler,
+}
+
+impl Kind {
+    /// Every kind, in declaration order.
+    pub const ALL: [Kind; 17] = [
+        Kind::Intake,
+        Kind::Gate,
+        Kind::Tank,
+        Kind::Splitter,
+        Kind::Valve,
+        Kind::Crate,
+        Kind::Switchboard,
+        Kind::Kiosk,
+        Kind::Mould,
+        Kind::Conveyor,
+        Kind::Horn,
+        Kind::Switchbox,
+        Kind::Gantry,
+        Kind::Console,
+        Kind::Antenna,
+        Kind::Toolrack,
+        Kind::Assembler,
+    ];
+}
 
 /// The file, under the repo root, that holds the kinds the user set.
 pub const OVERRIDES_PATH: &str = ".acan/kinds.json";

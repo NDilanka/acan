@@ -87,7 +87,7 @@ fn build(files: &[SourceFile], grouping: &Grouping) -> (Vec<Machine>, Vec<Belt>)
         let dir = common_directory(members.iter().map(|file| file.path.as_str()));
         let paths: Vec<&str> = members.iter().map(|file| file.path.as_str()).collect();
         let packages = shared_packages(&members);
-        let decision = acan_iso::classify(&name, &dir, &paths, &packages);
+        let decision = crate::rules::classify(&name, &dir, &paths, &packages);
         machines.push(Machine {
             id,
             name,
@@ -354,7 +354,7 @@ mod tests {
         let members: Vec<&SourceFile> = files.iter().collect();
         assert_eq!(shared_packages(&members), ["react"]);
         let (machines, _) = build(&files, &Grouping::default());
-        assert_eq!(machines[0].kind, acan_iso::Kind::Kiosk);
+        assert_eq!(machines[0].kind, crate::Kind::Kiosk);
         assert_eq!(machines[0].kind_reason, "imports \"react\"");
     }
 }
