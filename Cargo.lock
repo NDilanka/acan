@@ -116,7 +116,6 @@ dependencies = [
 name = "acan-scan"
 version = "0.1.0"
 dependencies = [
- "acan-iso",
  "anyhow",
  "ignore",
  "serde",
