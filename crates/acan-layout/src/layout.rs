@@ -342,7 +342,7 @@ fn belt_length(boxes: &[[f32; 4]], edge: &Edge) -> f32 {
 mod tests {
     use super::*;
     use crate::testdata::{
-        ASSEMBLER, CRATE, GATE, Input, TANK, dense_workspace, generated, workspace,
+        ASSEMBLER, CRATE, GATE, Input, TANK, demo, dense_workspace, generated, workspace,
     };
 
     /// The clear distance between two footprints along the axis where they are furthest apart.
@@ -908,5 +908,31 @@ mod tests {
         // A plant of one machine per district has nothing to group.
         let (sizes, edges, districts) = generated(60);
         assert!(layout(&sizes, &edges, &districts).districts.is_empty());
+    }
+
+    #[test]
+    fn the_demo_fixture_meets_every_invariant() {
+        check_input(&demo());
+    }
+
+    #[test]
+    fn the_demo_fixture_belts_keep_clear_of_every_label_band() {
+        check_labels(&demo());
+    }
+
+    #[test]
+    fn the_demo_plant_has_no_pads() {
+        // Pads need two districts of two machines or more; the demo has one.
+        let (sizes, edges, districts) = demo();
+        assert!(layout(&sizes, &edges, &districts).districts.is_empty());
+    }
+
+    #[test]
+    fn the_demo_layout_is_deterministic() {
+        let (sizes, edges, districts) = demo();
+        assert_eq!(
+            layout(&sizes, &edges, &districts),
+            layout(&sizes, &edges, &districts)
+        );
     }
 }

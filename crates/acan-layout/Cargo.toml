@@ -7,3 +7,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+
+[dev-dependencies]
+serde_json.workspace = true

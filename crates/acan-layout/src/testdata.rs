@@ -231,3 +231,39 @@ pub fn dense_workspace() -> Input {
         .collect();
     (sizes, edges, districts)
 }
+
+/// The demo plant, from the committed fixture `tests/fixtures/demo-input.json`: nine machines,
+/// eight of them in one district and one in another.
+pub fn demo() -> Input {
+    let value: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/fixtures/demo-input.json"))
+            .expect("the demo fixture is JSON");
+    let sizes = value["sizes"]
+        .as_array()
+        .expect("sizes")
+        .iter()
+        .map(|size| {
+            [
+                size[0].as_f64().expect("width") as f32,
+                size[1].as_f64().expect("depth") as f32,
+            ]
+        })
+        .collect();
+    let edges = value["edges"]
+        .as_array()
+        .expect("edges")
+        .iter()
+        .map(|edge| Edge {
+            from: edge["from"].as_u64().expect("from") as usize,
+            to: edge["to"].as_u64().expect("to") as usize,
+            imports: edge["imports"].as_u64().expect("imports") as u32,
+        })
+        .collect();
+    let districts = value["districts"]
+        .as_array()
+        .expect("districts")
+        .iter()
+        .map(|d| d.as_u64().expect("district") as u32)
+        .collect();
+    (sizes, edges, districts)
+}
