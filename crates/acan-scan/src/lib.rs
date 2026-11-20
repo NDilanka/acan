@@ -22,7 +22,7 @@ use hash::Digest;
 
 pub use group::Grouping;
 pub use hash::ContentHash;
-pub use kind::{Kind, OVERRIDES_PATH, kind_named, write_kind_overrides};
+pub use kind::{Footprint, Kind, OVERRIDES_PATH, footprint, kind_named, write_kind_overrides};
 pub use lang::Lang;
 pub use model::{
     Belt, Confidence, FileId, ImportRef, ImportTarget, LineRange, Machine, MachineId, Plant,

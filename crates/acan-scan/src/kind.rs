@@ -82,6 +82,44 @@ impl Kind {
     ];
 }
 
+/// A machine's size in plan units. The machine is centred on the origin, so its plan runs from
+/// `-w / 2` to `w / 2` and from `-d / 2` to `d / 2`, and it stands `top` high.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Footprint {
+    /// Width along x.
+    pub w: f32,
+    /// Depth along y.
+    pub d: f32,
+    /// Height of the machine's top above the floor.
+    pub top: f32,
+}
+
+/// The footprint of `kind`.
+#[must_use]
+pub fn footprint(kind: Kind) -> Footprint {
+    // Width, depth and top, in plan units, in the order of the variants above.
+    let (w, d, top) = match kind {
+        Kind::Intake => (72.0, 88.0, 34.0),
+        Kind::Gate => (56.0, 72.0, 36.0),
+        Kind::Tank => (80.0, 80.0, 48.0),
+        Kind::Splitter => (80.0, 80.0, 30.0),
+        Kind::Valve => (40.0, 40.0, 20.0),
+        Kind::Crate => (48.0, 48.0, 24.0),
+        Kind::Switchboard => (64.0, 40.0, 40.0),
+        Kind::Kiosk => (48.0, 56.0, 44.0),
+        Kind::Mould => (72.0, 56.0, 16.0),
+        Kind::Conveyor => (96.0, 40.0, 18.0),
+        Kind::Horn => (40.0, 40.0, 56.0),
+        Kind::Switchbox => (48.0, 32.0, 40.0),
+        Kind::Gantry => (88.0, 56.0, 44.0),
+        Kind::Console => (40.0, 48.0, 31.0),
+        Kind::Antenna => (56.0, 56.0, 52.0),
+        Kind::Toolrack => (56.0, 32.0, 40.0),
+        Kind::Assembler => (64.0, 64.0, 30.0),
+    };
+    Footprint { w, d, top }
+}
+
 /// The file, under the repo root, that holds the kinds the user set.
 pub const OVERRIDES_PATH: &str = ".acan/kinds.json";
 
