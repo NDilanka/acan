@@ -13,9 +13,11 @@ pub mod input;
 pub mod protocol;
 pub mod transport;
 
-use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde::de::{self, DeserializeOwned, Deserializer, MapAccess, SeqAccess, Visitor};
+use std::collections::HashSet;
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -42,6 +44,10 @@ pub const BLOCK_EXIT_CODE: i32 = 2;
 /// Largest hook stdin the hook reads, in bytes. Droid's hook payloads are a few kilobytes, so a
 /// larger payload is refused rather than buffered.
 pub const MAX_STDIN_BYTES: u64 = 256 * 1024;
+/// Longest the hook waits for its one stderr line before it exits anyway. A stderr pipe that
+/// nobody reads cannot hold the exit for longer than this, because the deadline keeps this much
+/// of its budget back for the write.
+pub const STDERR_GRACE: Duration = Duration::from_millis(25);
 
 /// Why the hook blocks a call or cannot decide. Every variant exits with [`BLOCK_EXIT_CODE`].
 #[derive(Debug)]
@@ -128,18 +134,92 @@ pub fn run_from_process(started: Instant) -> Result<(), HookError> {
     })
 }
 
-/// Parses one JSON object into `T`. An array or scalar is refused even where serde would read
-/// it as a struct, so hook input and daemon replies are always named-field objects.
+/// Parses one JSON object into `T`. Hook input and daemon replies must be named-field objects,
+/// so an array or scalar is refused even where serde would read it as a struct. A key that
+/// repeats anywhere in the object is refused too. A `serde_json::Value` keeps only the last copy
+/// of a repeated key, so the hook could read a different value than the one Droid acts on.
 ///
 /// # Errors
 ///
-/// Returns the parse error text when `raw` is not JSON, or is not an object that fits `T`.
+/// Returns the parse error text when `raw` is not JSON, is not an object that fits `T`, or
+/// repeats a key.
 fn parse_object<T: DeserializeOwned>(raw: &str) -> Result<T, String> {
-    let value: serde_json::Value = serde_json::from_str(raw).map_err(|err| err.to_string())?;
-    if !value.is_object() {
+    if raw.trim_start().as_bytes().first() != Some(&b'{') {
         return Err("expected a JSON object".to_owned());
     }
-    serde_json::from_value(value).map_err(|err| err.to_string())
+    // The first pass checks every depth for repeated keys. The second reads the fields into
+    // `T`, where serde also refuses a repeated field that the type declares.
+    serde_json::from_str::<NoRepeatedKeys>(raw).map_err(|err| err.to_string())?;
+    serde_json::from_str(raw).map_err(|err| err.to_string())
+}
+
+/// Any JSON value, checked for repeated keys at every depth. Nothing is kept.
+struct NoRepeatedKeys;
+
+impl<'de> Deserialize<'de> for NoRepeatedKeys {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(NoRepeatedKeysVisitor)
+    }
+}
+
+struct NoRepeatedKeysVisitor;
+
+impl<'de> Visitor<'de> for NoRepeatedKeysVisitor {
+    type Value = NoRepeatedKeys;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value without repeated keys")
+    }
+
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<NoRepeatedKeys, E> {
+        Ok(NoRepeatedKeys)
+    }
+
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<NoRepeatedKeys, E> {
+        Ok(NoRepeatedKeys)
+    }
+
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<NoRepeatedKeys, E> {
+        Ok(NoRepeatedKeys)
+    }
+
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<NoRepeatedKeys, E> {
+        Ok(NoRepeatedKeys)
+    }
+
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<NoRepeatedKeys, E> {
+        Ok(NoRepeatedKeys)
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<NoRepeatedKeys, E> {
+        Ok(NoRepeatedKeys)
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<NoRepeatedKeys, E> {
+        Ok(NoRepeatedKeys)
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<NoRepeatedKeys, D::Error> {
+        NoRepeatedKeys::deserialize(deserializer)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<NoRepeatedKeys, A::Error> {
+        while seq.next_element::<NoRepeatedKeys>()?.is_some() {}
+        Ok(NoRepeatedKeys)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<NoRepeatedKeys, A::Error> {
+        let mut seen = HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !seen.insert(key.clone()) {
+                return Err(<A::Error as de::Error>::custom(format!(
+                    "duplicate key {key:?}"
+                )));
+            }
+            map.next_value::<NoRepeatedKeys>()?;
+        }
+        Ok(NoRepeatedKeys)
+    }
 }
 
 /// Exit code for a panic: [`BLOCK_EXIT_CODE`] in an Acan session, 0 outside one.
@@ -193,16 +273,18 @@ fn ask(endpoint: &Endpoint, request: &HookRequest) -> Result<(), HookError> {
 
 /// Runs `work` on a worker thread and gives up once `limit` has passed since `started`.
 ///
-/// The clock starts at `started`, so time spent before this call uses up the same budget. If
-/// the budget is already gone, `work` never starts. A stalled stdin read, connect, or reply
-/// therefore cannot hold the hook past its deadline. The caller exits the process on error,
-/// which also ends the worker.
+/// The clock starts at `started`, so time spent before this call uses up the same budget. The
+/// last [`STDERR_GRACE`] of `limit` is kept for the one stderr line the caller writes, so the
+/// hook, stderr included, ends within `limit`. If the budget is already gone, `work` never
+/// starts. The wait is measured after the worker is spawned, so the spawn counts against the
+/// budget too. A stalled stdin read, connect, or reply therefore cannot hold the hook past its
+/// deadline. The caller exits the process on error, which also ends the worker.
 fn run_with_deadline<F>(started: Instant, limit: Duration, work: F) -> Result<(), HookError>
 where
     F: FnOnce() -> Result<(), HookError> + Send + 'static,
 {
-    let remaining = (started + limit).saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
+    let deadline = started + limit.saturating_sub(STDERR_GRACE);
+    if Instant::now() >= deadline {
         return Err(HookError::Timeout(limit));
     }
     let (tx, rx) = mpsc::channel();
@@ -213,6 +295,7 @@ where
             let _ = tx.send(work());
         })
         .map_err(|err| HookError::Internal(format!("cannot start worker: {err}")))?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
     match rx.recv_timeout(remaining) {
         Ok(result) => result,
         Err(RecvTimeoutError::Timeout) => Err(HookError::Timeout(limit)),
@@ -222,9 +305,33 @@ where
     }
 }
 
+/// Writes one line to stderr, and returns at once if the write stalls. The write runs on a
+/// helper thread and the caller waits at most [`STDERR_GRACE`], so a pipe that nobody reads
+/// cannot hold the exit. Errors are ignored: the exit code carries the decision.
+pub fn report(line: &str) {
+    write_line_within(io::stderr(), line.to_owned(), STDERR_GRACE);
+}
+
+/// Writes `line` and a newline to `out` on a helper thread, waiting at most `grace` for it.
+/// Returns whether the write finished in time.
+fn write_line_within<W>(mut out: W, line: String, grace: Duration) -> bool
+where
+    W: Write + Send + 'static,
+{
+    let (done_tx, done_rx) = mpsc::channel();
+    let spawned = thread::Builder::new()
+        .name("acan-hook-stderr".to_owned())
+        .spawn(move || {
+            let _ = writeln!(out, "{line}");
+            let _ = done_tx.send(());
+        });
+    spawned.is_ok() && done_rx.recv_timeout(grace).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn timeout_defaults_and_clamps() {
@@ -242,7 +349,7 @@ mod tests {
 
     #[test]
     fn deadline_gives_up_on_slow_work() {
-        let err = run_with_deadline(Instant::now(), Duration::from_millis(20), || {
+        let err = run_with_deadline(Instant::now(), Duration::from_millis(150), || {
             thread::sleep(Duration::from_millis(500));
             Ok(())
         })
@@ -257,5 +364,101 @@ mod tests {
         let err = run_with_deadline(started, Duration::from_millis(50), || Ok(()))
             .expect_err("a deadline that passed during setup must fail");
         assert!(matches!(err, HookError::Timeout(_)), "got {err}");
+    }
+
+    #[test]
+    fn a_timeout_leaves_room_for_the_stderr_line() {
+        let started = Instant::now();
+        let limit = Duration::from_millis(400);
+        let err = run_with_deadline(started, limit, || {
+            thread::sleep(Duration::from_secs(1));
+            Ok(())
+        })
+        .expect_err("slow work must miss the deadline");
+        assert!(matches!(err, HookError::Timeout(_)), "got {err}");
+        assert!(started.elapsed() < limit, "took {:?}", started.elapsed());
+    }
+
+    /// Stands in for a stderr pipe that nobody reads: every write stalls.
+    struct Stalled;
+
+    impl Write for Stalled {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            thread::sleep(Duration::from_secs(5));
+            Ok(0)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Keeps the bytes written to it, so a test can read them back.
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let mut bytes = self.0.lock().map_err(|_| io::Error::other("poisoned"))?;
+            bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stalled_stderr_does_not_hold_the_exit() {
+        let started = Instant::now();
+        let finished = write_line_within(
+            Stalled,
+            "acan hook: test".to_owned(),
+            Duration::from_millis(25),
+        );
+        assert!(!finished, "a stalled write must not count as finished");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_prompt_stderr_gets_the_whole_line() {
+        let capture = Capture::default();
+        let finished = write_line_within(
+            capture.clone(),
+            "blocked: test".to_owned(),
+            Duration::from_secs(5),
+        );
+        assert!(finished, "a prompt write must finish within the grace");
+        let bytes = capture.0.lock().expect("capture lock").clone();
+        assert_eq!(bytes, b"blocked: test\n");
+    }
+
+    #[test]
+    fn repeated_keys_are_refused_at_every_depth() {
+        for raw in [
+            r#"{"a":1,"a":2}"#,
+            r#"{"a":{"b":1,"b":2}}"#,
+            r#"{"a":[{"b":1,"b":2}]}"#,
+        ] {
+            let result: Result<serde_json::Value, String> = parse_object(raw);
+            assert!(result.is_err(), "{raw} must be refused");
+        }
+    }
+
+    #[test]
+    fn a_non_object_root_is_refused_even_when_serde_would_read_it() {
+        for raw in ["[1,2]", " [\"a\"]", "\"x\"", "7"] {
+            let result: Result<serde_json::Value, String> = parse_object(raw);
+            assert_eq!(
+                result.expect_err("refused"),
+                "expected a JSON object",
+                "{raw}"
+            );
+        }
     }
 }

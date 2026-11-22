@@ -284,7 +284,13 @@ fn silent_daemon_times_out_shortly_after_the_deadline() {
         "stderr: {}",
         run.stderr
     );
-    assert!(run.elapsed < HOOK_EXIT_LIMIT, "took {:?}", run.elapsed);
+    // The deadline is 100 ms. Process start adds a little, so a hook that waited past its
+    // deadline would take seconds, not this.
+    assert!(
+        run.elapsed < Duration::from_millis(600),
+        "took {:?}",
+        run.elapsed
+    );
 }
 
 #[test]
@@ -480,6 +486,61 @@ fn bad_daemon_replies_block_even_when_cut_short_or_not_objects() {
         "stderr: {}",
         run.stderr
     );
+}
+
+/// A repeated key is ambiguous, so the hook refuses the whole input rather than pick a copy.
+#[test]
+fn repeated_keys_in_hook_input_block() {
+    for input in [
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Create","tool_name":"Execute","tool_input":{"file_path":"src/a.txt"}}"#,
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Create","tool_input":{"file_path":"notes/x.txt","file_path":"src/a.txt"}}"#,
+        r#"{"hook_event_name":"SessionStart","source":"startup","source":"resume"}"#,
+    ] {
+        // The daemon would allow every one of these, so a hook that accepted them would exit 0.
+        let (endpoint, _daemon) = tcp_daemon(ALLOW);
+        let run = run_hook(&acan_env(&endpoint), input);
+        assert_eq!(run.code, Some(2), "input {input}; stderr: {}", run.stderr);
+        assert!(
+            run.stderr.contains("bad hook input"),
+            "input {input}; stderr: {}",
+            run.stderr
+        );
+    }
+}
+
+#[test]
+fn repeated_keys_in_a_daemon_reply_block() {
+    for reply in [
+        r#"{"version":1,"decision":"deny","decision":"allow"}"#,
+        r#"{"version":1,"decision":"allow","version":1}"#,
+    ] {
+        let (endpoint, _daemon) = tcp_daemon(reply);
+        let run = run_hook(&acan_env(&endpoint), PRE_TOOL_USE);
+        assert_eq!(run.code, Some(2), "reply {reply}; stderr: {}", run.stderr);
+        assert!(
+            run.stderr.contains("bad daemon reply"),
+            "reply {reply}; stderr: {}",
+            run.stderr
+        );
+    }
+}
+
+#[test]
+fn session_start_with_null_tool_fields_blocks_without_contacting_the_daemon() {
+    let (listener, endpoint) = untouched_listener();
+    for input in [
+        r#"{"hook_event_name":"SessionStart","tool_name":null}"#,
+        r#"{"hook_event_name":"SessionStart","tool_input":null}"#,
+    ] {
+        let run = run_hook(&acan_env(&endpoint), input);
+        assert_eq!(run.code, Some(2), "input {input}; stderr: {}", run.stderr);
+        assert!(
+            run.stderr.contains("bad hook input"),
+            "input {input}; stderr: {}",
+            run.stderr
+        );
+    }
+    assert_no_contact(&listener);
 }
 
 #[cfg(unix)]

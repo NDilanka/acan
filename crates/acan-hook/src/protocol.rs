@@ -177,6 +177,23 @@ mod tests {
     }
 
     #[test]
+    fn repeated_keys_in_a_reply_are_refused() {
+        // A repeated key is ambiguous, so no copy is chosen. Each of these is refused.
+        for case in [
+            r#"{"version":1,"decision":"deny","decision":"allow"}"#,
+            r#"{"version":1,"decision":"allow","version":1}"#,
+            r#"{"version":1,"decision":"deny","reason":"a","reason":"b"}"#,
+            r#"{"version":1,"decision":"allow","extra":1,"extra":2}"#,
+        ] {
+            let line = format!("{case}\n");
+            assert!(
+                matches!(parse_reply(&line), Err(HookError::BadReply(_))),
+                "reply {case} must be refused"
+            );
+        }
+    }
+
+    #[test]
     fn request_encodes_as_one_line() {
         let request = HookRequest {
             version: PROTOCOL_VERSION,

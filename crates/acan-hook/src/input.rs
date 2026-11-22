@@ -1,6 +1,6 @@
 //! Droid's hook stdin, and the plan the hook makes from it.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::HookError;
@@ -18,8 +18,53 @@ pub struct HookInput {
     pub hook_event_name: String,
     pub session_id: Option<String>,
     pub cwd: Option<String>,
-    pub tool_name: Option<String>,
-    pub tool_input: Option<Value>,
+    #[serde(default)]
+    pub tool_name: Field<String>,
+    #[serde(default)]
+    pub tool_input: Field<Value>,
+}
+
+/// A field that is absent, present as JSON `null`, or holds a value. An `Option` reads the
+/// last two alike, and a `SessionStart` must refuse both.
+#[derive(Debug, Default)]
+pub enum Field<T> {
+    /// The key is not in the object.
+    #[default]
+    Absent,
+    /// The key is present with `null`.
+    Null,
+    /// The key is present with a value.
+    Value(T),
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Field<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match Option::<T>::deserialize(deserializer)? {
+            Some(value) => Self::Value(value),
+            None => Self::Null,
+        })
+    }
+}
+
+impl<T> Field<T> {
+    /// True when the key is in the object, whether its value is `null` or not.
+    fn is_present(&self) -> bool {
+        !matches!(self, Self::Absent)
+    }
+
+    fn value(&self) -> Option<&T> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Absent | Self::Null => None,
+        }
+    }
+
+    fn into_value(self) -> Option<T> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Absent | Self::Null => None,
+        }
+    }
 }
 
 /// What the hook does with one event.
@@ -43,8 +88,8 @@ pub fn parse(raw: &str) -> Result<HookInput, HookError> {
 
 /// Decides what to ask the daemon for one event.
 ///
-/// A `SessionStart` must carry no tool fields. A `PreToolUse` must carry a non-blank
-/// `tool_name` and an object `tool_input`.
+/// A `SessionStart` must omit `tool_name` and `tool_input`, even when they are `null`. A
+/// `PreToolUse` must carry a non-blank `tool_name` and an object `tool_input`.
 ///
 /// # Errors
 ///
@@ -53,22 +98,21 @@ pub fn parse(raw: &str) -> Result<HookInput, HookError> {
 pub fn plan(input: HookInput, order: &str) -> Result<Plan, HookError> {
     match input.hook_event_name.as_str() {
         "SessionStart" => {
-            if input.tool_name.is_some() || input.tool_input.is_some() {
+            // A `null` counts as present, so an explicit null is refused like a value.
+            if input.tool_name.is_present() || input.tool_input.is_present() {
                 return Err(bad_input("SessionStart carries tool fields"));
             }
             Ok(Plan::Ask(request(RequestKind::SessionStart, input, order)))
         }
         "PreToolUse" => {
-            let tool_name = input
-                .tool_name
-                .as_deref()
-                .filter(|name| !name.trim().is_empty())
-                .ok_or_else(|| bad_input("PreToolUse without a tool_name"))?;
-            let tool_input = input
-                .tool_input
-                .as_ref()
-                .filter(|value| value.is_object())
-                .ok_or_else(|| bad_input("PreToolUse without a tool_input object"))?;
+            let tool_name = match &input.tool_name {
+                Field::Value(name) if !name.trim().is_empty() => name.as_str(),
+                _ => return Err(bad_input("PreToolUse without a tool_name")),
+            };
+            let tool_input = match &input.tool_input {
+                Field::Value(value) if value.is_object() => value,
+                _ => return Err(bad_input("PreToolUse without a tool_input object")),
+            };
             if is_batch_wrapper(tool_name, tool_input) {
                 return Ok(Plan::Pass);
             }
@@ -91,14 +135,14 @@ fn bad_input(why: impl Into<String>) -> HookError {
 fn request(kind: RequestKind, input: HookInput, order: &str) -> HookRequest {
     let file_path = input
         .tool_input
-        .as_ref()
+        .value()
         .and_then(|tool_input| {
             str_field(tool_input, "file_path").or_else(|| str_field(tool_input, "path"))
         })
         .map(str::to_owned);
     let command = input
         .tool_input
-        .as_ref()
+        .value()
         .and_then(|tool_input| str_field(tool_input, "command"))
         .map(str::to_owned);
     HookRequest {
@@ -107,10 +151,10 @@ fn request(kind: RequestKind, input: HookInput, order: &str) -> HookRequest {
         order: order.to_owned(),
         session_id: input.session_id,
         cwd: input.cwd,
-        tool_name: input.tool_name,
+        tool_name: input.tool_name.into_value(),
         file_path,
         command,
-        raw_tool_input: input.tool_input,
+        raw_tool_input: input.tool_input.into_value(),
     }
 }
 
@@ -258,5 +302,46 @@ mod tests {
             refused(r#"{"hook_event_name":"SessionStart","tool_input":{}}"#),
             HookError::BadInput(_)
         ));
+    }
+
+    #[test]
+    fn explicit_null_tool_fields_are_refused_on_session_start() {
+        for raw in [
+            r#"{"hook_event_name":"SessionStart","tool_name":null}"#,
+            r#"{"hook_event_name":"SessionStart","tool_input":null}"#,
+            r#"{"hook_event_name":"SessionStart","tool_name":null,"tool_input":null}"#,
+        ] {
+            assert!(
+                matches!(refused(raw), HookError::BadInput(_)),
+                "{raw} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_null_tool_fields_are_refused_on_pre_tool_use() {
+        for raw in [
+            r#"{"hook_event_name":"PreToolUse","tool_name":null,"tool_input":{}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Create","tool_input":null}"#,
+        ] {
+            assert!(
+                matches!(refused(raw), HookError::BadInput(_)),
+                "{raw} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_keys_in_hook_input_are_refused() {
+        for raw in [
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Create","tool_name":"Execute","tool_input":{}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Create","tool_input":{"file_path":"notes/x.txt","file_path":"src/a.txt"}}"#,
+            r#"{"hook_event_name":"SessionStart","source":"startup","source":"resume"}"#,
+        ] {
+            assert!(
+                matches!(parse(raw), Err(HookError::BadInput(_))),
+                "{raw} must be refused"
+            );
+        }
     }
 }
