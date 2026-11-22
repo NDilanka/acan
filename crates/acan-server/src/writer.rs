@@ -293,8 +293,8 @@ async fn commit(
     // The live transition touches of the stored batch. They never fail the write.
     publish_batch(&batch, scan, touches);
     // Accounting-only batches must not wake the job loop: a job whose reply was unusable would
-    // otherwise requeue itself and every other failed job without any user activity. A usage or vision
-    // record is no job's input either.
+    // otherwise requeue itself and every other failed job without any user activity. A usage or
+    // vision record is no job's input either.
     if batch.iter().any(|stamped| {
         !matches!(
             &stamped.event,

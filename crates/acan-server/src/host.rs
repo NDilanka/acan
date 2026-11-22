@@ -417,8 +417,8 @@ impl<C: ModelClient> Host<C> {
     }
 
     /// Scans the repository, reports each step to the feed, and commits the index with its
-    /// `IndexUpdated` batch. Does not mark the feed done, so the caller decides
-    /// when the project is settled.
+    /// `IndexUpdated` batch. Does not mark the feed done, so the caller decides when the project
+    /// is settled.
     pub(crate) async fn scan_and_commit(&self) -> Result<Vec<Stamped>, SubmitError> {
         let repo = self.inner.repo.clone();
         let feed = Arc::clone(&self.inner.feed);
