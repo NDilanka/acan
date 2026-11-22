@@ -114,6 +114,7 @@ pub fn run_from_process() -> Result<(), HookError> {
 }
 
 /// Exit code for a panic: [`BLOCK_EXIT_CODE`] in an Acan session, 0 outside one.
+#[must_use]
 pub fn panic_exit_code() -> i32 {
     match order_from_env() {
         Ok(None) => 0,
