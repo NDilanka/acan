@@ -6,10 +6,14 @@
 //! protected folders, check files, test files and shared lockfiles. Matching is segment-wise and
 //! ignores ASCII case on every platform, so `src/foo` never covers `src/foobar.rs`.
 //!
+//! [`validate_draft`] checks a proposed scope against the base commit, and
+//! [`PathScope::overlaps`] finds where two scopes meet.
+//!
 //! Every function here is pure. The hook, the landing check and the draft flow pass in the facts
 //! they read from the worktree.
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -523,21 +527,33 @@ fn is_test_file(rules: &RepoRules, path: &RepoPath) -> bool {
         .any(|pattern| glob_matches(pattern, name))
 }
 
-/// Decides one path in the order the spec gives: protected folders, check files, a File entry
-/// that names the path, shared files, then the broad entries. The rules before the entries win
-/// over them.
-fn coverage_in(entries: &[ScopeEntry], path: &RepoPath, rules: &RepoRules) -> PathCoverage {
+/// The protected folder that holds the path, if any. Protected folders are anchored at the repo
+/// root, so a folder of the same name deeper down is not protected.
+fn protected_rule(rules: &RepoRules, path: &RepoPath) -> Option<RepoPath> {
     let segments = fold(path);
-    if let Some(rule) = rules
+    rules
         .protected_folders
         .iter()
         .find(|folder| segments.starts_with(&fold(folder)))
-    {
-        return PathCoverage::Protected { rule: rule.clone() };
+        .cloned()
+}
+
+/// True when a check file rule names the path, ignoring case.
+fn is_check_file(rules: &RepoRules, path: &RepoPath) -> bool {
+    let segments = fold(path);
+    rules.check_files.iter().any(|file| fold(file) == segments)
+}
+
+/// Decides one path in a fixed order: protected folders, check files, a File entry that names the
+/// path, shared files, then the broad entries. The rules before the entries win over them.
+fn coverage_in(entries: &[ScopeEntry], path: &RepoPath, rules: &RepoRules) -> PathCoverage {
+    if let Some(rule) = protected_rule(rules, path) {
+        return PathCoverage::Protected { rule };
     }
-    if rules.check_files.iter().any(|file| fold(file) == segments) {
+    if is_check_file(rules, path) {
         return PathCoverage::CheckFile;
     }
+    let segments = fold(path);
     let named = entries.iter().any(
         |entry| matches!(entry, ScopeEntry::File { path: named, .. } if fold(named) == segments),
     );
@@ -592,6 +608,318 @@ pub fn detect_case_collisions(paths: &[RepoPath]) -> Vec<(RepoPath, RepoPath)> {
         }
     }
     pairs
+}
+
+/// Why a draft scope cannot be approved as written.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum DraftError {
+    /// An entry sits inside a protected folder.
+    #[error("entry {path} is inside protected folder {rule}/, which no order may change")]
+    Protected {
+        /// The refused entry.
+        path: RepoPath,
+        /// The protected folder that holds the entry.
+        rule: RepoPath,
+    },
+    /// A file entry names a check file.
+    #[error("entry {path} is a check file, whose checks are frozen at approval")]
+    CheckFile {
+        /// The refused entry.
+        path: RepoPath,
+    },
+    /// A file entry is neither tracked at the base commit nor marked new.
+    #[error("file {path} is not tracked at the base commit and is not marked new")]
+    MissingFile {
+        /// The file entry.
+        path: RepoPath,
+    },
+    /// A folder entry does not exist at the base commit.
+    #[error("folder {path}/ does not exist at the base commit")]
+    MissingFolder {
+        /// The folder entry.
+        path: RepoPath,
+    },
+    /// The folder of a new file neither exists at the base commit nor is covered by a folder
+    /// entry.
+    #[error("new file {path} needs its folder in the repo or a folder entry that covers it")]
+    MissingParent {
+        /// The new file.
+        path: RepoPath,
+    },
+}
+
+/// What a valid draft covers. The app shows it before the developer approves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DraftSummary {
+    /// Tracked files at the base commit that the scope covers.
+    pub covered_file_count: usize,
+    /// Tracked files at the base commit, each path counted once ignoring case.
+    pub total_tracked_files: usize,
+    /// The top-level folders the scope touches, sorted, with one spelling each.
+    pub top_level_folders: Vec<String>,
+    /// True when the scope has the repo root, or covers more than the threshold share of the
+    /// tracked files.
+    pub needs_broad_confirmation: bool,
+}
+
+/// Checks a proposed scope against the base commit before the developer approves it.
+///
+/// `tracked_files` and `existing_dirs` hold the paths at the base commit. A file entry that is not
+/// marked new must be tracked, a folder entry must exist, and the folder of a new file must exist
+/// or be covered by a folder entry in the same scope. Entries inside a protected folder, and file
+/// entries that name a check file, are refused. Case is ignored throughout.
+///
+/// On success the summary sizes the scope. `needs_broad_confirmation` is set when the scope has the
+/// repo root, or when it covers more than `broad_threshold_pct` percent of the tracked files.
+///
+/// # Errors
+///
+/// Returns every problem found, in scope order.
+pub fn validate_draft(
+    scope: &PathScope,
+    tracked_files: &[RepoPath],
+    existing_dirs: &[RepoPath],
+    rules: &RepoRules,
+    broad_threshold_pct: u8,
+) -> Result<DraftSummary, Vec<DraftError>> {
+    let tracked: BTreeSet<Vec<String>> = tracked_files.iter().map(fold).collect();
+    let dirs: BTreeSet<Vec<String>> = existing_dirs.iter().map(fold).collect();
+    let mut errors = Vec::new();
+    for entry in scope.entries() {
+        match entry {
+            ScopeEntry::RepoRoot { .. } => {}
+            ScopeEntry::File { path, new } => {
+                if let Some(rule) = protected_rule(rules, path) {
+                    errors.push(DraftError::Protected {
+                        path: path.clone(),
+                        rule,
+                    });
+                } else if is_check_file(rules, path) {
+                    errors.push(DraftError::CheckFile { path: path.clone() });
+                } else if !*new && !tracked.contains(&fold(path)) {
+                    errors.push(DraftError::MissingFile { path: path.clone() });
+                } else if *new && !parent_is_available(scope, &dirs, path) {
+                    errors.push(DraftError::MissingParent { path: path.clone() });
+                }
+            }
+            ScopeEntry::Folder { path, .. } => {
+                if let Some(rule) = protected_rule(rules, path) {
+                    errors.push(DraftError::Protected {
+                        path: path.clone(),
+                        rule,
+                    });
+                } else if !dirs.contains(&fold(path)) {
+                    errors.push(DraftError::MissingFolder { path: path.clone() });
+                }
+            }
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    Ok(summarize(scope, tracked_files, rules, broad_threshold_pct))
+}
+
+/// Counts the tracked files the scope covers and names the top-level folders it touches.
+fn summarize(
+    scope: &PathScope,
+    tracked_files: &[RepoPath],
+    rules: &RepoRules,
+    broad_threshold_pct: u8,
+) -> DraftSummary {
+    let mut folders: BTreeMap<String, String> = BTreeMap::new();
+    for entry in scope.entries() {
+        match entry {
+            ScopeEntry::RepoRoot { .. } => {}
+            ScopeEntry::Folder { path, .. } => remember_folder(&mut folders, first_segment(path)),
+            ScopeEntry::File { path, .. } => {
+                if let Some(name) = directory_top(path) {
+                    remember_folder(&mut folders, name);
+                }
+            }
+        }
+    }
+    let mut seen = BTreeSet::new();
+    let mut total_tracked_files: usize = 0;
+    let mut covered_file_count: usize = 0;
+    for path in tracked_files {
+        if !seen.insert(fold(path)) {
+            continue;
+        }
+        total_tracked_files += 1;
+        if scope.coverage(path, rules) == PathCoverage::Covered {
+            covered_file_count += 1;
+            if let Some(name) = directory_top(path) {
+                remember_folder(&mut folders, name);
+            }
+        }
+    }
+    let has_root = scope
+        .entries()
+        .iter()
+        .any(|entry| matches!(entry, ScopeEntry::RepoRoot { .. }));
+    let over_threshold = covered_file_count.saturating_mul(100)
+        > total_tracked_files.saturating_mul(usize::from(broad_threshold_pct));
+    DraftSummary {
+        covered_file_count,
+        total_tracked_files,
+        top_level_folders: folders.into_values().collect(),
+        needs_broad_confirmation: has_root || over_threshold,
+    }
+}
+
+/// Keeps one spelling for each top-level folder: the smallest, so the result does not depend on
+/// the order of the entries.
+fn remember_folder(folders: &mut BTreeMap<String, String>, name: &str) {
+    let slot = folders
+        .entry(name.to_ascii_lowercase())
+        .or_insert_with(|| name.to_owned());
+    if name < slot.as_str() {
+        *slot = name.to_owned();
+    }
+}
+
+/// The first segment of a folder path, which is the folder itself at the top level.
+fn first_segment(path: &RepoPath) -> &str {
+    path.as_str().split('/').next().unwrap_or_default()
+}
+
+/// The top-level folder that holds a path, or `None` when the path sits at the repo root.
+fn directory_top(path: &RepoPath) -> Option<&str> {
+    path.as_str().split_once('/').map(|(top, _)| top)
+}
+
+/// True when the folder above a new file is the repo root, a folder at the base commit, or a
+/// folder that a folder entry in the scope covers.
+fn parent_is_available(scope: &PathScope, dirs: &BTreeSet<Vec<String>>, path: &RepoPath) -> bool {
+    let mut parent = fold(path);
+    parent.pop();
+    if parent.is_empty() || dirs.contains(&parent) {
+        return true;
+    }
+    scope.entries().iter().any(|entry| {
+        matches!(entry, ScopeEntry::Folder { path: folder, .. } if parent.starts_with(&fold(folder)))
+    })
+}
+
+/// Two orders name the same place, so the interlock holds one of them back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Overlap {
+    /// Both scopes name this file, or one names it and the other names a folder above it.
+    File {
+        /// The shared file, in the spelling of the smaller entry.
+        path: RepoPath,
+    },
+    /// Both scopes name this folder, or one names a folder inside the other's folder. The
+    /// narrower folder is reported.
+    Folder {
+        /// The narrower folder, in the spelling of the smaller entry.
+        path: RepoPath,
+    },
+    /// Both scopes name the whole repo.
+    Root,
+}
+
+impl fmt::Display for Overlap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::File { path } => write!(f, "file {path}"),
+            Self::Folder { path } => write!(f, "folder {path}/"),
+            Self::Root => f.write_str("the repo root"),
+        }
+    }
+}
+
+impl Overlap {
+    /// The reported path, or `None` for the whole repo.
+    fn path(&self) -> Option<&RepoPath> {
+        match self {
+            Self::File { path } | Self::Folder { path } => Some(path),
+            Self::Root => None,
+        }
+    }
+
+    /// The position that reports each place once: the root, then folders, then files, each by
+    /// its case-folded path.
+    fn key(&self) -> (u8, Vec<String>) {
+        match self {
+            Self::Root => (0, Vec::new()),
+            Self::Folder { path } => (1, fold(path)),
+            Self::File { path } => (2, fold(path)),
+        }
+    }
+}
+
+impl PathScope {
+    /// The places where this scope and the other scope may both write. An entry of one scope
+    /// overlaps an entry of the other when one covers the other, ignoring case. Each place is
+    /// reported once, with the smaller spelling. The test and new flags do not change the answer,
+    /// so the check is conservative.
+    #[must_use]
+    pub fn overlaps(&self, other: &PathScope) -> Vec<Overlap> {
+        let mut found: BTreeMap<(u8, Vec<String>), Overlap> = BTreeMap::new();
+        for mine in &self.entries {
+            for theirs in &other.entries {
+                let Some(overlap) = overlap_between(mine, theirs) else {
+                    continue;
+                };
+                let replace = found
+                    .get(&overlap.key())
+                    .is_none_or(|kept| overlap.path() < kept.path());
+                if replace {
+                    found.insert(overlap.key(), overlap);
+                }
+            }
+        }
+        found.into_values().collect()
+    }
+}
+
+/// The overlap between two entries, or `None` when they name disjoint places.
+fn overlap_between(mine: &ScopeEntry, theirs: &ScopeEntry) -> Option<Overlap> {
+    match (mine, theirs) {
+        (ScopeEntry::RepoRoot { .. }, ScopeEntry::RepoRoot { .. }) => Some(Overlap::Root),
+        (ScopeEntry::RepoRoot { .. }, other) | (other, ScopeEntry::RepoRoot { .. }) => {
+            Some(named_place(other))
+        }
+        (ScopeEntry::File { path: a, .. }, ScopeEntry::File { path: b, .. }) => {
+            (fold(a) == fold(b)).then(|| Overlap::File {
+                path: a.min(b).clone(),
+            })
+        }
+        (ScopeEntry::Folder { path: folder, .. }, ScopeEntry::File { path: file, .. })
+        | (ScopeEntry::File { path: file, .. }, ScopeEntry::Folder { path: folder, .. }) => {
+            fold(file)
+                .starts_with(&fold(folder))
+                .then(|| Overlap::File { path: file.clone() })
+        }
+        (ScopeEntry::Folder { path: a, .. }, ScopeEntry::Folder { path: b, .. }) => {
+            let (fa, fb) = (fold(a), fold(b));
+            if !(fa.starts_with(&fb) || fb.starts_with(&fa)) {
+                return None;
+            }
+            let narrower = match fa.len().cmp(&fb.len()) {
+                Ordering::Greater => a,
+                Ordering::Less => b,
+                Ordering::Equal => a.min(b),
+            };
+            Some(Overlap::Folder {
+                path: narrower.clone(),
+            })
+        }
+    }
+}
+
+/// The place an entry names, for an overlap with the whole repo.
+fn named_place(entry: &ScopeEntry) -> Overlap {
+    match entry {
+        ScopeEntry::File { path, .. } => Overlap::File { path: path.clone() },
+        ScopeEntry::Folder { path, .. } => Overlap::Folder { path: path.clone() },
+        ScopeEntry::RepoRoot { .. } => Overlap::Root,
+    }
 }
 
 #[cfg(test)]
@@ -1140,6 +1468,329 @@ mod tests {
                 r#"{"kind":"folder","path":"src/../x","tests":false}"#
             )
             .is_err()
+        );
+    }
+
+    fn path_list(raw: &[&str]) -> Vec<RepoPath> {
+        raw.iter().copied().map(repo_path).collect()
+    }
+
+    fn draft(
+        proposed: &PathScope,
+        tracked: &[&str],
+        dirs: &[&str],
+    ) -> Result<DraftSummary, Vec<DraftError>> {
+        validate_draft(
+            proposed,
+            &path_list(tracked),
+            &path_list(dirs),
+            &RepoRules::default(),
+            50,
+        )
+    }
+
+    fn broad_flag(proposed: &PathScope, tracked: &[&str], threshold: u8) -> bool {
+        validate_draft(
+            proposed,
+            &path_list(tracked),
+            &path_list(&["a", "b"]),
+            &RepoRules::default(),
+            threshold,
+        )
+        .expect("draft is valid")
+        .needs_broad_confirmation
+    }
+
+    fn overlap_names(left: &PathScope, right: &PathScope) -> Vec<Overlap> {
+        let forward = left.overlaps(right);
+        assert_eq!(forward, right.overlaps(left), "overlap is symmetric");
+        forward
+    }
+
+    #[test]
+    fn draft_accepts_new_files_under_an_existing_or_covered_folder() {
+        let proposed = scope([
+            folder("src"),
+            new_file("src/app.rs"),
+            new_file("src/deep/new.rs"),
+            new_file("README.new.md"),
+        ]);
+        let summary = draft(&proposed, &["src/old.rs"], &["src"]).expect("draft is valid");
+        assert_eq!(summary.covered_file_count, 1);
+        assert_eq!(summary.total_tracked_files, 1);
+    }
+
+    #[test]
+    fn draft_rejects_a_file_that_is_missing_and_not_marked_new() {
+        let proposed = scope([file("src/gone.rs")]);
+        assert_eq!(
+            draft(&proposed, &["src/app.rs"], &["src"]),
+            Err(vec![DraftError::MissingFile {
+                path: repo_path("src/gone.rs"),
+            }])
+        );
+        let spelled = scope([file("SRC/APP.rs")]);
+        assert!(
+            draft(&spelled, &["src/app.rs"], &["src"]).is_ok(),
+            "existence ignores case"
+        );
+    }
+
+    #[test]
+    fn draft_rejects_a_new_file_whose_folder_is_missing_and_uncovered() {
+        let proposed = scope([new_file("docs/new/x.md")]);
+        assert_eq!(
+            draft(&proposed, &[], &[]),
+            Err(vec![DraftError::MissingParent {
+                path: repo_path("docs/new/x.md"),
+            }])
+        );
+        assert!(draft(&scope([new_file("docs/x.md")]), &[], &["docs"]).is_ok());
+        assert!(
+            draft(&scope([new_file("notes.md")]), &[], &[]).is_ok(),
+            "the root always exists"
+        );
+    }
+
+    #[test]
+    fn draft_rejects_missing_folders() {
+        let proposed = scope([folder("src/gone")]);
+        assert_eq!(
+            draft(&proposed, &["src/app.rs"], &["src"]),
+            Err(vec![DraftError::MissingFolder {
+                path: repo_path("src/gone"),
+            }])
+        );
+    }
+
+    #[test]
+    fn draft_refuses_protected_and_check_entries_in_scope_order() {
+        let rules = RepoRules {
+            check_files: vec![repo_path("ci/checks.yml")],
+            ..RepoRules::default()
+        };
+        let proposed = scope([
+            file(".factory/hooks.json"),
+            folder(".acan"),
+            file("ci/checks.yml"),
+            file("src/app.rs"),
+        ]);
+        assert_eq!(
+            validate_draft(
+                &proposed,
+                &path_list(&["ci/checks.yml", "src/app.rs"]),
+                &path_list(&["src"]),
+                &rules,
+                50,
+            ),
+            Err(vec![
+                DraftError::Protected {
+                    path: repo_path(".acan"),
+                    rule: repo_path(".acan"),
+                },
+                DraftError::Protected {
+                    path: repo_path(".factory/hooks.json"),
+                    rule: repo_path(".factory"),
+                },
+                DraftError::CheckFile {
+                    path: repo_path("ci/checks.yml"),
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn draft_summary_counts_covered_tracked_files_and_names_top_level_folders() {
+        let tracked = [
+            "src/a.rs",
+            "src/tests/t.rs",
+            "docs/x.md",
+            "README.md",
+            "Cargo.lock",
+        ];
+        let proposed = scope([folder("src"), file("docs/x.md")]);
+        let summary = draft(&proposed, &tracked, &["src", "docs"]).expect("draft is valid");
+        assert_eq!(
+            summary,
+            DraftSummary {
+                covered_file_count: 2,
+                total_tracked_files: 5,
+                top_level_folders: vec!["docs".to_owned(), "src".to_owned()],
+                needs_broad_confirmation: false,
+            }
+        );
+    }
+
+    #[test]
+    fn broad_confirmation_needs_more_than_the_threshold_share() {
+        let tracked = ["a/1.rs", "a/2.rs", "b/3.rs", "b/4.rs"];
+        let three = scope([folder("a"), file("b/3.rs")]);
+        let two = scope([folder("a")]);
+        assert!(broad_flag(&three, &tracked, 50));
+        assert!(
+            !broad_flag(&two, &tracked, 50),
+            "exactly half is not more than half"
+        );
+        assert!(broad_flag(&two, &tracked, 49));
+        assert!(
+            !broad_flag(&three, &tracked, 75),
+            "three of four is exactly 75 percent"
+        );
+    }
+
+    #[test]
+    fn the_repo_root_always_needs_confirmation() {
+        let root = scope([ScopeEntry::RepoRoot { tests: false }]);
+        // One of the two files is a test file, so the share is 50 percent and the root is the
+        // only reason for the flag at a 100 percent threshold.
+        assert!(broad_flag(&root, &["a/1.rs", "a/t_test.rs"], 100));
+    }
+
+    #[test]
+    fn root_summary_lists_every_top_level_folder_it_covers() {
+        let root = scope([ScopeEntry::RepoRoot { tests: true }]);
+        let summary =
+            draft(&root, &["src/a.rs", "tests/t.rs", "README.md"], &[]).expect("root is valid");
+        assert_eq!(summary.covered_file_count, 3);
+        assert_eq!(summary.top_level_folders, ["src", "tests"]);
+        assert!(summary.needs_broad_confirmation);
+    }
+
+    #[test]
+    fn a_valid_draft_merges_away_redundant_files_and_keeps_test_and_shared_files() {
+        let proposed = scope([
+            folder("src"),
+            file("src/a.rs"),
+            file("src/Cargo.lock"),
+            file("src/tests/unit.rs"),
+        ]);
+        let tracked = ["src/a.rs", "src/Cargo.lock", "src/tests/unit.rs"];
+        draft(&proposed, &tracked, &["src"]).expect("draft is valid");
+        assert_eq!(
+            proposed
+                .merge_redundant(&RepoRules::default())
+                .entries()
+                .to_vec(),
+            vec![
+                folder("src"),
+                file("src/Cargo.lock"),
+                file("src/tests/unit.rs")
+            ]
+        );
+    }
+
+    #[test]
+    fn draft_and_overlap_reasons_read_as_lowercase_sentences() {
+        assert_eq!(
+            DraftError::MissingFile {
+                path: repo_path("src/gone.rs"),
+            }
+            .to_string(),
+            "file src/gone.rs is not tracked at the base commit and is not marked new"
+        );
+        assert_eq!(
+            DraftError::Protected {
+                path: repo_path(".factory/hooks.json"),
+                rule: repo_path(".factory"),
+            }
+            .to_string(),
+            "entry .factory/hooks.json is inside protected folder .factory/, which no order may change"
+        );
+        assert_eq!(
+            Overlap::Folder {
+                path: repo_path("src"),
+            }
+            .to_string(),
+            "folder src/"
+        );
+        assert_eq!(
+            Overlap::File {
+                path: repo_path("src/app.rs"),
+            }
+            .to_string(),
+            "file src/app.rs"
+        );
+        assert_eq!(Overlap::Root.to_string(), "the repo root");
+    }
+
+    #[test]
+    fn overlap_at_file_level_ignores_case_and_names_the_smaller_spelling() {
+        let left = scope([file("src/App.rs")]);
+        let right = scope([file("SRC/app.rs")]);
+        assert_eq!(
+            overlap_names(&left, &right),
+            vec![Overlap::File {
+                path: repo_path("SRC/app.rs"),
+            }]
+        );
+        let other = scope([file("src/app.rs.bak")]);
+        assert!(overlap_names(&left, &other).is_empty());
+    }
+
+    #[test]
+    fn file_overlaps_a_folder_only_when_the_folder_holds_it() {
+        let named = scope([file("src/app.rs")]);
+        assert_eq!(
+            overlap_names(&named, &scope([folder("src")])),
+            vec![Overlap::File {
+                path: repo_path("src/app.rs"),
+            }]
+        );
+        assert!(overlap_names(&named, &scope([folder("lib")])).is_empty());
+    }
+
+    #[test]
+    fn folder_against_nested_folder_names_the_narrower_one() {
+        let outer = scope([folder("src")]);
+        let inner = scope([folder("SRC/Deep")]);
+        assert_eq!(
+            overlap_names(&outer, &inner),
+            vec![Overlap::Folder {
+                path: repo_path("SRC/Deep"),
+            }]
+        );
+    }
+
+    #[test]
+    fn disjoint_siblings_do_not_overlap() {
+        assert!(overlap_names(&scope([folder("src/a")]), &scope([folder("src/ab")])).is_empty());
+        assert!(overlap_names(&scope([file("src/a")]), &scope([folder("src/ab")])).is_empty());
+        assert!(overlap_names(&scope([folder("src/a")]), &scope([file("src/ab")])).is_empty());
+        assert!(overlap_names(&scope([file("src/a")]), &scope([file("src/ab")])).is_empty());
+    }
+
+    #[test]
+    fn the_repo_root_overlaps_any_entry_and_names_that_entry() {
+        let root = scope([ScopeEntry::RepoRoot { tests: false }]);
+        assert_eq!(
+            overlap_names(&root, &scope([file("x.md")])),
+            vec![Overlap::File {
+                path: repo_path("x.md"),
+            }]
+        );
+        assert_eq!(
+            overlap_names(&root, &scope([folder("src")])),
+            vec![Overlap::Folder {
+                path: repo_path("src"),
+            }]
+        );
+        assert_eq!(overlap_names(&root, &root), vec![Overlap::Root]);
+    }
+
+    #[test]
+    fn overlaps_report_each_place_once_across_entry_pairs() {
+        let left = scope([folder("SRC"), file("src/a.rs")]);
+        let right = scope([folder("src"), file("SRC/A.rs")]);
+        assert_eq!(
+            overlap_names(&left, &right),
+            vec![
+                Overlap::Folder {
+                    path: repo_path("SRC"),
+                },
+                Overlap::File {
+                    path: repo_path("SRC/A.rs"),
+                },
+            ]
         );
     }
 }
