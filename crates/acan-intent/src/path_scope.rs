@@ -61,6 +61,15 @@ pub enum PathScopeError {
         /// The grammar rule it broke.
         source: InvalidValue,
     },
+    /// Two file entries differ only by ASCII case. A repo cannot hold both spellings on a
+    /// case-insensitive filesystem, so one spelling must go.
+    #[error("two file entries differ only by case: {first} and {second}")]
+    CaseCollision {
+        /// The spelling that sorts first.
+        first: RepoPath,
+        /// The other spelling.
+        second: RepoPath,
+    },
     /// A scope needs at least one entry.
     #[error("a scope needs at least one entry")]
     EmptyScope,
@@ -204,7 +213,8 @@ impl fmt::Display for ScopeEntry {
 /// empty.
 ///
 /// Redundant entries stay until [`PathScope::merge_redundant`] runs. Merging needs the repo rules,
-/// and a draft is checked against the entries as written.
+/// and a draft is checked against the entries as written. Decoding runs [`PathScope::new`], so an
+/// empty, unsorted or repeated list is handled exactly as it is in code.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Vec<ScopeEntry>", into = "Vec<ScopeEntry>")]
 pub struct PathScope {
@@ -271,19 +281,39 @@ fn merged_with(kept: &ScopeEntry, incoming: &ScopeEntry) -> ScopeEntry {
     }
 }
 
+/// Refuses two file entries for the same place when their spellings differ. Exact repeats pass
+/// and merge in [`merged_with`].
+fn refuse_case_collision(kept: &ScopeEntry, incoming: &ScopeEntry) -> Result<(), PathScopeError> {
+    match (kept, incoming) {
+        (ScopeEntry::File { path: a, .. }, ScopeEntry::File { path: b, .. }) if a != b => {
+            let (first, second) = if a < b { (a, b) } else { (b, a) };
+            Err(PathScopeError::CaseCollision {
+                first: first.clone(),
+                second: second.clone(),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 impl PathScope {
-    /// Builds a scope from entries. Entries for the same place merge, and the result is sorted
-    /// into canonical order: the repo root, then folders, then files, each by path.
+    /// Builds a scope from entries. Folders and the root merge across spellings, and exact repeats
+    /// of a file merge too. The result is sorted into canonical order: the repo root, then
+    /// folders, then files, each by path.
     ///
     /// # Errors
     ///
-    /// Returns [`PathScopeError::EmptyScope`] when no entry is given.
+    /// Returns [`PathScopeError::CaseCollision`] when two file entries differ only by case, and
+    /// [`PathScopeError::EmptyScope`] when no entry is given.
     pub fn new(entries: impl IntoIterator<Item = ScopeEntry>) -> Result<Self, PathScopeError> {
         let mut merged: BTreeMap<EntryKey, ScopeEntry> = BTreeMap::new();
         for entry in entries {
             let key = entry_key(&entry);
             let combined = match merged.get(&key) {
-                Some(kept) => merged_with(kept, &entry),
+                Some(kept) => {
+                    refuse_case_collision(kept, &entry)?;
+                    merged_with(kept, &entry)
+                }
                 None => entry,
             };
             merged.insert(key, combined);
@@ -351,9 +381,7 @@ impl PathScope {
                         tests: outer_tests,
                     } => {
                         let outer = fold(outer_path);
-                        inner.len() > outer.len()
-                            && inner.starts_with(&outer)
-                            && (*outer_tests || !*tests)
+                        is_under(&inner, &outer) && (*outer_tests || !*tests)
                     }
                     ScopeEntry::File { .. } => false,
                 })
@@ -393,8 +421,9 @@ impl JsonSchema for PathScope {
 /// The per-repo rules that refuse some paths whatever the scope says.
 ///
 /// `protected_folders` and `check_files` are anchored at the repo root, so `src/.acan/x.md` is
-/// not protected. The other lists match at any depth. A missing field takes its default, so a
-/// partial rules file changes only the lists it names.
+/// not protected. In `test_folders` and `shared_files`, a bare name matches at any depth and a
+/// name with a `/` is anchored at the root. A missing field takes its default, so a partial rules
+/// file changes only the lists it names.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct RepoRules {
@@ -402,11 +431,13 @@ pub struct RepoRules {
     pub protected_folders: Vec<RepoPath>,
     /// Files whose checks are frozen at approval, so no order may change them.
     pub check_files: Vec<RepoPath>,
-    /// Folder names whose contents are test files. Matched ignoring ASCII case.
+    /// Folders whose contents are test files. A bare name matches a folder at any depth. A name
+    /// with a `/` is a repo-relative folder. Matched ignoring ASCII case.
     pub test_folders: Vec<String>,
     /// File name patterns that mark test files. `*` matches any run of characters.
     pub test_file_patterns: Vec<String>,
-    /// Lockfile names that only a File entry can cover. Matched ignoring ASCII case.
+    /// Files that only a File entry can cover, such as lockfiles. A bare name matches the file
+    /// name at any depth. A name with a `/` is a repo-relative path. Matched ignoring ASCII case.
     pub shared_files: Vec<String>,
 }
 
@@ -509,22 +540,58 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
     rest.ends_with(*last)
 }
 
-/// True when a folder name above the path is a test folder, or the file name matches a test
-/// pattern.
+/// Splits a rule that may contain `/` or `\` into case-folded segments. Empty and `.` segments
+/// drop out, so `./frontend//lock` and `frontend/lock` compare equal.
+fn fold_rule(rule: &str) -> Vec<String> {
+    rule.split(['/', '\\'])
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+/// True when the path lies strictly below the folder. An empty folder covers nothing, so an empty
+/// rule can never match every path.
+fn is_under(path: &[String], folder: &[String]) -> bool {
+    !folder.is_empty() && path.len() > folder.len() && path.starts_with(folder)
+}
+
+/// True when a shared-file rule names the path. A rule with a `/` names the whole repo-relative
+/// path, and a bare name names the file name at any depth. Case is ignored.
+fn is_shared_file(rules: &RepoRules, segments: &[String]) -> bool {
+    let Some(name) = segments.last() else {
+        return false;
+    };
+    rules.shared_files.iter().any(|rule| {
+        if rule.contains(['/', '\\']) {
+            fold_rule(rule) == segments
+        } else {
+            rule.eq_ignore_ascii_case(name)
+        }
+    })
+}
+
+/// True when a test folder rule covers a folder above the path, or the file name matches a test
+/// pattern. A bare folder name matches any folder above the path. A rule with a `/` names a
+/// repo-relative folder, and the path must lie below it. Case is ignored.
 fn is_test_file(rules: &RepoRules, path: &RepoPath) -> bool {
     let segments = fold(path);
     let Some((name, folders)) = segments.split_last() else {
         return false;
     };
-    folders.iter().any(|folder| {
-        rules
-            .test_folders
+    let in_test_folder = rules.test_folders.iter().any(|test| {
+        if test.contains(['/', '\\']) {
+            is_under(&segments, &fold_rule(test))
+        } else {
+            folders
+                .iter()
+                .any(|folder| test.eq_ignore_ascii_case(folder))
+        }
+    });
+    in_test_folder
+        || rules
+            .test_file_patterns
             .iter()
-            .any(|test| test.eq_ignore_ascii_case(folder))
-    }) || rules
-        .test_file_patterns
-        .iter()
-        .any(|pattern| glob_matches(pattern, name))
+            .any(|pattern| glob_matches(pattern, name))
 }
 
 /// The protected folder that holds the path, if any. Protected folders are anchored at the repo
@@ -560,12 +627,7 @@ fn coverage_in(entries: &[ScopeEntry], path: &RepoPath, rules: &RepoRules) -> Pa
     if named {
         return PathCoverage::Covered;
     }
-    let name = segments.last().map_or("", String::as_str);
-    if rules
-        .shared_files
-        .iter()
-        .any(|shared| shared.eq_ignore_ascii_case(name))
-    {
+    if is_shared_file(rules, &segments) {
         return PathCoverage::SharedFile;
     }
     let test = is_test_file(rules, path);
@@ -573,10 +635,7 @@ fn coverage_in(entries: &[ScopeEntry], path: &RepoPath, rules: &RepoRules) -> Pa
         ScopeEntry::Folder {
             path: folder,
             tests,
-        } => {
-            let folder = fold(folder);
-            segments.len() > folder.len() && segments.starts_with(&folder) && (*tests || !test)
-        }
+        } => is_under(&segments, &fold(folder)) && (*tests || !test),
         ScopeEntry::RepoRoot { tests } => *tests || !test,
         ScopeEntry::File { .. } => false,
     });
@@ -684,6 +743,7 @@ pub fn validate_draft(
     rules: &RepoRules,
     broad_threshold_pct: u8,
 ) -> Result<DraftSummary, Vec<DraftError>> {
+    // `fold` lowercases every segment, so the base listing and the entries match ignoring case.
     let tracked: BTreeSet<Vec<String>> = tracked_files.iter().map(fold).collect();
     let dirs: BTreeSet<Vec<String>> = existing_dirs.iter().map(fold).collect();
     let mut errors = Vec::new();
@@ -777,7 +837,7 @@ fn remember_folder(folders: &mut BTreeMap<String, String>, name: &str) {
         .entry(name.to_ascii_lowercase())
         .or_insert_with(|| name.to_owned());
     if name < slot.as_str() {
-        *slot = name.to_owned();
+        name.clone_into(slot);
     }
 }
 
@@ -1078,7 +1138,7 @@ mod tests {
                 path: repo_path("SRC"),
                 tests: true,
             },
-            file("SRC/B.rs"),
+            file("src/b.rs"),
         ];
         let mut backward = forward.clone();
         backward.reverse();
@@ -1092,7 +1152,7 @@ mod tests {
                     tests: true,
                 },
                 ScopeEntry::File {
-                    path: repo_path("SRC/B.rs"),
+                    path: repo_path("src/b.rs"),
                     new: false,
                 },
             ]
@@ -1468,6 +1528,225 @@ mod tests {
                 r#"{"kind":"folder","path":"src/../x","tests":false}"#
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn scope_refuses_file_entries_that_differ_only_by_case() {
+        let expected = PathScopeError::CaseCollision {
+            first: repo_path("SRC/App.rs"),
+            second: repo_path("src/app.rs"),
+        };
+        assert_eq!(
+            PathScope::new([file("src/app.rs"), file("SRC/App.rs")])
+                .expect_err("a case-only collision is refused"),
+            expected
+        );
+        assert_eq!(
+            PathScope::new([file("SRC/App.rs"), file("src/app.rs")])
+                .expect_err("input order does not hide the collision"),
+            expected
+        );
+        assert!(
+            matches!(
+                PathScope::new([
+                    file("src/app.rs"),
+                    new_file("src/app.rs"),
+                    file("Src/App.rs"),
+                ]),
+                Err(PathScopeError::CaseCollision { .. })
+            ),
+            "a third spelling after an exact repeat is still refused"
+        );
+    }
+
+    #[test]
+    fn scope_merges_exact_file_repeats_and_folders_across_spellings() {
+        assert_eq!(
+            scope([new_file("docs/a.md"), file("docs/a.md")])
+                .entries()
+                .to_vec(),
+            vec![file("docs/a.md")],
+            "a repeat is new only when both entries say so"
+        );
+        let merged = scope([
+            folder("src"),
+            tests_folder("SRC"),
+            ScopeEntry::RepoRoot { tests: false },
+            ScopeEntry::RepoRoot { tests: true },
+        ]);
+        assert_eq!(
+            merged.entries().to_vec(),
+            vec![ScopeEntry::RepoRoot { tests: true }, tests_folder("SRC")]
+        );
+        let reversed = scope([
+            ScopeEntry::RepoRoot { tests: true },
+            tests_folder("SRC"),
+            folder("src"),
+            ScopeEntry::RepoRoot { tests: false },
+        ]);
+        assert_eq!(reversed, merged, "input order does not change the merge");
+    }
+
+    #[test]
+    fn deserialized_scope_goes_through_the_constructor() {
+        // The wire form is the bare entry list, and every decode runs `PathScope::new`.
+        assert!(serde_json::from_str::<PathScope>("[]").is_err());
+        assert!(serde_json::from_str::<PathScope>(r#"{"entries":[]}"#).is_err());
+        let decoded: PathScope = serde_json::from_str(
+            r#"[{"kind":"file","path":"src/b.rs","new":false},{"kind":"folder","path":"SRC","tests":false},{"kind":"repo_root","tests":false},{"kind":"folder","path":"src","tests":true}]"#,
+        )
+        .expect("unsorted and repeated entries decode");
+        assert_eq!(
+            decoded.entries().to_vec(),
+            vec![
+                ScopeEntry::RepoRoot { tests: false },
+                tests_folder("SRC"),
+                file("src/b.rs"),
+            ]
+        );
+        assert!(
+            serde_json::from_str::<PathScope>(
+                r#"[{"kind":"file","path":"src/App.rs","new":false},{"kind":"file","path":"src/app.rs","new":false}]"#,
+            )
+            .is_err(),
+            "a case-only collision is refused on decode too"
+        );
+    }
+
+    #[test]
+    fn repeated_dot_segments_normalize_to_the_root() {
+        for raw in [".", "./", "./.", "././", "./././", ".\\.\\", "./.\\./"] {
+            assert_eq!(
+                normalize_entry_input(raw).expect("dot segments normalize"),
+                NormalizedInput::Root,
+                "{raw:?}"
+            );
+        }
+        assert_eq!(
+            normalize_entry_input("././src/").expect("input should normalize"),
+            NormalizedInput::Path {
+                path: repo_path("src"),
+                folder: true,
+            }
+        );
+    }
+
+    #[test]
+    fn path_qualified_shared_files_match_the_full_path() {
+        let rules = RepoRules {
+            shared_files: strings(&["frontend/package-lock.json"]),
+            ..RepoRules::default()
+        };
+        let root = scope([ScopeEntry::RepoRoot { tests: false }]);
+        assert_eq!(
+            root.coverage(&repo_path("frontend/package-lock.json"), &rules),
+            PathCoverage::SharedFile
+        );
+        assert_eq!(
+            root.coverage(&repo_path("Frontend/Package-Lock.json"), &rules),
+            PathCoverage::SharedFile,
+            "case is ignored"
+        );
+        assert_eq!(
+            root.coverage(&repo_path("backend/package-lock.json"), &rules),
+            PathCoverage::Covered,
+            "the rule names one path"
+        );
+        assert_eq!(
+            root.coverage(&repo_path("package-lock.json"), &rules),
+            PathCoverage::Covered,
+            "the rule names one path"
+        );
+        let frontend = scope([folder("frontend")]);
+        assert_eq!(
+            frontend.coverage(&repo_path("frontend/package-lock.json"), &rules),
+            PathCoverage::SharedFile,
+            "a folder entry never covers a shared file"
+        );
+        let named = scope([file("frontend/package-lock.json")]);
+        assert_eq!(
+            named.coverage(&repo_path("frontend/package-lock.json"), &rules),
+            PathCoverage::Covered
+        );
+        let bare = RepoRules {
+            shared_files: strings(&["Cargo.lock"]),
+            ..RepoRules::default()
+        };
+        assert_eq!(
+            root.coverage(&repo_path("crates/x/cargo.lock"), &bare),
+            PathCoverage::SharedFile,
+            "a bare name still matches at any depth"
+        );
+    }
+
+    #[test]
+    fn path_qualified_test_folders_match_one_folder_and_bare_names_match_any_depth() {
+        let rules = RepoRules {
+            test_folders: strings(&["crates/foo/integration"]),
+            ..RepoRules::default()
+        };
+        let root = scope([ScopeEntry::RepoRoot { tests: false }]);
+        assert_eq!(
+            root.coverage(&repo_path("crates/foo/integration/a.rs"), &rules),
+            PathCoverage::TestFile
+        );
+        assert_eq!(
+            root.coverage(&repo_path("Crates/Foo/Integration/deep/a.rs"), &rules),
+            PathCoverage::TestFile,
+            "case is ignored"
+        );
+        assert_eq!(
+            root.coverage(&repo_path("other/integration/a.rs"), &rules),
+            PathCoverage::Covered,
+            "the rule names one folder"
+        );
+        assert_eq!(
+            root.coverage(&repo_path("integration/a.rs"), &rules),
+            PathCoverage::Covered,
+            "the rule names one folder"
+        );
+        let plain = scope([folder("crates")]);
+        assert_eq!(
+            plain.coverage(&repo_path("crates/foo/integration/a.rs"), &rules),
+            PathCoverage::TestFile
+        );
+        let tests_on = scope([tests_folder("crates")]);
+        assert_eq!(
+            tests_on.coverage(&repo_path("crates/foo/integration/a.rs"), &rules),
+            PathCoverage::Covered
+        );
+        let bare = RepoRules {
+            test_folders: strings(&["integration"]),
+            ..RepoRules::default()
+        };
+        assert_eq!(
+            root.coverage(&repo_path("other/integration/a.rs"), &bare),
+            PathCoverage::TestFile,
+            "a bare name matches any depth"
+        );
+    }
+
+    #[test]
+    fn draft_matches_base_paths_and_parents_ignoring_case() {
+        let summary = draft(
+            &scope([file("Src/Lib.rs"), new_file("Src/new.rs")]),
+            &["src/lib.rs"],
+            &["src"],
+        )
+        .expect("case-only differences are not missing paths");
+        assert_eq!(summary.covered_file_count, 1);
+        assert_eq!(summary.total_tracked_files, 1);
+        assert!(
+            draft(&scope([file("src/lib.rs")]), &["Src/Lib.rs"], &["SRC"]).is_ok(),
+            "the base listing may differ in case"
+        );
+        assert!(draft(&scope([folder("SRC")]), &[], &["src"]).is_ok());
+        assert_eq!(
+            draft(&scope([new_file("Docs/new.md")]), &["src/lib.rs"], &["src"]),
+            Err(vec![DraftError::MissingParent {
+                path: repo_path("Docs/new.md"),
+            }])
         );
     }
 
