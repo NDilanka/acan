@@ -203,7 +203,8 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
                 .await?;
             let mut acknowledged = false;
             let mut confirmed = false;
-            while !(acknowledged && confirmed) {
+            let mut matching_broadcast = false;
+            while !(acknowledged && (confirmed || matching_broadcast)) {
                 match self.read_inbound().await? {
                     Some(InboundMessage::Response { id, result, error })
                         if id.as_ref() == Some(&update_id) =>
@@ -216,12 +217,23 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
                     }
                     Some(message) => {
                         if let Some(event) = Self::to_event(message)? {
-                            if let DroidEvent::SettingsUpdated { request_id, raw } = &event
-                                && (request_id.as_ref() == Some(&update_id)
-                                    || raw.get("requestId").is_none_or(serde_json::Value::is_null))
-                                && let Some(snapshot) = SettingsSnapshot::from_value(raw)?
-                            {
-                                confirmed |= snapshot.confirms(settings)?;
+                            if let DroidEvent::SettingsUpdated { request_id, raw } = &event {
+                                if request_id.as_ref() == Some(&update_id) {
+                                    if let Some(snapshot) = SettingsSnapshot::from_value(raw)? {
+                                        confirmed |= snapshot.confirms(settings)?;
+                                    }
+                                } else if raw
+                                    .get("requestId")
+                                    .is_none_or(serde_json::Value::is_null)
+                                {
+                                    // Droid may broadcast the previous settings before the tagged
+                                    // snapshot. A broadcast can confirm a match, not a rejection.
+                                    matching_broadcast = SettingsSnapshot::from_value(raw)
+                                        .ok()
+                                        .flatten()
+                                        .and_then(|snapshot| snapshot.confirms(settings).ok())
+                                        .unwrap_or(false);
+                                }
                             }
                             self.push_startup(event)?;
                         }
