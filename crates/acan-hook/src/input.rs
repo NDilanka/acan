@@ -6,10 +6,13 @@ use serde_json::Value;
 use crate::HookError;
 use crate::protocol::{HookRequest, PROTOCOL_VERSION, RequestKind};
 
-/// Droid's outer batch wrapper. Each inner call fires its own `PreToolUse`, so the wrapper passes.
+/// Droid's outer batch wrapper. Each inner call fires its own `PreToolUse`, so the wrapper
+/// passes. Only a wrapper whose input carries a non-blank `script` string passes. Any other
+/// `Script` call goes to the daemon like an ordinary tool call.
 pub const SCRIPT_TOOL: &str = "Script";
 
-/// The fields of Droid's hook stdin that the hook reads. Other fields, such as `source`, are ignored.
+/// The fields of Droid's hook stdin that the hook reads. Other fields, such as `source`, are
+/// ignored.
 #[derive(Debug, Deserialize)]
 pub struct HookInput {
     pub hook_event_name: String,
@@ -28,38 +31,61 @@ pub enum Plan {
     Ask(HookRequest),
 }
 
-/// Parses hook stdin.
+/// Parses hook stdin. It must be one JSON object.
 ///
 /// # Errors
 ///
-/// Returns [`HookError::BadInput`] when stdin is not a JSON object with `hook_event_name`.
+/// Returns [`HookError::BadInput`] when stdin is not a JSON object with a `hook_event_name`
+/// string.
 pub fn parse(raw: &str) -> Result<HookInput, HookError> {
-    serde_json::from_str(raw).map_err(|err| HookError::BadInput(err.to_string()))
+    crate::parse_object(raw).map_err(HookError::BadInput)
 }
 
 /// Decides what to ask the daemon for one event.
 ///
+/// A `SessionStart` must carry no tool fields. A `PreToolUse` must carry a non-blank
+/// `tool_name` and an object `tool_input`.
+///
 /// # Errors
 ///
-/// Returns [`HookError::BadInput`] for an event the hook does not handle, or for a
-/// `PreToolUse` that has no `tool_name`.
+/// Returns [`HookError::BadInput`] for an event the hook does not handle, or for a shape Droid
+/// does not send.
 pub fn plan(input: HookInput, order: &str) -> Result<Plan, HookError> {
     match input.hook_event_name.as_str() {
-        "SessionStart" => Ok(Plan::Ask(request(RequestKind::SessionStart, input, order))),
+        "SessionStart" => {
+            if input.tool_name.is_some() || input.tool_input.is_some() {
+                return Err(bad_input("SessionStart carries tool fields"));
+            }
+            Ok(Plan::Ask(request(RequestKind::SessionStart, input, order)))
+        }
         "PreToolUse" => {
             let tool_name = input
                 .tool_name
                 .as_deref()
-                .ok_or_else(|| HookError::BadInput("PreToolUse without tool_name".to_owned()))?;
-            if tool_name == SCRIPT_TOOL {
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| bad_input("PreToolUse without a tool_name"))?;
+            let tool_input = input
+                .tool_input
+                .as_ref()
+                .filter(|value| value.is_object())
+                .ok_or_else(|| bad_input("PreToolUse without a tool_input object"))?;
+            if is_batch_wrapper(tool_name, tool_input) {
                 return Ok(Plan::Pass);
             }
             Ok(Plan::Ask(request(RequestKind::PreToolUse, input, order)))
         }
-        other => Err(HookError::BadInput(format!(
-            "unsupported hook event {other:?}"
-        ))),
+        other => Err(bad_input(format!("unsupported hook event {other:?}"))),
     }
+}
+
+/// True for the outer `Script` call: the tool is `Script` and its input carries a script.
+fn is_batch_wrapper(tool_name: &str, tool_input: &Value) -> bool {
+    tool_name == SCRIPT_TOOL
+        && str_field(tool_input, "script").is_some_and(|script| !script.trim().is_empty())
+}
+
+fn bad_input(why: impl Into<String>) -> HookError {
+    HookError::BadInput(why.into())
 }
 
 fn request(kind: RequestKind, input: HookInput, order: &str) -> HookRequest {
@@ -102,6 +128,13 @@ mod tests {
         match plan(parse(raw).expect("valid hook input"), "order-1") {
             Ok(Plan::Ask(request)) => request,
             other => panic!("expected a request, got {other:?}"),
+        }
+    }
+
+    fn refused(raw: &str) -> HookError {
+        match parse(raw).and_then(|input| plan(input, "order-1")) {
+            Err(err) => err,
+            Ok(plan) => panic!("{raw} must be refused, got {plan:?}"),
         }
     }
 
@@ -160,23 +193,70 @@ mod tests {
     }
 
     #[test]
+    fn script_without_a_script_string_goes_to_the_daemon() {
+        for raw in [
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Script","tool_input":{}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Script","tool_input":{"script":"  "}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Script","tool_input":{"script":3}}"#,
+        ] {
+            let request = ask(raw);
+            assert_eq!(request.kind, RequestKind::PreToolUse, "{raw}");
+            assert_eq!(request.tool_name.as_deref(), Some("Script"), "{raw}");
+        }
+    }
+
+    #[test]
     fn unusable_events_are_bad_input() {
-        let no_tool = plan(
-            parse(r#"{"hook_event_name":"PreToolUse"}"#).expect("valid hook input"),
-            "order-1",
-        );
-        assert!(
-            matches!(no_tool, Err(HookError::BadInput(_))),
-            "{no_tool:?}"
-        );
-        let other_event = plan(
-            parse(r#"{"hook_event_name":"Stop"}"#).expect("valid hook input"),
-            "order-1",
-        );
-        assert!(
-            matches!(other_event, Err(HookError::BadInput(_))),
-            "{other_event:?}"
-        );
+        assert!(matches!(
+            refused(r#"{"hook_event_name":"PreToolUse"}"#),
+            HookError::BadInput(_)
+        ));
+        assert!(matches!(
+            refused(r#"{"hook_event_name":"Stop"}"#),
+            HookError::BadInput(_)
+        ));
         assert!(matches!(parse("{not json"), Err(HookError::BadInput(_))));
+    }
+
+    #[test]
+    fn non_object_stdin_is_bad_input() {
+        for raw in [
+            r#"["PreToolUse","Create"]"#,
+            r#""PreToolUse""#,
+            "null",
+            "[]",
+        ] {
+            assert!(
+                matches!(parse(raw), Err(HookError::BadInput(_))),
+                "{raw} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_tool_use_needs_a_name_and_an_object_input() {
+        for raw in [
+            r#"{"hook_event_name":"PreToolUse","tool_name":"  ","tool_input":{}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Create"}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Create","tool_input":"x"}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Create","tool_input":["x"]}"#,
+        ] {
+            assert!(
+                matches!(refused(raw), HookError::BadInput(_)),
+                "{raw} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn session_start_with_tool_fields_is_bad_input() {
+        assert!(matches!(
+            refused(r#"{"hook_event_name":"SessionStart","tool_name":"Create"}"#),
+            HookError::BadInput(_)
+        ));
+        assert!(matches!(
+            refused(r#"{"hook_event_name":"SessionStart","tool_input":{}}"#),
+            HookError::BadInput(_)
+        ));
     }
 }

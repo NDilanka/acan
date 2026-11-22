@@ -85,15 +85,18 @@ pub fn encode_request(request: &HookRequest) -> Result<String, HookError> {
     Ok(line)
 }
 
-/// Parses the daemon's reply line.
+/// Parses the daemon's reply line. The line must end in a newline and be one JSON object.
 ///
 /// # Errors
 ///
-/// Returns [`HookError::BadReply`] for malformed JSON, a missing or unknown decision, or a
-/// protocol version other than [`PROTOCOL_VERSION`].
+/// Returns [`HookError::BadReply`] when the line is not newline-terminated, is not a JSON
+/// object with a known `decision`, or carries a protocol version other than
+/// [`PROTOCOL_VERSION`].
 pub fn parse_reply(line: &str) -> Result<HookResponse, HookError> {
-    let response: HookResponse =
-        serde_json::from_str(line.trim()).map_err(|err| HookError::BadReply(err.to_string()))?;
+    let body = line
+        .strip_suffix('\n')
+        .ok_or_else(|| HookError::BadReply("the reply is not newline-terminated".to_owned()))?;
+    let response: HookResponse = crate::parse_object(body).map_err(HookError::BadReply)?;
     if response.version != PROTOCOL_VERSION {
         return Err(HookError::BadReply(format!(
             "protocol version {} (expected {PROTOCOL_VERSION})",
@@ -112,8 +115,11 @@ fn collapse_whitespace(text: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Parses one reply line the way the transport delivers it: with its newline.
     fn verdict(line: &str) -> Result<(), HookError> {
-        parse_reply(line).expect("reply parses").into_verdict()
+        parse_reply(&format!("{line}\n"))
+            .expect("reply parses")
+            .into_verdict()
     }
 
     #[test]
@@ -147,13 +153,27 @@ mod tests {
             r#"{"version":1}"#,
             r#"{"decision":"allow"}"#,
             r#"{"version":2,"decision":"allow"}"#,
+            // serde reads a sequence as a struct by position, so arrays are refused by name.
+            r#"["1","allow"]"#,
+            r#"[1,"allow",null]"#,
         ];
         for case in cases {
+            // Each case is complete, so the only fault is the content itself.
+            let line = format!("{case}\n");
             assert!(
-                matches!(parse_reply(case), Err(HookError::BadReply(_))),
+                matches!(parse_reply(&line), Err(HookError::BadReply(_))),
                 "reply {case:?} must be refused"
             );
         }
+    }
+
+    #[test]
+    fn a_reply_without_a_newline_is_refused() {
+        let unterminated = r#"{"version":1,"decision":"allow"}"#;
+        assert!(
+            matches!(parse_reply(unterminated), Err(HookError::BadReply(_))),
+            "a reply cut before its newline must be refused"
+        );
     }
 
     #[test]

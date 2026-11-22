@@ -3,11 +3,11 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use acan_hook::{ENDPOINT_ENV, ORDER_ENV, TIMEOUT_ENV};
+use acan_hook::{ENDPOINT_ENV, MAX_STDIN_BYTES, ORDER_ENV, TIMEOUT_ENV};
 use serde_json::Value;
 
 const ORDER: &str = "order-1";
@@ -25,8 +25,8 @@ struct Run {
     elapsed: Duration,
 }
 
-/// Runs the hook with a clean Acan environment plus `env`, feeding `input` on stdin.
-fn run_hook(env: &[(&str, &str)], input: &str) -> Run {
+/// The hook command, with a clean Acan environment plus `env`.
+fn hook_command(env: &[(&str, &str)]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_acan-hook"));
     cmd.env_remove(ORDER_ENV)
         .env_remove(ENDPOINT_ENV)
@@ -37,12 +37,34 @@ fn run_hook(env: &[(&str, &str)], input: &str) -> Run {
     for (key, value) in env {
         cmd.env(key, value);
     }
+    cmd
+}
+
+/// Runs the hook with a clean Acan environment plus `env`, feeding `input` on stdin.
+fn run_hook(env: &[(&str, &str)], input: &str) -> Run {
     let start = Instant::now();
-    let mut child = cmd.spawn().expect("spawn acan-hook");
+    let mut child = hook_command(env).spawn().expect("spawn acan-hook");
     if let Some(mut stdin) = child.stdin.take() {
         // The hook may exit without reading stdin (outside an Acan session), so a broken pipe is fine.
         let _ = stdin.write_all(input.as_bytes());
     }
+    finish(child, start)
+}
+
+/// Like `run_hook`, but keeps stdin open after `input`, so the hook never sees end of input.
+/// Only the hook's own deadline can end the run.
+fn run_hook_without_eof(env: &[(&str, &str)], input: &str) -> Run {
+    let start = Instant::now();
+    let mut child = hook_command(env).spawn().expect("spawn acan-hook");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    stdin.write_all(input.as_bytes()).expect("write the input");
+    let run = finish(child, start);
+    // Closed only after the hook has exited.
+    drop(stdin);
+    run
+}
+
+fn finish(child: Child, start: Instant) -> Run {
     let output = child.wait_with_output().expect("wait for acan-hook");
     Run {
         code: output.status.code(),
@@ -120,6 +142,23 @@ fn tcp_daemon(reply: &str) -> (String, thread::JoinHandle<String>) {
     (endpoint, daemon)
 }
 
+/// Starts a loopback daemon that answers one hook connection with `reply`, sent exactly as
+/// given. Unless `reply` ends in a newline, the connection closes with the reply cut short.
+fn tcp_daemon_unterminated(reply: &str) -> (String, thread::JoinHandle<()>) {
+    let (listener, endpoint) = untouched_listener();
+    let reply = reply.to_owned();
+    let daemon = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept the hook");
+        let mut request = String::new();
+        BufReader::new(&mut stream)
+            .read_line(&mut request)
+            .expect("read the request line");
+        stream.write_all(reply.as_bytes()).expect("write the reply");
+        // Dropping the stream here closes the connection after the reply.
+    });
+    (endpoint, daemon)
+}
+
 /// A loopback daemon that accepts the hook and never replies.
 fn silent_daemon() -> String {
     let (listener, endpoint) = untouched_listener();
@@ -174,6 +213,8 @@ fn bad_endpoint_blocks() {
         "tcp://192.0.2.1:9",
         "tcp://localhost:9",
         "tcp://127.0.0.1:notaport",
+        "tcp://127.0.0.1:9/x",
+        "acan-hook.sock",
     ] {
         let run = run_hook(&acan_env(endpoint), PRE_TOOL_USE);
         assert_eq!(
@@ -322,6 +363,125 @@ fn outer_script_batch_passes_without_contacting_the_daemon() {
     assert_no_contact(&listener);
 }
 
+#[test]
+fn blank_order_id_blocks_without_contacting_the_daemon() {
+    let (listener, endpoint) = untouched_listener();
+    for order in ["   ", "\t"] {
+        let run = run_hook(
+            &[(ORDER_ENV, order), (ENDPOINT_ENV, endpoint.as_str())],
+            PRE_TOOL_USE,
+        );
+        assert_eq!(run.code, Some(2), "order {order:?}; stderr: {}", run.stderr);
+        assert!(
+            run.stderr.contains("bad environment"),
+            "order {order:?}; stderr: {}",
+            run.stderr
+        );
+    }
+    assert_no_contact(&listener);
+}
+
+#[test]
+fn oversized_stdin_blocks_without_contacting_the_daemon() {
+    let (listener, endpoint) = untouched_listener();
+    // Valid JSON, one byte over the cap: the size check must refuse it before parsing.
+    let padding = "x".repeat(usize::try_from(MAX_STDIN_BYTES).expect("cap fits in usize") + 1);
+    let input = format!(
+        r#"{{"hook_event_name":"PreToolUse","tool_name":"Create","tool_input":{{"file_path":"src/a.txt","content":"{padding}"}}}}"#
+    );
+    let run = run_hook(&acan_env(&endpoint), &input);
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(run.stderr.contains("exceeds"), "stderr: {}", run.stderr);
+    assert_no_contact(&listener);
+}
+
+#[test]
+fn stdin_without_end_of_input_blocks_at_the_deadline() {
+    let (listener, endpoint) = untouched_listener();
+    let mut env = acan_env(&endpoint);
+    env.push((TIMEOUT_ENV, "50"));
+    let run = run_hook_without_eof(&env, PRE_TOOL_USE);
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(
+        run.stderr.contains("timed out after 50 ms"),
+        "stderr: {}",
+        run.stderr
+    );
+    assert!(run.elapsed < HOOK_EXIT_LIMIT, "took {:?}", run.elapsed);
+    assert_no_contact(&listener);
+}
+
+#[test]
+fn unusable_hook_input_blocks_without_contacting_the_daemon() {
+    let (listener, endpoint) = untouched_listener();
+    for input in [
+        r#"["PreToolUse","Create"]"#,
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Create"}"#,
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Create","tool_input":["x"]}"#,
+        r#"{"hook_event_name":"PreToolUse","tool_name":"  ","tool_input":{}}"#,
+        r#"{"hook_event_name":"SessionStart","tool_name":"Create"}"#,
+    ] {
+        let run = run_hook(&acan_env(&endpoint), input);
+        assert_eq!(run.code, Some(2), "input {input}; stderr: {}", run.stderr);
+        assert!(
+            run.stderr.contains("bad hook input"),
+            "input {input}; stderr: {}",
+            run.stderr
+        );
+    }
+    assert_no_contact(&listener);
+}
+
+#[test]
+/// A missing endpoint refuses at once on every platform. A closed loopback port can take
+/// seconds to refuse, so the deadline may end that case instead; `daemon_down_blocks_within_the_deadline`
+/// covers it.
+fn session_start_with_the_daemon_down_blocks() {
+    let run = run_hook(&acan_env(&missing_local_endpoint()), SESSION_START);
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(
+        run.stderr.contains("daemon unavailable"),
+        "stderr: {}",
+        run.stderr
+    );
+}
+
+#[test]
+fn a_script_call_without_a_script_goes_to_the_daemon() {
+    let (endpoint, daemon) = tcp_daemon(ALLOW);
+    let input =
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Script","tool_input":{"script":"  "}}"#;
+    let run = run_hook(&acan_env(&endpoint), input);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    let request: Value =
+        serde_json::from_str(&daemon.join().expect("daemon thread")).expect("JSON request");
+    assert_eq!(request["kind"], "pre_tool_use");
+    assert_eq!(request["tool_name"], "Script");
+}
+
+#[test]
+fn bad_daemon_replies_block_even_when_cut_short_or_not_objects() {
+    // Valid JSON, but an array rather than an object.
+    let (endpoint, _daemon) = tcp_daemon(r#"["1","allow"]"#);
+    let run = run_hook(&acan_env(&endpoint), PRE_TOOL_USE);
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(
+        run.stderr.contains("bad daemon reply"),
+        "stderr: {}",
+        run.stderr
+    );
+
+    // A complete allow that the daemon closes before sending its newline.
+    let (endpoint, _daemon) = tcp_daemon_unterminated(ALLOW);
+    let run = run_hook(&acan_env(&endpoint), PRE_TOOL_USE);
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(
+        run.stderr.contains("bad daemon reply"),
+        "stderr: {}",
+        run.stderr
+    );
+}
+
 #[cfg(unix)]
 mod unix_socket {
     use std::os::unix::net::UnixListener;
@@ -436,5 +596,41 @@ mod named_pipe {
         // blocked in ConnectNamedPipe.
         assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
         assert_write_request(&server.join().expect("pipe server thread"));
+    }
+
+    /// Only a canonical named pipe is a local endpoint. A plain file, a UNC share, and a name
+    /// that climbs out of the pipe namespace are all refused before anything is opened.
+    #[test]
+    fn only_named_pipes_are_local_endpoints() {
+        let file = std::env::temp_dir().join(format!("acan-hook-plain-{}.txt", std::process::id()));
+        std::fs::write(&file, "sentinel").expect("write the plain file");
+        let plain = file.display().to_string();
+        let endpoints = [
+            plain.as_str(),
+            r"\\server\share\acan",
+            r"\\.\pipe\..\acan",
+            r"\\.\pipe\a\b",
+            r"\\.\pipe\",
+        ];
+        let runs: Vec<(&str, Run)> = endpoints
+            .iter()
+            .map(|endpoint| (*endpoint, run_hook(&acan_env(endpoint), PRE_TOOL_USE)))
+            .collect();
+        let kept = std::fs::read_to_string(&file).expect("read the plain file back");
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(kept, "sentinel");
+        for (endpoint, run) in runs {
+            assert_eq!(
+                run.code,
+                Some(2),
+                "endpoint {endpoint}; stderr: {}",
+                run.stderr
+            );
+            assert!(
+                run.stderr.contains("bad endpoint"),
+                "endpoint {endpoint}; stderr: {}",
+                run.stderr
+            );
+        }
     }
 }
