@@ -27,9 +27,6 @@ const MAX_COMMAND_ARGS: usize = 64;
 /// The longest argument a custom command may have, in bytes.
 const MAX_ARG_BYTES: usize = 512;
 
-/// The most local workers one project may run.
-const MAX_WORKERS: u8 = 8;
-
 /// A settings change as the request sends it. Each section is optional, and each field in a
 /// section is optional, so a change names only what it sets. Unknown fields are refused when the
 /// request is parsed, so `tokens`, `about` and `version` are never accepted.
@@ -78,7 +75,6 @@ pub(crate) struct HarnessPatch {
 pub(crate) struct ProjectsPatch {
     add: Option<Vec<String>>,
     remove: Option<Vec<String>>,
-    workers: Option<BTreeMap<String, i64>>,
     /// Whether each named project uses the statemap LLM. The ids must be projects the server runs.
     statemap_llm: Option<BTreeMap<String, bool>>,
 }
@@ -440,24 +436,6 @@ fn projects(
                 .any(|removed| same_folder(Path::new(removed), &folder));
             if !kept {
                 next.remove.push(folder.display().to_string());
-            }
-        }
-    }
-    if let Some(workers) = &section.workers {
-        for (id, count) in workers {
-            if !valid_id(id) {
-                errors.push(field("projects.workers", "must name project ids"));
-                continue;
-            }
-            let path = format!("projects.workers.{id}");
-            match u8::try_from(*count)
-                .ok()
-                .filter(|count| *count <= MAX_WORKERS)
-            {
-                Some(count) => {
-                    next.workers.insert(id.clone(), count);
-                }
-                None => errors.push(field(&path, &format!("must be from 0 to {MAX_WORKERS}"))),
             }
         }
     }
@@ -1018,7 +996,7 @@ mod tests {
     }
 
     #[test]
-    fn project_ids_and_worker_counts_are_bounded() {
+    fn removed_project_ids_are_bounded() {
         assert!(names(
             &refused(json!({"projects": {"remove": ["Bad_Id"]}})),
             "projects.remove"
@@ -1038,20 +1016,6 @@ mod tests {
         // A removed folder is kept as its absolute path, which is drive-qualified on Windows.
         let beta = std::path::absolute("/work/beta").expect("an absolute path");
         assert_eq!(other.next.projects.remove, vec![beta.display().to_string()]);
-        let eight = accepted(json!({"projects": {"workers": {"acan-wip": 8}}}));
-        assert_eq!(eight.next.projects.workers.get("acan-wip"), Some(&8));
-        assert!(names(
-            &refused(json!({"projects": {"workers": {"acan-wip": 9}}})),
-            "projects.workers.acan-wip"
-        ));
-        assert!(names(
-            &refused(json!({"projects": {"workers": {"acan-wip": -1}}})),
-            "projects.workers.acan-wip"
-        ));
-        assert!(names(
-            &refused(json!({"projects": {"workers": {"Bad Id": 1}}})),
-            "projects.workers"
-        ));
     }
 
     #[test]

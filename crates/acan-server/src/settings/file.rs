@@ -177,7 +177,7 @@ mod tests {
             r#"{
                 "top": 1,
                 "harness": {"roles": {"worker": "codex"}, "wrapper": {"depth": 2}},
-                "projects": {"workers": {"alpha": 3}, "live": ["/some/folder"]},
+                "projects": {"live": ["/some/folder"]},
                 "budgets": {"repair_rounds": 5, "spare": true,
                             "call_limits": {"statemap": 12, "planner": 7}},
                 "look": {"theme": "dark", "glow": "soft"},
@@ -201,7 +201,6 @@ mod tests {
             stored.harness.roles.get(&Role::Worker),
             Some(&Adapter::Codex)
         );
-        assert_eq!(stored.projects.workers.get("alpha"), Some(&3));
         assert_eq!(stored.budgets.repair_rounds, 5);
         assert_eq!(stored.budgets.call_limits.statemap, 12);
         assert_eq!(stored.look.theme, Theme::Dark);

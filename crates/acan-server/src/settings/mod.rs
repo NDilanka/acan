@@ -216,13 +216,10 @@ pub(crate) struct Harness {
 }
 
 /// The projects a change records. Adds and removals take effect at the next start, and stay in
-/// effect until a later change undoes them. The worker counts are what each project runs with.
+/// effect until a later change undoes them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Projects {
-    /// The local worker count of each project, by id. A project with no entry runs the count the
-    /// server started with.
-    pub(crate) workers: BTreeMap<String, u8>,
     /// Folders served as projects beyond the ones the command line or projects file names, as
     /// absolute paths.
     pub(crate) add: Vec<String>,
@@ -624,7 +621,6 @@ impl<C: ModelClient + 'static> Settings<C> {
         note(&mut applied, "projects.add".to_owned());
         note(&mut applied, "projects.remove".to_owned());
         for entry in self.projects.entries() {
-            note(&mut applied, format!("projects.workers.{}", entry.id));
             note(&mut applied, format!("projects.statemap_llm.{}", entry.id));
         }
         applied
@@ -1570,7 +1566,6 @@ mod tests {
         assert_eq!(applied_label("budgets.call_limits.statemap"), "live");
         assert_eq!(applied_label("projects.add"), "restart");
         assert_eq!(applied_label("projects.remove"), "restart");
-        assert_eq!(applied_label("projects.workers.acan-wip"), "restart");
         assert_eq!(applied_label("projects.statemap_llm.acan-wip"), "live");
         assert_eq!(applied_label("look.theme"), "client");
         assert_eq!(applied_label("notifications.sound"), "client");
@@ -1595,16 +1590,13 @@ mod tests {
 
         let mut applied = BTreeMap::new();
         note_each(
-            &json!({"workers": {"acan-wip": 1}, "statemap_llm": {"acan-wip": true}}),
+            &json!({"statemap_llm": {"acan-wip": true}}),
             "projects",
             &mut applied,
         );
         assert_eq!(
             applied,
-            BTreeMap::from([
-                ("projects.statemap_llm.acan-wip".to_owned(), "live"),
-                ("projects.workers.acan-wip".to_owned(), "restart"),
-            ])
+            BTreeMap::from([("projects.statemap_llm.acan-wip".to_owned(), "live")])
         );
 
         let mut applied = BTreeMap::new();
