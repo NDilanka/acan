@@ -47,10 +47,8 @@ async fn checks_in_the_child() {
         .await
         .expect("the tested repository opens");
     assert_eq!(
-        repo.root(),
-        std::fs::canonicalize(&root)
-            .expect("a canonical root")
-            .as_path(),
+        std::fs::canonicalize(repo.root()).expect("canonical repo root"),
+        std::fs::canonicalize(&root).expect("a canonical root"),
         "the root is the tested repository"
     );
     let head = repo

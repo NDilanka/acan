@@ -853,32 +853,46 @@ mod tests {
 
     #[test]
     fn the_run_folder_follows_the_platform_variables() {
+        let local = if cfg!(windows) { r"C:\local" } else { "/local" };
+        let state = if cfg!(windows) { r"C:\state" } else { "/state" };
+        let home = if cfg!(windows) {
+            r"C:\users\me"
+        } else {
+            "/users/me"
+        };
         let all = [
-            ("LOCALAPPDATA", "/local"),
-            ("XDG_STATE_HOME", "/state"),
-            ("HOME", "/users/me"),
+            ("LOCALAPPDATA", local),
+            ("XDG_STATE_HOME", state),
+            ("HOME", home),
         ];
         assert_eq!(
             run_dir_from(true, vars(&all)),
-            Some(PathBuf::from("/local/Acan"))
+            Some(PathBuf::from(local).join("Acan"))
         );
         assert_eq!(
             run_dir_from(false, vars(&all)),
-            Some(PathBuf::from("/state/acan"))
+            Some(PathBuf::from(state).join("acan"))
         );
         assert_eq!(
-            run_dir_from(false, vars(&[("HOME", "/users/me")])),
-            Some(PathBuf::from("/users/me/.local/state/acan"))
+            run_dir_from(false, vars(&[("HOME", home)])),
+            Some(
+                PathBuf::from(home)
+                    .join(".local")
+                    .join("state")
+                    .join("acan")
+            )
         );
         assert_eq!(
-            run_dir_from(
-                false,
-                vars(&[("XDG_STATE_HOME", "state"), ("HOME", "/users/me")])
+            run_dir_from(false, vars(&[("XDG_STATE_HOME", "state"), ("HOME", home)])),
+            Some(
+                PathBuf::from(home)
+                    .join(".local")
+                    .join("state")
+                    .join("acan")
             ),
-            Some(PathBuf::from("/users/me/.local/state/acan")),
             "a relative XDG_STATE_HOME is ignored"
         );
-        assert_eq!(run_dir_from(true, vars(&[("HOME", "/users/me")])), None);
+        assert_eq!(run_dir_from(true, vars(&[("HOME", home)])), None);
         assert_eq!(run_dir_from(false, vars(&[])), None);
     }
 

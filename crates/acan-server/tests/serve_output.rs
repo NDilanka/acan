@@ -24,6 +24,7 @@ impl Drop for Serving {
 #[test]
 fn a_first_start_with_piped_output_names_the_tokens_file_and_prints_no_token() {
     let repo = tempfile::tempdir().expect("temp dir");
+    let user = tempfile::tempdir().expect("isolated user dirs");
     let child = Command::new(env!("CARGO_BIN_EXE_acan"))
         .arg("serve")
         .arg("--repo")
@@ -36,6 +37,12 @@ fn a_first_start_with_piped_output_names_the_tokens_file_and_prints_no_token() {
             "--workers",
             "0",
         ])
+        .env("HOME", user.path().join("home"))
+        .env("XDG_CONFIG_HOME", user.path().join("config"))
+        .env("XDG_STATE_HOME", user.path().join("state"))
+        .env("XDG_DATA_HOME", user.path().join("data"))
+        .env("APPDATA", user.path().join("appdata"))
+        .env("LOCALAPPDATA", user.path().join("localappdata"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
