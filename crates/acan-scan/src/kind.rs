@@ -1,17 +1,124 @@
-//! The kind of each machine, as the user sets it. The rules that guess a kind are in acan-iso's
-//! `classify`, which the renderer also runs, so a plant that carries no kinds draws the same ones.
+//! The kind of each machine, as the user sets it. The rules that guess a kind are in `rules.rs`.
 //! The user's choices live in `.acan/kinds.json`, and this module reads and writes them.
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::Path;
 
-use acan_iso::Kind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ScanError;
 use crate::model::Machine;
+
+/// The machine kinds: sixteen named kinds and the assembler fallback.
+///
+/// The names are the wire names in the plant JSON. A name this build does not know reads as
+/// [`Kind::Assembler`], so an older build shows a newer kind as the fallback.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// Entry points: servers, app bootstrap, main.
+    Intake,
+    /// Auth, sessions, permissions, guards.
+    Gate,
+    /// Data access, persistence, caching, migrations.
+    Tank,
+    /// Middleware, proxies, gateways.
+    Splitter,
+    /// Rate limits, throttles, quotas.
+    Valve,
+    /// Generated code, vendored output, tests, and machines with no files.
+    Crate,
+    /// Routes, controllers, handlers, endpoints.
+    Switchboard,
+    /// Web frontend: components, pages, screens, styles.
+    Kiosk,
+    /// Models, schemas, types, DTOs, protobuf.
+    Mould,
+    /// Background jobs, queues, workers, cron.
+    Conveyor,
+    /// Events, messaging, pub/sub, hooks.
+    Horn,
+    /// Config, settings, environment, constants.
+    Switchbox,
+    /// Infra, deploy, containers, `IaC`, CI.
+    Gantry,
+    /// CLI, commands, scripts, tools.
+    Console,
+    /// External API clients, SDKs, integrations.
+    Antenna,
+    /// Shared utilities, helpers, common, lib.
+    Toolrack,
+    /// Services, business logic, and anything no other rule names: the fallback.
+    /// It is last so that `serde(other)` can read unknown names as it.
+    #[default]
+    #[serde(other)]
+    Assembler,
+}
+
+impl Kind {
+    /// Every kind, in declaration order.
+    pub const ALL: [Kind; 17] = [
+        Kind::Intake,
+        Kind::Gate,
+        Kind::Tank,
+        Kind::Splitter,
+        Kind::Valve,
+        Kind::Crate,
+        Kind::Switchboard,
+        Kind::Kiosk,
+        Kind::Mould,
+        Kind::Conveyor,
+        Kind::Horn,
+        Kind::Switchbox,
+        Kind::Gantry,
+        Kind::Console,
+        Kind::Antenna,
+        Kind::Toolrack,
+        Kind::Assembler,
+    ];
+}
+
+/// A machine's size in plan units. The machine is centred on the origin, so its plan runs from
+/// `-w / 2` to `w / 2` and from `-d / 2` to `d / 2`, and it stands `top` high.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Footprint {
+    /// Width along x.
+    pub w: f32,
+    /// Depth along y.
+    pub d: f32,
+    /// Height of the machine's top above the floor.
+    pub top: f32,
+}
+
+/// The footprint of `kind`.
+#[must_use]
+pub fn footprint(kind: Kind) -> Footprint {
+    // Width, depth and top, in plan units, in the order of the variants above.
+    let (w, d, top) = match kind {
+        Kind::Intake => (72.0, 88.0, 34.0),
+        Kind::Gate => (56.0, 72.0, 36.0),
+        Kind::Tank => (80.0, 80.0, 48.0),
+        Kind::Splitter => (80.0, 80.0, 30.0),
+        Kind::Valve => (40.0, 40.0, 20.0),
+        Kind::Crate => (48.0, 48.0, 24.0),
+        Kind::Switchboard => (64.0, 40.0, 40.0),
+        Kind::Kiosk => (48.0, 56.0, 44.0),
+        Kind::Mould => (72.0, 56.0, 16.0),
+        Kind::Conveyor => (96.0, 40.0, 18.0),
+        Kind::Horn => (40.0, 40.0, 56.0),
+        Kind::Switchbox => (48.0, 32.0, 40.0),
+        Kind::Gantry => (88.0, 56.0, 44.0),
+        Kind::Console => (40.0, 48.0, 31.0),
+        Kind::Antenna => (56.0, 56.0, 52.0),
+        Kind::Toolrack => (56.0, 32.0, 40.0),
+        Kind::Assembler => (64.0, 64.0, 30.0),
+    };
+    Footprint { w, d, top }
+}
 
 /// The file, under the repo root, that holds the kinds the user set.
 pub const OVERRIDES_PATH: &str = ".acan/kinds.json";

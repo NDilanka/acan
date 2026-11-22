@@ -10,6 +10,7 @@ mod manifest;
 mod model;
 mod progress;
 mod resolve;
+mod rules;
 mod states;
 mod touch;
 mod walk;
@@ -19,16 +20,16 @@ use std::path::{Path, PathBuf};
 
 use hash::Digest;
 
-pub use acan_iso::Kind;
 pub use group::Grouping;
 pub use hash::ContentHash;
-pub use kind::{OVERRIDES_PATH, kind_named, write_kind_overrides};
+pub use kind::{Footprint, Kind, OVERRIDES_PATH, footprint, kind_named, write_kind_overrides};
 pub use lang::Lang;
 pub use model::{
     Belt, Confidence, FileId, ImportRef, ImportTarget, LineRange, Machine, MachineId, Plant,
     Source, SourceFile, State, StateCandidate, StateMachine, Symbol, SymbolKind, Transition,
 };
 pub use progress::{MAX_EXPORT_NAMES, ModuleFill, Progress};
+pub use rules::{Decision, classify};
 pub use touch::{Change, Touched, hunks, touched};
 
 /// Why a scan failed.

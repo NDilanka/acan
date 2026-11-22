@@ -7,7 +7,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-acan-iso = { path = "../acan-iso" }
 anyhow = { workspace = true }
 ignore = "0.4"
 serde = { workspace = true }
@@ -20,4 +19,5 @@ tree-sitter-rust = "0.24"
 tree-sitter-typescript = "0.23"
 
 [dev-dependencies]
+acan-iso = { path = "../acan-iso" }
 tempfile = "3"
