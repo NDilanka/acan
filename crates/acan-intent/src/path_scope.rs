@@ -10,7 +10,7 @@
 //! they read from the worktree.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
@@ -297,6 +297,65 @@ impl PathScope {
     pub fn entries(&self) -> &[ScopeEntry] {
         &self.entries
     }
+
+    /// What the scope and the repo rules say about one path.
+    #[must_use]
+    pub fn coverage(&self, path: &RepoPath, rules: &RepoRules) -> PathCoverage {
+        coverage_in(&self.entries, path, rules)
+    }
+
+    /// The scope without the entries that the other entries already grant. A File drops out when
+    /// the others cover its path, and a Folder drops out when an outer folder or the root grants
+    /// the same access. The root never drops out. Shared and test files are kept unless the
+    /// others cover them, so an explicit File entry for one survives under a plain folder.
+    #[must_use]
+    pub fn merge_redundant(&self, rules: &RepoRules) -> Self {
+        let entries: Vec<ScopeEntry> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !self.is_redundant(*index, rules))
+            .map(|(_, entry)| entry.clone())
+            .collect();
+        debug_assert!(
+            !entries.is_empty(),
+            "the root, or the outermost folder or file, never drops out"
+        );
+        Self { entries }
+    }
+
+    /// True when the other entries grant everything the entry at `index` grants.
+    fn is_redundant(&self, index: usize, rules: &RepoRules) -> bool {
+        let others: Vec<ScopeEntry> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| *position != index)
+            .map(|(_, entry)| entry.clone())
+            .collect();
+        match &self.entries[index] {
+            ScopeEntry::RepoRoot { .. } => false,
+            ScopeEntry::File { path, .. } => {
+                coverage_in(&others, path, rules) == PathCoverage::Covered
+            }
+            ScopeEntry::Folder { path, tests } => {
+                let inner = fold(path);
+                others.iter().any(|outer| match outer {
+                    ScopeEntry::RepoRoot { tests: outer_tests } => *outer_tests || !*tests,
+                    ScopeEntry::Folder {
+                        path: outer_path,
+                        tests: outer_tests,
+                    } => {
+                        let outer = fold(outer_path);
+                        inner.len() > outer.len()
+                            && inner.starts_with(&outer)
+                            && (*outer_tests || !*tests)
+                    }
+                    ScopeEntry::File { .. } => false,
+                })
+            }
+        }
+    }
 }
 
 impl TryFrom<Vec<ScopeEntry>> for PathScope {
@@ -325,6 +384,214 @@ impl JsonSchema for PathScope {
             "minItems": 1
         })
     }
+}
+
+/// The per-repo rules that refuse some paths whatever the scope says.
+///
+/// `protected_folders` and `check_files` are anchored at the repo root, so `src/.acan/x.md` is
+/// not protected. The other lists match at any depth. A missing field takes its default, so a
+/// partial rules file changes only the lists it names.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct RepoRules {
+    /// Folders no order may change, with everything under them.
+    pub protected_folders: Vec<RepoPath>,
+    /// Files whose checks are frozen at approval, so no order may change them.
+    pub check_files: Vec<RepoPath>,
+    /// Folder names whose contents are test files. Matched ignoring ASCII case.
+    pub test_folders: Vec<String>,
+    /// File name patterns that mark test files. `*` matches any run of characters.
+    pub test_file_patterns: Vec<String>,
+    /// Lockfile names that only a File entry can cover. Matched ignoring ASCII case.
+    pub shared_files: Vec<String>,
+}
+
+impl Default for RepoRules {
+    fn default() -> Self {
+        Self {
+            protected_folders: repo_paths(&[".acan", ".factory"]),
+            check_files: Vec::new(),
+            test_folders: strings(&["test", "tests", "__tests__", "spec"]),
+            test_file_patterns: strings(&["*.test.*", "*.spec.*", "*_test.*"]),
+            shared_files: strings(&[
+                "Cargo.lock",
+                "package-lock.json",
+                "pnpm-lock.yaml",
+                "yarn.lock",
+                "bun.lock",
+                "go.sum",
+                "poetry.lock",
+                "uv.lock",
+                "Gemfile.lock",
+            ]),
+        }
+    }
+}
+
+fn repo_paths(raw: &[&str]) -> Vec<RepoPath> {
+    raw.iter()
+        .map(|path| {
+            path.parse::<RepoPath>()
+                .expect("default rule is a portable repo path")
+        })
+        .collect()
+}
+
+fn strings(raw: &[&str]) -> Vec<String> {
+    raw.iter().map(|text| (*text).to_owned()).collect()
+}
+
+/// What the scope and the repo rules say about one path.
+///
+/// The name avoids `view::Coverage`, which the crate root exports for the plant view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PathCoverage {
+    /// An entry covers the path, and no rule refuses it.
+    Covered,
+    /// A protected folder holds the path. No order may change it.
+    Protected {
+        /// The protected folder, repo-relative.
+        rule: RepoPath,
+    },
+    /// The path is a check file, whose checks are frozen at approval.
+    CheckFile,
+    /// The path is a test file that no entry allows.
+    TestFile,
+    /// The path is a shared file, which only a File entry can name.
+    SharedFile,
+    /// No entry covers the path.
+    Outside,
+}
+
+impl fmt::Display for PathCoverage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Covered => f.write_str("covered by the scope"),
+            Self::Protected { rule } => {
+                write!(f, "protected folder {rule}/ is never writable by an order")
+            }
+            Self::CheckFile => f.write_str("a check file, whose checks are frozen at approval"),
+            Self::TestFile => f.write_str(
+                "a test file: name it with a file entry, or use a folder entry with tests on",
+            ),
+            Self::SharedFile => f.write_str("a shared file: only a file entry can name it"),
+            Self::Outside => f.write_str("outside the scope"),
+        }
+    }
+}
+
+/// Matches a file name against a pattern whose `*` stands for any run of characters. Case is
+/// ignored on both sides.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    let pattern = pattern.to_ascii_lowercase();
+    let name = name.to_ascii_lowercase();
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let Some((first, after_first)) = parts.split_first() else {
+        return false;
+    };
+    let Some((last, middle)) = after_first.split_last() else {
+        return name == pattern;
+    };
+    let Some(mut rest) = name.strip_prefix(*first) else {
+        return false;
+    };
+    for part in middle {
+        let Some(found) = rest.find(*part) else {
+            return false;
+        };
+        rest = &rest[found + part.len()..];
+    }
+    rest.ends_with(*last)
+}
+
+/// True when a folder name above the path is a test folder, or the file name matches a test
+/// pattern.
+fn is_test_file(rules: &RepoRules, path: &RepoPath) -> bool {
+    let segments = fold(path);
+    let Some((name, folders)) = segments.split_last() else {
+        return false;
+    };
+    folders.iter().any(|folder| {
+        rules
+            .test_folders
+            .iter()
+            .any(|test| test.eq_ignore_ascii_case(folder))
+    }) || rules
+        .test_file_patterns
+        .iter()
+        .any(|pattern| glob_matches(pattern, name))
+}
+
+/// Decides one path in the order the spec gives: protected folders, check files, a File entry
+/// that names the path, shared files, then the broad entries. The rules before the entries win
+/// over them.
+fn coverage_in(entries: &[ScopeEntry], path: &RepoPath, rules: &RepoRules) -> PathCoverage {
+    let segments = fold(path);
+    if let Some(rule) = rules
+        .protected_folders
+        .iter()
+        .find(|folder| segments.starts_with(&fold(folder)))
+    {
+        return PathCoverage::Protected { rule: rule.clone() };
+    }
+    if rules.check_files.iter().any(|file| fold(file) == segments) {
+        return PathCoverage::CheckFile;
+    }
+    let named = entries.iter().any(
+        |entry| matches!(entry, ScopeEntry::File { path: named, .. } if fold(named) == segments),
+    );
+    if named {
+        return PathCoverage::Covered;
+    }
+    let name = segments.last().map_or("", String::as_str);
+    if rules
+        .shared_files
+        .iter()
+        .any(|shared| shared.eq_ignore_ascii_case(name))
+    {
+        return PathCoverage::SharedFile;
+    }
+    let test = is_test_file(rules, path);
+    let broad = entries.iter().any(|entry| match entry {
+        ScopeEntry::Folder {
+            path: folder,
+            tests,
+        } => {
+            let folder = fold(folder);
+            segments.len() > folder.len() && segments.starts_with(&folder) && (*tests || !test)
+        }
+        ScopeEntry::RepoRoot { tests } => *tests || !test,
+        ScopeEntry::File { .. } => false,
+    });
+    if broad {
+        PathCoverage::Covered
+    } else if test {
+        PathCoverage::TestFile
+    } else {
+        PathCoverage::Outside
+    }
+}
+
+/// Pairs of paths that differ only by ASCII case. Each pair names the smallest spelling first and
+/// then one other spelling of the same path, so the result does not depend on input order.
+#[must_use]
+pub fn detect_case_collisions(paths: &[RepoPath]) -> Vec<(RepoPath, RepoPath)> {
+    let mut spellings: BTreeMap<String, BTreeSet<RepoPath>> = BTreeMap::new();
+    for path in paths {
+        spellings
+            .entry(path.as_str().to_ascii_lowercase())
+            .or_default()
+            .insert(path.clone());
+    }
+    let mut pairs = Vec::new();
+    for group in spellings.into_values() {
+        let mut group = group.into_iter();
+        if let Some(first) = group.next() {
+            pairs.extend(group.map(|other| (first.clone(), other)));
+        }
+    }
+    pairs
 }
 
 #[cfg(test)]
@@ -515,6 +782,332 @@ mod tests {
             PathScope::new(Vec::<ScopeEntry>::new()).expect_err("empty scope is refused"),
             PathScopeError::EmptyScope
         );
+    }
+
+    fn scope(entries: impl IntoIterator<Item = ScopeEntry>) -> PathScope {
+        PathScope::new(entries).expect("test scope is non-empty")
+    }
+
+    fn cover(scope: &PathScope, raw: &str) -> PathCoverage {
+        scope.coverage(&repo_path(raw), &RepoRules::default())
+    }
+
+    fn tests_folder(raw: &str) -> ScopeEntry {
+        ScopeEntry::Folder {
+            path: repo_path(raw),
+            tests: true,
+        }
+    }
+
+    #[test]
+    fn default_rules_protect_acan_and_factory_and_name_the_shared_lockfiles() {
+        let rules = RepoRules::default();
+        assert_eq!(
+            rules.protected_folders,
+            vec![repo_path(".acan"), repo_path(".factory")]
+        );
+        assert!(rules.check_files.is_empty());
+        assert_eq!(rules.test_folders, ["test", "tests", "__tests__", "spec"]);
+        assert_eq!(
+            rules.test_file_patterns,
+            ["*.test.*", "*.spec.*", "*_test.*"]
+        );
+        assert_eq!(
+            rules.shared_files,
+            [
+                "Cargo.lock",
+                "package-lock.json",
+                "pnpm-lock.yaml",
+                "yarn.lock",
+                "bun.lock",
+                "go.sum",
+                "poetry.lock",
+                "uv.lock",
+                "Gemfile.lock",
+            ]
+        );
+    }
+
+    #[test]
+    fn partial_rules_json_fills_the_defaults_and_refuses_unknown_fields() {
+        let rules: RepoRules = serde_json::from_str(r#"{"check_files":["ci/checks.yml"]}"#)
+            .expect("partial rules decode");
+        assert_eq!(rules.check_files, vec![repo_path("ci/checks.yml")]);
+        assert_eq!(
+            rules.protected_folders,
+            RepoRules::default().protected_folders
+        );
+        assert_eq!(rules.shared_files, RepoRules::default().shared_files);
+        assert!(serde_json::from_str::<RepoRules>(r#"{"protected":[".acan"]}"#).is_err());
+        assert!(serde_json::from_str::<RepoRules>(r#"{"check_files":["../x"]}"#).is_err());
+    }
+
+    #[test]
+    fn rules_round_trip_through_json() {
+        let rules = RepoRules {
+            check_files: vec![repo_path("ci/checks.yml")],
+            ..RepoRules::default()
+        };
+        let json = serde_json::to_string(&rules).expect("rules serialize");
+        let decoded: RepoRules = serde_json::from_str(&json).expect("rules decode");
+        assert_eq!(decoded, rules);
+    }
+
+    #[test]
+    fn glob_patterns_match_whole_file_names_ignoring_case() {
+        assert!(glob_matches("*.test.*", "app.test.ts"));
+        assert!(!glob_matches("*.test.*", "app.ts"));
+        assert!(!glob_matches("*.test.*", "app.testing.ts"));
+        assert!(glob_matches("*_test.*", "foo_test.go"));
+        assert!(glob_matches("*.spec.*", "Foo.SPEC.tsx"));
+        assert!(glob_matches("Cargo.lock", "cargo.LOCK"));
+        assert!(glob_matches("a*b*c", "axxbyyc"));
+        assert!(!glob_matches("a*b*c", "axxbyy"));
+        assert!(glob_matches("*", ""));
+        assert!(glob_matches("a*", "a"));
+        assert!(!glob_matches("a*a", "a"));
+    }
+
+    #[test]
+    fn folder_entries_match_whole_segments_and_ignore_case() {
+        let covered = scope([folder("src/foo")]);
+        assert_eq!(cover(&covered, "src/foo/a.rs"), PathCoverage::Covered);
+        assert_eq!(cover(&covered, "SRC/FOO/a.rs"), PathCoverage::Covered);
+        assert_eq!(cover(&covered, "src/foobar.rs"), PathCoverage::Outside);
+        let upper = scope([folder("SRC")]);
+        assert_eq!(cover(&upper, "src/app.rs"), PathCoverage::Covered);
+    }
+
+    #[test]
+    fn a_folder_covers_new_files_below_it_and_a_file_covers_only_itself() {
+        let covered = scope([folder("src"), file("docs/readme.md")]);
+        assert_eq!(cover(&covered, "src/deep/new.rs"), PathCoverage::Covered);
+        assert_eq!(cover(&covered, "docs/readme.md"), PathCoverage::Covered);
+        assert_eq!(cover(&covered, "docs/other.md"), PathCoverage::Outside);
+    }
+
+    #[test]
+    fn repo_root_covers_every_path_that_is_not_a_test_file() {
+        let root = scope([ScopeEntry::RepoRoot { tests: false }]);
+        assert_eq!(cover(&root, "a/b/c.rs"), PathCoverage::Covered);
+        assert_eq!(cover(&root, "Cargo.toml"), PathCoverage::Covered);
+    }
+
+    #[test]
+    fn protected_folders_refuse_whatever_the_scope_says_and_match_from_the_root() {
+        let root = scope([ScopeEntry::RepoRoot { tests: true }]);
+        assert_eq!(
+            cover(&root, ".acan/notes.md"),
+            PathCoverage::Protected {
+                rule: repo_path(".acan")
+            }
+        );
+        assert_eq!(
+            cover(&root, ".FACTORY/hooks.json"),
+            PathCoverage::Protected {
+                rule: repo_path(".factory")
+            }
+        );
+        let named = scope([new_file(".acan/world.db")]);
+        assert_eq!(
+            cover(&named, ".acan/world.db"),
+            PathCoverage::Protected {
+                rule: repo_path(".acan")
+            }
+        );
+        assert_eq!(cover(&root, "src/.acan/notes.md"), PathCoverage::Covered);
+    }
+
+    #[test]
+    fn check_files_refuse_even_with_a_file_entry() {
+        let rules = RepoRules {
+            check_files: vec![repo_path("ci/checks.yml")],
+            ..RepoRules::default()
+        };
+        let named = scope([file("ci/checks.yml")]);
+        assert_eq!(
+            named.coverage(&repo_path("ci/checks.yml"), &rules),
+            PathCoverage::CheckFile
+        );
+        let root = scope([ScopeEntry::RepoRoot { tests: true }]);
+        assert_eq!(
+            root.coverage(&repo_path("ci/checks.yml"), &rules),
+            PathCoverage::CheckFile
+        );
+        assert_eq!(
+            root.coverage(&repo_path("src/ci/checks.yml"), &rules),
+            PathCoverage::Covered
+        );
+    }
+
+    #[test]
+    fn test_files_need_a_file_entry_or_a_folder_with_tests_on() {
+        let plain = scope([folder("src")]);
+        assert_eq!(cover(&plain, "src/app.testing.ts"), PathCoverage::Covered);
+        assert_eq!(cover(&plain, "src/tests/unit.rs"), PathCoverage::TestFile);
+        assert_eq!(cover(&plain, "src/app.test.ts"), PathCoverage::TestFile);
+        assert_eq!(cover(&plain, "src/Foo.TEST.ts"), PathCoverage::TestFile);
+        assert_eq!(cover(&plain, "src/foo_test.go"), PathCoverage::TestFile);
+        let lib = scope([folder("lib")]);
+        assert_eq!(cover(&lib, "lib/spec/x.rb"), PathCoverage::TestFile);
+        let lib_tests = scope([tests_folder("lib")]);
+        assert_eq!(
+            cover(&lib_tests, "lib/__tests__/a.ts"),
+            PathCoverage::Covered
+        );
+        assert_eq!(cover(&lib_tests, "lib/spec/x.rb"), PathCoverage::Covered);
+        let named = scope([file("src/tests/unit.rs"), new_file("src/app.test.ts")]);
+        assert_eq!(cover(&named, "src/tests/unit.rs"), PathCoverage::Covered);
+        assert_eq!(cover(&named, "src/app.test.ts"), PathCoverage::Covered);
+        let root_tests = scope([ScopeEntry::RepoRoot { tests: true }]);
+        assert_eq!(
+            cover(&root_tests, "src/tests/unit.rs"),
+            PathCoverage::Covered
+        );
+        let root_plain = scope([ScopeEntry::RepoRoot { tests: false }]);
+        assert_eq!(
+            cover(&root_plain, "src/tests/unit.rs"),
+            PathCoverage::TestFile
+        );
+    }
+
+    #[test]
+    fn custom_test_folders_replace_the_defaults() {
+        let rules = RepoRules {
+            test_folders: vec!["fixtures".to_owned()],
+            ..RepoRules::default()
+        };
+        let lib = scope([folder("lib")]);
+        assert_eq!(
+            lib.coverage(&repo_path("lib/tests/a.rs"), &rules),
+            PathCoverage::Covered
+        );
+        assert_eq!(
+            lib.coverage(&repo_path("lib/fixtures/a.rs"), &rules),
+            PathCoverage::TestFile
+        );
+    }
+
+    #[test]
+    fn shared_files_need_their_own_file_entry_at_any_depth() {
+        let root = scope([ScopeEntry::RepoRoot { tests: true }]);
+        assert_eq!(cover(&root, "Cargo.lock"), PathCoverage::SharedFile);
+        assert_eq!(
+            cover(&root, "web/package-lock.json"),
+            PathCoverage::SharedFile
+        );
+        let web = scope([folder("web")]);
+        assert_eq!(cover(&web, "web/yarn.lock"), PathCoverage::SharedFile);
+        let named = scope([new_file("web/yarn.lock"), file("Cargo.lock")]);
+        assert_eq!(cover(&named, "web/yarn.lock"), PathCoverage::Covered);
+        assert_eq!(cover(&named, "Cargo.lock"), PathCoverage::Covered);
+    }
+
+    #[test]
+    fn coverage_reasons_name_the_rule() {
+        assert_eq!(PathCoverage::Covered.to_string(), "covered by the scope");
+        assert_eq!(
+            PathCoverage::Protected {
+                rule: repo_path(".acan")
+            }
+            .to_string(),
+            "protected folder .acan/ is never writable by an order"
+        );
+        assert_eq!(
+            PathCoverage::CheckFile.to_string(),
+            "a check file, whose checks are frozen at approval"
+        );
+        assert_eq!(
+            PathCoverage::TestFile.to_string(),
+            "a test file: name it with a file entry, or use a folder entry with tests on"
+        );
+        assert_eq!(
+            PathCoverage::SharedFile.to_string(),
+            "a shared file: only a file entry can name it"
+        );
+        assert_eq!(PathCoverage::Outside.to_string(), "outside the scope");
+    }
+
+    #[test]
+    fn merge_drops_entries_the_scope_already_grants_and_is_idempotent() {
+        let merged = scope([
+            folder("src"),
+            file("src/app.rs"),
+            folder("src/x"),
+            file("src/x/y.rs"),
+            file("docs/readme.md"),
+        ])
+        .merge_redundant(&RepoRules::default());
+        assert_eq!(
+            merged.entries().to_vec(),
+            vec![folder("src"), file("docs/readme.md")]
+        );
+        assert_eq!(
+            merged.merge_redundant(&RepoRules::default()),
+            merged,
+            "merging twice changes nothing"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_test_and_shared_files_under_a_plain_folder() {
+        let before = scope([
+            folder("src"),
+            file("src/Cargo.lock"),
+            file("src/tests/unit.rs"),
+        ]);
+        assert_eq!(before.merge_redundant(&RepoRules::default()), before);
+    }
+
+    #[test]
+    fn merge_keeps_a_child_folder_that_adds_test_access_and_drops_one_that_adds_none() {
+        let kept = scope([folder("src"), tests_folder("src/x")]);
+        assert_eq!(kept.merge_redundant(&RepoRules::default()), kept);
+        let dropped = scope([tests_folder("lib"), folder("lib/x")]);
+        assert_eq!(
+            dropped
+                .merge_redundant(&RepoRules::default())
+                .entries()
+                .to_vec(),
+            vec![tests_folder("lib")]
+        );
+    }
+
+    #[test]
+    fn merge_keeps_the_root_and_a_root_level_shared_file() {
+        let root = scope([
+            ScopeEntry::RepoRoot { tests: false },
+            new_file("Cargo.lock"),
+            file("src/app.rs"),
+        ]);
+        assert_eq!(
+            root.merge_redundant(&RepoRules::default())
+                .entries()
+                .to_vec(),
+            vec![
+                ScopeEntry::RepoRoot { tests: false },
+                new_file("Cargo.lock")
+            ]
+        );
+    }
+
+    #[test]
+    fn case_collisions_pair_each_spelling_with_the_smallest() {
+        let paths = [
+            repo_path("src/main.rs"),
+            repo_path("src/Main.rs"),
+            repo_path("docs/a.md"),
+            repo_path("SRC/MAIN.rs"),
+            repo_path("src/main.rs"),
+        ];
+        assert_eq!(
+            detect_case_collisions(&paths),
+            vec![
+                (repo_path("SRC/MAIN.rs"), repo_path("src/Main.rs")),
+                (repo_path("SRC/MAIN.rs"), repo_path("src/main.rs")),
+            ]
+        );
+        assert!(detect_case_collisions(&[repo_path("src/a.rs"), repo_path("src/b.rs")]).is_empty());
     }
 
     #[test]

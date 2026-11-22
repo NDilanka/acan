@@ -86,7 +86,8 @@ pub use observation::{
 };
 pub use order::{DeterministicError, deterministic};
 pub use path_scope::{
-    NormalizedInput, PathScope, PathScopeError, ScopeEntry, normalize_entry_input,
+    NormalizedInput, PathCoverage, PathScope, PathScopeError, RepoRules, ScopeEntry,
+    detect_case_collisions, normalize_entry_input,
 };
 pub use probe::{
     AdvanceTimeStep, AppContract, AppContractVersion, CaptureKind, CaptureOutcome, CaptureSource,
