@@ -22,7 +22,6 @@ use crate::scan_feed::ScanFeed;
 use crate::store::EventStore;
 use crate::touches::{TouchSink, TransitionTouch};
 use crate::tour::TourCache;
-use crate::vision::Vision;
 use crate::writer::{Guard, Snapshot, Writer};
 
 /// How many events a live subscriber may fall behind before the server disconnects it.
@@ -75,8 +74,6 @@ pub struct HostParts<C> {
     /// after another. Their container runs still take permits from the witness pool, so this does
     /// not raise how many containers run at once.
     pub probe_concurrency: usize,
-    /// The advisory vision witness. `None` runs no vision checks.
-    pub vision: Option<Vision>,
 }
 
 /// One world's host. Cloning shares the same writer, log and broadcast.
@@ -104,7 +101,6 @@ struct Inner<C> {
     witness_http_base_url: Option<String>,
     witness_slots: Arc<Semaphore>,
     probe_concurrency: usize,
-    vision: Option<Vision>,
     /// Held by a land from its final check through its install, and by every command that
     /// [`invalidates_landing`]. A command cannot change what a land is checking while the land
     /// checks and installs.
@@ -244,7 +240,6 @@ impl<C: ModelClient> Host<C> {
                 witness_http_base_url: parts.witness_http_base_url,
                 witness_slots: slots,
                 probe_concurrency: parts.probe_concurrency,
-                vision: parts.vision,
                 landing: tokio::sync::Mutex::new(()),
                 #[cfg(test)]
                 stream_hold: crate::stream::Hold::default(),
@@ -306,11 +301,6 @@ impl<C: ModelClient> Host<C> {
     /// How many probes of one contrast run at once.
     pub(crate) fn probe_concurrency(&self) -> usize {
         self.inner.probe_concurrency
-    }
-
-    /// The advisory vision witness, when this server runs one.
-    pub(crate) fn vision(&self) -> Option<&Vision> {
-        self.inner.vision.as_ref()
     }
 
     /// The bearer tokens.
@@ -542,7 +532,7 @@ impl<C: ModelClient> Host<C> {
         }
     }
 
-    /// Opens the project to writes once its codebase is mapped and its workers are registered.
+    /// Opens the project to writes once its codebase is mapped.
     pub(crate) fn open_writes(&self) {
         self.inner.mapped.send_replace(Some(Ok(())));
         self.inner.feed.done();
@@ -552,15 +542,6 @@ impl<C: ModelClient> Host<C> {
     pub(crate) fn mapping_failed(&self, reason: String) {
         self.inner.mapped.send_replace(Some(Err(reason.clone())));
         self.inner.feed.failed(reason);
-    }
-
-    /// Sends `command` to the writer without the mapping gate. Only the mapping task uses it, to
-    /// register the local workers before the project opens to writes.
-    pub(crate) async fn submit_unmapped(
-        &self,
-        command: Command,
-    ) -> Result<Vec<Stamped>, SubmitError> {
-        self.inner.writer.submit(command).await
     }
 
     fn ensure_mapped(&self) -> Result<(), SubmitError> {
@@ -729,7 +710,6 @@ pub(crate) mod testing {
             witness_http_base_url: None,
             witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
             probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
-            vision: None,
         };
         let host = if mapping {
             let slots = Arc::new(Semaphore::new(DEFAULT_WITNESS_CONCURRENCY));

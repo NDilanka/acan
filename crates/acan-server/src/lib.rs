@@ -67,8 +67,6 @@ mod stream;
 mod stream_all;
 mod touches;
 mod tour;
-mod vision;
-mod workers;
 mod writer;
 
 use std::fs;
@@ -79,7 +77,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use acan_core::{Command, HumanCmd, MemberId, Origin, Seq, WorldId, WorldRef};
+use acan_core::{MemberId, Origin, Seq, WorldId, WorldRef};
 use acan_llm::{KeyFile, ModelClient, UsageLedger};
 use anyhow::{Context, bail, ensure};
 use tokio::net::TcpListener;
@@ -95,11 +93,6 @@ pub use index::{IndexError, Scan, code_index, scan};
 pub use jobs::spawn as spawn_jobs;
 pub use models::Models;
 pub use store::EventStore;
-pub use vision::{
-    CHROME, Comparison, EDGE, MustKeepItem, Verdict, Vision, VisionCheck, VisionConfig,
-    VisionWitness, WitnessStatus, default_browser, default_data_dir,
-};
-pub use workers::{State as WorkerState, Status as WorkerStatus, WorkersView};
 
 use crate::add::LiveContext;
 use crate::projects::{ProjectSet, ProjectSpec};
@@ -155,9 +148,6 @@ pub struct ServerConfig {
     pub witness_http_base_url: Option<String>,
     /// How many witness runs may run at once. Must be at least 1.
     pub witness_concurrency: usize,
-    /// The advisory vision witness. `None` runs no vision checks, and the vision route then
-    /// serves a `failed` record for every gate run.
-    pub vision: Option<VisionConfig>,
 }
 
 /// What to serve, and where: the projects, and the settings every project shares.
@@ -174,12 +164,6 @@ pub struct ServeConfig {
     pub web: Option<PathBuf>,
     /// How many witness runs may run at once, across every project. Must be at least 1.
     pub witness_concurrency: usize,
-    /// The advisory vision witness, shared by every project. `None` runs no vision checks.
-    pub vision: Option<VisionConfig>,
-    /// How many local worker loops each project runs in this process, unless the settings give
-    /// that project another count. Zero runs none. Each loop has its own agent, `local-1` and so
-    /// on, in every project.
-    pub local_workers: usize,
     /// Whether each project's codebase maps when its first page connects, rather than as the server
     /// starts. A waiting project's map stays blank and takes no writes until then. Such a server
     /// must be started with [`start_projects_serving`], since waiting for the maps would wait for a
@@ -200,8 +184,6 @@ impl From<ServerConfig> for ServeConfig {
             team: config.team,
             web: config.web,
             witness_concurrency: config.witness_concurrency,
-            vision: config.vision,
-            local_workers: 0,
             map_on_first_view: false,
         }
     }
@@ -256,7 +238,6 @@ pub struct Running {
 pub(crate) struct Runtime {
     id: String,
     jobs: JoinHandle<()>,
-    worker_loops: Vec<JoinHandle<()>>,
     writer: Writer,
     streams: Arc<Mutex<JoinSet<()>>>,
     /// The codebase mapping task of a project added while the server runs. Startup keeps its
@@ -355,14 +336,6 @@ impl Running {
             mapping.abort();
             let _ = mapping.await;
         }
-        // A local worker may be waiting on the origin for up to its wait limit, so its loop is
-        // aborted rather than awaited. Its lease then ends on its own after the origin's TTL.
-        for runtime in &mut self.runtimes {
-            for worker in std::mem::take(&mut runtime.worker_loops) {
-                worker.abort();
-                let _ = worker.await;
-            }
-        }
         let served = self.wait().await;
         drain_streams(&self.streams, "every project").await;
         let mut written: anyhow::Result<()> = Ok(());
@@ -382,10 +355,6 @@ impl Running {
             if let Some(mapping) = runtime.mapping.take() {
                 mapping.abort();
                 let _ = mapping.await;
-            }
-            for worker in std::mem::take(&mut runtime.worker_loops) {
-                worker.abort();
-                let _ = worker.await;
             }
             runtime.jobs.abort();
             let _ = runtime.jobs.await;
@@ -409,45 +378,24 @@ async fn drain_streams(streams: &Mutex<JoinSet<()>>, project: &str) {
     }
 }
 
-/// Opens the repository's world, replays it, scans the code, and starts listening. Runs no local
-/// workers; see [`start_with_workers`].
+/// Opens the repository's world, replays it, scans the code, and starts listening.
 ///
 /// # Errors
 ///
 /// Returns an error when the bind address is non-loopback without `team`, the state directory,
 /// tokens or database cannot be opened, the stored log does not replay, the scan fails, the web
-/// directory is not a dedicated public directory, the vision data directory cannot be created or
-/// is inside the repository, or the address cannot be bound.
+/// directory is not a dedicated public directory, or the address cannot be bound.
 pub async fn start<C: ModelClient + 'static>(
     config: ServerConfig,
     client: C,
     ledger: UsageLedger,
 ) -> anyhow::Result<Running> {
-    start_with_workers(config, client, ledger, 0).await
-}
-
-/// As [`start`], and runs `local_workers` worker loops in this process. Each loop has its own
-/// agent, `local-1` and so on, registered to the owner. Its token is kept in the state directory,
-/// so the same agent keeps its token across starts. Zero runs none.
-///
-/// # Errors
-///
-/// Returns the errors of [`start`], plus an error when an agent token cannot be written or a
-/// local worker cannot be registered.
-pub async fn start_with_workers<C: ModelClient + 'static>(
-    config: ServerConfig,
-    client: C,
-    ledger: UsageLedger,
-    local_workers: usize,
-) -> anyhow::Result<Running> {
-    let mut config = ServeConfig::from(config);
-    config.local_workers = local_workers;
-    start_projects(config, vec![(client, ledger)]).await
+    start_projects(ServeConfig::from(config), vec![(client, ledger)]).await
 }
 
 /// Opens every project's world, replays it, scans its code, and starts one listener that serves
 /// them all. `clients` holds one model client and usage ledger per project, in the order of
-/// `config.projects.projects`. Each project runs `config.local_workers` worker loops.
+/// `config.projects.projects`.
 ///
 /// Every project opens before anything binds, so a project that fails to open leaves nothing
 /// running. The witness pool is one pool for all projects. The settings are kept as in
@@ -468,8 +416,7 @@ pub async fn start_projects<C: ModelClient + 'static>(
 /// defaults. A file that does not parse stops the start, so the server never replaces it with the
 /// defaults.
 ///
-/// Each project runs the local worker count its settings give, or `config.local_workers` when they
-/// give none. The folders settings added and removed are the caller's to apply, with
+/// The folders settings added and removed are the caller's to apply, with
 /// [`apply_project_changes`], before it builds the clients.
 ///
 /// # Errors
@@ -477,8 +424,7 @@ pub async fn start_projects<C: ModelClient + 'static>(
 /// Returns an error when the bind address is non-loopback without `team`, the projects do not
 /// validate, a project's state directory, tokens or database cannot be opened, a stored log does
 /// not replay, a scan fails, the web directory is not a dedicated public directory for every
-/// repository, the settings file cannot be read or does not parse, an agent token cannot be
-/// written, a local worker cannot be registered, or the address cannot be bound.
+/// repository, the settings file cannot be read or does not parse, or the address cannot be bound.
 pub async fn start_projects_with_settings<C: ModelClient + 'static>(
     config: ServeConfig,
     clients: Vec<(C, UsageLedger)>,
@@ -614,16 +560,6 @@ async fn start_listening<C: ModelClient + 'static>(
     };
     let stored = settings::load(&settings_file)?;
     settings::warn_unknown_keys(&stored);
-    let mut visions = Vec::with_capacity(specs.len());
-    for spec in &specs {
-        visions.push(
-            config
-                .vision
-                .as_ref()
-                .map(|vision| Vision::open(vision, &spec.repo))
-                .transpose()?,
-        );
-    }
     let founder = MemberId::from_str(OWNER)?;
     // The user's folder is listed first, so its owner token is the one every project takes.
     let mut dirs: Vec<&Path> = folder.iter().map(|folder| folder.dir.as_path()).collect();
@@ -645,17 +581,9 @@ async fn start_listening<C: ModelClient + 'static>(
     let home_dir = home.as_ref().map(|home| home.dir.clone());
 
     let mut openings = Vec::with_capacity(specs.len());
-    let inputs = specs.into_iter().zip(clients).zip(tokens).zip(visions);
-    for (((spec, (client, ledger)), mut tokens), vision) in inputs {
+    let inputs = specs.into_iter().zip(clients).zip(tokens);
+    for ((spec, (client, ledger)), tokens) in inputs {
         let state_dir = spec.repo.join(STATE_DIR);
-        // Each project's local workers hold their own tokens, kept in that project's state
-        // directory, so the same worker keeps its token across starts.
-        let workers = settings::worker_count(&stored, &spec.id, config.local_workers);
-        let mut worker_tokens = Vec::with_capacity(workers);
-        for index in 0..workers {
-            let token = tokens.agent_token(&state_dir, &workers::agent(index)?)?;
-            worker_tokens.push(token.as_str().to_owned());
-        }
         let store = EventStore::open(&state_dir.join(DB_FILE)).await?;
         let log = store.load_from(Seq::new(0)).await?;
         let origin = if log.is_empty() {
@@ -681,11 +609,9 @@ async fn start_listening<C: ModelClient + 'static>(
             origin,
             scan,
             tokens,
-            vision,
             client,
             ledger,
             statemap,
-            worker_tokens,
         });
     }
 
@@ -700,7 +626,6 @@ async fn start_listening<C: ModelClient + 'static>(
     // witness runs at once.
     let slots = Arc::new(Semaphore::new(config.witness_concurrency));
     let mut entries: Vec<Entry<C>> = Vec::with_capacity(openings.len());
-    let mut project_workers: Vec<Vec<String>> = Vec::with_capacity(openings.len());
     for opening in openings {
         let Opening {
             spec,
@@ -708,11 +633,9 @@ async fn start_listening<C: ModelClient + 'static>(
             origin,
             scan,
             tokens,
-            vision,
             client,
             ledger,
             statemap,
-            worker_tokens,
         } = opening;
         let git = open_git(&spec).await;
         let host = Host::new_mapping(
@@ -729,7 +652,6 @@ async fn start_listening<C: ModelClient + 'static>(
                 witness_http_base_url: spec.witness_http_base_url.clone(),
                 witness_concurrency: config.witness_concurrency,
                 probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
-                vision,
             },
             Arc::clone(&slots),
             Some(statemap),
@@ -741,44 +663,27 @@ async fn start_listening<C: ModelClient + 'static>(
             id: spec.id,
             name: spec.name,
             host,
-            board: workers::Board::new(worker_tokens.len()),
             head: tokio::sync::Mutex::new(None),
             router: None,
             plain: None,
         });
-        project_workers.push(worker_tokens);
     }
-    // Each project maps its codebase in the background. It records the index and registers its
-    // local workers, then opens to writes. Its job and worker loops wait for that.
+    // Each project maps its codebase in the background. It records the index, then opens to
+    // writes. Its job loop waits for that.
     let mut mapping = Vec::with_capacity(entries.len());
     let mut mapped = Vec::with_capacity(entries.len());
-    for (entry, worker_tokens) in entries.iter().zip(&project_workers) {
+    for entry in &entries {
         mapped.push((entry.id.clone(), entry.host.mapping_state()));
-        mapping.push(tokio::spawn(map_project(
-            entry.host.clone(),
-            founder.clone(),
-            worker_tokens.len(),
-            config.map_on_first_view,
-        )));
+        mapping.push(tokio::spawn(map_project(entry.host.clone(), config.map_on_first_view)));
     }
 
-    // Each project's loops reach that project's routes, so their MCP calls take the project's
-    // own agent tokens.
     let mut runtimes = Vec::with_capacity(entries.len());
-    for (entry, worker_tokens) in entries.iter().zip(project_workers) {
+    for entry in &entries {
         let jobs = jobs::spawn(entry.host.clone());
         entry.host.wake_jobs();
-        let worker_loops = workers::spawn(
-            entry.host.clone(),
-            entry.board.clone(),
-            worker_tokens,
-            entry.host.repo().to_path_buf(),
-            format!("{}/api/p/{}", workers::origin_url(local_addr), entry.id),
-        );
         runtimes.push(Runtime {
             id: entry.id.clone(),
             jobs,
-            worker_loops,
             writer: entry.host.writer(),
             streams: Arc::clone(entry.host.streams()),
             mapping: None,
@@ -796,12 +701,9 @@ async fn start_listening<C: ModelClient + 'static>(
     let live_runtimes = Arc::new(Mutex::new(Vec::new()));
     let live = opener.map(|open_client| LiveContext {
         founder: founder.clone(),
-        local_addr,
         shutdown: shutdown_rx.clone(),
         slots: Arc::clone(&slots),
         witness_concurrency: config.witness_concurrency,
-        local_workers: config.local_workers,
-        vision: config.vision.clone(),
         settings_file: settings_file.clone(),
         web: config.web.clone(),
         open_client,
@@ -851,30 +753,16 @@ async fn start_listening<C: ModelClient + 'static>(
     })
 }
 
-/// Maps one project's codebase in the background: scans it, commits its index, registers its local
-/// workers, and opens it to writes. A failure is recorded on the project, which then takes no
-/// writes, and the server keeps running so the page can show why. With `on_view`, the scan starts
-/// only once a page has connected to the project.
-pub(crate) async fn map_project<C: ModelClient + 'static>(
-    host: Host<C>,
-    founder: MemberId,
-    workers: usize,
-    on_view: bool,
-) {
+/// Maps one project's codebase in the background: scans it, commits its index, and opens it to
+/// writes. A failure is recorded on the project, which then takes no writes, and the server keeps
+/// running so the page can show why. With `on_view`, the scan starts only once a page has
+/// connected to the project.
+pub(crate) async fn map_project<C: ModelClient + 'static>(host: Host<C>, on_view: bool) {
     if on_view {
         host.wait_viewed().await;
     }
     let mapped = async {
         host.scan_and_commit().await?;
-        for index in 0..workers {
-            let registration = Command::Human {
-                member: founder.clone(),
-                cmd: HumanCmd::RegisterAgent {
-                    agent: workers::agent(index)?,
-                },
-            };
-            host.submit_unmapped(registration).await?;
-        }
         anyhow::Ok(())
     }
     .await;
@@ -949,13 +837,10 @@ struct Opening<C> {
     origin: Origin,
     scan: Scan,
     tokens: Tokens,
-    vision: Option<Vision>,
     client: C,
     ledger: UsageLedger,
     /// Where the project's scans read their statemap settings.
     statemap: statemap::SettingsSource,
-    /// The tokens of this project's local workers, in worker order.
-    worker_tokens: Vec<String>,
 }
 
 /// Opens a project's git state for worktrees, witnesses and landing. A directory that is not a

@@ -4,7 +4,6 @@
 //! are served by the fallback in `http.rs`, because the router was built at start without them.
 
 use std::collections::BTreeSet;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -21,9 +20,8 @@ use crate::public::PublicRoot;
 use crate::registry::{Entry, Registry};
 use crate::settings::data::DataOwner;
 use crate::store::EventStore;
-use crate::vision::{Vision, VisionConfig};
 use crate::{DB_FILE, DEFAULT_PROBE_CONCURRENCY, Runtime, STATE_DIR};
-use crate::{index, jobs, map_project, open_git, prepare_state_dir, settings, statemap, workers};
+use crate::{index, jobs, map_project, open_git, prepare_state_dir, statemap};
 
 /// Opens the model client and usage ledger of a project added while the server runs. The CLI
 /// builds one from the project's routing file, as startup does for each project.
@@ -35,18 +33,12 @@ pub type ClientFactory<C> =
 pub(crate) struct LiveContext<C> {
     /// The member whose token is the owner's.
     pub(crate) founder: MemberId,
-    /// The address the server listens on, which a project's workers call back into.
-    pub(crate) local_addr: SocketAddr,
     /// Signalled when the server shuts down.
     pub(crate) shutdown: watch::Receiver<bool>,
     /// The witness pool every project shares.
     pub(crate) slots: Arc<Semaphore>,
     /// How many witness runs may run at once, as startup was given.
     pub(crate) witness_concurrency: usize,
-    /// How many local workers a project runs unless the settings give it another count.
-    pub(crate) local_workers: usize,
-    /// The advisory vision witness, shared by every project. `None` runs no vision checks.
-    pub(crate) vision: Option<VisionConfig>,
     /// The settings file, which each project's scans read their statemap settings from.
     pub(crate) settings_file: PathBuf,
     /// The public folder, if one is served. A project's folder must sit outside it.
@@ -142,15 +134,7 @@ pub(crate) async fn open<C: ModelClient + 'static>(
     dirs.push(state_dir.clone());
     let refs: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
     let (mut all, _) = Tokens::load_shared(&refs, &live.founder)?;
-    let mut tokens = all.pop().context("the new project's tokens")?;
-
-    let stored = settings::load(&live.settings_file)?;
-    let workers_here = settings::worker_count(&stored, &spec.id, live.local_workers);
-    let mut worker_tokens = Vec::with_capacity(workers_here);
-    for index in 0..workers_here {
-        let token = tokens.agent_token(&state_dir, &workers::agent(index)?)?;
-        worker_tokens.push(token.as_str().to_owned());
-    }
+    let tokens = all.pop().context("the new project's tokens")?;
 
     let store = EventStore::open(&state_dir.join(DB_FILE)).await?;
     let log = store.load_from(Seq::new(0)).await?;
@@ -170,11 +154,6 @@ pub(crate) async fn open<C: ModelClient + 'static>(
         .await
         .context("the skeleton scan task did not finish")??;
     let statemap = statemap::SettingsSource::new(live.settings_file.clone(), spec.id.clone());
-    let vision = live
-        .vision
-        .as_ref()
-        .map(|config| Vision::open(config, &spec.repo))
-        .transpose()?;
     let (client, ledger) = (live.open_client)(&spec)?;
     let git = open_git(&spec).await;
     let host = Host::new_mapping(
@@ -191,13 +170,11 @@ pub(crate) async fn open<C: ModelClient + 'static>(
             witness_http_base_url: spec.witness_http_base_url.clone(),
             witness_concurrency: live.witness_concurrency,
             probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
-            vision,
         },
         Arc::clone(&live.slots),
         Some(statemap),
     );
 
-    let board = workers::Board::new(worker_tokens.len());
     let api = format!("/api/p/{}", spec.id);
     let mcp = format!("{api}/mcp");
     let owner = DataOwner {
@@ -210,7 +187,6 @@ pub(crate) async fn open<C: ModelClient + 'static>(
             mcp: &mcp,
         },
         host.clone(),
-        board.clone(),
         owner.clone(),
     );
     // The caller holds the settings change lock, so no other add can take the default meanwhile.
@@ -222,32 +198,18 @@ pub(crate) async fn open<C: ModelClient + 'static>(
                 mcp: "/mcp",
             },
             host.clone(),
-            board.clone(),
             owner,
         )
     });
-    let mapping = tokio::spawn(map_project(
-        host.clone(),
-        live.founder.clone(),
-        worker_tokens.len(),
-        false,
-    ));
+    let mapping = tokio::spawn(map_project(host.clone(), false));
     let jobs = jobs::spawn(host.clone());
     host.wake_jobs();
-    let worker_loops = workers::spawn(
-        host.clone(),
-        board.clone(),
-        worker_tokens,
-        spec.repo.clone(),
-        format!("{}/api/p/{}", workers::origin_url(live.local_addr), spec.id),
-    );
     live.runtimes
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push(Runtime {
             id: spec.id.clone(),
             jobs,
-            worker_loops,
             writer: host.writer(),
             streams: Arc::clone(host.streams()),
             mapping: Some(mapping),
@@ -257,7 +219,6 @@ pub(crate) async fn open<C: ModelClient + 'static>(
         id: spec.id,
         name: spec.name,
         host,
-        board,
         head: tokio::sync::Mutex::new(None),
         router: Some(router),
         plain,

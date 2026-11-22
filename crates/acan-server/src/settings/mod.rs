@@ -630,7 +630,7 @@ impl<C: ModelClient + 'static> Settings<C> {
         applied
     }
 
-    /// Each running project, with its worker count: the stored count, or the one it started with.
+    /// Each running project, by id and name.
     fn projects_view(&self, stored: &Stored) -> Vec<ProjectView> {
         self.projects
             .entries()
@@ -638,7 +638,6 @@ impl<C: ModelClient + 'static> Settings<C> {
             .map(|entry| ProjectView {
                 id: entry.id.clone(),
                 name: entry.name.clone(),
-                workers: worker_count(stored, &entry.id, entry.board.view().workers.len()),
                 statemap_llm: stored
                     .projects
                     .statemap_llm
@@ -827,7 +826,6 @@ impl HarnessView {
 struct ProjectView {
     id: String,
     name: String,
-    workers: usize,
     /// Whether the project uses the LLM refinement of scanned state charts.
     statemap_llm: bool,
 }
@@ -1336,34 +1334,12 @@ pub(crate) fn statemap_call_limit(settings_path: &Path) -> u32 {
     }
 }
 
-/// The local worker count of project `id`: the count the settings give it, or `started` when they
-/// give none. The count is read when the server starts, so a change takes effect at the next start.
-pub(crate) fn worker_count(stored: &Stored, id: &str, started: usize) -> usize {
-    stored
-        .projects
-        .workers
-        .get(id)
-        .map_or(started, |count| usize::from(*count))
-}
-
 #[cfg(test)]
 mod tests {
     use acan_llm::ProviderStatus;
 
     use super::*;
 
-    #[test]
-    fn a_project_with_no_worker_count_runs_the_count_it_started_with() {
-        let mut stored = Stored::default();
-        assert_eq!(worker_count(&stored, "alpha", 2), 2);
-        stored.projects.workers.insert("alpha".to_owned(), 0);
-        assert_eq!(worker_count(&stored, "alpha", 2), 0, "zero runs none");
-        assert_eq!(
-            worker_count(&stored, "beta", 2),
-            2,
-            "the others keep theirs"
-        );
-    }
 
     #[test]
     fn the_statemap_call_limit_is_read_from_the_file_on_each_call() {

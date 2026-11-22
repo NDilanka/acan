@@ -11,7 +11,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use acan_core::{
-    AgentId, Command, GateRunId, Generation, HumanCmd, MemberId, OrderId, OrderRev, Rejection,
+    AgentId, Command, Generation, HumanCmd, MemberId, OrderId, OrderRev, Rejection,
     ScopeConfirmation, ScopeDraftOutcome, Seq, Stamped, TaskId, TaskState,
 };
 use acan_intent::{
@@ -19,11 +19,11 @@ use acan_intent::{
     GetRulingsResponse, GetScopeRequest, GetScopeResponse, MachineId, McpError, McpErrorCode,
     McpV1, TaskRef,
 };
-use acan_llm::{ModelClient, Role, RoleStatus, UsageTotals};
+use acan_llm::{ModelClient, UsageTotals};
 use acan_scan::Plant;
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, Request, State};
-use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
+use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -46,8 +46,6 @@ use crate::ruling::{self, RulingBody, RulingDraftView};
 use crate::scan_feed::Summary as ScanSummary;
 use crate::settings::data::{self, DataOwner};
 use crate::settings::{self, Settings};
-use crate::vision::{self, Side, VisionWitness};
-use crate::workers::{Board, WorkersView};
 use crate::{STATE_DIR, observe, redact, setup, stream, stream_all};
 
 /// Where one project's routes are mounted: the prefix of its API paths, and the path of its MCP
@@ -59,13 +57,11 @@ pub(crate) struct Mount<'a> {
     pub(crate) mcp: &'a str,
 }
 
-/// The routes one project's host answers under `mount`. The board is this project's own local
-/// workers, which `GET .../workers` reports. The owner names who may export or clear the project's
-/// data, and the project it belongs to.
+/// The routes one project's host answers under `mount`. The owner names who may export or clear
+/// the project's data, and the project it belongs to.
 pub(crate) fn project_routes<C: ModelClient + 'static>(
     mount: Mount<'_>,
     host: Host<C>,
-    board: Board,
     owner: DataOwner,
 ) -> Router {
     let api = mount.api;
@@ -78,7 +74,6 @@ pub(crate) fn project_routes<C: ModelClient + 'static>(
         .route(&format!("{api}/scan"), post(post_scan::<C>))
         .route(&format!("{api}/plant/kinds"), put(put_plant_kinds::<C>))
         .route(&format!("{api}/usage"), get(get_usage::<C>))
-        .route(&format!("{api}/workers"), get(get_workers::<C>))
         .route(&format!("{api}/update"), get(get_update::<C>))
         .route(&format!("{api}/bug-report"), get(get_bug_report::<C>))
         .route(&format!("{api}/setup"), get(setup::get_status::<C>))
@@ -133,19 +128,6 @@ pub(crate) fn project_routes<C: ModelClient + 'static>(
             &format!("{api}/orders/{{order}}/episodes/{{episode}}/ruling"),
             post(post_ruling::<C>),
         )
-        .route(
-            &format!("{api}/tasks/{{task}}/vision"),
-            get(get_vision::<C>),
-        )
-        .route(
-            &format!("{api}/tasks/{{task}}/vision/{{file}}"),
-            get(get_vision_image::<C>),
-        )
-        .route(
-            &format!("{api}/tasks/{{task}}/vision/{{index}}/baseline.png"),
-            get(get_vision_baseline::<C>),
-        )
-        .layer(Extension(board))
         .layer(Extension(owner))
         .layer(middleware::from_fn_with_state(
             host.clone(),
@@ -205,7 +187,6 @@ pub(crate) fn router<C: ModelClient + 'static>(
                 mcp: &mcp,
             },
             entry.host.clone(),
-            entry.board.clone(),
             owner.clone(),
         ));
         if entry.id == projects.default_id() {
@@ -215,7 +196,6 @@ pub(crate) fn router<C: ModelClient + 'static>(
                     mcp: "/mcp",
                 },
                 entry.host.clone(),
-                entry.board.clone(),
                 owner,
             ));
         }
@@ -487,14 +467,13 @@ async fn get_events<C: ModelClient + 'static>(
     Ok(Json(views))
 }
 
-/// The plant, with the two flags the UI reads from it: whether the protected app contract is in
-/// place, and whether the advisory vision check runs. The plant's own fields stay at the top level.
+/// The plant, with the flag the UI reads from it: whether the protected app contract is in place.
+/// The plant's own fields stay at the top level.
 #[derive(Serialize)]
 struct PlantResponse {
     #[serde(flatten)]
     plant: Plant,
     contract: ContractView,
-    vision: VisionView,
     /// Where the codebase's scan is. A page reads `stage` to tell a mapping project from a mapped
     /// one, and the stream carries the filled modules.
     scan: ScanSummary,
@@ -521,7 +500,6 @@ async fn get_plant<C: ModelClient + 'static>(
     Ok(Json(PlantResponse {
         plant,
         contract,
-        vision: vision_of(&host),
         scan,
     }))
 }
@@ -600,17 +578,6 @@ async fn get_usage<C: ModelClient + 'static>(
     Ok(Json(host.ledger().snapshot()))
 }
 
-/// The local workers this server runs and what each is doing. Members only, since an agent token
-/// reads the origin through MCP, not through this route.
-async fn get_workers<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
-    Extension(board): Extension<Board>,
-    headers: HeaderMap,
-) -> Result<Json<WorkersView>, ApiError> {
-    member(&host, &headers)?;
-    Ok(Json(board.view()))
-}
-
 /// The update check's status. Any principal may read it.
 async fn get_update<C: ModelClient + 'static>(
     State(host): State<Host<C>>,
@@ -655,41 +622,6 @@ pub(crate) async fn contract_of<C: ModelClient>(host: &Host<C>) -> Result<Contra
             version: None,
         },
     })
-}
-
-/// Whether the advisory vision check runs, and why it does not. The UI reads this rather than
-/// parsing the reason a vision record gives.
-#[derive(Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct VisionView {
-    on: bool,
-    reason: Option<String>,
-}
-
-/// The vision flag of this server: the check runs when the server runs it and a provider serves
-/// the vision role.
-fn vision_of<C: ModelClient>(host: &Host<C>) -> VisionView {
-    let keys = host.client().key_status();
-    vision_view(host.vision().is_some(), keys.role(Role::Vision))
-}
-
-/// The vision flag from whether the server runs the check and the status of the vision role.
-fn vision_view(configured: bool, role: Option<&RoleStatus>) -> VisionView {
-    if !configured {
-        return VisionView {
-            on: false,
-            reason: Some("the server runs no vision checks".to_owned()),
-        };
-    }
-    match role {
-        Some(status) => VisionView {
-            on: status.off_reason.is_none(),
-            reason: status.off_reason.map(str::to_owned),
-        },
-        None => VisionView {
-            on: false,
-            reason: Some("no model serves vision".to_owned()),
-        },
-    }
 }
 
 /// Where a claimed task's worktree is, the branch it is on, and the protected-head snapshot its
@@ -929,82 +861,6 @@ async fn get_receipt<C: ModelClient + 'static>(
     Ok(Json(intent_api::get_receipt(&host, &request)?))
 }
 
-/// The advisory vision record of the task's latest gate run.
-async fn get_vision<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
-    headers: HeaderMap,
-    Path(task): Path<String>,
-) -> Result<Json<VisionWitness>, ApiError> {
-    authenticate(&host, bearer(&headers))?;
-    let (task, run) = vision_run(&host, &task)?;
-    Ok(Json(vision::served(host.vision(), task, run).await?))
-}
-
-/// The candidate screenshot of one vision check. The segment is `{index}.png`.
-async fn get_vision_image<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
-    headers: HeaderMap,
-    Path((task, file)): Path<(String, String)>,
-) -> Result<Response, ApiError> {
-    authenticate(&host, bearer(&headers))?;
-    let index = file
-        .strip_suffix(".png")
-        .ok_or(ApiError::NotFound("image"))?;
-    vision_png(&host, &task, index, Side::Candidate).await
-}
-
-/// The baseline screenshot of one vision check. 404 when the check has no baseline.
-async fn get_vision_baseline<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
-    headers: HeaderMap,
-    Path((task, index)): Path<(String, String)>,
-) -> Result<Response, ApiError> {
-    authenticate(&host, bearer(&headers))?;
-    vision_png(&host, &task, &index, Side::Baseline).await
-}
-
-/// The task and its latest gate run. A task with no gate run is 404.
-fn vision_run<C: ModelClient>(host: &Host<C>, raw: &str) -> Result<(TaskId, GateRunId), ApiError> {
-    let task: TaskId = raw.parse().map_err(|_| ApiError::NotFound("task"))?;
-    host.read(|world| {
-        if world.task(task).is_none() {
-            return Err(ApiError::NotFound("task"));
-        }
-        vision::latest_run(world, task)
-            .map(|run| (task, run))
-            .ok_or(ApiError::NotFound("gate run"))
-    })
-}
-
-/// One stored screenshot as `image/png`. The index is parsed as a number, so the file read is
-/// always one the vision witness named.
-async fn vision_png<C: ModelClient>(
-    host: &Host<C>,
-    task: &str,
-    index: &str,
-    side: Side,
-) -> Result<Response, ApiError> {
-    let (task, run) = vision_run(host, task)?;
-    let index: u32 = index.parse().map_err(|_| ApiError::NotFound("image"))?;
-    let Some(vision) = host.vision() else {
-        return Err(ApiError::NotFound("image"));
-    };
-    let png = vision
-        .image(task, run, index, side)
-        .await
-        .map_err(|err| ApiError::Internal(err.into()))?
-        .ok_or(ApiError::NotFound("image"))?;
-    Ok((
-        [
-            (CONTENT_TYPE, "image/png"),
-            (X_CONTENT_TYPE_OPTIONS, "nosniff"),
-            (CACHE_CONTROL, "no-store"),
-        ],
-        png,
-    )
-        .into_response())
-}
-
 /// A task id from a path. One that has no contract spelling names no task.
 pub(crate) fn task_ref(raw: &str) -> Result<TaskRef, ApiError> {
     TaskRef::from_str(raw).map_err(|_| ApiError::NotFound("task"))
@@ -1036,63 +892,5 @@ mod tests {
         let json: Value = serde_json::from_slice(&body).expect("the body is JSON");
         assert_eq!(json["error"], "not_mapped");
         assert_eq!(json["what"], "codebase");
-    }
-
-    fn vision_role(off_reason: Option<&'static str>) -> RoleStatus {
-        RoleStatus {
-            role: Role::Vision,
-            provider: off_reason.is_none().then(|| "meta".to_owned()),
-            picked: false,
-            off_reason,
-            meta_only: true,
-        }
-    }
-
-    #[test]
-    fn a_server_that_runs_no_vision_checks_says_so() {
-        let view = vision_view(false, Some(&vision_role(None)));
-        assert_eq!(
-            view,
-            VisionView {
-                on: false,
-                reason: Some("the server runs no vision checks".to_owned()),
-            }
-        );
-    }
-
-    #[test]
-    fn vision_is_on_when_a_provider_serves_its_role() {
-        let view = vision_view(true, Some(&vision_role(None)));
-        assert_eq!(
-            view,
-            VisionView {
-                on: true,
-                reason: None,
-            }
-        );
-    }
-
-    #[test]
-    fn vision_is_off_with_the_reason_its_role_gives() {
-        let view = vision_view(true, Some(&vision_role(Some("it needs a Meta key"))));
-        assert_eq!(
-            view,
-            VisionView {
-                on: false,
-                reason: Some("it needs a Meta key".to_owned()),
-            }
-        );
-    }
-
-    #[test]
-    fn vision_is_off_when_no_model_lists_its_role() {
-        let view = vision_view(true, None);
-        assert_eq!(
-            view,
-            VisionView {
-                on: false,
-                reason: Some("no model serves vision".to_owned()),
-            }
-        );
     }
 }

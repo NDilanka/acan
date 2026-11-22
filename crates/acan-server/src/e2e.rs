@@ -2983,7 +2983,6 @@ async fn start_with<C: ModelClient + 'static>(
         protected_branch: Some("main".to_owned()),
         witness_http_base_url: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
-        vision: None,
     };
     start(config, client, ledger)
         .await
@@ -3014,8 +3013,6 @@ async fn start_pair(root: &Path, other: &Path) -> Running {
         team: false,
         web: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
-        vision: None,
-        local_workers: 0,
         map_on_first_view: false,
     };
     let first = Offline::default();
