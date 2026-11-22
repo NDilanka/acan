@@ -1,6 +1,7 @@
 //! A client for Droid's headless JSON-RPC stream.
 
 mod env;
+mod process;
 mod protocol;
 mod session;
 mod spawn;
@@ -33,6 +34,9 @@ pub enum DroidError {
     /// A CLI argument would bypass permissions or override the protocol format.
     #[error("droid launch argument is not allowed: {0}")]
     ForbiddenArgument(&'static str),
+    /// A Windows batch shim path or argument contained shell metacharacters.
+    #[error("droid batch shim {0} contains a cmd.exe metacharacter")]
+    UnsafeBatchInput(&'static str),
     /// The CLI reported a version outside the configured range.
     #[error("untested droid version {version} (supported: {policy})")]
     UnsupportedVersion {

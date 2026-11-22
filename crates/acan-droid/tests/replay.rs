@@ -3,12 +3,12 @@ use std::time::Duration;
 
 use acan_droid::{
     AskAnswer, AskUserReply, CleanEnv, DroidError, DroidEvent, DroidSession, Headroom,
-    PermissionReply, RequestId, SessionInit, SessionSettings, SpawnConfig,
+    InboundMessage, PermissionReply, RequestId, SessionInit, SessionSettings, SpawnConfig,
 };
 use serde_json::{Value, json};
 use tokio::io::{
-    AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream, Lines,
-    ReadHalf, WriteHalf, duplex, split,
+    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream,
+    Lines, ReadHalf, WriteHalf, duplex, split,
 };
 use tokio::time::timeout;
 
@@ -149,6 +149,201 @@ where
     })
     .await
     .expect("receive replay event")
+}
+
+#[tokio::test]
+async fn frames_are_bounded_even_without_a_newline() {
+    const LIMIT: u64 = 16 * 1024 * 1024;
+    let reader = tokio::io::repeat(b' ').take(LIMIT + 1);
+    let mut session = DroidSession::from_streams(reader, tokio::io::sink());
+    assert!(matches!(
+        timeout(WAIT, session.next_event()).await,
+        Ok(Err(DroidError::Protocol("frame exceeds size limit")))
+    ));
+
+    let reader = tokio::io::repeat(b' ').take(LIMIT).chain(&b"\n"[..]);
+    let mut session = DroidSession::from_streams(reader, tokio::io::sink());
+    assert_eq!(
+        event(&mut session).await,
+        DroidEvent::Exited { status: None }
+    );
+}
+
+#[tokio::test]
+async fn cancelling_read_preserves_partial_frame_and_escaped_envelope_strings() {
+    let (mut session, mut peer) = replay();
+    peer.tx
+        .write_all(br#"{"jsonrpc":"2.\u0030","factoryApiVersion":"1.0."#)
+        .await
+        .expect("write a partial frame");
+    tokio::select! {
+        biased;
+        result = session.next_event() => panic!("read completed before newline: {result:?}"),
+        () = std::future::ready(()) => {}
+    }
+    peer.tx
+        .write_all(
+            b"\\u0030\",\"type\":\"notification\",\"method\":\"future_event\",\"params\":{}}\n",
+        )
+        .await
+        .expect("finish the partial frame");
+    assert_eq!(
+        event(&mut session).await,
+        DroidEvent::Unknown {
+            method: "future_event".into(),
+            raw: json!({})
+        }
+    );
+}
+
+#[test]
+fn error_frames_require_a_nested_or_flat_payload() {
+    for frame in [
+        br#"{"jsonrpc":"2.0","factoryApiVersion":"1.0.0","type":"error","id":1,"result":{}}"#
+            .as_slice(),
+        br#"{"jsonrpc":"2.0","factoryApiVersion":"1.0.0","type":"error","error":null}"#,
+    ] {
+        assert!(InboundMessage::from_json(frame).is_err());
+    }
+    let frame = br#"{"jsonrpc":"2.0","factoryApiVersion":"1.0.0","type":"error","error":{"code":-1,"message":"rejected"}}"#;
+    assert!(matches!(
+        InboundMessage::from_json(frame),
+        Ok(InboundMessage::Error { id: None, error }) if error.code == -1 && error.message == "rejected"
+    ));
+}
+
+#[tokio::test]
+async fn flat_error_during_settings_confirmation_aborts_instead_of_acknowledging() {
+    let (mut session, mut peer) = replay();
+    let server = tokio::spawn(async move {
+        let id = peer.start().await;
+        peer.notify(json!({
+            "type":"settings_updated","requestId":id,
+            "settings":{"modelId":"fixture-model","autonomyLevel":"low"}
+        }))
+        .await;
+        peer.write(json!({"type":"error","id":id,"code":-32602,"message":"rejected settings"}))
+            .await;
+        assert!(
+            peer.read_client_frame().await.is_none(),
+            "unexpected client frame"
+        );
+    });
+    assert!(matches!(
+        session.initialize(init(), &settings(), WAIT).await,
+        Err(DroidError::Rpc(-32602, message)) if message == "rejected settings"
+    ));
+    assert!(matches!(
+        session.send_user_message("never sent").await,
+        Err(DroidError::NotConfirmed)
+    ));
+    server.await.expect("server replay passed");
+}
+
+#[tokio::test]
+async fn flat_errors_surface_and_end_the_active_turn() {
+    let (mut session, mut peer) = replay();
+    let server = tokio::spawn(async move {
+        peer.confirm().await;
+        let message = peer.client_request("droid.add_user_message").await;
+        peer.write(
+            json!({"type":"error","id":message["id"],"code":-32000,"message":"turn failed"}),
+        )
+        .await;
+        let message = peer.client_request("droid.add_user_message").await;
+        peer.response(&message["id"], json!({})).await;
+        peer.write(
+            json!({"type":"error","code":429,"message":"quota reached","data":{"retryAfter":3}}),
+        )
+        .await;
+        let message = peer.client_request("droid.add_user_message").await;
+        peer.response(&message["id"], json!({})).await;
+        peer.notify(json!({"type":"agent_turn_completed","reason":null}))
+            .await;
+    });
+    session
+        .initialize(init(), &settings(), WAIT)
+        .await
+        .expect("initialize");
+    session
+        .send_user_message("first turn")
+        .await
+        .expect("send message");
+    assert!(matches!(
+        event(&mut session).await,
+        DroidEvent::RequestFailed { error, .. } if error.code == -32000
+    ));
+    assert!(!session.finished());
+    session
+        .send_user_message("second turn")
+        .await
+        .expect("failed turn ended");
+    assert_eq!(
+        event(&mut session).await,
+        DroidEvent::RateLimited {
+            message: "quota reached".into(),
+            retry_after: Some(Duration::from_secs(3)),
+            headroom: Headroom::Unknown,
+        }
+    );
+    assert!(!session.finished());
+    session
+        .send_user_message("third turn")
+        .await
+        .expect("rate-limited turn ended");
+    assert_eq!(
+        event(&mut session).await,
+        DroidEvent::TurnCompleted {
+            turn_id: None,
+            reason: None
+        }
+    );
+    assert!(
+        session.finished(),
+        "an explicit completion with null reason finishes the turn"
+    );
+    server.await.expect("server replay passed");
+}
+
+#[tokio::test]
+async fn null_permission_calls_and_question_options_become_empty_lists() {
+    let (mut session, mut peer) = replay();
+    let server = tokio::spawn(async move {
+        peer.confirm().await;
+        peer.write(json!({
+            "type":"request","id":"permission-2","method":"droid.request_permission","params":{
+                "toolUses":[{"toolUse":{"id":"tool-2","name":"Script"},"details":{"calls":null}}],
+                "options":[{"label":"Cancel","value":"cancel"}]
+            }
+        }))
+        .await;
+        peer.write(json!({"type":"request","id":104,"method":"droid.ask_user",
+        "params":{"toolCallId":"ask-2","questions":[
+            {"index":1,"question":"Any preferences?","options":null}
+        ]}}))
+        .await;
+    });
+    session
+        .initialize(init(), &settings(), WAIT)
+        .await
+        .expect("initialize");
+    let DroidEvent::PermissionRequested { request, .. } = event(&mut session).await else {
+        panic!("expected a permission request");
+    };
+    assert_eq!(request.script_calls().count(), 0);
+    assert!(
+        request.tool_uses[0]
+            .details
+            .as_ref()
+            .expect("permission details")
+            .calls
+            .is_empty()
+    );
+    let DroidEvent::AskUserRequested { request, .. } = event(&mut session).await else {
+        panic!("expected a question request");
+    };
+    assert!(request.questions[0].options.is_empty());
+    server.await.expect("server replay passed");
 }
 
 #[tokio::test]
@@ -626,6 +821,146 @@ fn spawn_config_rejects_unsafe_arguments() {
         assert!(matches!(
             SpawnConfig::new("never-executed").with_args([arg]),
             Err(DroidError::ForbiddenArgument("--skip-permissions-unsafe"))
+        ));
+    }
+    for arg in ["-o", "-o=json"] {
+        assert!(matches!(
+            SpawnConfig::new("never-executed").with_args([arg]),
+            Err(DroidError::ForbiddenArgument("-o"))
+        ));
+    }
+}
+
+#[cfg(windows)]
+mod windows_process_tree {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
+    use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+
+    use super::*;
+
+    fn sleeping_shim(dir: &Path) -> PathBuf {
+        let path = dir.join("sleeping droid.cmd");
+        std::fs::write(
+            &path,
+            concat!(
+                "@echo off\r\n",
+                "if \"%~1\"==\"--version\" (\r\n",
+                "    echo 1.15.0\r\n",
+                "    exit /b 0\r\n",
+                ")\r\n",
+                "powershell.exe -NoLogo -NoProfile -NonInteractive -File \"%~dp0sleep.ps1\"\r\n",
+            ),
+        )
+        .expect("write sleeping shim");
+        std::fs::write(
+            dir.join("sleep.ps1"),
+            "[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'descendant.pid'), [string]$PID)\n\
+             Start-Sleep -Seconds 30\n",
+        )
+        .expect("write sleeping descendant");
+        path
+    }
+
+    async fn descendant_handle(dir: &Path) -> OwnedHandle {
+        let path = dir.join("descendant.pid");
+        let id = timeout(WAIT, async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&path).await
+                    && let Ok(id) = text.parse::<u32>()
+                {
+                    break id;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the shim should start its descendant");
+        // SAFETY: OpenProcess accepts the PID and returns a new handle or null.
+        let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, id) };
+        assert!(!raw.is_null(), "open sleeping descendant");
+        // SAFETY: OpenProcess returned a new handle that we now own.
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+        // SAFETY: the handle is live and has SYNCHRONIZE access.
+        assert_eq!(
+            unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) },
+            WAIT_TIMEOUT
+        );
+        handle
+    }
+
+    fn assert_terminated(descendant: &OwnedHandle) {
+        // SAFETY: the handle is live and has SYNCHRONIZE access.
+        let state = unsafe { WaitForSingleObject(descendant.as_raw_handle(), 5_000) };
+        assert_eq!(
+            state, WAIT_OBJECT_0,
+            "the descendant should terminate promptly"
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_and_drop_terminate_windows_shim_descendants() {
+        for explicit_kill in [true, false] {
+            let dir = tempfile::tempdir().expect("make fake Droid directory");
+            let path = sleeping_shim(dir.path());
+            let mut session = DroidSession::spawn(&fake_config(&path))
+                .await
+                .expect("spawn shim");
+            let descendant = descendant_handle(dir.path()).await;
+            if explicit_kill {
+                timeout(WAIT, session.kill())
+                    .await
+                    .expect("kill deadline")
+                    .expect("kill job");
+            } else {
+                drop(session);
+            }
+            assert_terminated(&descendant);
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_timeout_terminates_windows_shim_descendants() {
+        let dir = tempfile::tempdir().expect("make fake Droid directory");
+        let path = sleeping_shim(dir.path());
+        let mut session = DroidSession::spawn(&fake_config(&path))
+            .await
+            .expect("spawn shim");
+        let descendant = descendant_handle(dir.path()).await;
+        assert!(matches!(
+            session
+                .initialize(init(), &settings(), Duration::from_millis(100))
+                .await,
+            Err(DroidError::Timeout("initialization"))
+        ));
+        assert_terminated(&descendant);
+    }
+
+    #[tokio::test]
+    async fn cancelling_auth_preflight_terminates_windows_shim_descendants() {
+        let dir = tempfile::tempdir().expect("make fake Droid directory");
+        let path = sleeping_shim(dir.path());
+        let config = fake_config(&path);
+        let mut preflight = Box::pin(config.check_auth());
+        let descendant = tokio::select! {
+            result = &mut preflight => panic!("preflight returned early: {result:?}"),
+            handle = descendant_handle(dir.path()) => handle,
+        };
+        drop(preflight);
+        assert_terminated(&descendant);
+    }
+
+    #[tokio::test]
+    async fn unsafe_resolved_batch_path_is_rejected_before_preflight() {
+        let dir = tempfile::tempdir().expect("make fake Droid directory");
+        let path = dir.path().join("%ACAN_MCP_TOKEN%.cmd");
+        std::fs::write(&path, "@exit /b 1\r\n").expect("write unused shim");
+        assert!(matches!(
+            DroidSession::spawn(&fake_config(&path)).await,
+            Err(DroidError::UnsafeBatchInput("path"))
         ));
     }
 }

@@ -5,18 +5,62 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::process::{ChildStdin, ChildStdout};
 use tokio::time::{self, Instant};
 
+use crate::process::Process;
 use crate::protocol::SettingsSnapshot;
 use crate::{
     AskUserReply, DroidError, DroidEvent, DroidVersion, InboundMessage, OutboundRequest,
-    OutboundResponse, PermissionReply, RequestId, SessionSettings, SpawnConfig,
+    OutboundResponse, PermissionReply, RequestId, RpcError, SessionSettings, SpawnConfig,
 };
 
 const EXIT_GRACE: Duration = Duration::from_secs(1);
 const MAX_STARTUP_EVENTS: usize = 256;
+const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug)]
+struct FrameReader<R> {
+    reader: BufReader<R>,
+    partial: Vec<u8>,
+}
+
+impl<R: AsyncRead + Unpin> FrameReader<R> {
+    // Keep the partial frame across awaits so selecting on child exit can't discard bytes.
+    async fn next(&mut self) -> Result<Option<InboundMessage>, DroidError> {
+        loop {
+            let chunk = self.reader.fill_buf().await?;
+            let newline = chunk.iter().position(|&byte| byte == b'\n');
+            let end = newline.unwrap_or(chunk.len());
+            let len = self.partial.len() + end;
+            if len > MAX_FRAME_BYTES {
+                return Err(DroidError::Protocol("frame exceeds size limit"));
+            }
+            if len > self.partial.capacity() {
+                let capacity = self.partial.capacity().saturating_mul(2);
+                let capacity = capacity.max(len).min(MAX_FRAME_BYTES);
+                self.partial.reserve_exact(capacity - self.partial.len());
+            }
+            self.partial.extend_from_slice(&chunk[..end]);
+            let eof = chunk.is_empty();
+            self.reader.consume(end + usize::from(newline.is_some()));
+            if newline.is_none() && !eof {
+                continue;
+            }
+            if self.partial.iter().all(u8::is_ascii_whitespace) {
+                self.partial.clear();
+                if eof {
+                    return Ok(None);
+                }
+                continue;
+            }
+            let message = InboundMessage::from_json(&self.partial);
+            self.partial.clear();
+            return message.map(Some);
+        }
+    }
+}
 
 /// Parameters for a new worktree session.
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -59,9 +103,9 @@ impl Turn {
 /// be in flight. Complete write operations before calling another method on the session.
 #[derive(Debug)]
 pub struct DroidSession<R = ChildStdout, W = ChildStdin> {
-    stdout: Lines<BufReader<R>>,
+    stdout: FrameReader<R>,
     stdin: Option<W>,
-    child: Option<Child>,
+    process: Option<Process>,
     version: Option<DroidVersion>,
     session_id: Option<String>,
     next_id: i64,
@@ -77,28 +121,31 @@ impl DroidSession {
     /// Checks the CLI version, then starts a child with a cleaned environment.
     ///
     /// Call [`Self::initialize`] before sending messages. Dropping the session kills the owned
-    /// process, not any descendants of a Windows command shim.
+    /// process and, on Windows, its descendants.
     ///
     /// # Errors
     ///
     /// Returns an error if the executable cannot run or is outside the supported version range.
     pub async fn spawn(config: &SpawnConfig) -> Result<Self, DroidError> {
         let (mut command, version) = config.session_command().await?;
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let stdout = child
+        let mut process = Process::spawn(
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )?;
+        let stdout = process
+            .child
             .stdout
             .take()
             .ok_or(DroidError::Protocol("missing child stdout"))?;
-        let stdin = child
+        let stdin = process
+            .child
             .stdin
             .take()
             .ok_or(DroidError::Protocol("missing child stdin"))?;
         let mut session = Self::from_streams(stdout, stdin);
-        session.child = Some(child);
+        session.process = Some(process);
         session.version = Some(version);
         Ok(session)
     }
@@ -108,9 +155,12 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
     /// Attaches to existing streams without starting a process or running preflight commands.
     pub fn from_streams(stdout: R, stdin: W) -> Self {
         Self {
-            stdout: BufReader::new(stdout).lines(),
+            stdout: FrameReader {
+                reader: BufReader::new(stdout),
+                partial: Vec::new(),
+            },
             stdin: Some(stdin),
-            child: None,
+            process: None,
             version: None,
             session_id: None,
             next_id: 1,
@@ -180,6 +230,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
             let init_id = self.request("droid.initialize_session", init).await?;
             loop {
                 match self.read_inbound().await? {
+                    Some(InboundMessage::Error { error, .. }) => return Err(rpc_failure(error)),
                     Some(InboundMessage::Response { id, result, error })
                         if id.as_ref() == Some(&init_id) =>
                     {
@@ -206,6 +257,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
             let mut matching_broadcast = false;
             while !(acknowledged && (confirmed || matching_broadcast)) {
                 match self.read_inbound().await? {
+                    Some(InboundMessage::Error { error, .. }) => return Err(rpc_failure(error)),
                     Some(InboundMessage::Response { id, result, error })
                         if id.as_ref() == Some(&update_id) =>
                     {
@@ -367,18 +419,19 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
         shutdown
     }
 
-    /// Stops the owned child immediately, or shuts down the writer of an attached stream.
+    /// Stops the child (and its descendants on Windows), or closes an attached writer.
     ///
     /// # Errors
     ///
     /// Returns an error if the process or writer cannot be stopped.
     pub async fn kill(&mut self) -> Result<(), DroidError> {
         let stdin = self.stdin.take();
-        if let Some(child) = &mut self.child {
+        if let Some(process) = &mut self.process {
             drop(stdin);
             if self.reaped.is_none() {
-                child.kill().await?;
-                self.reaped = Some((child.wait().await?, Instant::now()));
+                self.reaped = Some((process.kill().await?, Instant::now()));
+            } else {
+                process.root_exited();
             }
         } else if let Some(mut stdin) = stdin {
             time::timeout(EXIT_GRACE, stdin.shutdown())
@@ -455,11 +508,13 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
     }
 
     fn handle_event(&mut self, message: InboundMessage) -> Result<Option<DroidEvent>, DroidError> {
-        let failed_turn_request = matches!(
-            &message,
-            InboundMessage::Response { id: Some(id), error: Some(_), .. }
-                if self.turn.request_id() == Some(id)
-        );
+        let failed_turn_request = self.turn.request_id().is_some_and(|turn| match &message {
+            InboundMessage::Error { id, .. } => id.as_ref().is_none_or(|id| id == turn),
+            InboundMessage::Response {
+                id, error: Some(_), ..
+            } => id.as_ref() == Some(turn),
+            _ => false,
+        });
         let event = Self::to_event(message)?;
         if failed_turn_request {
             self.turn = Turn::Stopped;
@@ -494,46 +549,46 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
             InboundMessage::Response { id, error, .. } => {
                 error.map(|error| DroidEvent::response_error(id, error))
             }
+            InboundMessage::Error { id, error } => Some(DroidEvent::response_error(id, error)),
         })
     }
 
     async fn read_inbound(&mut self) -> Result<Option<InboundMessage>, DroidError> {
         while !self.closed {
-            let line = if let Some((_, deadline)) = self.reaped {
+            let frame = if let Some((_, deadline)) = self.reaped {
                 // Drain final frames, but don't wait forever on an inherited stdout handle.
-                time::timeout_at(deadline, self.stdout.next_line())
+                time::timeout_at(deadline, self.stdout.next())
                     .await
                     .unwrap_or(Ok(None))?
-            } else if let Some(child) = &mut self.child {
+            } else if let Some(process) = &mut self.process {
                 tokio::select! {
                     biased;
-                    line = self.stdout.next_line() => line?,
-                    status = child.wait() => {
+                    frame = self.stdout.next() => frame?,
+                    status = process.child.wait() => {
                         self.reaped = Some((status?, Instant::now() + EXIT_GRACE));
+                        process.root_exited();
                         continue;
                     }
                 }
             } else {
-                self.stdout.next_line().await?
+                self.stdout.next().await?
             };
-            if let Some(line) = line {
-                if !line.trim().is_empty() {
-                    return InboundMessage::from_json(line.as_bytes()).map(Some);
-                }
-                continue;
+            if frame.is_some() {
+                return Ok(frame);
             }
-            if let Some(child) = &mut self.child
+            if let Some(process) = &mut self.process
                 && self.reaped.is_none()
             {
                 // A closed stdout can't carry any further events, even if the child lingers.
                 self.stdin.take();
-                let status = if let Ok(status) = time::timeout(EXIT_GRACE, child.wait()).await {
-                    status?
-                } else {
-                    child.kill().await?;
-                    child.wait().await?
-                };
+                let status =
+                    if let Ok(status) = time::timeout(EXIT_GRACE, process.child.wait()).await {
+                        status?
+                    } else {
+                        process.kill().await?
+                    };
                 self.reaped = Some((status, Instant::now()));
+                process.root_exited();
             }
             self.mark_closed();
         }
@@ -543,10 +598,14 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
 
 fn response_result(
     result: serde_json::Value,
-    error: Option<crate::RpcError>,
+    error: Option<RpcError>,
 ) -> Result<serde_json::Value, DroidError> {
     match error {
-        Some(error) => Err(DroidError::Rpc(error.code, error.message)),
+        Some(error) => Err(rpc_failure(error)),
         None => Ok(result),
     }
+}
+
+fn rpc_failure(error: RpcError) -> DroidError {
+    DroidError::Rpc(error.code, error.message)
 }

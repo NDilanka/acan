@@ -1,8 +1,9 @@
+use std::borrow::Cow;
 use std::process::ExitStatus;
 use std::time::Duration;
 
 use serde::ser::SerializeStruct;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::DroidError;
@@ -86,7 +87,6 @@ pub enum InboundMessage {
         params: Value,
     },
     /// The result (or error) of a client request.
-    #[serde(alias = "error")]
     Response {
         /// The client request ID, if associated with a request.
         id: Option<RequestId>,
@@ -95,6 +95,14 @@ pub enum InboundMessage {
         result: Value,
         /// Error information, if Droid rejected the request.
         error: Option<RpcError>,
+    },
+    /// A standalone protocol error, which may not be associated with a request.
+    Error {
+        /// The client request ID, when supplied.
+        id: Option<RequestId>,
+        /// The required error payload.
+        #[serde(flatten, deserialize_with = "deserialize_error_payload")]
+        error: RpcError,
     },
     /// An unsolicited notification, including methods not known to this client.
     Notification {
@@ -116,8 +124,10 @@ impl InboundMessage {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Envelope<'a> {
-            jsonrpc: &'a str,
-            factory_api_version: &'a str,
+            #[serde(borrow)]
+            jsonrpc: Cow<'a, str>,
+            #[serde(borrow)]
+            factory_api_version: Cow<'a, str>,
             #[serde(flatten)]
             body: InboundMessage,
         }
@@ -141,6 +151,21 @@ pub struct RpcError {
     /// Optional additional error data.
     #[serde(default)]
     pub data: Value,
+}
+
+fn deserialize_error_payload<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<RpcError, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Payload {
+        Nested { error: RpcError },
+        Flat(RpcError),
+    }
+
+    Ok(match Payload::deserialize(deserializer)? {
+        Payload::Nested { error } | Payload::Flat(error) => error,
+    })
 }
 
 /// The settings requested before the first turn.
@@ -246,7 +271,7 @@ pub struct ToolUse {
 #[non_exhaustive]
 pub struct PermissionDetails {
     /// The inner calls listed for a Script.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub calls: Vec<ScriptCall>,
     /// Other details specific to the confirmation type.
     #[serde(flatten)]
@@ -320,10 +345,18 @@ pub struct AskQuestion {
     /// Question text, to echo with the answer.
     pub question: String,
     /// Choices Droid presents alongside its free-text input.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub options: Vec<String>,
     /// Descriptions of choices, when supplied.
     pub option_descriptions: Option<Vec<String>>,
+}
+
+fn null_as_default<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+where
+    T: Deserialize<'de> + Default,
+    D: Deserializer<'de>,
+{
+    Ok(Option::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// The developer's answer to one question.
@@ -504,7 +537,9 @@ impl DroidEvent {
                 raw,
             },
             "turn_completed" | "agent_turn_completed"
-                if raw.get("reason").is_none_or(Value::is_string) =>
+                if raw
+                    .get("reason")
+                    .is_none_or(|v| v.is_null() || v.is_string()) =>
             {
                 Self::TurnCompleted {
                     turn_id: string_field(&raw, "turnId"),
