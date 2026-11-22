@@ -82,7 +82,7 @@ function Get-LauncherSource([string]$Kind, [string]$Os) {
 function Get-Members([string]$Kind, [string]$Os) {
     $exe = Get-Exe $Os
     $launcher = Split-Path -Leaf (Get-LauncherSource $Kind $Os)
-    $members = @("acan$exe", "acan-worker$exe", 'web/index.html', 'LICENSE', $launcher, 'FLAVOR')
+    $members = @("acan$exe", 'web/index.html', 'LICENSE', $launcher, 'FLAVOR')
     if ($Kind -eq 'demo') {
         $members += 'web/replay/manifest.json', 'web/replay/events.json', 'web/replay/plant.json', 'acan-demo.bundle', 'README.txt'
     }
@@ -159,7 +159,7 @@ function New-Stage {
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
     $exe = Get-Exe $Os
-    foreach ($bin in 'acan', 'acan-worker') {
+    foreach ($bin in @('acan')) {
         $source = Join-Path $BinDir "$bin$exe"
         if (-not (Test-Path -LiteralPath $source)) { throw "missing binary: $source" }
         Copy-Item -LiteralPath $source -Destination (Join-Path $stage "$bin$exe")
@@ -185,7 +185,7 @@ function New-Stage {
 function New-LinuxArchive([string]$Stage, [string]$OutDir) {
     $name = Split-Path -Leaf $Stage
     if (-not $IsWindows) {
-        foreach ($file in 'acan', 'acan-worker', 'install.sh', 'start-acan-demo.sh') {
+        foreach ($file in 'acan', 'install.sh', 'start-acan-demo.sh') {
             $path = Join-Path $Stage $file
             if (Test-Path -LiteralPath $path) { chmod 755 $path }
         }
@@ -218,7 +218,7 @@ function Invoke-SelfTest {
         $out = Join-Path $work 'out'
         $bundle = Join-Path $work 'acan-demo.bundle'
         New-Item -ItemType Directory -Force -Path $bin, $empty, (Join-Path $web 'pkg'), $replay, $out | Out-Null
-        foreach ($name in 'acan', 'acan-worker', 'acan.exe', 'acan-worker.exe') {
+        foreach ($name in 'acan', 'acan.exe') {
             Set-Content -LiteralPath (Join-Path $bin $name) -Value $name
         }
         Set-Content -LiteralPath (Join-Path $web 'index.html') -Value '<!doctype html>'
