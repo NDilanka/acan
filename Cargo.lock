@@ -46,6 +46,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "acan-hook"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "acan-intent"
 version = "0.1.0"
 dependencies = [

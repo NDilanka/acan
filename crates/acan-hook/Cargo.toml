@@ -1,0 +1,12 @@
+[package]
+name = "acan-hook"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Fast fail-closed Droid hook that asks the Acan daemon to allow or block a tool call"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
