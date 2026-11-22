@@ -2739,8 +2739,7 @@ async fn plant_of(running: &Running) -> Value {
 }
 
 /// The contract flag reads the protected app contract at the protected head. The demo carries one,
-/// so the flag is present and names the contract's version. The plant carries the same flag, and
-/// the server runs no vision checks, so the plant's vision flag is off.
+/// so the flag is present and names the contract's version. The plant carries the same flag.
 #[tokio::test]
 async fn the_contract_flag_reads_the_protected_app_contract() {
     let repo = demo_repo();
@@ -2762,11 +2761,6 @@ async fn the_contract_flag_reads_the_protected_app_contract() {
         plant["contract"],
         json!({ "present": true, "version": "acan-app/1" }),
         "the plant carries the same contract flag"
-    );
-    assert_eq!(
-        plant["vision"],
-        json!({ "on": false, "reason": "the server runs no vision checks" }),
-        "the test server runs no vision checks"
     );
     running.stop().await.expect("the server stops");
 }

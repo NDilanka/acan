@@ -50,22 +50,31 @@ fn owner_token(repo: &Path) -> String {
     token_of(repo, "member", "owner")
 }
 
+/// Grants the agent a token in the repository's tokens file, beside the owner's.
+fn grant_agent(repo: &Path, token: &str, agent: &str) {
+    let state = repo.join(".acan");
+    fs::create_dir_all(&state).expect("the state directory");
+    let entries = json!([
+        { "token": "acan_owner_test", "principal": { "kind": "member", "id": "owner" } },
+        { "token": token, "principal": { "kind": "agent", "id": agent } }
+    ]);
+    fs::write(state.join("tokens.json"), entries.to_string()).expect("the tokens file");
+}
+
 /// One client for every request, so the tests share its connection pool.
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
-/// The config every test starts with: an ephemeral port, the stub model, and no vision.
-fn config(projects: &ProjectSet, local_workers: usize) -> ServeConfig {
+/// The config every test starts with: an ephemeral port and the stub model.
+fn config(projects: &ProjectSet) -> ServeConfig {
     ServeConfig {
         projects: projects.clone(),
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         team: false,
         web: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
-        vision: None,
-        local_workers,
         map_on_first_view: false,
     }
 }
@@ -76,7 +85,7 @@ fn stub_opener() -> ClientFactory<Stub> {
 }
 
 /// Starts a server over `projects` that can add projects while it runs.
-async fn start(projects: &ProjectSet, local_workers: usize) -> Running {
+async fn start(projects: &ProjectSet) -> Running {
     let clients = projects
         .projects
         .iter()
@@ -84,7 +93,7 @@ async fn start(projects: &ProjectSet, local_workers: usize) -> Running {
         .collect();
     let settings = default_settings_file(projects);
     start_projects_adding(
-        config(projects, local_workers),
+        config(projects),
         clients,
         Some(settings),
         stub_opener(),
@@ -162,7 +171,7 @@ async fn a_folder_added_while_the_server_runs_is_served_and_scanned() {
     let alpha = repo(root.path(), "alpha");
     let beta = repo(root.path(), "beta");
     let projects = ProjectSet::from_repos(std::slice::from_ref(&alpha));
-    let running = start(&projects, 0).await;
+    let running = start(&projects).await;
     let token = owner_token(&alpha);
 
     let (status, body) = add(&running, Some(&token), &beta.display().to_string()).await;
@@ -261,7 +270,7 @@ async fn a_folder_added_while_the_server_runs_is_served_and_scanned() {
         skipped.is_empty(),
         "every added folder is served: {skipped:?}"
     );
-    let running = start(&next, 0).await;
+    let running = start(&next).await;
     let (status, list) = get(&running, "/api/projects", &token).await;
     assert_eq!(status, StatusCode::OK);
     let ids: Vec<&str> = list
@@ -284,9 +293,11 @@ async fn a_live_add_is_for_the_owner_alone() {
     let alpha = repo(root.path(), "alpha");
     let beta = repo(root.path(), "beta");
     let projects = ProjectSet::from_repos(std::slice::from_ref(&alpha));
-    // One local worker, so its agent token is in the tokens file to test with.
-    let running = start(&projects, 1).await;
-    let agent = token_of(&alpha, "agent", "local-1");
+    // No local worker mints an agent token, so the tokens file grants one to test with. It names
+    // the owner too: a file that exists mints nothing.
+    grant_agent(&alpha, "acan_agent_test", "agent-1");
+    let running = start(&projects).await;
+    let agent = token_of(&alpha, "agent", "agent-1");
     let beta_path = beta.display().to_string();
 
     let (status, _) = add(&running, None, &beta_path).await;
@@ -317,7 +328,7 @@ async fn a_folder_that_cannot_be_served_is_refused_and_the_settings_stay() {
     fs::create_dir_all(&inside_state).expect("a folder inside the state folder");
     let file = alpha.join("model/store.ts");
     let projects = ProjectSet::from_repos(std::slice::from_ref(&alpha));
-    let running = start(&projects, 0).await;
+    let running = start(&projects).await;
     let token = owner_token(&alpha);
 
     let missing = root.path().join("missing").display().to_string();
@@ -383,7 +394,7 @@ async fn a_server_started_without_live_adds_refuses_them() {
     let projects = ProjectSet::from_repos(std::slice::from_ref(&alpha));
     let clients = vec![(Stub::default(), UsageLedger::default())];
     let settings = default_settings_file(&projects);
-    let running = start_projects_serving(config(&projects, 0), clients, Some(settings))
+    let running = start_projects_serving(config(&projects), clients, Some(settings))
         .await
         .expect("the server starts");
     let token = owner_token(&alpha);

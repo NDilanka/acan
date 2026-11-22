@@ -1520,7 +1520,6 @@ async fn scope_host(root: &Path, client: Stub) -> Host<Stub> {
         witness_http_base_url: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
         probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
-        vision: None,
     })
 }
 
@@ -2026,7 +2025,6 @@ async fn clashed_host(root: &Path, client: Stub) -> (Host<Stub>, ClashId) {
         witness_http_base_url: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
         probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
-        vision: None,
     });
     (host, clash)
 }

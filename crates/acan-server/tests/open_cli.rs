@@ -75,7 +75,6 @@ impl User {
     fn open_with_browser(&self, args: &[&str], browser: &str) -> Output {
         Command::new(env!("CARGO_BIN_EXE_acan"))
             .arg("open")
-            .args(["--no-vision", "--workers", "0"])
             .args(args)
             .env("HOME", self.path("home"))
             .env("XDG_CONFIG_HOME", self.path("config"))

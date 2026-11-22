@@ -82,7 +82,6 @@ fn config(repo: &Path) -> ServerConfig {
         protected_branch: None,
         witness_http_base_url: None,
         witness_concurrency: acan_server::DEFAULT_WITNESS_CONCURRENCY,
-        vision: None,
     }
 }
 
@@ -240,7 +239,6 @@ async fn the_owner_reads_an_editable_document_of_the_defaults() {
     assert_eq!(doc["models"]["configured"], false);
     assert_eq!(doc["models"]["keys"].as_array().expect("keys").len(), 3);
     assert_eq!(doc["models"]["roles"].as_array().expect("roles").len(), 7);
-    assert_eq!(doc["projects"][0]["workers"], 0);
     for field in ["name", "version", "commit", "os", "arch"] {
         assert!(doc["about"].get(field).is_some(), "about has {field}");
     }
@@ -439,29 +437,6 @@ async fn the_custom_adapter_needs_a_command_and_a_command_is_stored() {
 async fn project_changes_are_recorded_for_the_next_start() {
     let repo = temp_repo();
     let running = boot(repo.path(), models(repo.path(), &[])).await;
-    let id = owner_doc(&running).await["projects"][0]["id"]
-        .as_str()
-        .expect("the project has an id")
-        .to_owned();
-
-    let workers = json!({"projects": {"workers": {&id: 2}}});
-    let response = put(&running, Some(OWNER_TOKEN), &workers).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let worker_path = format!("projects.workers.{id}");
-    assert_eq!(
-        json(response).await["applied"],
-        json!({ worker_path: "restart" })
-    );
-    assert_eq!(owner_doc(&running).await["projects"][0]["workers"], 2);
-
-    let too_many = json!({"projects": {"workers": {&id: 9}}});
-    let refused = put(&running, Some(OWNER_TOKEN), &too_many).await;
-    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        invalid_paths(refused).await,
-        [format!("projects.workers.{id}")]
-    );
-
     let relative = json!({"projects": {"add": ["relative/folder"]}});
     let refused = put(&running, Some(OWNER_TOKEN), &relative).await;
     assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -829,15 +804,6 @@ async fn the_statemap_llm_flag_is_set_per_project_and_applies_at_once() {
     assert_eq!(
         invalid_paths(refused).await,
         ["projects.statemap_llm.no-such-project"]
-    );
-
-    let with_restart = json!({"projects": {"statemap_llm": {&id: true}, "workers": {&id: 1}}});
-    let response = put(&running, Some(OWNER_TOKEN), &with_restart).await;
-    let worker_path = format!("projects.workers.{id}");
-    assert_eq!(
-        json(response).await["applied"],
-        json!({ flag_path: "live", worker_path: "restart" }),
-        "the worker count waits for a restart, and the flag is read on each use"
     );
 
     running.stop().await.expect("the server stops");
@@ -1681,7 +1647,6 @@ async fn the_owner_clears_the_dependency_cache_and_nothing_else() {
                 "tokens",
                 "examples",
                 "observations",
-                "vision",
             ],
         })
     );

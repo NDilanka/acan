@@ -45,8 +45,6 @@ fn config(repo: &Path, map_on_first_view: bool) -> ServeConfig {
         team: false,
         web: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
-        vision: None,
-        local_workers: 0,
         map_on_first_view,
     }
 }

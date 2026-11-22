@@ -29,14 +29,7 @@ fn a_first_start_with_piped_output_names_the_tokens_file_and_prints_no_token() {
         .arg("serve")
         .arg("--repo")
         .arg(repo.path())
-        .args([
-            "--port",
-            "0",
-            "--no-update-check",
-            "--no-vision",
-            "--workers",
-            "0",
-        ])
+        .args(["--port", "0", "--no-update-check"])
         .env("HOME", user.path().join("home"))
         .env("XDG_CONFIG_HOME", user.path().join("config"))
         .env("XDG_STATE_HOME", user.path().join("state"))

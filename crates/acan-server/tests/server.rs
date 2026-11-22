@@ -50,7 +50,6 @@ fn config(repo: &Path, addr: SocketAddr, team: bool) -> ServerConfig {
         protected_branch: None,
         witness_http_base_url: None,
         witness_concurrency: acan_server::DEFAULT_WITNESS_CONCURRENCY,
-        vision: None,
     }
 }
 
@@ -371,10 +370,6 @@ async fn plant_endpoint_returns_the_scanned_plant() {
         .as_object_mut()
         .expect("the plant is a JSON object")
         .remove("contract");
-    let vision = plant
-        .as_object_mut()
-        .expect("the plant is a JSON object")
-        .remove("vision");
     let summary = plant
         .as_object_mut()
         .expect("the plant is a JSON object")
@@ -393,11 +388,6 @@ async fn plant_endpoint_returns_the_scanned_plant() {
         contract,
         Some(json!({ "present": false, "version": null })),
         "a repository with no app contract says so"
-    );
-    assert_eq!(
-        vision,
-        Some(json!({ "on": false, "reason": "the server runs no vision checks" })),
-        "this server runs no vision checks"
     );
 }
 

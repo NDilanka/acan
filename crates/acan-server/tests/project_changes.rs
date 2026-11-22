@@ -50,7 +50,7 @@ fn client() -> &'static reqwest::Client {
 }
 
 /// Starts a server over `projects`, with its settings in the default project's state directory.
-async fn start(projects: &ProjectSet, local_workers: usize) -> Running {
+async fn start(projects: &ProjectSet) -> Running {
     let clients = projects
         .projects
         .iter()
@@ -62,8 +62,6 @@ async fn start(projects: &ProjectSet, local_workers: usize) -> Running {
         team: false,
         web: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
-        vision: None,
-        local_workers,
         map_on_first_view: false,
     };
     let settings = default_settings_file(projects);
@@ -75,12 +73,12 @@ async fn start(projects: &ProjectSet, local_workers: usize) -> Running {
 /// Starts a server the way the binary does: the folders the command line names, changed by the
 /// project changes in the settings file. Returns the server and each added folder that could not
 /// be served, with the reason.
-async fn restart(repos: &[PathBuf], local_workers: usize) -> (Running, Vec<String>) {
+async fn restart(repos: &[PathBuf]) -> (Running, Vec<String>) {
     let mut projects = ProjectSet::from_repos(repos);
     let settings = default_settings_file(&projects);
     let skipped =
         apply_project_changes(&mut projects, &settings).expect("the project changes apply");
-    (start(&projects, local_workers).await, skipped)
+    (start(&projects).await, skipped)
 }
 
 /// The owner's settings document.
@@ -107,60 +105,13 @@ async fn put_settings(running: &Running, token: &str, body: &Value) -> reqwest::
         .expect("the request is sent")
 }
 
-/// How many local workers project `id` runs, as its workers route reports them.
-async fn workers_of(running: &Running, token: &str, id: &str) -> usize {
-    let response = client()
-        .get(format!("http://{}/api/p/{id}/workers", running.local_addr))
-        .bearer_auth(token)
-        .send()
-        .await
-        .expect("the request is sent");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: Value = response.json().await.expect("the body is JSON");
-    body["workers"].as_array().expect("a list of workers").len()
-}
-
-#[tokio::test]
-async fn a_worker_count_in_settings_is_what_its_project_runs_at_the_next_start() {
-    let root = tempfile::tempdir().expect("temp dir");
-    let alpha = repo(root.path(), "alpha");
-    let beta = repo(root.path(), "beta");
-    let repos = [alpha.clone(), beta.clone()];
-    let (running, skipped) = restart(&repos, 0).await;
-    assert!(skipped.is_empty(), "{skipped:?}");
-    let token = owner_token(&alpha);
-
-    let response = put_settings(
-        &running,
-        &token,
-        &json!({"projects": {"workers": {"beta": 2}}}),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        workers_of(&running, &token, "beta").await,
-        0,
-        "the count takes effect at the next start"
-    );
-    running.stop().await.expect("the server stops");
-
-    let (running, _) = restart(&repos, 1).await;
-    assert_eq!(workers_of(&running, &token, "beta").await, 2);
-    assert_eq!(
-        workers_of(&running, &token, "alpha").await,
-        1,
-        "a project with no count runs the count the command line gives"
-    );
-    running.stop().await.expect("the server stops");
-}
-
 #[tokio::test]
 async fn a_folder_added_in_settings_is_served_at_every_later_start() {
     let root = tempfile::tempdir().expect("temp dir");
     let alpha = repo(root.path(), "alpha");
     let beta = repo(root.path(), "beta");
     let alpha_only = [alpha.clone()];
-    let (running, _) = restart(&alpha_only, 0).await;
+    let (running, _) = restart(&alpha_only).await;
     let token = owner_token(&alpha);
     let beta_text = beta.display().to_string();
 
@@ -178,7 +129,7 @@ async fn a_folder_added_in_settings_is_served_at_every_later_start() {
     running.stop().await.expect("the server stops");
 
     // The command line still names only alpha, and beta is served from the settings.
-    let (running, skipped) = restart(&alpha_only, 0).await;
+    let (running, skipped) = restart(&alpha_only).await;
     assert!(skipped.is_empty(), "{skipped:?}");
     assert_eq!(running.project_ids(), ["alpha", "beta"]);
     assert_eq!(
@@ -198,7 +149,7 @@ async fn a_folder_added_in_settings_is_served_at_every_later_start() {
     );
     running.stop().await.expect("the server stops");
 
-    let (running, _) = restart(&alpha_only, 0).await;
+    let (running, _) = restart(&alpha_only).await;
     assert_eq!(
         running.project_ids(),
         ["alpha", "beta"],
@@ -214,7 +165,7 @@ async fn a_project_removed_in_settings_stays_removed_until_its_folder_is_added_a
     let beta = repo(root.path(), "beta");
     let repos = [alpha.clone(), beta.clone()];
     let alpha_only = [alpha.clone()];
-    let (running, _) = restart(&repos, 0).await;
+    let (running, _) = restart(&repos).await;
     let token = owner_token(&alpha);
 
     let default = put_settings(
@@ -233,7 +184,7 @@ async fn a_project_removed_in_settings_stays_removed_until_its_folder_is_added_a
     running.stop().await.expect("the server stops");
 
     // The command line still names beta, and the removal keeps it out.
-    let (running, _) = restart(&repos, 0).await;
+    let (running, _) = restart(&repos).await;
     assert_eq!(running.project_ids(), ["alpha"]);
     let gone = put_settings(&running, &token, &json!({"projects": {"remove": ["beta"]}})).await;
     assert_eq!(
@@ -252,7 +203,7 @@ async fn a_project_removed_in_settings_stays_removed_until_its_folder_is_added_a
     assert_eq!(doc["project_changes"]["remove"], json!([]));
     running.stop().await.expect("the server stops");
 
-    let (running, _) = restart(&alpha_only, 0).await;
+    let (running, _) = restart(&alpha_only).await;
     assert_eq!(
         running.project_ids(),
         ["alpha", "beta"],
@@ -266,7 +217,7 @@ async fn an_added_folder_that_cannot_be_served_is_named_once_and_dropped() {
     let root = tempfile::tempdir().expect("temp dir");
     let alpha = repo(root.path(), "alpha");
     let alpha_only = [alpha.clone()];
-    let (running, _) = restart(&alpha_only, 0).await;
+    let (running, _) = restart(&alpha_only).await;
     let token = owner_token(&alpha);
 
     // A folder inside alpha's state directory cannot be served as a project of its own.
@@ -281,7 +232,7 @@ async fn an_added_folder_that_cannot_be_served_is_named_once_and_dropped() {
     assert_eq!(response.status(), StatusCode::OK);
     running.stop().await.expect("the server stops");
 
-    let (running, skipped) = restart(&alpha_only, 0).await;
+    let (running, skipped) = restart(&alpha_only).await;
     assert_eq!(skipped.len(), 1, "{skipped:?}");
     assert!(
         skipped[0].starts_with(&inner.display().to_string()),
@@ -296,7 +247,7 @@ async fn an_added_folder_that_cannot_be_served_is_named_once_and_dropped() {
     );
     running.stop().await.expect("the server stops");
 
-    let (running, skipped) = restart(&alpha_only, 0).await;
+    let (running, skipped) = restart(&alpha_only).await;
     assert!(skipped.is_empty(), "{skipped:?}");
     running.stop().await.expect("the server stops");
 }
