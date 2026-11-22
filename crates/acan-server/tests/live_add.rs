@@ -92,14 +92,9 @@ async fn start(projects: &ProjectSet) -> Running {
         .map(|_| (Stub::default(), UsageLedger::default()))
         .collect();
     let settings = default_settings_file(projects);
-    start_projects_adding(
-        config(projects),
-        clients,
-        Some(settings),
-        stub_opener(),
-    )
-    .await
-    .expect("the server starts")
+    start_projects_adding(config(projects), clients, Some(settings), stub_opener())
+        .await
+        .expect("the server starts")
 }
 
 /// Sends `GET path` with `token`, and returns the status and the JSON body.

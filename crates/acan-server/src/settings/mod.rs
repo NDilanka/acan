@@ -1336,7 +1336,6 @@ mod tests {
 
     use super::*;
 
-
     #[test]
     fn the_statemap_call_limit_is_read_from_the_file_on_each_call() {
         let dir = tempfile::tempdir().expect("temp dir");

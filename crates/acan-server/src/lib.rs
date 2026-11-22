@@ -674,7 +674,10 @@ async fn start_listening<C: ModelClient + 'static>(
     let mut mapped = Vec::with_capacity(entries.len());
     for entry in &entries {
         mapped.push((entry.id.clone(), entry.host.mapping_state()));
-        mapping.push(tokio::spawn(map_project(entry.host.clone(), config.map_on_first_view)));
+        mapping.push(tokio::spawn(map_project(
+            entry.host.clone(),
+            config.map_on_first_view,
+        )));
     }
 
     let mut runtimes = Vec::with_capacity(entries.len());
