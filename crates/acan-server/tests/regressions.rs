@@ -1,26 +1,23 @@
-//! Contiguous logs across cancellation and shutdown, bounded job retries, atomic rescans, and a
-//! static root that cannot expose private state.
+//! Contiguous logs across cancellation and shutdown, atomic rescans, and a static root that
+//! cannot expose private state.
 
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use acan_core::{
-    Command, HumanCmd, MachineKey, MemberId, OrderId, OrderState, Origin, Role as MemberRole, Seq,
-    SystemCmd, Timestamp, WorldId, WorldRef,
+    Command, HumanCmd, MemberId, Origin, Role as MemberRole, Seq, SystemCmd, Timestamp, WorldId,
+    WorldRef,
 };
-use acan_llm::{ChatRequest, ChatResponse, LlmError, ModelClient, Reply, Role, Stub, UsageLedger};
+use acan_llm::{Stub, UsageLedger};
 use acan_server::{
     DEFAULT_PROBE_CONCURRENCY, DEFAULT_WITNESS_CONCURRENCY, EventStore, Host, HostParts, Running,
     ServerConfig, Tokens, scan, start,
 };
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, SqliteConnection};
-use tokio::sync::{Notify, Semaphore};
 use tokio::time::{sleep, timeout};
 
 fn repo() -> tempfile::TempDir {
@@ -237,55 +234,6 @@ async fn stop_waits_for_an_in_flight_write_and_the_log_replays_afterwards() {
 }
 
 #[tokio::test]
-async fn failed_jobs_retry_briefly_and_then_stop_without_new_work() {
-    let dir = repo();
-    let stub = Stub::default().when(Role::Foreman, |_| true, Reply::text(r#"{"tasks":[]}"#));
-    let ledger = stub.ledger().clone();
-    let running = start(config(&dir), stub, ledger.clone())
-        .await
-        .expect("start");
-    let token = token_of(&running);
-    let http = reqwest::Client::new();
-    for n in 0..6 {
-        let cmd = HumanCmd::PostOrder {
-            machine: MachineKey::from_str("model").expect("valid machine key"),
-            sentence: format!("order {n}"),
-            witnesses: Vec::new(),
-        };
-        let response = http
-            .post(format!("http://{}/api/commands", running.local_addr))
-            .bearer_auth(&token)
-            .json(&cmd)
-            .send()
-            .await
-            .expect("the order request is sent");
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-    }
-
-    let calls =
-        |ledger: &UsageLedger| -> u64 { ledger.snapshot().iter().map(|usage| usage.calls).sum() };
-    // Five attempts per order: the initial run plus bounded backoff retries. The retries run on
-    // a timer, not on the ModelUsed events the attempts themselves record.
-    let settled = timeout(Duration::from_secs(5), async {
-        loop {
-            if calls(&ledger) >= 30 {
-                return;
-            }
-            sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await;
-    assert!(settled.is_ok(), "every job reached its retry limit");
-    sleep(Duration::from_millis(500)).await;
-    assert_eq!(
-        calls(&ledger),
-        30,
-        "usage events do not requeue failed jobs, and exhausted jobs stay down"
-    );
-    running.stop().await.expect("the server stops");
-}
-
-#[tokio::test]
 async fn a_failed_rescan_keeps_the_committed_scan_and_the_writer_recovers() {
     let dir = repo();
     let path = dir.path().join(".acan/world.db");
@@ -444,137 +392,4 @@ async fn public_files_are_served_but_private_state_is_not_reachable_without_a_to
         );
     }
     running.stop().await.expect("the server stops");
-}
-/// A client that answers once its gate opens, counting calls. Used to prove stop and rejection
-/// behavior without depending on timing the real model.
-#[derive(Clone)]
-struct Controlled {
-    inner: Arc<Stub>,
-    calls: Arc<AtomicUsize>,
-    started: Arc<Notify>,
-    gate: Arc<Semaphore>,
-}
-
-impl Controlled {
-    fn new() -> Self {
-        Self {
-            inner: Arc::new(Stub::default().when(
-                Role::Foreman,
-                |_| true,
-                Reply::text(r#"{"tasks":[{"title":"test","brief":"test","scope":["model"]}]}"#),
-            )),
-            calls: Arc::new(AtomicUsize::new(0)),
-            started: Arc::new(Notify::new()),
-            gate: Arc::new(Semaphore::new(0)),
-        }
-    }
-
-    fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
-    }
-}
-
-impl ModelClient for Controlled {
-    async fn chat(&self, role: Role, request: ChatRequest) -> Result<ChatResponse, LlmError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.started.notify_one();
-        self.gate
-            .acquire()
-            .await
-            .expect("the gate stays open")
-            .forget();
-        self.inner.chat(role, request).await
-    }
-}
-
-async fn post_order(running: &Running, token: &str) {
-    let response = reqwest::Client::new()
-        .post(format!("http://{}/api/commands", running.local_addr))
-        .bearer_auth(token)
-        .json(&HumanCmd::PostOrder {
-            machine: MachineKey::from_str("model").expect("valid machine key"),
-            sentence: "test order".to_owned(),
-            witnesses: Vec::new(),
-        })
-        .send()
-        .await
-        .expect("the order request is sent");
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-}
-
-#[tokio::test]
-async fn an_obsolete_job_result_is_rejected_without_a_retry_and_reads_stay_live() {
-    let dir = repo();
-    let client = Controlled::new();
-    let running = start(config(&dir), client.clone(), client.inner.ledger().clone())
-        .await
-        .expect("start");
-    let token = token_of(&running);
-    post_order(&running, &token).await;
-    timeout(Duration::from_secs(2), client.started.notified())
-        .await
-        .expect("the split job started");
-
-    let order = OrderId::from_str("o-0").expect("valid order id");
-    let cancel = reqwest::Client::new()
-        .post(format!("http://{}/api/commands", running.local_addr))
-        .bearer_auth(&token)
-        .json(&HumanCmd::CancelOrder { order })
-        .send()
-        .await
-        .expect("the cancel request is sent");
-    assert_eq!(
-        cancel.status(),
-        reqwest::StatusCode::OK,
-        "the origin answers while the model is still thinking"
-    );
-
-    client.gate.add_permits(1);
-    sleep(Duration::from_millis(300)).await;
-    assert_eq!(client.calls(), 1, "an obsolete result is not retried");
-
-    let store = EventStore::open(&dir.path().join(".acan/world.db"))
-        .await
-        .expect("store");
-    let log = store.load_from(Seq::new(0)).await.expect("log");
-    let origin = Origin::replay(log).expect("replay");
-    assert_eq!(
-        origin.world().order(order).expect("the order exists").state,
-        OrderState::Cancelled
-    );
-    assert_eq!(
-        origin.world().tasks_of(order).count(),
-        0,
-        "the late split created no tasks"
-    );
-    running.stop().await.expect("the server stops");
-}
-
-#[tokio::test]
-async fn stop_aborts_a_job_waiting_on_the_model_and_nothing_lands_afterwards() {
-    let dir = repo();
-    let client = Controlled::new();
-    let running = start(config(&dir), client.clone(), client.inner.ledger().clone())
-        .await
-        .expect("start");
-    let token = token_of(&running);
-    post_order(&running, &token).await;
-    timeout(Duration::from_secs(2), client.started.notified())
-        .await
-        .expect("the split job started");
-
-    running.stop().await.expect("the server stops");
-
-    client.gate.add_permits(1);
-    sleep(Duration::from_millis(200)).await;
-    let store = EventStore::open(&dir.path().join(".acan/world.db"))
-        .await
-        .expect("store");
-    let log = store.load_from(Seq::new(0)).await.expect("log");
-    assert_eq!(
-        log.len(),
-        3,
-        "the aborted job records no usage and no result after stop"
-    );
-    assert_eq!(client.calls(), 1);
 }

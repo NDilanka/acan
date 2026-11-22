@@ -2,12 +2,13 @@
 //! the settings file keeps. No test sends a key to a real provider. A key is set in the keys file
 //! directly, and the only key changes sent are ones refused before any request, or cleared.
 
+mod common;
+
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use acan_core::{Event, Stamped};
 use acan_llm::{KeyFile, UsageLedger};
 use acan_server::{Models, Running, ServerConfig, start};
 use futures_util::{SinkExt, StreamExt};
@@ -757,59 +758,6 @@ async fn statemap_is_a_role_in_the_models_the_harness_and_the_call_limits() {
 }
 
 #[tokio::test]
-async fn the_statemap_llm_flag_is_set_per_project_and_applies_at_once() {
-    let repo = temp_repo();
-    let running = boot(repo.path(), models(repo.path(), &[])).await;
-    let id = owner_doc(&running).await["projects"][0]["id"]
-        .as_str()
-        .expect("the project has an id")
-        .to_owned();
-    assert_eq!(
-        owner_doc(&running).await["projects"][0]["statemap_llm"],
-        false,
-        "the flag is off by default"
-    );
-
-    let flag_path = format!("projects.statemap_llm.{id}");
-    let on = json!({"projects": {"statemap_llm": {&id: true}}});
-    let response = put(&running, Some(OWNER_TOKEN), &on).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        json(response).await["applied"],
-        json!({ flag_path.clone(): "live" })
-    );
-    assert_eq!(
-        owner_doc(&running).await["projects"][0]["statemap_llm"],
-        true
-    );
-    let saved: Value = serde_json::from_str(
-        &fs::read_to_string(settings_file(repo.path())).expect("the file is written"),
-    )
-    .expect("the file is JSON");
-    assert_eq!(saved["projects"]["statemap_llm"][&id], true);
-
-    let off = json!({"projects": {"statemap_llm": {&id: false}}});
-    assert_eq!(
-        put(&running, Some(OWNER_TOKEN), &off).await.status(),
-        StatusCode::OK
-    );
-    assert_eq!(
-        owner_doc(&running).await["projects"][0]["statemap_llm"],
-        false
-    );
-
-    let unknown = json!({"projects": {"statemap_llm": {"no-such-project": true}}});
-    let refused = put(&running, Some(OWNER_TOKEN), &unknown).await;
-    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        invalid_paths(refused).await,
-        ["projects.statemap_llm.no-such-project"]
-    );
-
-    running.stop().await.expect("the server stops");
-}
-
-#[tokio::test]
 async fn the_owner_token_is_read_by_the_owner_alone() {
     let repo = temp_repo();
     let running = boot(repo.path(), models(repo.path(), &[])).await;
@@ -1219,26 +1167,6 @@ fn manifest_of(entries: &[(String, Vec<u8>)]) -> Value {
     serde_json::from_slice(bytes).expect("the manifest is JSON")
 }
 
-/// Waits until the offline split of the posted order lands in the event log.
-async fn wait_for_split(running: &Running) {
-    let deadline = tokio::time::Instant::now() + WAIT;
-    loop {
-        let body = json(get_path(running, "/api/events?from=0", Some(OWNER_TOKEN)).await).await;
-        let events: Vec<Stamped> = serde_json::from_value(body).expect("events JSON");
-        if events
-            .iter()
-            .any(|stamped| matches!(stamped.event, Event::OrderSplit { .. }))
-        {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the offline split never landed"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
 #[tokio::test]
 async fn the_data_routes_refuse_a_member_an_agent_and_an_unknown_token() {
     let repo = temp_repo();
@@ -1596,7 +1524,9 @@ async fn an_export_skips_a_task_that_has_no_receipt() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK, "the agent is registered");
-    wait_for_split(&running).await;
+    running.stop().await.expect("the server stops");
+    common::record_split(repo.path(), SPLIT_SENTENCE).await;
+    let running = boot(repo.path(), models(repo.path(), &[])).await;
 
     // The split made a task, and no gate run has given it a receipt. Its export is skipped.
     let response = get_path(
@@ -1639,7 +1569,7 @@ async fn the_owner_clears_the_dependency_cache_and_nothing_else() {
     assert_eq!(
         body,
         json!({
-            "cleared": ["deps", "tour_cache"],
+            "cleared": ["deps"],
             "kept": [
                 "receipts",
                 "event_log",

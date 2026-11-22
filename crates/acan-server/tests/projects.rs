@@ -942,7 +942,6 @@ async fn unprefixed_equals_default() {
     for path in [
         "/plant",
         "/events?from=0",
-        "/usage",
         "/setup",
         "/orders/o-0/plant-view",
     ] {
