@@ -21,7 +21,7 @@ use crate::registry::{Entry, Registry};
 use crate::settings::data::DataOwner;
 use crate::store::EventStore;
 use crate::{DB_FILE, DEFAULT_PROBE_CONCURRENCY, Runtime, STATE_DIR};
-use crate::{index, jobs, map_project, open_git, prepare_state_dir, statemap};
+use crate::{index, jobs, map_project, open_git, prepare_state_dir};
 
 /// Opens the model client and usage ledger of a project added while the server runs. The CLI
 /// builds one from the project's routing file, as startup does for each project.
@@ -29,7 +29,7 @@ pub type ClientFactory<C> =
     Box<dyn Fn(&ProjectSpec) -> anyhow::Result<(C, UsageLedger)> + Send + Sync>;
 
 /// What a live add needs from the server that started. Built by startup, so a project opened later
-/// gets the same witness pool, shutdown signal, owner and settings file as the others.
+/// gets the same witness pool, shutdown signal and owner as the others.
 pub(crate) struct LiveContext<C> {
     /// The member whose token is the owner's.
     pub(crate) founder: MemberId,
@@ -39,8 +39,6 @@ pub(crate) struct LiveContext<C> {
     pub(crate) slots: Arc<Semaphore>,
     /// How many witness runs may run at once, as startup was given.
     pub(crate) witness_concurrency: usize,
-    /// The settings file, which each project's scans read their statemap settings from.
-    pub(crate) settings_file: PathBuf,
     /// The public folder, if one is served. A project's folder must sit outside it.
     pub(crate) web: Option<PathBuf>,
     /// Opens the model client of a project added while the server runs.
@@ -153,7 +151,6 @@ pub(crate) async fn open<C: ModelClient + 'static>(
     let scan = tokio::task::spawn_blocking(move || index::skeleton(&repo))
         .await
         .context("the skeleton scan task did not finish")??;
-    let statemap = statemap::SettingsSource::new(live.settings_file.clone(), spec.id.clone());
     let (client, ledger) = (live.open_client)(&spec)?;
     let git = open_git(&spec).await;
     let host = Host::new_mapping(
@@ -172,7 +169,6 @@ pub(crate) async fn open<C: ModelClient + 'static>(
             probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
         },
         Arc::clone(&live.slots),
-        Some(statemap),
     );
 
     let api = format!("/api/p/{}", spec.id);

@@ -75,8 +75,6 @@ pub(crate) struct HarnessPatch {
 pub(crate) struct ProjectsPatch {
     add: Option<Vec<String>>,
     remove: Option<Vec<String>>,
-    /// Whether each named project uses the statemap LLM. The ids must be projects the server runs.
-    statemap_llm: Option<BTreeMap<String, bool>>,
 }
 
 /// The budgets part of a change. Numbers are read as wide integers, so an out-of-range number is
@@ -375,9 +373,8 @@ fn is_folder(path: &str) -> bool {
 
 /// The projects part of a change. Adds, removes and worker counts take effect at the next start,
 /// and are kept until a later change undoes them. Folders are kept as paths, so a removed project
-/// stays removed whatever the command line names. A statemap LLM flag names a project the server
-/// runs, and takes effect at once. The default project cannot be removed, since the unprefixed
-/// routes answer for it.
+/// stays removed whatever the command line names. The default project cannot be removed, since
+/// the unprefixed routes answer for it.
 fn projects(
     section: &ProjectsPatch,
     next: &mut Projects,
@@ -436,21 +433,6 @@ fn projects(
                 .any(|removed| same_folder(Path::new(removed), &folder));
             if !kept {
                 next.remove.push(folder.display().to_string());
-            }
-        }
-    }
-    if let Some(flags) = &section.statemap_llm {
-        for (id, on) in flags {
-            if !valid_id(id) {
-                errors.push(field("projects.statemap_llm", "must name project ids"));
-            } else if !running
-                .iter()
-                .any(|(running_id, _)| *running_id == id.as_str())
-            {
-                let path = format!("projects.statemap_llm.{id}");
-                errors.push(field(&path, "must name a project the server runs"));
-            } else {
-                next.statemap_llm.insert(id.clone(), *on);
             }
         }
     }
@@ -698,28 +680,6 @@ mod tests {
             &refused(json!({"budgets": {"call_limits": {"statemap": 501}}})),
             "budgets.call_limits.statemap"
         ));
-    }
-
-    #[test]
-    fn statemap_llm_flags_name_running_projects_and_hold_a_bool() {
-        let on = accepted(json!({"projects": {"statemap_llm": {"acan-wip": true}}}));
-        assert_eq!(on.next.projects.statemap_llm.get("acan-wip"), Some(&true));
-        assert_eq!(on.sections, vec![Section::Projects]);
-        assert!(names(
-            &refused(json!({"projects": {"statemap_llm": {"no-such-project": true}}})),
-            "projects.statemap_llm.no-such-project"
-        ));
-        assert!(names(
-            &refused(json!({"projects": {"statemap_llm": {"Bad Id": true}}})),
-            "projects.statemap_llm"
-        ));
-        assert!(
-            serde_json::from_value::<Patch>(
-                json!({"projects": {"statemap_llm": {"acan-wip": "yes"}}})
-            )
-            .is_err(),
-            "a flag that is not a bool does not parse"
-        );
     }
 
     #[test]

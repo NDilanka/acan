@@ -12,8 +12,6 @@
 mod add;
 mod auth;
 pub mod deps;
-#[cfg(test)]
-mod e2e;
 mod examples;
 mod git;
 mod host;
@@ -61,12 +59,10 @@ mod scan_feed;
 mod settings;
 mod setup;
 mod signin;
-mod statemap;
 mod store;
 mod stream;
 mod stream_all;
 mod touches;
-mod tour;
 mod writer;
 
 use std::fs;
@@ -226,11 +222,9 @@ pub struct Running {
     streams: Arc<Mutex<JoinSet<()>>>,
     /// The sign-in codes the server's routes redeem. Shared with the registry.
     signins: Arc<SignIns>,
-    /// The default project's stream and ruling holds, which the tests park to hold a write.
+    /// The default project's stream hold, which the tests park to hold a write.
     #[cfg(test)]
     pub(crate) stream_hold: stream::Hold,
-    #[cfg(test)]
-    pub(crate) ruling_hold: stream::Hold,
 }
 
 /// One project's background work: its job loop, its writer, and the streams open on it.
@@ -300,12 +294,6 @@ impl Running {
             .iter()
             .map(|runtime| runtime.id.as_str())
             .collect()
-    }
-
-    /// The writer of the first project, which the tests drive directly.
-    #[cfg(test)]
-    pub(crate) fn writer(&self) -> &Writer {
-        &self.runtimes[0].writer
     }
 
     /// The writer of the project `id`, which a test stops to make that project degraded.
@@ -600,9 +588,6 @@ async fn start_listening<C: ModelClient + 'static>(
         let scan = tokio::task::spawn_blocking(move || index::skeleton(&repo))
             .await
             .context("the skeleton scan task did not finish")??;
-        // Read from the settings file at each scan. A flag that is off makes no model call and
-        // writes no cache.
-        let statemap = statemap::SettingsSource::new(settings_file.clone(), spec.id.clone());
         openings.push(Opening {
             spec,
             store,
@@ -611,7 +596,6 @@ async fn start_listening<C: ModelClient + 'static>(
             tokens,
             client,
             ledger,
-            statemap,
         });
     }
 
@@ -635,7 +619,6 @@ async fn start_listening<C: ModelClient + 'static>(
             tokens,
             client,
             ledger,
-            statemap,
         } = opening;
         let git = open_git(&spec).await;
         let host = Host::new_mapping(
@@ -654,7 +637,6 @@ async fn start_listening<C: ModelClient + 'static>(
                 probe_concurrency: DEFAULT_PROBE_CONCURRENCY,
             },
             Arc::clone(&slots),
-            Some(statemap),
         );
         if config.map_on_first_view {
             host.hold_until_viewed();
@@ -696,10 +678,6 @@ async fn start_listening<C: ModelClient + 'static>(
     let stream_hold = entries.first().map_or_else(stream::Hold::default, |entry| {
         entry.host.stream_hold().clone()
     });
-    #[cfg(test)]
-    let ruling_hold = entries.first().map_or_else(stream::Hold::default, |entry| {
-        entry.host.ruling_hold().clone()
-    });
     let streams = Arc::new(Mutex::new(JoinSet::new()));
     let live_runtimes = Arc::new(Mutex::new(Vec::new()));
     let live = opener.map(|open_client| LiveContext {
@@ -707,7 +685,6 @@ async fn start_listening<C: ModelClient + 'static>(
         shutdown: shutdown_rx.clone(),
         slots: Arc::clone(&slots),
         witness_concurrency: config.witness_concurrency,
-        settings_file: settings_file.clone(),
         web: config.web.clone(),
         open_client,
         runtimes: Arc::clone(&live_runtimes),
@@ -751,8 +728,6 @@ async fn start_listening<C: ModelClient + 'static>(
         signins,
         #[cfg(test)]
         stream_hold,
-        #[cfg(test)]
-        ruling_hold,
     })
 }
 
@@ -842,8 +817,6 @@ struct Opening<C> {
     tokens: Tokens,
     client: C,
     ledger: UsageLedger,
-    /// Where the project's scans read their statemap settings.
-    statemap: statemap::SettingsSource,
 }
 
 /// Opens a project's git state for worktrees, witnesses and landing. A directory that is not a

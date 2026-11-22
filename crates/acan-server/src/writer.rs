@@ -43,10 +43,6 @@ enum Request {
         guard: Option<Guard>,
         reply: oneshot::Sender<Result<Vec<Stamped>, SubmitError>>,
     },
-    Advisory {
-        command: Command,
-        reply: oneshot::Sender<Result<Vec<Stamped>, SubmitError>>,
-    },
     Rescan {
         scan: Scan,
         reply: oneshot::Sender<Result<Vec<Stamped>, SubmitError>>,
@@ -54,15 +50,6 @@ enum Request {
     Shutdown {
         reply: oneshot::Sender<()>,
     },
-}
-
-/// How the origin decides a command.
-#[derive(Debug, Clone, Copy)]
-enum Mode {
-    /// Lease, barrier, clash and build maintenance run around the command.
-    Ordinary,
-    /// Only the command is decided; see [`Origin::execute_advisory`].
-    Advisory,
 }
 
 /// A handle to the writer task. Cloning shares the same task.
@@ -127,14 +114,6 @@ impl Writer {
             reply,
         })
         .await
-    }
-
-    pub(crate) async fn submit_advisory(
-        &self,
-        command: Command,
-    ) -> Result<Vec<Stamped>, SubmitError> {
-        self.call(|reply| Request::Advisory { command, reply })
-            .await
     }
 
     pub(crate) async fn rescan(&self, scan: Scan) -> Result<Vec<Stamped>, SubmitError> {
@@ -205,7 +184,6 @@ async fn run(
                     None,
                     command,
                     guard,
-                    Mode::Ordinary,
                     &store,
                     &events,
                     &touches,
@@ -215,24 +193,6 @@ async fn run(
                 )
                 .await;
                 // A gone receiver means the caller was cancelled; the write still stands.
-                let _ = reply.send(result);
-            }
-            Request::Advisory { command, reply } => {
-                let result = commit(
-                    &mut origin,
-                    &mut scan,
-                    None,
-                    command,
-                    None,
-                    Mode::Advisory,
-                    &store,
-                    &events,
-                    &touches,
-                    &wake,
-                    &snapshots,
-                    &mut broken,
-                )
-                .await;
                 let _ = reply.send(result);
             }
             Request::Rescan {
@@ -245,7 +205,6 @@ async fn run(
                     Some(candidate),
                     Command::System(SystemCmd::IndexUpdated),
                     None,
-                    Mode::Ordinary,
                     &store,
                     &events,
                     &touches,
@@ -260,7 +219,7 @@ async fn run(
     }
 }
 
-/// Decides `command` in `mode`, persists its batch, and publishes the new snapshot, in that
+/// Decides `command`, persists its batch, and publishes the new snapshot, in that
 /// order. A `candidate` scan is decided against and committed only together with its batch, so a
 /// failed rescan keeps the previous origin and scan pair.
 #[expect(clippy::too_many_arguments, reason = "one call site per request kind")]
@@ -270,7 +229,6 @@ async fn commit(
     candidate: Option<Scan>,
     command: Command,
     guard: Option<Guard>,
-    mode: Mode,
     store: &EventStore,
     broadcast_tx: &broadcast::Sender<Stamped>,
     touches: &TouchSink,
@@ -295,10 +253,7 @@ async fn commit(
         guard(origin.world()).map_err(SubmitError::Rejected)?;
     }
     let mut staged = origin.clone();
-    let batch = match mode {
-        Mode::Ordinary => staged.execute(&ctx, command)?,
-        Mode::Advisory => staged.execute_advisory(&ctx, command)?,
-    };
+    let batch = staged.execute(&ctx, command)?;
     if batch.is_empty() {
         // An already-satisfied command changes nothing. A rescan to the same revision still
         // adopts the freshly scanned structures.
@@ -338,8 +293,8 @@ async fn commit(
     // The live transition touches of the stored batch. They never fail the write.
     publish_batch(&batch, scan, touches);
     // Accounting-only batches must not wake the job loop: a job whose reply was unusable would
-    // otherwise requeue itself and every other failed job without any user activity. An advisory
-    // vision summary is no job's input either.
+    // otherwise requeue itself and every other failed job without any user activity. A usage or vision
+    // record is no job's input either.
     if batch.iter().any(|stamped| {
         !matches!(
             &stamped.event,

@@ -226,9 +226,6 @@ pub(crate) struct Projects {
     /// Folders of projects that are not served, as absolute paths. A folder stays here until a
     /// change adds it again.
     pub(crate) remove: Vec<String>,
-    /// Whether each project uses the LLM refinement of scanned state charts, by id. A project with
-    /// no entry does not use it. This takes effect at once, since the flag is read on each use.
-    pub(crate) statemap_llm: BTreeMap<String, bool>,
     /// Keys this version does not use, kept as the file holds them. See [`Stored`].
     #[serde(flatten)]
     pub(crate) unknown: BTreeMap<String, Value>,
@@ -393,15 +390,13 @@ pub(crate) enum Section {
 /// How the setting at `path` takes effect, as the `applied` map of a response and `GET` name it.
 /// The path is dotted, as a request names the setting. `live` means the server uses it at once.
 /// `stored` means it is saved, and no server path reads it yet. `restart` means it takes effect at
-/// the next start. `client` means the page applies it. A project's statemap flag is read on each
-/// use, so it is `live`. So is `budgets.call_limits.statemap`, once the statemap pass reads it on
-/// each scan.
+/// the next start. `client` means the page applies it. The statemap call limit is labelled
+/// `live` until its role is removed.
 fn applied_label(path: &str) -> &'static str {
     let mut parts = path.split('.');
     match (parts.next(), parts.next(), parts.next()) {
         (Some("models"), _, _) => "live",
         (Some("harness"), _, _) => "stored",
-        (Some("projects"), Some("statemap_llm"), _) => "live",
         (Some("projects"), _, _) => "restart",
         (Some("budgets"), Some("call_limits"), Some("statemap")) => "live",
         (Some("budgets"), _, _) => "stored",
@@ -560,7 +555,7 @@ impl<C: ModelClient + 'static> Settings<C> {
             editable: caller == Caller::Owner,
             models: ModelsView::of(self.key_status()),
             harness: HarnessView::of(&stored.harness),
-            projects: self.projects_view(stored),
+            projects: self.projects_view(),
             budgets: stored.budgets.clone(),
             look: stored.look.clone(),
             notifications: stored.notifications.clone(),
@@ -620,26 +615,17 @@ impl<C: ModelClient + 'static> Settings<C> {
         }
         note(&mut applied, "projects.add".to_owned());
         note(&mut applied, "projects.remove".to_owned());
-        for entry in self.projects.entries() {
-            note(&mut applied, format!("projects.statemap_llm.{}", entry.id));
-        }
         applied
     }
 
     /// Each running project, by id and name.
-    fn projects_view(&self, stored: &Stored) -> Vec<ProjectView> {
+    fn projects_view(&self) -> Vec<ProjectView> {
         self.projects
             .entries()
             .iter()
             .map(|entry| ProjectView {
                 id: entry.id.clone(),
                 name: entry.name.clone(),
-                statemap_llm: stored
-                    .projects
-                    .statemap_llm
-                    .get(&entry.id)
-                    .copied()
-                    .unwrap_or(false),
             })
             .collect()
     }
@@ -822,8 +808,6 @@ impl HarnessView {
 struct ProjectView {
     id: String,
     name: String,
-    /// Whether the project uses the LLM refinement of scanned state charts.
-    statemap_llm: bool,
 }
 
 /// `GET /api/settings`. Any member may read the settings. An agent gets 403, and an unknown token
@@ -1298,66 +1282,11 @@ pub(crate) fn routes<C: ModelClient + 'static>(state: Arc<Settings<C>>) -> Route
         .with_state(state)
 }
 
-/// Whether the LLM refinement of scanned state charts is on for project `project_id`, as the
-/// settings file at `settings_path` says now. The file is read on each call, so a change takes
-/// effect at once. A missing file, or a project with no entry, is off. A file that cannot be read
-/// is off too, and the warning names no part of it.
-pub(crate) fn statemap_llm_enabled(settings_path: &Path, project_id: &str) -> bool {
-    match file::load(settings_path) {
-        Ok(stored) => stored
-            .projects
-            .statemap_llm
-            .get(project_id)
-            .copied()
-            .unwrap_or(false),
-        Err(err) => {
-            tracing::warn!(error = %err, "the statemap LLM setting cannot be read; it stays off");
-            false
-        }
-    }
-}
-
-/// The most calls the statemap role may make, as the settings file at `settings_path` says now.
-/// The file is read on each call, like [`statemap_llm_enabled`]. A missing file, or one that
-/// cannot be read, gives the default limit.
-pub(crate) fn statemap_call_limit(settings_path: &Path) -> u32 {
-    match file::load(settings_path) {
-        Ok(stored) => stored.budgets.call_limits.statemap,
-        Err(err) => {
-            tracing::warn!(error = %err, "the statemap call limit cannot be read; the default applies");
-            DEFAULT_CALL_LIMIT
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use acan_llm::ProviderStatus;
 
     use super::*;
-
-    #[test]
-    fn the_statemap_call_limit_is_read_from_the_file_on_each_call() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join(FILE);
-        assert_eq!(
-            statemap_call_limit(&path),
-            30,
-            "a missing file gives the default"
-        );
-
-        let mut stored = Stored::default();
-        stored.budgets.call_limits.statemap = 12;
-        file::save(&path, &stored).expect("the settings are saved");
-        assert_eq!(statemap_call_limit(&path), 12);
-
-        std::fs::write(&path, "{ not json").expect("the file is written");
-        assert_eq!(
-            statemap_call_limit(&path),
-            30,
-            "a file that does not parse gives the default"
-        );
-    }
 
     /// A status where each `(provider, saved, environment)` has a key, and the setup saved the keys.
     fn status(providers: &[(&str, bool, bool)]) -> KeyStatus {
@@ -1565,7 +1494,6 @@ mod tests {
         assert_eq!(applied_label("budgets.call_limits.statemap"), "live");
         assert_eq!(applied_label("projects.add"), "restart");
         assert_eq!(applied_label("projects.remove"), "restart");
-        assert_eq!(applied_label("projects.statemap_llm.acan-wip"), "live");
         assert_eq!(applied_label("look.theme"), "client");
         assert_eq!(applied_label("notifications.sound"), "client");
     }
@@ -1585,17 +1513,6 @@ mod tests {
                 ("budgets.call_limits.worker".to_owned(), "stored"),
                 ("budgets.repair_rounds".to_owned(), "stored"),
             ])
-        );
-
-        let mut applied = BTreeMap::new();
-        note_each(
-            &json!({"statemap_llm": {"acan-wip": true}}),
-            "projects",
-            &mut applied,
-        );
-        assert_eq!(
-            applied,
-            BTreeMap::from([("projects.statemap_llm.acan-wip".to_owned(), "live")])
         );
 
         let mut applied = BTreeMap::new();
@@ -1678,44 +1595,6 @@ mod tests {
         assert_eq!(
             test_error(&LlmError::NoScriptedReply { role: Role::Fast }),
             "failed"
-        );
-    }
-
-    #[test]
-    fn the_statemap_llm_flag_is_read_from_the_file_on_each_call() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join(FILE);
-        assert!(
-            !statemap_llm_enabled(&path, "acan-wip"),
-            "a missing file is off"
-        );
-
-        let mut stored = Stored::default();
-        stored
-            .projects
-            .statemap_llm
-            .insert("acan-wip".to_owned(), true);
-        file::save(&path, &stored).expect("the settings are saved");
-        assert!(statemap_llm_enabled(&path, "acan-wip"));
-        assert!(
-            !statemap_llm_enabled(&path, "another-project"),
-            "a project with no entry is off"
-        );
-
-        stored
-            .projects
-            .statemap_llm
-            .insert("acan-wip".to_owned(), false);
-        file::save(&path, &stored).expect("the settings are saved");
-        assert!(
-            !statemap_llm_enabled(&path, "acan-wip"),
-            "a flag set to false is off"
-        );
-
-        std::fs::write(&path, "{ not json").expect("the file is written");
-        assert!(
-            !statemap_llm_enabled(&path, "acan-wip"),
-            "a file that does not parse is off"
         );
     }
 }

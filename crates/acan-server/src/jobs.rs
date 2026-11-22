@@ -22,10 +22,6 @@
 //! A `Barrier` job sleeps until its order's declare barrier is due and then sends a `Tick`,
 //! the same command the lease expiry runs on.
 //!
-//! A `DraftScope` job asks the foreman for a scope of an order that has none. The draft is stored
-//! as `ScopeDrafted` and confirms nothing. A failed draft is retried and then recorded as
-//! `ScopeDraftFailed`; no offline draft stands in for it.
-//!
 //! A scope-first run is not a job: the core derives no key for it. The loop reads
 //! `World::pending_contrasts` instead. Each pending run is prepared once (`CandidatePrepared`),
 //! observed and judged (`ReceiptReady`). A run already running is never started again. The
@@ -46,17 +42,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::Instant;
 
 use acan_core::{
-    CallFailure, Check, ClashId, Command, CommitId, GateRunId, Generation, Job, OrderId, OrderRev,
-    Rejection, Stage, Step, SystemCmd, TaskId, TaskState, Timestamp, WitnessId, WitnessKind,
-    WitnessOutcome, World,
+    Check, Command, CommitId, GateRunId, Generation, Job, OrderId, Rejection, Stage, SystemCmd,
+    TaskId, TaskState, Timestamp, WitnessId, WitnessKind, WitnessOutcome, World,
 };
 use acan_git::{Preparation, PrepareOutcome, ProtectedExport, Repo};
 use acan_intent::{
-    AppContract, CommitSha, ContainerPolicy, DiscrepancyEpisode, GateContext, MachineId, ModelRef,
-    OrderRef, PreparedCommit, ProbeCorpus, RepoPath, Scope, ScopeConfirmation, ScopeDraft,
-    ScopeDraftV1, ScopeRev, UnixMillis,
+    AppContract, CommitSha, ContainerPolicy, DiscrepancyEpisode, GateContext, PreparedCommit,
+    ProbeCorpus, RepoPath, Scope, ScopeConfirmation,
 };
-use acan_llm::{CallRecord, Destination, LlmError, ModelClient, Role};
+use acan_llm::ModelClient;
 use acan_witness::RunnerConfig;
 use tokio::sync::Semaphore;
 use tokio::task::{self, JoinHandle, JoinSet};
@@ -67,10 +61,7 @@ use crate::examples;
 use crate::git::{LandFailure, Workspace};
 use crate::host::{self, Host, SubmitError};
 use crate::land::{self, Delivery, LandError};
-use crate::model::{self, ReplyError};
 use crate::observe::{self, ObserveError, Order, Plan};
-use crate::plant_view;
-use crate::tour;
 
 /// Total attempts one job key gets before the loop stops retrying it. Chosen so a broken model
 /// shows up in seconds during a demo while a live provider is called at most this many times
@@ -97,11 +88,6 @@ pub(crate) const DEPS_DIR: &str = "deps";
 /// The state directory's folder that holds one protected-head snapshot per commit.
 const SNAPSHOT_DIR: &str = "snapshots";
 
-/// The scope revision a draft proposes for an order that has no scope yet. The first scope of
-/// every order is revision 1 (the take and the lane tests write it so), and a new lane accepts
-/// any revision. The draft's outcome is keyed by the order's own revision, not by this one.
-const FIRST_SCOPE_REV: ScopeRev = ScopeRev(1);
-
 /// Starts the job loop for `host`.
 pub fn spawn<C: ModelClient + 'static>(host: Host<C>) -> JoinHandle<()> {
     tokio::spawn(run(host))
@@ -109,10 +95,6 @@ pub fn spawn<C: ModelClient + 'static>(host: Host<C>) -> JoinHandle<()> {
 
 #[derive(Debug, thiserror::Error)]
 enum JobError {
-    #[error(transparent)]
-    Model(#[from] LlmError),
-    #[error(transparent)]
-    Reply(#[from] ReplyError),
     #[error(transparent)]
     Git(#[from] acan_git::Error),
     #[error("the origin refused the result: {0}")]
@@ -143,7 +125,6 @@ impl From<SubmitError> for JobError {
 struct Retry {
     attempts: u32,
     not_before: Instant,
-    last_error: String,
 }
 
 /// What a task worktree step does.
@@ -371,7 +352,6 @@ fn record_failure<K: Eq + std::hash::Hash + std::fmt::Debug>(
             Retry {
                 attempts: MAX_JOB_ATTEMPTS,
                 not_before: Instant::now(),
-                last_error: err.to_string(),
             },
         );
         return;
@@ -387,7 +367,6 @@ fn record_failure<K: Eq + std::hash::Hash + std::fmt::Debug>(
         Retry {
             attempts,
             not_before: Instant::now() + RETRY_BACKOFF * 2u32.pow(attempts.saturating_sub(1)),
-            last_error: err.to_string(),
         },
     );
 }
@@ -412,9 +391,8 @@ fn start_derived<C: ModelClient + 'static>(
             Some(retry) => retry.attempts + 1,
             None => 1,
         };
-        let previous = retries.get(&job).map(|retry| retry.last_error.clone());
         let id = tasks
-            .spawn(run_one(host.clone(), job.clone(), attempt, previous))
+            .spawn(run_one(host.clone(), job.clone(), attempt))
             .id();
         in_flight.insert(id, job);
     }
@@ -507,9 +485,8 @@ async fn run_one<C: ModelClient>(
     host: Host<C>,
     job: Job,
     attempt: u32,
-    previous: Option<String>,
 ) -> (Job, Result<(), JobError>) {
-    let result = match execute(&host, &job, previous.as_deref()).await {
+    let result = match execute(&host, &job).await {
         Ok(Some(command)) => host
             .submit(Command::System(command))
             .await
@@ -530,9 +507,7 @@ async fn run_one<C: ModelClient>(
 }
 
 /// Reports a failure that used up every attempt as the job's own result. A git failure moves the
-/// land queue or the gate on, instead of waiting for a change that may never come. A scope draft
-/// that never checked is recorded as `ScopeDraftFailed`, so the failure is visible and nothing
-/// stands in for it.
+/// land queue or the gate on, instead of waiting for a change that may never come.
 async fn report_exhausted<C: ModelClient>(host: &Host<C>, job: &Job, err: &JobError) {
     let command = match job {
         Job::Land { task, head } if matches!(err, JobError::Git(_)) => SystemCmd::LandResult {
@@ -549,12 +524,6 @@ async fn report_exhausted<C: ModelClient>(host: &Host<C>, job: &Job, err: &JobEr
                 },
             }
         }
-        // A draft that never checked is recorded, so the member sees why no scope came.
-        Job::DraftScope { order, rev } => SystemCmd::ScopeDraftFailed {
-            order: *order,
-            rev: *rev,
-            reason: format!("the scope draft failed on every attempt: {err}"),
-        },
         _ => return,
     };
     if let Err(submit_err) = host.submit(Command::System(command)).await {
@@ -566,15 +535,10 @@ async fn report_exhausted<C: ModelClient>(host: &Host<C>, job: &Job, err: &JobEr
     }
 }
 
-async fn execute<C: ModelClient>(
-    host: &Host<C>,
-    job: &Job,
-    previous: Option<&str>,
-) -> Result<Option<SystemCmd>, JobError> {
+async fn execute<C: ModelClient>(host: &Host<C>, job: &Job) -> Result<Option<SystemCmd>, JobError> {
     match job {
-        Job::Split { order, rev } => split(host, job, *order, *rev).await,
-        Job::DraftScope { order, rev } => draft_scope(host, job, *order, *rev, previous).await,
-        Job::Explain { clash } => explain(host, job, *clash).await,
+        // Removed in V1. The variants leave acan-core in a later change.
+        Job::Split { .. } | Job::DraftScope { .. } | Job::Explain { .. } => Ok(None),
         Job::Barrier { deadline, .. } => {
             sleep_until(*deadline).await;
             Ok(Some(SystemCmd::Tick))
@@ -594,153 +558,6 @@ async fn sleep_until(deadline: Timestamp) {
         }
         tokio::time::sleep(Duration::from_millis(left)).await;
     }
-}
-
-async fn split<C: ModelClient>(
-    host: &Host<C>,
-    job: &Job,
-    order: OrderId,
-    rev: OrderRev,
-) -> Result<Option<SystemCmd>, JobError> {
-    let machines = model::plant_machines(&host.scan().index);
-    let Some(request) = host.read(|world| model::split_request(world, order, &machines)) else {
-        return Ok(None);
-    };
-    let reply = host
-        .client()
-        .chat_json::<model::SplitReply>(Role::Foreman, request)
-        .await?;
-    let detail = format!("split {order} into {} tasks", reply.value.tasks.len());
-    record_usage(host, job, &reply.call, Step::Split, Some(detail)).await;
-    Ok(Some(model::split_result(
-        order,
-        rev,
-        &machines,
-        reply.value,
-    )?))
-}
-
-/// Asks the foreman to draft the scope of `order` at `rev`. The reply is checked against the
-/// plant's machines, the protected route table and the protected limits, then reported as
-/// `ScopeDrafted`. The draft confirms nothing: a human revises and confirms the scope. No offline
-/// draft stands in for a failed call; a failure is retried and then reported as
-/// `ScopeDraftFailed`. A retry is told why the last attempt failed, through `previous`.
-async fn draft_scope<C: ModelClient>(
-    host: &Host<C>,
-    job: &Job,
-    order: OrderId,
-    rev: OrderRev,
-    previous: Option<&str>,
-) -> Result<Option<SystemCmd>, JobError> {
-    let Some(workspace) = host.workspace() else {
-        return Err(JobError::Unavailable(
-            "the server has no git repository to draft a scope against".to_owned(),
-        ));
-    };
-    let Some((sentence, machine)) = host.read(|world| draft_facts(world, job, order)) else {
-        return Ok(None);
-    };
-    let order_ref = OrderRef::from_str(&order.to_string()).map_err(|err| {
-        JobError::Unavailable(format!("the order id has no contract spelling: {err}"))
-    })?;
-    let machine_id = MachineId::from_str(&machine)
-        .map_err(|err| JobError::Unavailable(format!("the order's machine: {err}")))?;
-    let base = protected_sha(workspace.repo()).await?;
-    let snapshot = protected_snapshot(workspace.repo(), &host.repo().join(STATE_DIR))
-        .await
-        .map_err(|err| JobError::Unavailable(format!("the protected snapshot: {err}")))?;
-    let (app, corpus) = observe::read_protected(&snapshot)?;
-    let machines = model::plant_machines(&host.scan().index);
-    let bounds = model::DraftBounds {
-        machines: &machines,
-        routes: &corpus.routes,
-        fixtures: &corpus.fixtures,
-        probes: &corpus.probes,
-        limits: app.limits,
-    };
-    // The foreman drafts from the order's sentence, what the human asked for. The order ref is
-    // only the draft's key, so it never stands in for the request.
-    let request = model::scope_request_on(&sentence, &machine, &bounds, previous);
-    let detail = format!("scope draft for {order} rev {}", rev.get());
-    let reply = match host
-        .client()
-        .chat_json::<model::DraftReply>(Role::Foreman, request)
-        .await
-    {
-        Ok(reply) => reply,
-        Err(err) => {
-            // A reply the foreman sent that Acan cannot use still cost its tokens, so it is metered.
-            // A call that was sent and gave no reply is metered as a failure, with no tokens. A call
-            // refused before any request was sent is not metered.
-            if let Some(trace) = err.reply_trace() {
-                record_usage(host, job, &trace.call, Step::Scope, Some(detail)).await;
-            } else if err.was_sent() {
-                match host.client().destination(Role::Foreman) {
-                    Some(destination) => {
-                        let failure = failure_of(&err);
-                        let detail = format!("{detail}: {}", failure_word(failure));
-                        record_failed_usage(host, job, &destination, Step::Scope, failure, detail)
-                            .await;
-                    }
-                    None => tracing::warn!(
-                        ?job,
-                        "a failed scope draft has no foreman route to name; its usage is not recorded"
-                    ),
-                }
-            }
-            return Err(err.into());
-        }
-    };
-    record_usage(host, job, &reply.call, Step::Scope, Some(detail)).await;
-    let model = ModelRef::from_str(&reply.call.model)
-        .map_err(|err| JobError::Unavailable(format!("the model id: {err}")))?;
-    let proposal = model::scope_from_reply(reply.value, model, &bounds)
-        .map_err(|err| JobError::Unavailable(format!("the scope draft does not check: {err}")))?;
-    let draft = ScopeDraft {
-        version: ScopeDraftV1,
-        order: order_ref,
-        rev: FIRST_SCOPE_REV,
-        base_commit: base,
-        sentence,
-        machine_id,
-        draft: proposal,
-        drafted_at: UnixMillis(host::now().as_millis()),
-    };
-    Ok(Some(SystemCmd::ScopeDrafted {
-        order,
-        rev,
-        draft: Box::new(draft),
-    }))
-}
-
-/// What a scope draft of `order` is written from: the order's sentence and machine. None when
-/// the job is no longer derived, so no draft is asked for a scoped or superseded order.
-fn draft_facts(world: &World, job: &Job, order: OrderId) -> Option<(String, String)> {
-    if !world.jobs().contains(job) {
-        return None;
-    }
-    let found = world.order(order)?;
-    Some((found.sentence.clone(), found.machine.as_str().to_owned()))
-}
-
-async fn explain<C: ModelClient>(
-    host: &Host<C>,
-    job: &Job,
-    clash: ClashId,
-) -> Result<Option<SystemCmd>, JobError> {
-    let Some(request) = host.read(|world| model::explain_request(world, clash)) else {
-        return Ok(None);
-    };
-    let reply = host
-        .client()
-        .chat_json::<model::ExplainReply>(Role::Fast, request)
-        .await?;
-    let detail = format!("explained {clash}");
-    record_usage(host, job, &reply.call, Step::Explain, Some(detail)).await;
-    Ok(Some(SystemCmd::ClashExplained {
-        clash,
-        explanation: model::explanation(reply.value)?,
-    }))
 }
 
 /// Runs one frozen witness against the commit its gate tests, and reports what it found.
@@ -1284,25 +1101,7 @@ async fn contrast<C: ModelClient + 'static>(
         receipt: Box::new(judged.receipt),
     }))
     .await?;
-    prefetch_tour(host, contrast.order);
     Ok(())
-}
-
-/// Starts the director's call for the receipt `order` has just recorded, in the background, so its
-/// answer is cached before the plant view is opened. The contrast does not wait for it. A view that
-/// cannot be built starts no call, and the view is built again when it is opened.
-fn prefetch_tour<C: ModelClient + 'static>(host: &Host<C>, order: OrderId) {
-    let host = host.clone();
-    tokio::spawn(async move {
-        match plant_view::untoured_view(&host, order).await {
-            Ok(view) => tour::prefetch(&host, &view),
-            Err(err) => tracing::warn!(
-                %order,
-                error = ?err,
-                "the director's tour is not started: the plant view cannot be built"
-            ),
-        }
-    });
 }
 
 /// The command that records the protected inputs of the scope `order` was just confirmed under, at
@@ -1671,71 +1470,6 @@ fn unique_suffix() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos())
-}
-
-/// Records one model call that gave a reply in the usage panel, with the step that made it and the
-/// detail code built from its outcome.
-async fn record_usage<C: ModelClient>(
-    host: &Host<C>,
-    job: &Job,
-    call: &CallRecord,
-    step: Step,
-    detail: Option<String>,
-) {
-    let command = SystemCmd::ModelUsed {
-        model: call.model.clone(),
-        provider: Some(call.provider.clone()),
-        step,
-        input_tokens: Some(call.usage.prompt_tokens),
-        output_tokens: Some(call.usage.completion_tokens),
-        failure: None,
-        detail,
-    };
-    // Metering is best-effort: a lost usage event must not retry the model call it paid for.
-    if let Err(err) = host.submit(Command::System(command)).await {
-        tracing::warn!(?job, error = %err, "recording model usage failed");
-    }
-}
-
-/// Records a call that was sent and gave no reply. Its model and provider are the route it was sent
-/// to, and it has no token counts, so it is not counted in the usage totals.
-async fn record_failed_usage<C: ModelClient>(
-    host: &Host<C>,
-    job: &Job,
-    destination: &Destination,
-    step: Step,
-    failure: CallFailure,
-    detail: String,
-) {
-    let command = SystemCmd::ModelUsed {
-        model: destination.model.clone(),
-        provider: Some(destination.provider.clone()),
-        step,
-        input_tokens: None,
-        output_tokens: None,
-        failure: Some(failure),
-        detail: Some(detail),
-    };
-    if let Err(err) = host.submit(Command::System(command)).await {
-        tracing::warn!(?job, error = %err, "recording model usage failed");
-    }
-}
-
-/// Why a call that gave no reply failed: a timeout, or any other error.
-pub(crate) fn failure_of(err: &LlmError) -> CallFailure {
-    if matches!(err, LlmError::Timeout { .. }) {
-        CallFailure::Timeout
-    } else {
-        CallFailure::Error
-    }
-}
-
-/// The word a usage detail ends with for a call that failed.
-pub(crate) fn failure_word(failure: CallFailure) -> &'static str {
-    match failure {
-        CallFailure::Timeout => "timeout",
-        CallFailure::Error => "error",
-    }
 }
 
 #[cfg(test)]
