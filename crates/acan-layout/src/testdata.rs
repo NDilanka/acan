@@ -1,11 +1,10 @@
 //! Test inputs for the layout: generated plants, a workspace of crates, and the demo plant. The
-//! generators copy the machines, sizes and imports of acan-render-web's stress plant and of its
-//! workspace test, so the checks run on the same shapes without the scan reader. The parity test
-//! in `tests/render_web_parity.rs` checks the copy.
+//! generators preserve the machines, sizes and imports of the former renderer's stress plant and
+//! workspace test, so the checks run on the same shapes without the scan reader.
 
 use crate::layout::Edge;
 
-/// Plan sizes `[width, depth]` of the machines the tests use, from acan-iso's footprint table.
+/// Plan sizes `[width, depth]` of the machines the tests use, from the former footprint table.
 pub const ANTENNA: [f32; 2] = [56.0, 56.0];
 pub const ASSEMBLER: [f32; 2] = [64.0, 64.0];
 pub const CONVEYOR: [f32; 2] = [96.0, 40.0];
@@ -23,7 +22,7 @@ pub const VALVE: [f32; 2] = [40.0, 40.0];
 pub type Input = (Vec<[f32; 2]>, Vec<Edge>, Vec<u32>);
 
 /// The district number of each machine: the index of its district's name among the distinct
-/// names in sorted order, the numbering that acan-render-web gives its plant districts.
+/// names in sorted order, the numbering used by the former renderer.
 fn district_numbers(names: &[String]) -> Vec<u32> {
     let mut sorted = names.to_vec();
     sorted.sort_unstable();
@@ -34,7 +33,7 @@ fn district_numbers(names: &[String]) -> Vec<u32> {
         .collect()
 }
 
-/// A generated plant of `count` machines, the same plant as acan-render-web's `plant::stress`:
+/// A generated plant of `count` machines, matching the former renderer's stress plant:
 /// about `sqrt(count)` layers, each belt running from one layer to the next, and every machine
 /// a district of its own.
 pub fn generated(count: usize) -> Input {
@@ -63,7 +62,7 @@ pub fn generated(count: usize) -> Input {
         layer_of.push(layer);
         members[layer].push(i);
         let (base, size) = NAMES[i % NAMES.len()];
-        // acan-render-web draws a file count here; the layout does not read it.
+        // The former renderer drew a file count here; keep the same random sequence.
         rng.below(12);
         sizes.push(size);
         names.push(format!("src/{base}-{i}"));
@@ -101,7 +100,7 @@ pub fn generated(count: usize) -> Input {
     (sizes, edges, district_numbers(&names))
 }
 
-/// The generator of acan-render-web's stress plant, so the same count gives the same plant.
+/// The former renderer's stress-plant generator, so the same count gives the same plant.
 struct Lcg(u64);
 
 impl Lcg {
