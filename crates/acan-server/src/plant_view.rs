@@ -3,7 +3,7 @@
 //! Every fact comes from the receipt, the confirmed scope of its order, the order's plate and the
 //! route table of the protected corpus the receipt ran against. That corpus is read at the
 //! receipt's base commit, and the view is refused when it does not hold the number of routes the
-//! receipt counted. The director's tour is filled in by [`crate::tour`].
+//! receipt counted.
 
 use std::str::FromStr;
 
@@ -19,13 +19,12 @@ use crate::jobs;
 use crate::model;
 use crate::observe;
 use crate::receipt::{MachineInput, PlateOrder, plant_view};
-use crate::tour;
 
 /// What a plant view answers when the order has no receipt for its confirmed scope yet.
 const NO_RECEIPT: &str = "no receipt for this order yet";
 
-/// The plant view of `order`'s latest receipt, with its tour filled in. The tour is never waited
-/// for, so the view is served at once: see [`tour::fill`].
+/// The plant view of `order`'s latest receipt. It carries no tour: the server serves none, so the
+/// view is built from the receipt alone.
 ///
 /// # Errors
 ///
@@ -34,20 +33,6 @@ const NO_RECEIPT: &str = "no receipt for this order yet";
 /// cannot be read or does not match the receipt, or when the view cannot be built from the
 /// receipt; the detail goes to the log.
 pub(crate) async fn order_view<C: ModelClient + 'static>(
-    host: &Host<C>,
-    order: OrderId,
-) -> Result<PlantView, ApiError> {
-    let view = untoured_view(host, order).await?;
-    Ok(tour::fill(host, view).await)
-}
-
-/// The plant view of `order`'s latest receipt before its tour is filled in. The director's call for
-/// a new receipt starts from this view, so it is built the same way [`order_view`] builds it.
-///
-/// # Errors
-///
-/// The same errors as [`order_view`].
-pub(crate) async fn untoured_view<C: ModelClient + 'static>(
     host: &Host<C>,
     order: OrderId,
 ) -> Result<PlantView, ApiError> {
@@ -189,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn assemble_builds_the_fixture_receipt_against_its_corpus_with_no_tour_yet() {
+    fn assemble_builds_the_fixture_receipt_against_its_corpus() {
         let plain: Value = decode(PLAIN);
         let (plate, machines) = plate_and_machines(&plain);
         let receipt: Receipt = decode(RECEIPT);
@@ -204,7 +189,7 @@ mod tests {
             receipt.receipt_hash().expect("the receipt hashes")
         );
         assert_eq!(view.items.len(), receipt.items.len());
-        assert!(view.tour.is_none(), "the tour is filled after the view");
+        assert!(view.tour.is_none(), "the view carries no tour");
     }
 
     #[test]

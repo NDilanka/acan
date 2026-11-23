@@ -1,18 +1,19 @@
 //! The scope-first lane over the real server. Agents reach it over MCP, and members reach the
 //! reads and the human commands over HTTP.
 //!
-//! Each test boots a server on a temporary repository with the offline models, so the job loop
-//! splits the order into tasks, and every command runs through acan-core's origin. The tokens file
+//! Each test boots a server on a temporary repository with the offline models. A test that
+//! needs tasks records the order's split in the log while the server is stopped, since the server
+//! no longer splits orders. Every command runs through acan-core's origin. The tokens file
 //! is written before the server starts: an owner token for the member `owner`, and an agent token
 //! for `agent-1`, which the owner registers.
+
+mod common;
 
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::OnceLock;
-use std::time::Duration;
 
-use acan_core::{Event, Stamped};
 use acan_intent::Scope;
 use acan_server::{DEFAULT_WITNESS_CONCURRENCY, Models, Running, ServerConfig, start};
 use reqwest::StatusCode;
@@ -27,7 +28,6 @@ const SENTENCE: &str = "split the store into a reader and a writer";
 const CONFIRMED_AT: u64 = 1_700_000_000_000;
 /// The JSON-RPC code for a call to a tool the endpoint does not have.
 const INVALID_PARAMS: i64 = -32602;
-const WAIT: Duration = Duration::from_secs(10);
 
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -268,8 +268,9 @@ fn readback(task: &str, rev: u32, hash: &Value, summary: &str) -> Value {
     })
 }
 
-/// Boots a server, posts the order, registers the agent, and waits until the offline split has
-/// made the order's tasks. Returns the server and the order's id, such as `o-1`.
+/// Boots a server, posts the order and registers the agent, then records the order's split with
+/// the server stopped and boots it again on the same log. Returns the server and the order's id,
+/// such as `o-1`.
 async fn split_order(repo: &Path) -> (Running, String) {
     let running = boot(repo).await;
     let post = json!({
@@ -284,23 +285,9 @@ async fn split_order(repo: &Path) -> (Running, String) {
     let (status, _) = post_command(&running, OWNER_TOKEN, &register).await;
     assert_eq!(status, StatusCode::OK, "the agent is registered");
 
-    let deadline = tokio::time::Instant::now() + WAIT;
-    loop {
-        let (_, body) = get_json(&running, "/api/events?from=0", OWNER_TOKEN).await;
-        let events: Vec<Stamped> = serde_json::from_value(body).expect("events JSON");
-        let split = events.iter().find_map(|stamped| match &stamped.event {
-            Event::OrderSplit { order, .. } => Some(order.to_string()),
-            _ => None,
-        });
-        if let Some(order) = split {
-            return (running, order);
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the offline split never landed: {events:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    running.stop().await.expect("the server stops");
+    let order = common::record_split(repo, SENTENCE).await;
+    (boot(repo).await, order.to_string())
 }
 
 /// The first task of `order`, as the agent lists it over MCP.

@@ -10,9 +10,9 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use acan_core::{Actor, Event, HumanCmd, MachineKey, MemberId, Role as MemberRole, Stamped};
-use acan_llm::{ChatRequest, Message, ModelClient, Reply, Role, Stub, UsageLedger};
-use acan_server::{Models, Running, ServerConfig, scan, start};
+use acan_core::{HumanCmd, MemberId, Role as MemberRole, Stamped};
+use acan_llm::{Stub, UsageLedger};
+use acan_server::{Running, ServerConfig, scan, start};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -229,7 +229,7 @@ async fn health_is_open_and_every_api_route_refuses_a_bad_token() {
     assert_eq!(health.text().await.expect("health body"), "ok");
 
     let bad = "acan_not_a_real_token";
-    for path in ["/api/plant", "/api/events?from=0", "/api/usage"] {
+    for path in ["/api/plant", "/api/events?from=0"] {
         let (status, _) = get_json(&running, path, bad).await;
         assert_eq!(
             status,
@@ -348,7 +348,7 @@ async fn the_owner_token_is_minted_once_and_survives_a_restart() {
         "a restart does not print a new owner token"
     );
 
-    let (status, _) = get_json(&second, "/api/usage", &token).await;
+    let (status, _) = get_json(&second, "/api/plant", &token).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -502,134 +502,4 @@ async fn a_resumed_stream_delivers_the_missed_events_once_and_in_order() {
         [6],
         "an event accepted after the backlog arrives live, once"
     );
-}
-
-#[tokio::test]
-async fn usage_endpoint_reports_the_calls_the_stub_answered() {
-    let dir = temp_repo();
-    let stub = Stub::default().when(Role::Foreman, |_| true, Reply::text("{}"));
-    let ledger = stub.ledger().clone();
-    let request = ChatRequest {
-        messages: vec![Message::user("ping")],
-        ..ChatRequest::default()
-    };
-    stub.chat(Role::Foreman, request)
-        .await
-        .expect("the stub answers the scripted call");
-
-    let running = start(config(dir.path(), loopback(), false), stub, ledger)
-        .await
-        .expect("the server starts");
-    let token = owner_token(&running);
-
-    let (status, body) = get_json(&running, "/api/usage", &token).await;
-
-    assert_eq!(status, StatusCode::OK);
-    let totals = body.as_array().expect("usage is an array");
-    assert_eq!(totals.len(), 1, "one role, provider and model were called");
-    assert_eq!(
-        totals[0]["role"],
-        serde_json::to_value(Role::Foreman).expect("role JSON")
-    );
-    assert_eq!(totals[0]["provider"], json!("stub"));
-    assert_eq!(totals[0]["calls"], json!(1));
-}
-
-#[tokio::test]
-async fn a_posted_order_runs_its_split_job_through_the_client() {
-    let dir = temp_repo();
-    // The reply is not JSON on purpose. The Stub records a call when it answers, before the
-    // reply is parsed, so the ledger shows the job reached the client either way. The failed
-    // job retries a bounded number of times.
-    let stub = Stub::default().when(Role::Foreman, |_| true, Reply::text("not json"));
-    let ledger = stub.ledger().clone();
-    let running = start(config(dir.path(), loopback(), false), stub, ledger)
-        .await
-        .expect("the server starts");
-    let token = owner_token(&running);
-
-    let order = HumanCmd::PostOrder {
-        machine: MachineKey::from_str("model").expect("valid machine key"),
-        sentence: "split the store into a reader and a writer".to_owned(),
-        witnesses: Vec::new(),
-    };
-    let response = post_command(&running, &token, &order).await;
-    assert_eq!(response.status(), StatusCode::OK, "the order is accepted");
-
-    let calls = foreman_calls(&running, &token).await;
-
-    assert!(
-        (1..=5).contains(&calls),
-        "the split job reached the client, within its retry bound: {calls} calls"
-    );
-}
-
-#[tokio::test]
-async fn without_a_routing_file_a_posted_order_is_split_by_the_offline_models() {
-    let dir = temp_repo();
-    let models = Models::load(&dir.path().join(".acan/llm.toml"))
-        .expect("a missing routing file selects the offline models");
-    let ledger = models.ledger();
-    let running = start(config(dir.path(), loopback(), false), models, ledger)
-        .await
-        .expect("the server starts");
-    let token = owner_token(&running);
-    let order = HumanCmd::PostOrder {
-        machine: MachineKey::from_str("model").expect("valid machine key"),
-        sentence: "split the store into a reader and a writer".to_owned(),
-        witnesses: Vec::new(),
-    };
-    assert_eq!(
-        post_command(&running, &token, &order).await.status(),
-        StatusCode::OK
-    );
-
-    let deadline = tokio::time::Instant::now() + WAIT;
-    let split = loop {
-        let (_, body) = get_json(&running, "/api/events?from=0", &token).await;
-        let events: Vec<Stamped> = serde_json::from_value(body).expect("events JSON");
-        if let Some(split) = events
-            .iter()
-            .find(|stamped| matches!(stamped.event, Event::OrderSplit { .. }))
-        {
-            break split.clone();
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the offline split never landed: {events:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
-    assert_eq!(
-        split.actor,
-        Actor::System,
-        "the split is the job loop's result"
-    );
-    let (_, usage) = get_json(&running, "/api/usage", &token).await;
-    assert_eq!(
-        usage[0]["provider"],
-        json!("offline"),
-        "the call is metered: {usage}"
-    );
-    assert_eq!(usage[0]["calls"], json!(1), "one call split the order");
-    running.stop().await.expect("the server stops");
-}
-/// Polls the usage endpoint until the foreman has a call, or the wait runs out.
-async fn foreman_calls(running: &Running, token: &str) -> u64 {
-    let foreman = serde_json::to_value(Role::Foreman).expect("role JSON");
-    let deadline = tokio::time::Instant::now() + WAIT;
-    loop {
-        let (_, usage) = get_json(running, "/api/usage", token).await;
-        let calls: u64 = usage
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|total| total["role"] == foreman)
-            .filter_map(|total| total["calls"].as_u64())
-            .sum();
-        if calls > 0 || tokio::time::Instant::now() >= deadline {
-            return calls;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
 }

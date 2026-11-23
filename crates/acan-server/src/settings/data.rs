@@ -1,7 +1,7 @@
 //! The data routes of one project. `GET .../settings/data/export` gives the owner a ZIP archive of
 //! the project's receipts, its recorded run, or both. `POST .../settings/data/clear` removes the
-//! project's local derived data: the installed-dependency cache and the in-memory tour cache. Only
-//! the owner may use either route.
+//! project's local derived data: the installed-dependency cache. Only the owner may use either
+//! route.
 //!
 //! The archive is written without compression. Its text passes the bug report's redaction, and no
 //! entry may hold the text of a value in the repository's `.env` file: such a value fails the
@@ -55,7 +55,7 @@ const SECRET_MIN_LEN: usize = 8;
 const REPLAY_FILES: [&str; 3] = ["plant.json", "events.json", "manifest.json"];
 
 /// What a clear removes, as its response names it.
-const CLEARED: [&str; 2] = ["deps", "tour_cache"];
+const CLEARED: [&str; 1] = ["deps"];
 
 /// What a clear keeps, as its response names it. A clear never removes any of these.
 const KEPT: [&str; 6] = [
@@ -405,7 +405,7 @@ pub(crate) struct ClearBody {
 
 /// `POST .../settings/data/clear`. Only the owner may clear. The body is read as bytes and parsed
 /// here, so a bad body is never echoed. The clear removes this project's installed-dependency
-/// cache and empties its tour cache. It removes nothing else, and a missing cache is not an error.
+/// cache. It removes nothing else, and a missing cache is not an error.
 ///
 /// Status codes: `200` with what was cleared and what was kept. `400` for a body that is not JSON,
 /// names anything but `local`, does not confirm with `true`, or has an extra key. `401` for an
@@ -425,7 +425,6 @@ pub(crate) async fn post_clear<C: ModelClient + 'static>(
         ));
     }
     clear_deps(&host.repo().join(STATE_DIR))?;
-    host.tours().clear();
     Ok((
         StatusCode::OK,
         Json(json!({ "cleared": CLEARED, "kept": KEPT })),

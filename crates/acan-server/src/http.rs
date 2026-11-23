@@ -11,15 +11,15 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use acan_core::{
-    AgentId, Command, Generation, HumanCmd, MemberId, OrderId, OrderRev, Rejection,
-    ScopeConfirmation, ScopeDraftOutcome, Seq, Stamped, TaskId, TaskState,
+    AgentId, Command, Generation, HumanCmd, MemberId, OrderId, Rejection, ScopeConfirmation, Seq,
+    Stamped, TaskId, TaskState,
 };
 use acan_intent::{
     AppContractV1, EpisodeId, GetReceiptRequest, GetReceiptResponse, GetRulingsRequest,
     GetRulingsResponse, GetScopeRequest, GetScopeResponse, MachineId, McpError, McpErrorCode,
     McpV1, TaskRef,
 };
-use acan_llm::{ModelClient, UsageTotals};
+use acan_llm::ModelClient;
 use acan_scan::Plant;
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, Request, State};
@@ -73,7 +73,6 @@ pub(crate) fn project_routes<C: ModelClient + 'static>(
         .route(&format!("{api}/contract"), get(get_contract::<C>))
         .route(&format!("{api}/scan"), post(post_scan::<C>))
         .route(&format!("{api}/plant/kinds"), put(put_plant_kinds::<C>))
-        .route(&format!("{api}/usage"), get(get_usage::<C>))
         .route(&format!("{api}/update"), get(get_update::<C>))
         .route(&format!("{api}/bug-report"), get(get_bug_report::<C>))
         .route(&format!("{api}/setup"), get(setup::get_status::<C>))
@@ -111,10 +110,6 @@ pub(crate) fn project_routes<C: ModelClient + 'static>(
         .route(
             &format!("{api}/orders/{{order}}/plant-view"),
             get(get_plant_view::<C>),
-        )
-        .route(
-            &format!("{api}/orders/{{order}}/scope-draft"),
-            get(get_scope_draft::<C>),
         )
         .route(
             &format!("{api}/orders/{{order}}/scope/confirmation"),
@@ -570,14 +565,6 @@ async fn put_plant_kinds<C: ModelClient + 'static>(
     Ok(Json(events))
 }
 
-async fn get_usage<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<UsageTotals>>, ApiError> {
-    authenticate(&host, bearer(&headers))?;
-    Ok(Json(host.ledger().snapshot()))
-}
-
 /// The update check's status. Any principal may read it.
 async fn get_update<C: ModelClient + 'static>(
     State(host): State<Host<C>>,
@@ -747,19 +734,7 @@ async fn get_rulings<C: ModelClient + 'static>(
     Ok(Json(intent_api::get_rulings(&host, &request)?))
 }
 
-/// The latest scope draft of an order: the draft the foreman returned, or the failure that
-/// ended its last attempt, with the order revision it was for. Members only, since a human
-/// adopts a draft. The draft confirms nothing; the order's scope is the one a human revises and
-/// confirms.
-#[derive(Serialize)]
-pub(crate) struct ScopeDraftView {
-    order: String,
-    rev: OrderRev,
-    #[serde(flatten)]
-    outcome: ScopeDraftOutcome,
-}
-
-/// The plant view of the order's latest receipt, with its tour filled in. Members only, as the
+/// The plant view of the order's latest receipt. Members only, as the
 /// other order reads are; a 404 names what the order lacks.
 async fn get_plant_view<C: ModelClient + 'static>(
     State(host): State<Host<C>>,
@@ -769,29 +744,6 @@ async fn get_plant_view<C: ModelClient + 'static>(
     member(&host, &headers)?;
     let order: OrderId = order.parse().map_err(|_| ApiError::NotFound("order"))?;
     Ok(Json(plant_view::order_view(&host, order).await?))
-}
-
-async fn get_scope_draft<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
-    headers: HeaderMap,
-    Path(order): Path<String>,
-) -> Result<Json<ScopeDraftView>, ApiError> {
-    member(&host, &headers)?;
-    let order: OrderId = order.parse().map_err(|_| ApiError::NotFound("order"))?;
-    let view = host.read(|world| {
-        if world.order(order).is_none() {
-            return Err(ApiError::NotFound("order"));
-        }
-        world
-            .scope_draft(order)
-            .map(|(rev, outcome)| ScopeDraftView {
-                order: order.to_string(),
-                rev,
-                outcome: outcome.clone(),
-            })
-            .ok_or(ApiError::NotFound("no scope draft for this order yet"))
-    })?;
-    Ok(Json(view))
 }
 
 /// The body a member sends as `ConfirmScope` for an order's current scope revision. It carries

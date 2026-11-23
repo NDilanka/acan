@@ -62,8 +62,6 @@ pub(crate) mod caps {
     /// The most words a must-keep rule's text holds. The value lives in acan-intent, next to the
     /// field it caps.
     pub const MUST_KEEP_WORDS: usize = acan_intent::MUST_KEEP_WORDS;
-    /// The most words a card or a usage detail holds.
-    pub const CARD_WORDS: usize = 100;
 
     /// The number of words in `text`. Text splits on whitespace, except that a run inside a
     /// backtick span is one word, so `a b c` counts once. A backtick with no partner is ordinary

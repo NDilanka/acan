@@ -32,14 +32,6 @@ impl Offline {
     pub fn with_ledger(ledger: UsageLedger) -> Self {
         Self { ledger }
     }
-
-    /// The ledger every answered call is recorded in. Only the tests read it, since the server
-    /// reads the ledger it shares with the live client.
-    #[cfg(test)]
-    #[must_use]
-    pub fn ledger(&self) -> &UsageLedger {
-        &self.ledger
-    }
 }
 
 impl ModelClient for Offline {

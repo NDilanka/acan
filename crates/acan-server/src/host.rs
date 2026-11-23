@@ -21,7 +21,6 @@ use crate::jobs;
 use crate::scan_feed::ScanFeed;
 use crate::store::EventStore;
 use crate::touches::{TouchSink, TransitionTouch};
-use crate::tour::TourCache;
 use crate::writer::{Guard, Snapshot, Writer};
 
 /// How many events a live subscriber may fall behind before the server disconnects it.
@@ -92,8 +91,6 @@ struct Inner<C> {
     wake: Arc<Notify>,
     ledger: UsageLedger,
     client: C,
-    /// Where each rescan reads its statemap settings. `None` runs no statemap pass.
-    statemap: Option<crate::statemap::SettingsSource>,
     repo: PathBuf,
     shutdown: watch::Receiver<bool>,
     streams: Arc<Mutex<JoinSet<()>>>,
@@ -107,8 +104,6 @@ struct Inner<C> {
     landing: tokio::sync::Mutex<()>,
     #[cfg(test)]
     stream_hold: crate::stream::Hold,
-    /// The director's answer for each receipt the plant view has asked about.
-    tours: TourCache,
     #[cfg(test)]
     ruling_hold: crate::stream::Hold,
     /// Each step of the current scan, as the streams and the plant route see it.
@@ -152,46 +147,22 @@ impl<C: ModelClient> Host<C> {
     /// Panics when called outside a Tokio runtime, or when `probe_concurrency` is zero.
     #[must_use]
     pub fn new_with_slots(parts: HostParts<C>, slots: Arc<Semaphore>) -> Self {
-        Self::new_with_statemap(parts, slots, None)
+        Self::build(parts, slots, false)
     }
 
-    /// [`new_with_slots`](Self::new_with_slots), with the statemap settings each rescan reads. `None`
-    /// runs no statemap pass.
+    /// [`new_with_slots`](Self::new_with_slots) for a project that maps its codebase. The scan in
+    /// `parts` is the skeleton, and the project takes no writes until [`Host::open_writes`] is
+    /// called or [`Host::map_codebase`] fails.
     ///
     /// # Panics
     ///
     /// Panics when called outside a Tokio runtime, or when `probe_concurrency` is zero.
     #[must_use]
-    pub(crate) fn new_with_statemap(
-        parts: HostParts<C>,
-        slots: Arc<Semaphore>,
-        statemap: Option<crate::statemap::SettingsSource>,
-    ) -> Self {
-        Self::build(parts, slots, statemap, false)
+    pub(crate) fn new_mapping(parts: HostParts<C>, slots: Arc<Semaphore>) -> Self {
+        Self::build(parts, slots, true)
     }
 
-    /// [`new_with_statemap`](Self::new_with_statemap) for a project that maps its codebase. The
-    /// scan in `parts` is the skeleton, and the project takes no writes until
-    /// [`Host::open_writes`] is called or [`Host::map_codebase`] fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics when called outside a Tokio runtime, or when `probe_concurrency` is zero.
-    #[must_use]
-    pub(crate) fn new_mapping(
-        parts: HostParts<C>,
-        slots: Arc<Semaphore>,
-        statemap: Option<crate::statemap::SettingsSource>,
-    ) -> Self {
-        Self::build(parts, slots, statemap, true)
-    }
-
-    fn build(
-        parts: HostParts<C>,
-        slots: Arc<Semaphore>,
-        statemap: Option<crate::statemap::SettingsSource>,
-        mapping: bool,
-    ) -> Self {
+    fn build(parts: HostParts<C>, slots: Arc<Semaphore>, mapping: bool) -> Self {
         assert!(
             parts.probe_concurrency > 0,
             "probe_concurrency must allow at least one probe, got {}",
@@ -232,7 +203,6 @@ impl<C: ModelClient> Host<C> {
                 wake,
                 ledger: parts.ledger,
                 client: parts.client,
-                statemap,
                 repo: parts.repo,
                 shutdown: parts.shutdown,
                 streams: Arc::new(Mutex::new(JoinSet::new())),
@@ -243,7 +213,6 @@ impl<C: ModelClient> Host<C> {
                 landing: tokio::sync::Mutex::new(()),
                 #[cfg(test)]
                 stream_hold: crate::stream::Hold::default(),
-                tours: TourCache::default(),
                 #[cfg(test)]
                 ruling_hold: crate::stream::Hold::default(),
                 feed,
@@ -253,11 +222,6 @@ impl<C: ModelClient> Host<C> {
                 mapping_hold: crate::stream::Hold::default(),
             }),
         }
-    }
-
-    /// The director's answers, one per receipt.
-    pub(crate) fn tours(&self) -> &TourCache {
-        &self.inner.tours
     }
 
     /// The git workspace, or `None` when the served directory is not a usable repository.
@@ -429,23 +393,6 @@ impl<C: ModelClient> Host<C> {
         Ok(events)
     }
 
-    /// Sends an advisory command (`VisionChecked`, `ModelUsed`) to the writer, which decides it
-    /// without expiring leases or barriers or clearing builds, so a vision report never moves
-    /// gate state. Neither command can invalidate a land, so no landing fence is taken.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SubmitError::Rejected`] when the origin refuses the command, which it does for
-    /// any command that is not advisory, and [`SubmitError::Internal`] when the events cannot be
-    /// stored or the writer is gone.
-    pub(crate) async fn submit_advisory(
-        &self,
-        command: Command,
-    ) -> Result<Vec<Stamped>, SubmitError> {
-        self.ensure_mapped()?;
-        self.inner.writer.submit_advisory(command).await
-    }
-
     /// Holds the landing fence until the guard drops. A land takes it before it checks the
     /// queued delivery and keeps it through the install, so no invalidating command writes in
     /// between.
@@ -469,20 +416,17 @@ impl<C: ModelClient> Host<C> {
         outcome
     }
 
-    /// Scans the repository, reports each step to the feed, refines the state machines, and commits
-    /// the index with its `IndexUpdated` batch. Does not mark the feed done, so the caller decides
-    /// when the project is settled.
+    /// Scans the repository, reports each step to the feed, and commits the index with its
+    /// `IndexUpdated` batch. Does not mark the feed done, so the caller decides when the project
+    /// is settled.
     pub(crate) async fn scan_and_commit(&self) -> Result<Vec<Stamped>, SubmitError> {
         let repo = self.inner.repo.clone();
         let feed = Arc::clone(&self.inner.feed);
-        let mut scan = tokio::task::spawn_blocking(move || {
+        let scan = tokio::task::spawn_blocking(move || {
             crate::index::scan_observed(&repo, |progress| feed.observe(progress))
         })
         .await
         .context("the scan task did not finish")??;
-        if let Some(statemap) = &self.inner.statemap {
-            crate::statemap::refine(&self.inner.client, &mut scan.plant, statemap.current()).await;
-        }
         #[cfg(test)]
         self.inner.mapping_hold.wait().await;
         self.inner.writer.rescan(scan).await
@@ -713,7 +657,7 @@ pub(crate) mod testing {
         };
         let host = if mapping {
             let slots = Arc::new(Semaphore::new(DEFAULT_WITNESS_CONCURRENCY));
-            Host::new_mapping(parts, slots, None)
+            Host::new_mapping(parts, slots)
         } else {
             Host::new(parts)
         };
