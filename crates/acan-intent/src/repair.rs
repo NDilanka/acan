@@ -22,7 +22,9 @@ use crate::version::RepairRoundV1;
 
 bounded!(
     /// A round of one order, from 1. Never more than the v1 cap of eight.
-    RoundNumber(u32), 1 ..= 8, "repair round number"
+    RoundNumber(u32),
+    1..=8,
+    "repair round number"
 );
 
 /// What identifies a round: the order and its number. Never a commit, worker, probe or run.

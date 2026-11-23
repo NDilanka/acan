@@ -52,78 +52,97 @@ pub(crate) use literal_tag;
 
 literal_tag!(
     /// Version of [`crate::PlantView`].
-    PlantViewV1 = "plant-view/1", "version"
+    PlantViewV1 = "plant-view/1",
+    "version"
 );
 literal_tag!(
     /// Version of [`crate::ScopeDraft`].
-    ScopeDraftV1 = "acan-scope-draft/1", "version"
+    ScopeDraftV1 = "acan-scope-draft/1",
+    "version"
 );
 literal_tag!(
     /// Version of [`crate::Scope`].
-    ScopeV1 = "acan-scope/1", "version"
+    ScopeV1 = "acan-scope/1",
+    "version"
 );
 literal_tag!(
     /// Version of [`crate::ScopeConfirmation`].
-    ScopeConfirmationV1 = "acan-scope-confirmation/1", "version"
+    ScopeConfirmationV1 = "acan-scope-confirmation/1",
+    "version"
 );
 literal_tag!(
     /// Schema version of every [`crate::LedgerEvent`] line in `.acan/rulings.log`.
-    LedgerV1 = "acan-ledger/1", "version"
+    LedgerV1 = "acan-ledger/1",
+    "version"
 );
 literal_tag!(
     /// Version of [`crate::ProbeCorpus`], the protected probe file.
-    ProbeCorpusV1 = "acan-probes/1", "version"
+    ProbeCorpusV1 = "acan-probes/1",
+    "version"
 );
 literal_tag!(
     /// Version of [`crate::AppContract`], the protected `.acan/app.json`.
-    AppContractV1 = "acan-app/1", "version"
+    AppContractV1 = "acan-app/1",
+    "version"
 );
 literal_tag!(
     /// The runner contract a fixture and an app contract are written against.
-    RunnerContractV1 = "acan-runner/1", "runner contract"
+    RunnerContractV1 = "acan-runner/1",
+    "runner contract"
 );
 literal_tag!(
     /// Version of [`crate::Run`].
-    RunV1 = "acan-run/1", "version"
+    RunV1 = "acan-run/1",
+    "version"
 );
 literal_tag!(
     /// Version of [`crate::Observation`].
-    ObservationV1 = "acan-observation/1", "version"
+    ObservationV1 = "acan-observation/1",
+    "version"
 );
 literal_tag!(
     /// Version of [`crate::DiscrepancyEpisode`].
-    EpisodeV1 = "acan-episode/1", "version"
+    EpisodeV1 = "acan-episode/1",
+    "version"
 );
 literal_tag!(
     /// Version of [`crate::Contest`].
-    ContestV1 = "acan-contest/1", "version"
+    ContestV1 = "acan-contest/1",
+    "version"
 );
 literal_tag!(
     /// Version of [`crate::Receipt`].
-    ReceiptV1 = "acan-receipt/1", "version"
+    ReceiptV1 = "acan-receipt/1",
+    "version"
 );
 literal_tag!(
     /// Version of every MCP request, response and error envelope.
-    McpV1 = "acan-mcp/1", "version"
+    McpV1 = "acan-mcp/1",
+    "version"
 );
 literal_tag!(
     /// Version of [`crate::ContrastExample`], a retained ruling example.
-    ContrastExampleV1 = "acan-contrast-example/1", "version"
+    ContrastExampleV1 = "acan-contrast-example/1",
+    "version"
 );
 literal_tag!(
     /// Version of [`crate::RepairRound`].
-    RepairRoundV1 = "acan-repair-round/1", "version"
+    RepairRoundV1 = "acan-repair-round/1",
+    "version"
 );
 literal_tag!(
     /// Version of every twin-probe request, response and error envelope.
-    TwinV1 = "acan-twin/1", "version"
+    TwinV1 = "acan-twin/1",
+    "version"
 );
 literal_tag!(
     /// Version of [`crate::Card`] and [`crate::CardRequest`].
-    CardV1 = "acan-card/1", "version"
+    CardV1 = "acan-card/1",
+    "version"
 );
 literal_tag!(
     /// Version of [`crate::CaptionCatalog`]. Version 2 gives each template the classes and states
     /// it describes.
-    CaptionCatalogV2 = "acan-caption-catalog/2", "version"
+    CaptionCatalogV2 = "acan-caption-catalog/2",
+    "version"
 );

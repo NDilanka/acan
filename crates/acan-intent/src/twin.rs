@@ -53,7 +53,9 @@ pub const TWIN_CAPS: TwinCaps = TwinCaps {
 
 bounded!(
     /// How many times one HTTP step is sent in a row: 1 to 20.
-    RepeatCount(u32), 1 ..= 20, "twin repeat count"
+    RepeatCount(u32),
+    1..=20,
+    "twin repeat count"
 );
 
 /// One edit to one HTTP step of the source probe.

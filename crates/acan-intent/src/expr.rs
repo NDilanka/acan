@@ -19,11 +19,15 @@ use crate::types::{
 
 bounded!(
     /// A window length in milliseconds of the controlled clock: 1 ms to one day.
-    WindowMs(u64), 1 ..= 86_400_000, "window length in ms"
+    WindowMs(u64),
+    1..=86_400_000,
+    "window length in ms"
 );
 bounded!(
     /// How many matching events a window allows: 0 to 10,000.
-    AllowedCount(u32), 0 ..= 10_000, "allowed count"
+    AllowedCount(u32),
+    0..=10_000,
+    "allowed count"
 );
 
 /// Which run of a contrast a value comes from.

@@ -126,19 +126,23 @@ use crate::version::literal_tag;
 
 literal_tag!(
     /// The `provenance` field of an [`Observed`] value.
-    ObservedTag = "observed", "provenance"
+    ObservedTag = "observed",
+    "provenance"
 );
 literal_tag!(
     /// The `provenance` field of a [`CoreDerived`] value.
-    CoreDerivedTag = "core_derived", "provenance"
+    CoreDerivedTag = "core_derived",
+    "provenance"
 );
 literal_tag!(
     /// The `provenance` field of a [`HumanSpec`] value.
-    HumanSpecTag = "human_spec", "provenance"
+    HumanSpecTag = "human_spec",
+    "provenance"
 );
 literal_tag!(
     /// The `provenance` field of a [`ModelProposal`].
-    ModelProposalTag = "model_proposal", "provenance"
+    ModelProposalTag = "model_proposal",
+    "provenance"
 );
 
 /// The provenance label the plant and the card draw next to a value.

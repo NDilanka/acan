@@ -581,7 +581,9 @@ pub struct BroadGrantAck {
 
 bounded!(
     /// Repair rounds one order may use: at most eight in v1. The offered default is two.
-    RepairRounds(u32), 0 ..= 8, "repair rounds per order"
+    RepairRounds(u32),
+    0..=8,
+    "repair rounds per order"
 );
 
 /// The repair budget of one order, fixed before the first run.

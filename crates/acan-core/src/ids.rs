@@ -101,20 +101,41 @@ impl Visitor<'_> for CounterVisitor {
     }
 }
 
-counter_id!(/// An order posted on a machine. Displays as `o-1`.
-    OrderId, "o");
-counter_id!(/// A task the foreman split from an order. Displays as `t-1`.
-    TaskId, "t");
-counter_id!(/// A locked witness. Displays as `w-1`.
-    WitnessId, "w");
-counter_id!(/// A worker's readback of a task. Displays as `r-1`.
-    ReadbackId, "r");
-counter_id!(/// A question pinned when readbacks disagree. Displays as `q-1`.
-    QuestionId, "q");
-counter_id!(/// A blocking overlap between two declarations. Displays as `c-1`.
-    ClashId, "c");
-counter_id!(/// One run of a task's witnesses against one commit. Displays as `g-1`.
-    GateRunId, "g");
+counter_id!(
+    /// An order posted on a machine. Displays as `o-1`.
+    OrderId,
+    "o"
+);
+counter_id!(
+    /// A task the foreman split from an order. Displays as `t-1`.
+    TaskId,
+    "t"
+);
+counter_id!(
+    /// A locked witness. Displays as `w-1`.
+    WitnessId,
+    "w"
+);
+counter_id!(
+    /// A worker's readback of a task. Displays as `r-1`.
+    ReadbackId,
+    "r"
+);
+counter_id!(
+    /// A question pinned when readbacks disagree. Displays as `q-1`.
+    QuestionId,
+    "q"
+);
+counter_id!(
+    /// A blocking overlap between two declarations. Displays as `c-1`.
+    ClashId,
+    "c"
+);
+counter_id!(
+    /// One run of a task's witnesses against one commit. Displays as `g-1`.
+    GateRunId,
+    "g"
+);
 
 macro_rules! ordinal {
     ($(#[$meta:meta])* $name:ident($inner:ty)) => {
@@ -141,12 +162,18 @@ macro_rules! ordinal {
     };
 }
 
-ordinal!(/// Position of an event in its world log. Gap-free, starting at 0.
-    Seq(u64));
-ordinal!(/// Revision of an order's locked witness set. Bumps when a question is answered.
-    OrderRev(u32));
-ordinal!(/// Fencing token of a task's lease. Bumps on every grant and never resets.
-    Generation(u32));
+ordinal!(
+    /// Position of an event in its world log. Gap-free, starting at 0.
+    Seq(u64)
+);
+ordinal!(
+    /// Revision of an order's locked witness set. Bumps when a question is answered.
+    OrderRev(u32)
+);
+ordinal!(
+    /// Fencing token of a task's lease. Bumps on every grant and never resets.
+    Generation(u32)
+);
 
 impl Seq {
     // A log is gap-free from 0, so reaching u64::MAX would take 2^64 events.
@@ -241,20 +268,41 @@ macro_rules! name_id {
     };
 }
 
-name_id!(/// A world: one repository's shared order log.
-    WorldId, validate_name);
-name_id!(/// A human member, as resolved by the origin's token store.
-    MemberId, validate_name);
-name_id!(/// An agent principal owned by a member, as resolved by the origin's token store.
-    AgentId, validate_name);
-name_id!(/// A git commit id in the repository's object format.
-    CommitId, validate_name);
-name_id!(/// A machine on the plant, keyed by its name. Scanner machine indices are not stable across regrouping.
-    MachineKey, validate_name);
-name_id!(/// An opaque content revision of a [`crate::CodeIndex`], computed by the host.
-    CodeRev, validate_name);
-name_id!(/// A repo-relative file path with forward slashes.
-    FilePath, validate_path);
+name_id!(
+    /// A world: one repository's shared order log.
+    WorldId,
+    validate_name
+);
+name_id!(
+    /// A human member, as resolved by the origin's token store.
+    MemberId,
+    validate_name
+);
+name_id!(
+    /// An agent principal owned by a member, as resolved by the origin's token store.
+    AgentId,
+    validate_name
+);
+name_id!(
+    /// A git commit id in the repository's object format.
+    CommitId,
+    validate_name
+);
+name_id!(
+    /// A machine on the plant, keyed by its name. Scanner machine indices are not stable across regrouping.
+    MachineKey,
+    validate_name
+);
+name_id!(
+    /// An opaque content revision of a [`crate::CodeIndex`], computed by the host.
+    CodeRev,
+    validate_name
+);
+name_id!(
+    /// A repo-relative file path with forward slashes.
+    FilePath,
+    validate_path
+);
 
 fn validate_name(raw: &str) -> Result<(), ParseIdError> {
     if raw.is_empty() {
