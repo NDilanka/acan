@@ -48,7 +48,6 @@ async fn boot(repo: &Path, models: Models) -> Running {
         protected_branch: None,
         witness_http_base_url: None,
         witness_concurrency: acan_server::DEFAULT_WITNESS_CONCURRENCY,
-        vision: None,
     };
     let ledger: UsageLedger = models.ledger();
     start(config, models, ledger)

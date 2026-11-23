@@ -71,7 +71,7 @@ fn client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
-/// The config every test starts with: an ephemeral port, the stub model, and no vision.
+/// The config every test starts with: an ephemeral port and the stub model.
 fn config(projects: &ProjectSet) -> ServeConfig {
     ServeConfig {
         projects: projects.clone(),
@@ -79,8 +79,6 @@ fn config(projects: &ProjectSet) -> ServeConfig {
         team: false,
         web: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
-        vision: None,
-        local_workers: 0,
         map_on_first_view: false,
     }
 }

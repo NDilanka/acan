@@ -73,7 +73,6 @@ async fn boot(repo: &Path) -> Running {
         protected_branch: None,
         witness_http_base_url: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
-        vision: None,
     };
     start(config, models, ledger)
         .await

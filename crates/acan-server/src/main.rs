@@ -13,9 +13,9 @@ use acan_server::receipt_cli::{self, Format, ShadowArgs};
 use acan_server::release::{self, Redaction};
 use acan_server::replay;
 use acan_server::{
-    ClientFactory, DEFAULT_WITNESS_CONCURRENCY, Models, ServeConfig, UserFolder, VisionConfig,
-    apply_project_changes, default_browser, default_data_dir, default_settings_file,
-    settings_file_beside, start_open, start_projects_adding, tokens_file,
+    ClientFactory, DEFAULT_WITNESS_CONCURRENCY, Models, ServeConfig, UserFolder,
+    apply_project_changes, default_settings_file, settings_file_beside, start_open,
+    start_projects_adding, tokens_file,
 };
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -86,12 +86,6 @@ struct OpenServerArgs {
 /// The options `acan open` passes on to the server it starts.
 #[derive(Debug, Args)]
 struct OpenServerOptions {
-    /// How many workers the server runs in its own process for each project. Zero runs none.
-    #[arg(long, default_value_t = 1)]
-    workers: usize,
-    /// Runs no advisory vision checks.
-    #[arg(long)]
-    no_vision: bool,
     /// A directory served at `/`, such as the renderer page. Without it, the `web` folder beside
     /// the binary is served, when there is one.
     #[arg(long)]
@@ -102,10 +96,7 @@ impl OpenServerOptions {
     /// These options as the server's arguments. The server runs in the run folder, so a relative
     /// web folder is made absolute first.
     fn to_args(&self) -> Result<Vec<OsString>> {
-        let mut args: Vec<OsString> = vec!["--workers".into(), self.workers.to_string().into()];
-        if self.no_vision {
-            args.push("--no-vision".into());
-        }
+        let mut args: Vec<OsString> = Vec::new();
         if let Some(web) = &self.web {
             args.push("--web".into());
             args.push(std::path::absolute(web).context("resolving --web")?.into());
@@ -184,21 +175,6 @@ struct ServeArgs {
     /// ACAN_UPDATE_CHECK variable is 0, false, no or off.
     #[arg(long)]
     no_update_check: bool,
-    /// The headless browser the vision witness renders pages with. Defaults to Edge, then Chrome.
-    #[arg(long)]
-    vision_browser: Option<PathBuf>,
-    /// Where vision records and screenshots are kept. Defaults to the per-user data directory,
-    /// and must not be inside any repository.
-    #[arg(long)]
-    vision_dir: Option<PathBuf>,
-    /// Runs no advisory vision checks.
-    #[arg(long)]
-    no_vision: bool,
-    /// How many workers this server runs in its own process for each project, each taking one
-    /// task at a time. Zero runs none. A worker waits, and is reported as having no model key,
-    /// until a key is set.
-    #[arg(long, default_value_t = 1)]
-    workers: usize,
     /// Maps each project's codebase when its first page connects, not as the server starts.
     ///
     /// Until a page connects, the project's map stays blank, runs no scan and takes no writes. The
@@ -354,11 +330,6 @@ async fn serve(args: ServeArgs) -> Result<()> {
         team: args.team,
         web: args.web.or_else(bundled_web),
         witness_concurrency: args.witness_concurrency,
-        vision: (!args.no_vision).then(|| VisionConfig {
-            browser: args.vision_browser.unwrap_or_else(default_browser),
-            data_dir: args.vision_dir.unwrap_or_else(default_data_dir),
-        }),
-        local_workers: args.workers,
         map_on_first_view: args.map_on_first_view,
     };
     let tokens = config
@@ -523,11 +494,6 @@ async fn open_server(args: OpenServerArgs) -> Result<()> {
         team: false,
         web: args.server.web.or_else(bundled_web),
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
-        vision: (!args.server.no_vision).then(|| VisionConfig {
-            browser: default_browser(),
-            data_dir: default_data_dir(),
-        }),
-        local_workers: args.server.workers,
         map_on_first_view: false,
     };
     let user = UserFolder {

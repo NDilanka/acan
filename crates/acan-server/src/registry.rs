@@ -21,7 +21,6 @@ use crate::auth::{Principal, Tokens};
 use crate::host::Host;
 use crate::http::{ApiError, bearer};
 use crate::signin::SignIns;
-use crate::workers::Board;
 
 /// Every project one server runs, and which of them answers the unprefixed routes. A project added
 /// while the server runs joins the list, so the list is read through [`Registry::entries`]. The list
@@ -65,8 +64,6 @@ pub(crate) struct Entry<C> {
     pub(crate) name: String,
     /// The project's host: its writer, its snapshot, its tokens and its git state.
     pub(crate) host: Host<C>,
-    /// The state of this project's local workers, which `GET /api/p/{id}/workers` reports.
-    pub(crate) board: Board,
     /// The protected branch head the list last read, with the seq of the snapshot it was read at.
     /// It is read again only when the snapshot moves, so the list does not run git per request.
     pub(crate) head: tokio::sync::Mutex<Option<(u64, Option<String>)>>,
@@ -370,8 +367,6 @@ mod tests {
             team: false,
             web: None,
             witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
-            vision: None,
-            local_workers: 0,
             map_on_first_view: false,
         };
         let clients = repos

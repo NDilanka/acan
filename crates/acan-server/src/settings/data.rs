@@ -6,7 +6,7 @@
 //! The archive is written without compression. Its text passes the bug report's redaction, and no
 //! entry may hold the text of a value in the repository's `.env` file: such a value fails the
 //! request, and nothing is sent. The clear keeps the event log, the receipts, the saved examples
-//! and observations, the vision folder, the tokens, and the repository itself.
+//! and observations, the tokens, and the repository itself.
 
 use std::fs;
 use std::io;
@@ -58,14 +58,13 @@ const REPLAY_FILES: [&str; 3] = ["plant.json", "events.json", "manifest.json"];
 const CLEARED: [&str; 2] = ["deps", "tour_cache"];
 
 /// What a clear keeps, as its response names it. A clear never removes any of these.
-const KEPT: [&str; 7] = [
+const KEPT: [&str; 6] = [
     "receipts",
     "event_log",
     "repo",
     "tokens",
     "examples",
     "observations",
-    "vision",
 ];
 
 /// The owner of one project's data: the member whose token may export or clear it, and the

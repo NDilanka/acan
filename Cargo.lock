@@ -3,28 +3,6 @@
 version = 4
 
 [[package]]
-name = "acan-agent"
-version = "0.1.0"
-dependencies = [
- "acan-core",
- "acan-intent",
- "acan-llm",
- "acan-server",
- "acan-witness",
- "anyhow",
- "clap",
- "dotenvy",
- "reqwest",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "acan-core"
 version = "0.1.0"
 dependencies = [
@@ -164,7 +142,6 @@ dependencies = [
 name = "acan-server"
 version = "0.1.0"
 dependencies = [
- "acan-agent",
  "acan-core",
  "acan-git",
  "acan-intent",

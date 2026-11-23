@@ -128,8 +128,6 @@ jobs:
           $reported = ($reported | Out-String).Trim()
           if ($reported -ne "acan $env:VERSION") { throw "acan reports '$reported', expected 'acan $env:VERSION'" }
           Write-Host "acan reports: $reported"
-      - name: Build acan-worker
-        run: cargo build -p acan-agent --bin acan-worker --release --locked
       # The demo pin: DEMO_SHA above and the ref below must name the same commit.
       - uses: actions/checkout@v4
         with:
@@ -181,8 +179,6 @@ jobs:
           $reported = ($reported | Out-String).Trim()
           if ($reported -ne "acan $env:VERSION") { throw "acan reports '$reported', expected 'acan $env:VERSION'" }
           Write-Host "acan reports: $reported"
-      - name: Build acan-worker
-        run: cargo build -p acan-agent --bin acan-worker --release --locked
       # The demo pin: DEMO_SHA above and the ref below must name the same commit.
       - uses: actions/checkout@v4
         with:

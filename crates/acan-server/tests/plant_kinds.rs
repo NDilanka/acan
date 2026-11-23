@@ -50,8 +50,6 @@ async fn boot(repo: &Path) -> Running {
         team: false,
         web: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
-        vision: None,
-        local_workers: 0,
         map_on_first_view: false,
     };
     start_projects(config, vec![(Stub::default(), UsageLedger::default())])

@@ -531,8 +531,6 @@ mod tests {
             team: false,
             web: None,
             witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
-            vision: None,
-            local_workers: 0,
             map_on_first_view: false,
         };
         let clients = repos
