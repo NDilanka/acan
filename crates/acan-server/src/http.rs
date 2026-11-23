@@ -27,7 +27,7 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -46,7 +46,7 @@ use crate::ruling::{self, RulingBody, RulingDraftView};
 use crate::scan_feed::Summary as ScanSummary;
 use crate::settings::data::{self, DataOwner};
 use crate::settings::{self, Settings};
-use crate::{STATE_DIR, observe, redact, setup, stream, stream_all};
+use crate::{STATE_DIR, observe, redact, stream, stream_all};
 
 /// Where one project's routes are mounted: the prefix of its API paths, and the path of its MCP
 /// endpoint. The default project is mounted at `/api` and `/mcp`, and every project at
@@ -75,16 +75,6 @@ pub(crate) fn project_routes<C: ModelClient + 'static>(
         .route(&format!("{api}/plant/kinds"), put(put_plant_kinds::<C>))
         .route(&format!("{api}/update"), get(get_update::<C>))
         .route(&format!("{api}/bug-report"), get(get_bug_report::<C>))
-        .route(&format!("{api}/setup"), get(setup::get_status::<C>))
-        .route(&format!("{api}/setup/keys"), post(setup::post_key::<C>))
-        .route(
-            &format!("{api}/setup/keys/{{provider}}"),
-            delete(setup::delete_key::<C>),
-        )
-        .route(
-            &format!("{api}/setup/roles/{{role}}"),
-            put(setup::put_role::<C>),
-        )
         .route(&format!("{api}/stream"), get(stream::upgrade::<C>))
         .route(
             &format!("{api}/settings/data/export"),
@@ -145,9 +135,8 @@ async fn refuse_when_stopped<C: ModelClient + 'static>(
 }
 
 /// Builds the router for every project. Each project answers under `/api/p/{id}`, and the default
-/// project also answers at the unprefixed paths, which the setup page and older clients use. The
-/// server's own health and version are not any project's. The public files are served for every
-/// path the API does not claim. The settings are the server's, so their route is global too.
+/// project also answers at the unprefixed paths. Public files are served for every path the API
+/// does not claim. Health, version and settings are server-wide.
 /// `founder` is the member whose token is the owner's: only it may export or clear a project's
 /// data.
 pub(crate) fn router<C: ModelClient + 'static>(
@@ -159,7 +148,6 @@ pub(crate) fn router<C: ModelClient + 'static>(
     let mut router = Router::new()
         .route("/health", get(health))
         .route("/version", get(version))
-        .route("/setup", get(setup::page))
         .merge(
             Router::new()
                 .route("/api/projects", get(registry::list_projects::<C>))

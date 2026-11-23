@@ -34,9 +34,6 @@ pub struct ProjectSpec {
     pub repo: PathBuf,
     /// The branch finished work lands on. `None` lands on the branch checked out in the repository.
     pub protected_branch: Option<String>,
-    /// The model routing file. `None` means `<repo>/.acan/llm.toml`. The command line reads it;
-    /// the server does not.
-    pub llm: Option<PathBuf>,
     /// The base URL HTTP witness checks target for this project.
     pub witness_http_base_url: Option<String>,
 }
@@ -67,7 +64,6 @@ struct FileProject {
     name: Option<String>,
     repo: PathBuf,
     protected_branch: Option<String>,
-    llm: Option<PathBuf>,
     witness_http_base_url: Option<String>,
 }
 
@@ -108,7 +104,6 @@ impl ProjectSet {
                 id: entry.id,
                 repo: base.join(entry.repo),
                 protected_branch: entry.protected_branch,
-                llm: entry.llm.map(|llm| base.join(llm)),
                 witness_http_base_url: entry.witness_http_base_url,
             })
             .collect();
@@ -333,7 +328,6 @@ pub(crate) fn spec_for(repo: &Path, taken: &mut BTreeSet<String>) -> ProjectSpec
         name,
         repo: repo.to_path_buf(),
         protected_branch: None,
-        llm: None,
         witness_http_base_url: None,
     }
 }

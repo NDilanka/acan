@@ -27,15 +27,12 @@ mod jobs;
 )]
 mod land;
 mod mcp;
-pub mod model;
-mod models;
 #[allow(
     dead_code,
     reason = "reading stored observations back has no caller in the server yet; only the store writes them"
 )]
 mod observations;
 mod observe;
-mod offline;
 pub mod open;
 mod plant_view;
 pub mod projects;
@@ -57,7 +54,6 @@ pub mod replay;
 mod ruling;
 mod scan_feed;
 mod settings;
-mod setup;
 mod signin;
 mod store;
 mod stream;
@@ -74,7 +70,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use acan_core::{MemberId, Origin, Seq, WorldId, WorldRef};
-use acan_llm::{KeyFile, ModelClient, UsageLedger};
+use acan_llm::{ModelClient, UsageLedger};
 use anyhow::{Context, bail, ensure};
 use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, watch};
@@ -87,7 +83,6 @@ pub use index::{IndexError, Scan, code_index, scan};
 /// Starts the job loop for a host built by hand. [`start`] does this for the server; a caller
 /// that builds its own [`Host`] runs the same loop with this.
 pub use jobs::spawn as spawn_jobs;
-pub use models::Models;
 pub use store::EventStore;
 
 use crate::add::LiveContext;
@@ -188,13 +183,10 @@ impl From<ServerConfig> for ServeConfig {
 /// The user's own folder, which a server opened with [`start_open`] holds. It is not any project's
 /// folder, so the server can run with no codebase.
 #[derive(Debug, Clone)]
-pub struct UserFolder<C> {
-    /// The user's folder. It holds `settings.json` and `tokens.json`, with the model keys beside
-    /// them. Its tokens file holds the owner's token, which every project then shares.
+pub struct UserFolder {
+    /// The user's folder. It holds `settings.json` and `tokens.json`. Its tokens file holds the
+    /// owner's token, which every project then shares.
     pub dir: PathBuf,
-    /// The model client that holds the user's keys. The settings read and change the keys through
-    /// it while no project runs.
-    pub keys: C,
 }
 
 /// A project's mapping state as its watch channel holds it: `None` while the codebase maps, then
@@ -475,18 +467,10 @@ pub async fn start_projects_adding<C: ModelClient + 'static>(
 pub async fn start_open<C: ModelClient + 'static>(
     config: ServeConfig,
     clients: Vec<(C, UsageLedger)>,
-    folder: UserFolder<C>,
+    folder: UserFolder,
     opener: ClientFactory<C>,
 ) -> anyhow::Result<Running> {
-    let settings_file = folder.dir.join(settings::FILE);
-    start_listening(
-        config,
-        clients,
-        Some(settings_file),
-        Some(opener),
-        Some(folder),
-    )
-    .await
+    start_listening(config, clients, None, Some(opener), Some(folder)).await
 }
 
 async fn start_listening<C: ModelClient + 'static>(
@@ -494,7 +478,7 @@ async fn start_listening<C: ModelClient + 'static>(
     clients: Vec<(C, UsageLedger)>,
     settings_file: Option<PathBuf>,
     opener: Option<ClientFactory<C>>,
-    folder: Option<UserFolder<C>>,
+    folder: Option<UserFolder>,
 ) -> anyhow::Result<Running> {
     if !config.addr.ip().is_loopback() && !config.team {
         bail!(
@@ -542,8 +526,8 @@ async fn start_listening<C: ModelClient + 'static>(
     }
     let settings_file = match (settings_file, &folder, states.first()) {
         (Some(file), _, _) => file,
-        (None, Some(folder), _) => folder.dir.join(settings::FILE),
-        (None, None, Some(state)) => state.join(settings::FILE),
+        (None, Some(folder), _) => settings_file_in(&folder.dir),
+        (None, None, Some(state)) => settings_file_in(state),
         (None, None, None) => bail!("there is no folder to keep the settings in"),
     };
     let stored = settings::load(&settings_file)?;
@@ -553,19 +537,12 @@ async fn start_listening<C: ModelClient + 'static>(
     let mut dirs: Vec<&Path> = folder.iter().map(|folder| folder.dir.as_path()).collect();
     dirs.extend(states.iter().map(PathBuf::as_path));
     let (mut tokens, owner_token) = Tokens::load_shared(&dirs, &founder)?;
-    let (home, own_keys) = match folder {
-        Some(UserFolder { dir, keys }) => {
-            // One table per directory, in order, so the first is the user's folder's.
-            let table = tokens.remove(0);
-            let home = HomeTokens {
-                tokens: table,
-                dir,
-                owner: founder.clone(),
-            };
-            (Some(home), Some(Arc::new(keys)))
-        }
-        None => (None, None),
-    };
+    let home = folder.map(|folder| HomeTokens {
+        // One table per directory, in order, so the first is the user's folder's.
+        tokens: tokens.remove(0),
+        dir: folder.dir,
+        owner: founder.clone(),
+    });
     let home_dir = home.as_ref().map(|home| home.dir.clone());
 
     let mut openings = Vec::with_capacity(specs.len());
@@ -704,7 +681,6 @@ async fn start_listening<C: ModelClient + 'static>(
         stored,
         Arc::clone(&registry),
         founder.clone(),
-        own_keys,
     ));
     let app = http::router(registry, web, shared_settings, founder);
     let mut shutdown_seen = shutdown.subscribe();
@@ -755,11 +731,10 @@ pub(crate) async fn map_project<C: ModelClient + 'static>(host: Host<C>, on_view
     host.wake_jobs();
 }
 
-/// The settings file beside `keys`: `settings.json` in the folder the keys file is in. A user's
-/// settings sit with that user's model keys, so every project the user runs shares them.
+/// The settings file in `dir`.
 #[must_use]
-pub fn settings_file_beside(keys: &KeyFile) -> PathBuf {
-    keys.path().with_file_name(settings::FILE)
+pub fn settings_file_in(dir: &Path) -> PathBuf {
+    dir.join(settings::FILE)
 }
 
 /// The settings file a start keeps when it is given none: `settings.json` in the first project's

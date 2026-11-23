@@ -5,9 +5,10 @@
 //! receipt's base commit, and the view is refused when it does not hold the number of routes the
 //! receipt counted.
 
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
-use acan_core::{MachineKey, OrderId, World};
+use acan_core::{CodeIndex, MachineKey, OrderId, World};
 use acan_intent::{MachineId, PlantView, ProbeCorpus, Receipt, RouteEntry, RouteTemplate, Scope};
 use acan_llm::ModelClient;
 use anyhow::anyhow;
@@ -16,7 +17,6 @@ use crate::STATE_DIR;
 use crate::host::Host;
 use crate::http::ApiError;
 use crate::jobs;
-use crate::model;
 use crate::observe;
 use crate::receipt::{MachineInput, PlateOrder, plant_view};
 
@@ -48,8 +48,20 @@ pub(crate) async fn order_view<C: ModelClient + 'static>(
         .map_err(ApiError::Internal)?;
     let (_app, corpus) =
         observe::read_protected(&snapshot).map_err(|err| ApiError::Internal(err.into()))?;
-    let machines = model::plant_machines(&host.scan().index);
+    let machines = plant_machines(&host.scan().index);
     assemble(&receipt, &scope, &plate, &machines, &corpus)
+}
+
+/// Every machine the code index names, in name order: the owner of each file and both ends of
+/// each belt.
+fn plant_machines(index: &CodeIndex) -> Vec<MachineKey> {
+    let mut machines: BTreeSet<&MachineKey> =
+        index.files.values().map(|file| &file.machine).collect();
+    for belt in &index.belts {
+        machines.insert(&belt.from);
+        machines.insert(&belt.to);
+    }
+    machines.into_iter().cloned().collect()
 }
 
 /// The receipt the plant view answers for: the latest one whose scope revision is the order's

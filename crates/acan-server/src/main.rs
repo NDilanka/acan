@@ -5,7 +5,7 @@ use std::io::{self, IsTerminal};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-use acan_llm::{KeyFile, ModelClient};
+use acan_llm::{Stub, UsageLedger};
 use acan_server::init_cli::{self, InitArgs};
 use acan_server::open::{self, Browser, RunDir};
 use acan_server::projects::{ProjectSet, ProjectSpec};
@@ -13,9 +13,8 @@ use acan_server::receipt_cli::{self, Format, ShadowArgs};
 use acan_server::release::{self, Redaction};
 use acan_server::replay;
 use acan_server::{
-    ClientFactory, DEFAULT_WITNESS_CONCURRENCY, Models, ServeConfig, UserFolder,
-    apply_project_changes, default_settings_file, settings_file_beside, start_open,
-    start_projects_adding, tokens_file,
+    DEFAULT_WITNESS_CONCURRENCY, ServeConfig, UserFolder, apply_project_changes,
+    default_settings_file, settings_file_in, start_open, start_projects_adding, tokens_file,
 };
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -156,10 +155,6 @@ struct ServeArgs {
     /// the binary is served, when there is one.
     #[arg(long)]
     web: Option<PathBuf>,
-    /// The model routing file of the one project. Defaults to `<repo>/.acan/llm.toml`. When
-    /// serving several projects, set it per project in a projects file.
-    #[arg(long)]
-    llm: Option<PathBuf>,
     /// The branch finished work lands on. Defaults to the branch checked out in the repository.
     /// Names one project; set it per project in a projects file when serving several.
     #[arg(long)]
@@ -208,8 +203,7 @@ async fn main() -> Result<()> {
 }
 
 /// Loads the repository's `.env` file. A repository without one is the normal case. A file that
-/// exists but does not parse is an error, so the keys it was meant to set are not silently
-/// missing.
+/// exists but does not parse is an error, so its secrets are not silently missed by redaction.
 fn load_dotenv(repo: &std::path::Path) -> Result<()> {
     match dotenvy::from_path(repo.join(".env")) {
         Ok(()) => Ok(()),
@@ -274,23 +268,16 @@ async fn serve(args: ServeArgs) -> Result<()> {
         if let Some(url) = &args.witness_http_base_url {
             project.witness_http_base_url = Some(url.clone());
         }
-        if let Some(llm) = &args.llm {
-            project.llm = Some(llm.clone());
-        }
-    } else if args.protected_branch.is_some()
-        || args.witness_http_base_url.is_some()
-        || args.llm.is_some()
-    {
+    } else if args.protected_branch.is_some() || args.witness_http_base_url.is_some() {
         bail!(
-            "--protected-branch, --witness-http-base-url and --llm name one project; set them per project in a --projects file"
+            "--protected-branch and --witness-http-base-url name one project; set them per project in a --projects file"
         );
     }
     projects.validate()?;
-    // The settings sit beside the model keys, so every project this user runs shares them. The
-    // folders settings added and removed are applied before the clients are built.
-    let settings = KeyFile::for_user().map_or_else(
+    // Every project this user runs shares the same settings. Apply their project changes first.
+    let settings = open::user_dir().map_or_else(
         || default_settings_file(&projects),
-        |keys| settings_file_beside(&keys),
+        |dir| settings_file_in(&dir),
     );
     for line in apply_project_changes(&mut projects, &settings)? {
         println!("acan did not add a project: {line}");
@@ -311,19 +298,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         release::spawn_update_check();
     }
 
-    let mut clients = Vec::with_capacity(projects.projects.len());
-    let mut needs_key = false;
-    for project in &projects.projects {
-        let llm = project
-            .llm
-            .clone()
-            .unwrap_or_else(|| project.repo.join(".acan").join("llm.toml"));
-        let models = Models::open(&llm, KeyFile::for_user())?;
-        // Model keys are user-wide, so every project reports the same key status.
-        needs_key = !models.key_status().configured;
-        let ledger = models.ledger();
-        clients.push((models, ledger));
-    }
+    let clients = projects.projects.iter().map(|_| stub_client()).collect();
     let config = ServeConfig {
         projects,
         addr: SocketAddr::new(args.bind, args.port),
@@ -340,20 +315,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .unwrap_or_else(|| tokens_file(Path::new(".")));
     let tokens = std::path::absolute(&tokens).unwrap_or(tokens);
     let map_on_view = args.map_on_first_view;
-    // A project added while the server runs is opened from its routing file, as a project at start
-    // is, so the settings can serve a new folder with no restart.
-    let opener: ClientFactory<Models> = Box::new(|project: &ProjectSpec| {
-        let llm = project
-            .llm
-            .clone()
-            .unwrap_or_else(|| project.repo.join(".acan").join("llm.toml"));
-        let models = Models::open(&llm, KeyFile::for_user())?;
-        let ledger = models.ledger();
-        Ok::<_, anyhow::Error>((models, ledger))
-    });
     // A server that maps on first view is listening before its codebases map, so it does not wait
     // for them: the first page is what starts each map. Otherwise the start waits for every map.
-    let mut running = start_projects_adding(config, clients, Some(settings), opener).await?;
+    let mut running =
+        start_projects_adding(config, clients, Some(settings), Box::new(open_stub)).await?;
     if !map_on_view && let Err(err) = running.wait_mapped().await {
         let _ = running.stop().await;
         return Err(err);
@@ -371,11 +336,6 @@ async fn serve(args: ServeArgs) -> Result<()> {
     );
     if map_on_view {
         println!("the codebase maps when the first page connects");
-    }
-    if needs_key {
-        // Model jobs get built-in replies until a key is saved, so say where to save one.
-        let token = running.owner_token.as_ref().map(|token| token.as_str());
-        println!("{}", key_line(running.local_addr, token, terminal));
     }
     // Either way the same barrier runs: no write may still be in flight when this returns.
     let outcome = tokio::select! {
@@ -448,15 +408,9 @@ async fn open_server(args: OpenServerArgs) -> Result<()> {
     };
     // Files left by a server that did not stop cleanly name a port nothing answers on.
     run.remove_live_files();
-    let keys = KeyFile::for_user().context(
-        "there is no user folder for the settings and keys; set HOME, or APPDATA on Windows",
-    )?;
-    let folder = keys
-        .path()
-        .parent()
-        .context("the keys file has no folder")?
-        .to_path_buf();
-    let settings = settings_file_beside(&keys);
+    let folder = open::user_dir()
+        .context("there is no user folder for the settings; set HOME, or APPDATA on Windows")?;
+    let settings = settings_file_in(&folder);
     let mut projects = ProjectSet::from_repos(&[]);
     for line in apply_project_changes(&mut projects, &settings)? {
         println!("acan did not add a project: {line}");
@@ -474,20 +428,7 @@ async fn open_server(args: OpenServerArgs) -> Result<()> {
         release::spawn_update_check();
     }
 
-    let mut clients = Vec::with_capacity(projects.projects.len());
-    for project in &projects.projects {
-        let models = Models::open(&routing_file(project), KeyFile::for_user())?;
-        let ledger = models.ledger();
-        clients.push((models, ledger));
-    }
-    // The user's folder has no routing file, so its client always reads the saved keys. An empty
-    // path never exists.
-    let user_keys = Models::open(Path::new(""), Some(keys))?;
-    let opener: ClientFactory<Models> = Box::new(|project: &ProjectSpec| {
-        let models = Models::open(&routing_file(project), KeyFile::for_user())?;
-        let ledger = models.ledger();
-        Ok::<_, anyhow::Error>((models, ledger))
-    });
+    let clients = projects.projects.iter().map(|_| stub_client()).collect();
     let config = ServeConfig {
         projects,
         addr: SocketAddr::from((Ipv4Addr::LOCALHOST, args.port)),
@@ -496,12 +437,9 @@ async fn open_server(args: OpenServerArgs) -> Result<()> {
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
         map_on_first_view: false,
     };
-    let user = UserFolder {
-        dir: folder,
-        keys: user_keys,
-    };
+    let user = UserFolder { dir: folder };
     // The codebases map while the server already answers, so the launcher's wait stays short.
-    let mut running = start_open(config, clients, user, opener).await?;
+    let mut running = start_open(config, clients, user, Box::new(open_stub)).await?;
     let written = run
         .write_pid(std::process::id())
         .and_then(|()| run.write_port(running.local_addr.port()));
@@ -531,12 +469,15 @@ async fn open_server(args: OpenServerArgs) -> Result<()> {
     outcome.and(stopped)
 }
 
-/// The routing file of `project`: its own, or `.acan/llm.toml` in its repository.
-fn routing_file(project: &ProjectSpec) -> PathBuf {
-    project
-        .llm
-        .clone()
-        .unwrap_or_else(|| project.repo.join(".acan").join("llm.toml"))
+/// The client and ledger a project starts with, whether it opens at startup or is added later.
+fn stub_client() -> (Stub, UsageLedger) {
+    let client = Stub::default();
+    let ledger = client.ledger().clone();
+    (client, ledger)
+}
+
+fn open_stub(_: &ProjectSpec) -> Result<(Stub, UsageLedger)> {
+    Ok(stub_client())
 }
 
 /// Completes on Ctrl-C. A process with no console may be unable to listen for it, and then this
@@ -577,15 +518,6 @@ fn owner_token_lines(addr: SocketAddr, token: &str, file: &Path, terminal: bool)
     }
 }
 
-/// The line that says where to save a model key. The owner token is part of the link only when
-/// it is shown on a terminal.
-fn key_line(addr: SocketAddr, token: Option<&str>, terminal: bool) -> String {
-    match token.filter(|_| terminal) {
-        Some(token) => format!("no model key is set. Add one at http://{addr}/setup#token={token}"),
-        None => format!("no model key is set. Add one at http://{addr}/setup"),
-    }
-}
-
 /// Whether the update check runs. It is on unless `--no-update-check` or `ACAN_UPDATE_CHECK`
 /// turns it off.
 fn update_check_enabled(flag_off: bool) -> bool {
@@ -620,9 +552,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Cli, Command};
-
-    use super::{key_line, owner_token_lines};
+    use super::{Cli, Command, owner_token_lines};
 
     const TOKEN: &str = "acan_0123456789abcdef0123456789abcdef";
 
@@ -667,27 +597,5 @@ mod tests {
         };
         assert!(!serve(&["acan", "serve"]).map_on_first_view);
         assert!(serve(&["acan", "serve", "--map-on-first-view"]).map_on_first_view);
-    }
-
-    #[test]
-    fn the_key_line_carries_the_token_only_on_a_terminal() {
-        assert_eq!(
-            key_line(addr(), Some(TOKEN), true),
-            format!("no model key is set. Add one at http://127.0.0.1:7311/setup#token={TOKEN}")
-        );
-        let piped = key_line(addr(), Some(TOKEN), false);
-        assert!(
-            !piped.contains(TOKEN),
-            "the token reached the output: {piped}"
-        );
-        assert_eq!(
-            piped,
-            "no model key is set. Add one at http://127.0.0.1:7311/setup"
-        );
-        assert_eq!(
-            key_line(addr(), None, true),
-            "no model key is set. Add one at http://127.0.0.1:7311/setup",
-            "a later start has no token to show"
-        );
     }
 }

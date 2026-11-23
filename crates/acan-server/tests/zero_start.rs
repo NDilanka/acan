@@ -97,7 +97,6 @@ async fn open(projects: &ProjectSet, folder: &Path) -> Running {
         .collect();
     let user = UserFolder {
         dir: folder.to_path_buf(),
-        keys: Stub::default(),
     };
     start_open(config(projects), clients, user, stub_opener())
         .await
@@ -196,11 +195,9 @@ async fn a_server_with_no_codebase_answers_cleanly() {
     let (status, _) = get(&running, "/api/projects", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "no token is unauthorized");
 
-    for path in ["/api/plant", "/api/setup"] {
-        let (status, body) = get(&running, path, Some(&token)).await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "{path} has no codebase");
-        assert_eq!(body["error"], "no_codebase", "{path} says why: {body}");
-    }
+    let (status, body) = get(&running, "/api/plant", Some(&token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "plant has no codebase");
+    assert_eq!(body["error"], "no_codebase", "plant says why: {body}");
 
     let (status, _) = get(&running, "/health", None).await;
     assert_eq!(status, StatusCode::OK, "the server is healthy");

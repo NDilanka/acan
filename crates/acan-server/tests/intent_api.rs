@@ -1,7 +1,7 @@
 //! The scope-first lane over the real server. Agents reach it over MCP, and members reach the
 //! reads and the human commands over HTTP.
 //!
-//! Each test boots a server on a temporary repository with the offline models. A test that
+//! Each test boots a server on a temporary repository with a stub client. A test that
 //! needs tasks records the order's split in the log while the server is stopped, since the server
 //! no longer splits orders. Every command runs through acan-core's origin. The tokens file
 //! is written before the server starts: an owner token for the member `owner`, and an agent token
@@ -15,7 +15,8 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use acan_intent::Scope;
-use acan_server::{DEFAULT_WITNESS_CONCURRENCY, Models, Running, ServerConfig, start};
+use acan_llm::{Stub, UsageLedger};
+use acan_server::{DEFAULT_WITNESS_CONCURRENCY, Running, ServerConfig, start};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
@@ -62,9 +63,6 @@ fn write_tokens(repo: &Path) {
 
 async fn boot(repo: &Path) -> Running {
     write_tokens(repo);
-    let models = Models::load(&repo.join(".acan/llm.toml"))
-        .expect("a missing routing file selects the offline models");
-    let ledger = models.ledger();
     let config = ServerConfig {
         repo: repo.to_path_buf(),
         addr: loopback(),
@@ -74,7 +72,7 @@ async fn boot(repo: &Path) -> Running {
         witness_http_base_url: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
     };
-    start(config, models, ledger)
+    start(config, Stub::default(), UsageLedger::default())
         .await
         .expect("the server starts")
 }

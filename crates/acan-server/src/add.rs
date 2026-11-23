@@ -23,8 +23,7 @@ use crate::store::EventStore;
 use crate::{DB_FILE, DEFAULT_PROBE_CONCURRENCY, Runtime, STATE_DIR};
 use crate::{index, jobs, map_project, open_git, prepare_state_dir};
 
-/// Opens the model client and usage ledger of a project added while the server runs. The CLI
-/// builds one from the project's routing file, as startup does for each project.
+/// Opens the client and usage ledger of a project added while the server runs.
 pub type ClientFactory<C> =
     Box<dyn Fn(&ProjectSpec) -> anyhow::Result<(C, UsageLedger)> + Send + Sync>;
 

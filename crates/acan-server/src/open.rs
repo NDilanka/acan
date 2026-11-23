@@ -22,7 +22,6 @@ use std::str::FromStr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acan_core::MemberId;
-use acan_llm::KeyFile;
 use serde_json::Value;
 
 use crate::Tokens;
@@ -66,11 +65,38 @@ fn founder() -> MemberId {
     MemberId::from_str(crate::OWNER).expect("the owner is a valid member id")
 }
 
-/// The user's own folder: the folder that holds the model keys, `settings.json` and
-/// `tokens.json`. `%APPDATA%\acan` on Windows. `None` when there is no such folder.
+/// The user's own folder, which holds `settings.json` and `tokens.json`.
+/// `%APPDATA%\acan` on Windows, `~/Library/Application Support/acan` on macOS, and
+/// `$XDG_CONFIG_HOME/acan` or `~/.config/acan` elsewhere.
 #[must_use]
 pub fn user_dir() -> Option<PathBuf> {
-    KeyFile::for_user().and_then(|keys| keys.path().parent().map(Path::to_path_buf))
+    user_dir_from(cfg!(windows), cfg!(target_os = "macos"), |name| {
+        std::env::var_os(name)
+    })
+}
+
+fn user_dir_from(
+    windows: bool,
+    macos: bool,
+    var: impl Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    let absolute = |name: &str| var(name).map(PathBuf::from).filter(|dir| dir.is_absolute());
+    if windows {
+        return absolute("APPDATA").map(|dir| dir.join("acan"));
+    }
+    let home = absolute("HOME")?;
+    if macos {
+        return Some(
+            home.join("Library")
+                .join("Application Support")
+                .join("acan"),
+        );
+    }
+    Some(
+        absolute("XDG_CONFIG_HOME")
+            .unwrap_or_else(|| home.join(".config"))
+            .join("acan"),
+    )
 }
 
 /// The owner's token in the user's folder `dir`, or `None` when it holds none or cannot be read.
@@ -626,8 +652,7 @@ pub async fn open(request: &Request) -> Result<Opened, OpenFailed> {
     let early = |what: String| OpenFailed { what, log: None };
     let user = user_dir().ok_or_else(|| {
         early(
-            "there is no user folder for the settings and keys; set HOME, or APPDATA on Windows"
-                .to_owned(),
+            "there is no user folder for the settings; set HOME, or APPDATA on Windows".to_owned(),
         )
     })?;
     let run = run_dir().ok_or_else(|| {
@@ -833,7 +858,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use super::{Failure, RunDir, redact, run_dir_from};
+    use super::{Failure, RunDir, redact, run_dir_from, user_dir_from};
 
     const TOKEN: &str = "acan_0123456789abcdef0123456789abcdef";
     const CODE: &str = "fedcba9876543210fedcba9876543210";
@@ -849,6 +874,54 @@ mod tests {
                 .find(|(held, _)| held == name)
                 .map(|(_, value)| OsString::from(value))
         }
+    }
+
+    #[test]
+    fn the_user_folder_follows_the_platform_variables() {
+        let appdata = if cfg!(windows) {
+            r"C:\appdata"
+        } else {
+            "/appdata"
+        };
+        let config = if cfg!(windows) {
+            r"C:\config"
+        } else {
+            "/config"
+        };
+        let home = if cfg!(windows) { r"C:\home" } else { "/home" };
+        let all = [
+            ("APPDATA", appdata),
+            ("XDG_CONFIG_HOME", config),
+            ("HOME", home),
+        ];
+        assert_eq!(
+            user_dir_from(true, false, vars(&all)),
+            Some(PathBuf::from(appdata).join("acan"))
+        );
+        assert_eq!(
+            user_dir_from(false, true, vars(&all)),
+            Some(
+                PathBuf::from(home)
+                    .join("Library")
+                    .join("Application Support")
+                    .join("acan")
+            )
+        );
+        assert_eq!(
+            user_dir_from(false, false, vars(&all)),
+            Some(PathBuf::from(config).join("acan"))
+        );
+        assert_eq!(
+            user_dir_from(
+                false,
+                false,
+                vars(&[("XDG_CONFIG_HOME", "config"), ("HOME", home)])
+            ),
+            Some(PathBuf::from(home).join(".config").join("acan")),
+            "a relative XDG_CONFIG_HOME is ignored"
+        );
+        assert_eq!(user_dir_from(true, false, vars(&[("HOME", home)])), None);
+        assert_eq!(user_dir_from(false, false, vars(&[])), None);
     }
 
     #[test]
