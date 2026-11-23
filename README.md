@@ -58,9 +58,9 @@ Acan is a Rust workspace. Each crate under `crates/` has one job.
 | `acan-agent` | The worker harness: a model-driven worker that takes a task from the origin over MCP. Builds the `acan-worker` binary. |
 | `acan-witness` | Runs a witness check against a task's worktree and reports the outcome. |
 | `acan-server` | The `acan` binary: one world's origin served over HTTP and WebSocket, with its event log in SQLite. |
-| `acan-render` | The plant renderer: 3D meshes drawn with wgpu. |
-| `acan-render-web` | Browser host for `acan-render`, built to wasm. |
-| `acan-iso` | Isometric machine models as draw lists, ported from an MIT anatomy kit. Its license and source notes are in the crate (`LICENSE-anatomy`, `SOURCE`). |
+| `acan-layout` | Zero-dependency 2D plant placement, orthogonal belt routing, and labelling. |
+| `acan-hook` | Fail-closed hook client binary enforcing path scope and interlocks. |
+| `acan-droid` | Headless Droid JSON-RPC client crate. |
 
 The demo app that the live take runs against is a separate public repository: https://github.com/NDilanka/acan-demo.
 
@@ -152,7 +152,7 @@ Before the hackathon I did design research and made UI mockups. They live in [ND
 
 ## License
 
-MIT. See `LICENSE`. The vendored anatomy kit in `crates/acan-iso` keeps its own license file, `LICENSE-anatomy`.
+MIT. See `LICENSE`.
 
 ## Contributors
 
