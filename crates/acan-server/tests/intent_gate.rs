@@ -49,8 +49,8 @@ use std::time::Duration;
 
 use acan_core::{
     AgentCmd, AgentId, Command, CommitId, Event, Fence, GateRunId, HumanCmd, LaneVerdict,
-    MachineKey, MemberId, OrderId, Origin, ScopeBinding, Seq, Stage, SystemCmd, TaskId, TaskState,
-    Timestamp, World, WorldId, WorldRef,
+    MachineKey, MemberId, OrderId, OrderRev, Origin, ScopeBinding, Seq, Stage, SystemCmd, TaskId,
+    TaskSpec, TaskState, Timestamp, World, WorldId, WorldRef,
 };
 use acan_git::{InstallOutcome, Preparation, PrepareOutcome, ProtectedPaths, Repo};
 use acan_intent::{
@@ -58,7 +58,7 @@ use acan_intent::{
     EpisodeKey, FixtureId, FoldedLedger, ItemClass, ItemState, LedgerEvent, Outcome, ProbeCorpus,
     Receipt, Scope, ScopeConfirmation, canonical_episode_selector, fold,
 };
-use acan_llm::{Reply, Role, Stub, UsageLedger};
+use acan_llm::{Stub, UsageLedger};
 use acan_server::{
     DEFAULT_PROBE_CONCURRENCY, DEFAULT_WITNESS_CONCURRENCY, EventStore, Host, HostParts, Tokens,
     scan, spawn_jobs,
@@ -1027,16 +1027,13 @@ const WORKER: &str = "worker-a";
 const MACHINE: &str = "auth";
 /// The file the worker declares it will change. The signup answer lives here in the pinned demo.
 const SIGNUP_FILE: &str = "src/auth.ts";
-/// The one task the foreman splits the demo order into.
-const SPLIT: &str =
-    r#"{"tasks":[{"title":"signup","brief":"keep the signup answer as it is","scope":["auth"]}]}"#;
 /// How long one live step may take before the test gives up on it. A judged candidate runs
 /// every probe three times in Docker, so this covers a slow machine.
 const LIVE_WAIT: Duration = Duration::from_secs(900);
 
-/// A model that splits the demo order as `SPLIT` asks and answers nothing else.
+/// A stub model client; the job loop no longer calls a model to split orders.
 fn foreman() -> Stub {
-    Stub::default().when(Role::Foreman, |_| true, Reply::text(SPLIT))
+    Stub::default()
 }
 
 /// A host built over `root`, the way the server builds one: its own store and state directory
@@ -1189,7 +1186,7 @@ async fn report_built(live: &Live, demo: &Demo, candidate: &CommitSha) -> (Order
     (order, task)
 }
 
-/// Registers the worker, posts the demo order, and waits for the job loop to split it. Returns
+/// Registers the worker, posts the demo order, and records its single split task. Returns
 /// the order and its one task.
 async fn post_and_split(host: &Host<Stub>) -> (OrderId, TaskId) {
     owner_says(host, HumanCmd::RegisterAgent { agent: worker() }).await;
@@ -1206,6 +1203,17 @@ async fn post_and_split(host: &Host<Stub>) -> (OrderId, TaskId) {
         host.read(|world| world.orders().next().map(|order| order.id))
     })
     .await;
+    host.submit(Command::System(SystemCmd::SplitReady {
+        order,
+        rev: OrderRev::new(0),
+        tasks: vec![TaskSpec {
+            title: "signup".to_owned(),
+            brief: "keep the signup answer as it is".to_owned(),
+            scope: vec![MachineKey::from_str(MACHINE).expect("valid machine key")],
+        }],
+    }))
+    .await
+    .expect("the split is accepted");
     let task = until("the split task", || {
         host.read(|world| world.tasks_of(order).next().map(|task| task.id))
     })

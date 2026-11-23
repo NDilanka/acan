@@ -769,11 +769,28 @@ fn fake_config(path: &Path) -> SpawnConfig {
     SpawnConfig::new(path).with_env(env)
 }
 
+async fn spawn_fake(config: &SpawnConfig) -> Result<DroidSession, DroidError> {
+    // On Linux, a concurrent test thread can fork while `fake_droid` holds the script's write
+    // descriptor open; the child briefly inherits that descriptor until its own exec, causing
+    // `ETXTBSY` (`ExecutableFileBusy`) when spawning the freshly written script.
+    for attempt in 0..20 {
+        match DroidSession::spawn(config).await {
+            Err(DroidError::Io(error))
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 19 =>
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            other => return other,
+        }
+    }
+    unreachable!("loop returns on the last attempt")
+}
+
 #[tokio::test]
 async fn successful_child_exit_mid_turn_is_unfinished() {
     let dir = tempfile::tempdir().expect("make fake Droid directory");
     let fake = fake_droid(dir.path(), "1.15.0");
-    let mut session = DroidSession::spawn(&fake_config(&fake))
+    let mut session = spawn_fake(&fake_config(&fake))
         .await
         .expect("start the fake executable");
     assert_eq!(
@@ -805,7 +822,7 @@ async fn spawn_rejects_an_untested_version_before_exec() {
     let fake = fake_droid(dir.path(), "2.0.0");
     #[cfg(windows)]
     let fake = fake.with_extension("");
-    let error = DroidSession::spawn(&fake_config(&fake))
+    let error = spawn_fake(&fake_config(&fake))
         .await
         .expect_err("untested version should not be spawned");
     assert!(matches!(error, DroidError::UnsupportedVersion { .. }));
