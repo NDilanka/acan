@@ -9,7 +9,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use acan_llm::ModelClient;
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::State;
@@ -78,8 +77,8 @@ struct Exchange {
 /// Status codes: `200` with `code` and `expires_in` in seconds. `401` for an unknown token. `403`
 /// for a token that is not the owner's. `404` with `what: "signin"` when the server holds no
 /// user folder.
-pub(crate) async fn mint<C: ModelClient + 'static>(
-    State(projects): State<Arc<Registry<C>>>,
+pub(crate) async fn mint(
+    State(projects): State<Arc<Registry>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let home = projects.home().ok_or(ApiError::NotFound("signin"))?;
@@ -102,8 +101,8 @@ pub(crate) async fn mint<C: ModelClient + 'static>(
 /// Status codes: `200` with the owner's `token`. `400` for a body that is not an object with a
 /// `code`. `401` for a code that is unknown, used or expired. `404` with `what: "signin"` when the
 /// server holds no user folder.
-pub(crate) async fn exchange<C: ModelClient + 'static>(
-    State(projects): State<Arc<Registry<C>>>,
+pub(crate) async fn exchange(
+    State(projects): State<Arc<Registry>>,
     body: Bytes,
 ) -> Result<Json<Value>, ApiError> {
     let home = projects.home().ok_or(ApiError::NotFound("signin"))?;

@@ -815,7 +815,7 @@ mod tests {
         let cases: [(&str, Kind); 4] = [
             ("crates/acan-server/src/settings", Kind::Switchbox),
             ("crates/acan-server/src", Kind::Intake),
-            ("crates/acan-llm/examples", Kind::Console),
+            ("crates/acan-server/examples", Kind::Console),
             ("crates/acan-witness/src/harness", Kind::Console),
         ];
         for (name, kind) in cases {

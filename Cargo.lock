@@ -65,24 +65,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "acan-llm"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "dotenvy",
- "reqwest",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "wiremock",
-]
-
-[[package]]
 name = "acan-scan"
 version = "0.1.0"
 dependencies = [
@@ -106,7 +88,6 @@ dependencies = [
  "acan-core",
  "acan-git",
  "acan-intent",
- "acan-llm",
  "acan-scan",
  "acan-witness",
  "anyhow",

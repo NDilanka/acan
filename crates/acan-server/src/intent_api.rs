@@ -23,7 +23,6 @@ use acan_intent::{
     GetScopeResponse, MachineId, McpError, McpErrorCode, McpV1, OrderRef, PostReadbackRequest,
     PostReadbackResponse, RulingNote, RulingSummary, RulingTagState, TaskRef,
 };
-use acan_llm::ModelClient;
 
 use crate::host::{Host, SubmitError};
 
@@ -53,10 +52,7 @@ impl From<McpError> for IntentError {
 /// # Errors
 ///
 /// Returns a refusal when the task does not exist, or when its order has no confirmed scope.
-pub(crate) fn get_scope<C: ModelClient>(
-    host: &Host<C>,
-    request: &GetScopeRequest,
-) -> IntentResult<GetScopeResponse> {
+pub(crate) fn get_scope(host: &Host, request: &GetScopeRequest) -> IntentResult<GetScopeResponse> {
     let task = task_of(&request.task)?;
     host.read(|world| {
         let found = found_task(world, task, &request.task)?;
@@ -85,8 +81,8 @@ pub(crate) fn get_scope<C: ModelClient>(
 /// # Errors
 ///
 /// Returns a refusal when the task does not exist. A log that does not fold is an internal error.
-pub(crate) fn get_rulings<C: ModelClient>(
-    host: &Host<C>,
+pub(crate) fn get_rulings(
+    host: &Host,
     request: &GetRulingsRequest,
 ) -> IntentResult<GetRulingsResponse> {
     let task = task_of(&request.task)?;
@@ -118,8 +114,8 @@ pub(crate) fn get_rulings<C: ModelClient>(
 ///
 /// Returns a refusal when the revision or hash is not the confirmed one, when the scope is not
 /// confirmed, or when the caller does not hold the task's readback rights.
-pub(crate) async fn post_scoped_readback<C: ModelClient>(
-    host: &Host<C>,
+pub(crate) async fn post_scoped_readback(
+    host: &Host,
     agent: &AgentId,
     request: &PostReadbackRequest,
 ) -> IntentResult<PostReadbackResponse> {
@@ -160,8 +156,8 @@ pub(crate) async fn post_scoped_readback<C: ModelClient>(
 ///
 /// Returns a refusal when the task does not exist, the agent does not hold it, or the origin
 /// refuses the contest, such as for an unknown episode.
-pub(crate) async fn file_contest<C: ModelClient>(
-    host: &Host<C>,
+pub(crate) async fn file_contest(
+    host: &Host,
     agent: &AgentId,
     request: &ContestRequest,
 ) -> IntentResult<ContestResponse> {
@@ -201,8 +197,8 @@ pub(crate) async fn file_contest<C: ModelClient>(
 /// # Errors
 ///
 /// Returns a refusal when the task does not exist, or when none of its runs has a receipt yet.
-pub(crate) fn get_receipt<C: ModelClient>(
-    host: &Host<C>,
+pub(crate) fn get_receipt(
+    host: &Host,
     request: &GetReceiptRequest,
 ) -> IntentResult<GetReceiptResponse> {
     let task = task_of(&request.task)?;
@@ -226,8 +222,8 @@ pub(crate) fn get_receipt<C: ModelClient>(
 
 /// Sends one agent command to the origin and returns the events it accepted. `action` names the
 /// tool, so a refusal of the agent's permission says what it was refused.
-async fn submit<C: ModelClient>(
-    host: &Host<C>,
+async fn submit(
+    host: &Host,
     agent: &AgentId,
     cmd: AgentCmd,
     action: &str,

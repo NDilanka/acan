@@ -15,7 +15,6 @@ path = "src/main.rs"
 acan-core = { path = "../acan-core" }
 acan-git = { path = "../acan-git" }
 acan-intent = { path = "../acan-intent" }
-acan-llm = { path = "../acan-llm" }
 acan-scan = { path = "../acan-scan" }
 acan-witness = { path = "../acan-witness" }
 anyhow.workspace = true

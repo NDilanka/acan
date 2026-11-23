@@ -8,11 +8,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use acan_intent::RepairRounds;
-use acan_llm::Role;
 use serde::Deserialize;
 
 use super::{
-    Adapter, Budgets, Harness, LabelDensity, Look, Notifications, Projects, Section, Stored, Theme,
+    Adapter, Budgets, Harness, LabelDensity, Look, Notifications, Projects, Role, Section, Stored,
+    Theme,
 };
 use crate::http::FieldError;
 use crate::projects::{same_folder, valid_id};
