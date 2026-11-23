@@ -28,6 +28,7 @@ mod ledger;
 mod mcp;
 mod observation;
 mod order;
+mod path_scope;
 pub mod predicate;
 mod probe;
 pub mod provenance;
@@ -84,6 +85,10 @@ pub use observation::{
     Relation, RequestRecord, StepPath, TypedCapture,
 };
 pub use order::{DeterministicError, deterministic};
+pub use path_scope::{
+    DraftError, DraftSummary, NormalizedInput, Overlap, PathCoverage, PathScope, PathScopeError,
+    RepoRules, ScopeEntry, detect_case_collisions, normalize_entry_input, validate_draft,
+};
 pub use probe::{
     AdvanceTimeStep, AppContract, AppContractVersion, CaptureKind, CaptureOutcome, CaptureSource,
     CaptureStep, ClockControl, CompletionBarrier, CorpusProbe, Fixture, HttpStep, Isolation,
