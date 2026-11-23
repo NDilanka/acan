@@ -1,12 +1,10 @@
 //! Runs the origin's derived jobs and records each result as a `SystemCmd`.
 //!
-//! The loop starts each derived job once per key. A job fails when its work errors (a model
-//! call, a reply that cannot become a command, or a git step) or when the origin refuses its
-//! result. A failed job is retried with backoff up to [`MAX_JOB_ATTEMPTS`]. When the last
-//! attempt fails on git, a land or a witness run reports that failure as its own result, so
-//! the queue or the gate moves on. Other failed jobs wait until their key leaves the derived
-//! set and returns, so a broken model can neither spin the loop nor burn provider credits
-//! without user activity. A refused result is never retried: the origin decided it against the
+//! The loop starts each derived job once per key. A job fails when its work errors or when the
+//! origin refuses its result. A failed job is retried with backoff up to [`MAX_JOB_ATTEMPTS`].
+//! When the last attempt fails on git, a land or a witness run reports that failure as its own
+//! result, so the queue or the gate moves on. Other failed jobs wait until their key leaves the
+//! derived set and returns. A refused result is never retried: the origin decided it against the
 //! world the job read, and a changed world derives a new key. Accounting-only batches never wake
 //! the loop; the writer guarantees that.
 //!
@@ -63,9 +61,7 @@ use crate::host::{self, Host, SubmitError};
 use crate::land::{self, Delivery, LandError};
 use crate::observe::{self, ObserveError, Order, Plan};
 
-/// Total attempts one job key gets before the loop stops retrying it. Chosen so a broken model
-/// shows up in seconds during a demo while a live provider is called at most this many times
-/// for the same stuck job.
+/// Total attempts one job key gets before the loop stops retrying it.
 const MAX_JOB_ATTEMPTS: u32 = 5;
 
 /// The delay before the first retry of a failed job. Each later retry waits twice as long.

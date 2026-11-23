@@ -1,15 +1,14 @@
 //! Checks a settings change before anything is written. Every field is checked, and then the rules
 //! that span sections, so a change that fails reports every failure at once.
 //!
-//! The only read here is whether a folder a change adds exists. Nothing here saves a key, writes a
-//! file or changes a project. A failure names the field and the rule, and never the value sent, so
-//! a key cannot come back in an error.
+//! The only read here is whether a folder a change adds exists. Nothing here writes a file or
+//! changes a project. A failure names the field and the rule, and never the value sent.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use acan_intent::RepairRounds;
-use acan_llm::{MUSE_SPARK_PROVIDER, Role, is_provider};
+use acan_llm::Role;
 use serde::Deserialize;
 
 use super::{
@@ -17,9 +16,6 @@ use super::{
 };
 use crate::http::FieldError;
 use crate::projects::{same_folder, valid_id};
-
-/// The longest key a change may set, in bytes. acan-llm refuses a longer key when it saves one.
-const MAX_KEY_BYTES: usize = 512;
 
 /// The most arguments a custom command may have.
 const MAX_COMMAND_ARGS: usize = 64;
@@ -33,32 +29,11 @@ const MAX_ARG_BYTES: usize = 512;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Patch {
-    pub(crate) models: Option<ModelsPatch>,
     pub(crate) harness: Option<HarnessPatch>,
     pub(crate) projects: Option<ProjectsPatch>,
     pub(crate) budgets: Option<BudgetsPatch>,
     pub(crate) look: Option<LookPatch>,
     pub(crate) notifications: Option<NotificationsPatch>,
-}
-
-/// The model part of a change: keys to save or clear, and role picks.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ModelsPatch {
-    #[serde(default)]
-    pub(crate) keys: BTreeMap<String, KeyPatch>,
-    /// A role mapped to the provider it uses, or to `null` to clear the pick.
-    #[serde(default)]
-    pub(crate) roles: BTreeMap<String, Option<String>>,
-}
-
-/// One provider's key: either a key to save, or `clear` set to `true`. Not `Debug`, so a key cannot
-/// be printed by accident.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct KeyPatch {
-    key: Option<String>,
-    clear: Option<bool>,
 }
 
 /// The harness part of a change.
@@ -85,40 +60,9 @@ pub(crate) struct BudgetsPatch {
     repair_rounds: Option<i64>,
     max_episodes: Option<i64>,
     wall_time_ms: Option<i64>,
-    model_cost_micros: Option<i64>,
-    call_limits: Option<CallLimitsPatch>,
     stuck_declare_ms: Option<i64>,
     stuck_build_ms: Option<i64>,
     drift_threshold: Option<i64>,
-}
-
-/// The call limit of each role.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct CallLimitsPatch {
-    foreman: Option<i64>,
-    worker: Option<i64>,
-    fast: Option<i64>,
-    vision: Option<i64>,
-    director: Option<i64>,
-    wonder: Option<i64>,
-    statemap: Option<i64>,
-}
-
-impl CallLimitsPatch {
-    /// The limit the change sets for `role`, if it sets one. The match names every role, so a role
-    /// the server adds cannot be left out of a change.
-    fn get(&self, role: Role) -> Option<i64> {
-        match role {
-            Role::Foreman => self.foreman,
-            Role::Worker => self.worker,
-            Role::Fast => self.fast,
-            Role::Vision => self.vision,
-            Role::Director => self.director,
-            Role::Wonder => self.wonder,
-            Role::Statemap => self.statemap,
-        }
-    }
 }
 
 /// The look part of a change.
@@ -142,36 +86,12 @@ pub(crate) struct NotificationsPatch {
     browser: Option<bool>,
 }
 
-/// A checked change: the settings after it, the model part, and the sections it names.
+/// A checked change: the settings after it and the sections it names.
 pub(crate) struct Changes {
     /// The settings as they stand once the change is written.
     pub(crate) next: Stored,
-    /// The model part, when the change names one. It is applied through the client, not the file.
-    pub(crate) models: Option<ModelsChange>,
     /// The sections the change names, in their fixed order.
     pub(crate) sections: Vec<Section>,
-}
-
-/// The model part of a change. It holds keys, so it is not `Debug`.
-#[derive(Default)]
-pub(crate) struct ModelsChange {
-    /// Each provider's key change, in provider order.
-    pub(crate) keys: Vec<(String, KeyChange)>,
-    /// Each role's pick. `None` clears the pick.
-    pub(crate) roles: Vec<(Role, Option<String>)>,
-}
-
-impl ModelsChange {
-    /// Whether the change asks for nothing.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.keys.is_empty() && self.roles.is_empty()
-    }
-}
-
-/// What one provider's key change does. A `Set` holds the key, so it is not `Debug`.
-pub(crate) enum KeyChange {
-    Set(String),
-    Clear,
 }
 
 /// Checks `patch` against the settings `current`. `running` lists the projects the server runs,
@@ -191,11 +111,6 @@ pub(crate) fn check(
     let mut errors = Vec::new();
     let mut next = current.clone();
     let mut sections = Vec::new();
-    let mut models = None;
-    if let Some(section) = &patch.models {
-        sections.push(Section::Models);
-        models = Some(models_change(section, &mut errors));
-    }
     if let Some(section) = &patch.harness {
         sections.push(Section::Harness);
         harness(section, &mut next.harness, &mut errors);
@@ -218,11 +133,7 @@ pub(crate) fn check(
         notifications(section, &mut next.notifications);
     }
     if errors.is_empty() {
-        Ok(Changes {
-            next,
-            models,
-            sections,
-        })
+        Ok(Changes { next, sections })
     } else {
         Err(errors)
     }
@@ -234,67 +145,6 @@ fn field(path: &str, why: &str) -> FieldError {
         path: path.to_owned(),
         why: why.to_owned(),
     }
-}
-
-/// The model part of a change. A key must name a provider the setup page offers, and carry one
-/// key or a clear, never both. A role pick must name a provider the page offers, and a role that
-/// needs Meta may only pick Meta.
-fn models_change(section: &ModelsPatch, errors: &mut Vec<FieldError>) -> ModelsChange {
-    let mut change = ModelsChange::default();
-    for (provider, key) in &section.keys {
-        if !is_provider(provider) {
-            errors.push(field(
-                "models.keys",
-                "must name a provider the setup page offers",
-            ));
-            continue;
-        }
-        let path = format!("models.keys.{provider}");
-        match (&key.key, key.clear) {
-            (Some(text), None) => match key_text(text) {
-                Some(key) => change.keys.push((provider.clone(), KeyChange::Set(key))),
-                None => errors.push(field(
-                    &path,
-                    "must be a key of at most 512 bytes, with no space or control character",
-                )),
-            },
-            (None, Some(true)) => change.keys.push((provider.clone(), KeyChange::Clear)),
-            _ => errors.push(field(
-                &path,
-                "must give a key, or clear set to true, and not both",
-            )),
-        }
-    }
-    for (name, pick) in &section.roles {
-        let Ok(role) = name.parse::<Role>() else {
-            errors.push(field("models.roles", "must name a role the server has"));
-            continue;
-        };
-        let path = format!("models.roles.{role}");
-        match pick {
-            None => change.roles.push((role, None)),
-            Some(provider) if !is_provider(provider) => errors.push(field(
-                &path,
-                "must be a provider the setup page offers, or null",
-            )),
-            Some(provider) if role.needs_meta() && provider != MUSE_SPARK_PROVIDER => {
-                errors.push(field(&path, "needs a Meta provider"));
-            }
-            Some(provider) => change.roles.push((role, Some(provider.clone()))),
-        }
-    }
-    change
-}
-
-/// The key a change sets, trimmed, or `None` when the provider could not take it. The rule is the
-/// one acan-llm applies when it saves a key: one line, with no space or control character, at most
-/// [`MAX_KEY_BYTES`] bytes.
-fn key_text(raw: &str) -> Option<String> {
-    let key = raw.trim();
-    let usable = !key.is_empty()
-        && key.len() <= MAX_KEY_BYTES
-        && !key.chars().any(|c| c.is_whitespace() || c.is_control());
-    usable.then(|| key.to_owned())
 }
 
 /// The harness part of a change: the adapter of each role, and the custom command.
@@ -482,23 +332,6 @@ fn budgets(section: &BudgetsPatch, next: &mut Budgets, errors: &mut Vec<FieldErr
         next.wall_time_ms = value;
     }
     if let Some(value) = bounded(
-        "budgets.model_cost_micros",
-        section.model_cost_micros,
-        0,
-        50_000_000,
-        errors,
-    ) {
-        next.model_cost_micros = value;
-    }
-    if let Some(limits) = &section.call_limits {
-        for role in Role::ALL {
-            let path = format!("budgets.call_limits.{role}");
-            if let Some(limit) = bounded(&path, limits.get(role), 1, 500, errors) {
-                next.call_limits.set(role, limit);
-            }
-        }
-    }
-    if let Some(value) = bounded(
         "budgets.stuck_declare_ms",
         section.stuck_declare_ms,
         60_000,
@@ -612,10 +445,6 @@ mod tests {
         errors.iter().any(|error| error.path == path)
     }
 
-    fn models_of(value: Value) -> ModelsChange {
-        accepted(value).models.expect("the change names models")
-    }
-
     #[test]
     fn repair_rounds_accept_both_ends_and_refuse_outside_them() {
         accepted(json!({"budgets": {"repair_rounds": 0}}));
@@ -635,7 +464,6 @@ mod tests {
         let ranges = [
             ("max_episodes", 1, 16),
             ("wall_time_ms", 60_000, 3_600_000),
-            ("model_cost_micros", 0, 50_000_000),
             ("stuck_declare_ms", 60_000, 3_600_000),
             ("stuck_build_ms", 60_000, 7_200_000),
             ("drift_threshold", 1, 100),
@@ -656,33 +484,6 @@ mod tests {
     }
 
     #[test]
-    fn each_call_limit_is_from_one_to_five_hundred() {
-        accepted(json!({"budgets": {"call_limits": {"foreman": 1, "wonder": 500}}}));
-        assert!(names(
-            &refused(json!({"budgets": {"call_limits": {"foreman": 0}}})),
-            "budgets.call_limits.foreman"
-        ));
-        assert!(names(
-            &refused(json!({"budgets": {"call_limits": {"worker": 501}}})),
-            "budgets.call_limits.worker"
-        ));
-    }
-
-    #[test]
-    fn the_statemap_role_has_a_call_limit_like_the_others() {
-        let limits = accepted(json!({"budgets": {"call_limits": {"statemap": 7}}}))
-            .next
-            .budgets
-            .call_limits;
-        assert_eq!(limits.statemap, 7);
-        assert_eq!(limits.foreman, 30, "the other limits keep their defaults");
-        assert!(names(
-            &refused(json!({"budgets": {"call_limits": {"statemap": 501}}})),
-            "budgets.call_limits.statemap"
-        ));
-    }
-
-    #[test]
     fn the_patch_refuses_the_read_only_and_unknown_fields() {
         for value in [
             json!({"tokens": {}}),
@@ -690,7 +491,6 @@ mod tests {
             json!({"version": 1}),
             json!({"budgets": {"nope": 1}}),
             json!({"look": {"theme": "paper", "extra": true}}),
-            json!({"models": {"keys": {"meta": {"key": "a", "extra": 1}}}}),
         ] {
             assert!(serde_json::from_value::<Patch>(value).is_err());
         }
@@ -773,84 +573,6 @@ mod tests {
         assert!(names(
             &refused(json!({"harness": {"roles": {"judge": "builtin"}}})),
             "harness.roles"
-        ));
-    }
-
-    #[test]
-    fn a_key_names_a_provider_the_page_offers() {
-        assert!(names(
-            &refused(json!({"models": {"keys": {"openai": {"key": "fake-key-abc"}}}})),
-            "models.keys"
-        ));
-    }
-
-    #[test]
-    fn a_refused_key_is_never_echoed_in_its_failure() {
-        let errors = refused(json!({"models": {"keys": {"openai": {"key": "SECRET-VALUE"}}}}));
-        let text = serde_json::to_string(&errors.iter().map(|e| &e.why).collect::<Vec<_>>())
-            .expect("the failures serialize");
-        assert!(!text.contains("SECRET"));
-        let shape = refused(json!({"models": {"keys": {"meta": {"key": "two words"}}}}));
-        assert!(names(&shape, "models.keys.meta"));
-    }
-
-    #[test]
-    fn a_key_is_one_line_of_at_most_512_bytes_and_is_trimmed() {
-        let key = models_of(json!({"models": {"keys": {"meta": {"key": "  abc  "}}}}));
-        assert!(matches!(&key.keys[0].1, KeyChange::Set(text) if text == "abc"));
-        assert!(names(
-            &refused(json!({"models": {"keys": {"meta": {"key": ""}}}})),
-            "models.keys.meta"
-        ));
-        assert!(names(
-            &refused(json!({"models": {"keys": {"meta": {"key": "x".repeat(513)}}}})),
-            "models.keys.meta"
-        ));
-    }
-
-    #[test]
-    fn a_key_or_a_clear_is_given_but_not_both() {
-        let clear = models_of(json!({"models": {"keys": {"meta": {"clear": true}}}}));
-        assert!(matches!(clear.keys[0].1, KeyChange::Clear));
-        assert!(names(
-            &refused(json!({"models": {"keys": {"meta": {"key": "abc", "clear": true}}}})),
-            "models.keys.meta"
-        ));
-        assert!(names(
-            &refused(json!({"models": {"keys": {"meta": {}}}})),
-            "models.keys.meta"
-        ));
-        assert!(names(
-            &refused(json!({"models": {"keys": {"meta": {"clear": false}}}})),
-            "models.keys.meta"
-        ));
-    }
-
-    #[test]
-    fn a_role_picks_an_offered_provider_or_clears_its_pick() {
-        let picked = models_of(json!({"models": {"roles": {"foreman": "baseten"}}}));
-        assert_eq!(
-            picked.roles,
-            vec![(Role::Foreman, Some("baseten".to_owned()))]
-        );
-        let cleared = models_of(json!({"models": {"roles": {"foreman": null}}}));
-        assert_eq!(cleared.roles, vec![(Role::Foreman, None)]);
-        accepted(json!({"models": {"roles": {"vision": "meta"}}}));
-    }
-
-    #[test]
-    fn a_role_that_needs_meta_may_only_pick_meta() {
-        assert!(names(
-            &refused(json!({"models": {"roles": {"vision": "baseten"}}})),
-            "models.roles.vision"
-        ));
-        assert!(names(
-            &refused(json!({"models": {"roles": {"foreman": "openai"}}})),
-            "models.roles.foreman"
-        ));
-        assert!(names(
-            &refused(json!({"models": {"roles": {"judge": "meta"}}})),
-            "models.roles"
         ));
     }
 

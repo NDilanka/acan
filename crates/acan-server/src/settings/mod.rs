@@ -1,6 +1,4 @@
 //! The server's settings: the harness, the projects, the budgets, the look and the notifications.
-//! The model keys are not here. They stay in the keys file the setup page keeps, and this module
-//! reaches them only through the model client, so no response and no settings file holds a key.
 //!
 //! `GET /api/settings` reads the settings. Any member may read them. `PUT /api/settings` changes
 //! them, and only the owner may do that. A change is checked as a whole before anything is written,
@@ -14,17 +12,13 @@ mod validate;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
-use std::time::Instant;
 
 use acan_core::{AgentId, MemberId};
-use acan_llm::{
-    ChatRequest, KeyOrigin, KeyOutcome, KeySource, KeyStatus, LlmError, Message, ModelClient, Role,
-    RoleStatus,
-};
+use acan_llm::{ModelClient, Role};
 use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Path as UrlPath, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -35,17 +29,15 @@ use tokio::sync::Mutex;
 use crate::STATE_DIR;
 use crate::add;
 use crate::auth::{Principal, Tokens};
-use crate::host::Host;
 use crate::http::{ApiError, bearer};
 use crate::projects::same_folder;
 use crate::registry::Registry;
 use crate::release::{self, VersionInfo};
-use crate::setup::setup_error;
 
 pub(crate) use file::load;
-use validate::{KeyChange, ModelsChange, Patch};
+use validate::Patch;
 
-/// The file the settings are kept in, beside the keys file.
+/// The file the settings are kept in.
 pub(crate) const FILE: &str = "settings.json";
 
 /// The version of the settings document `GET /api/settings` returns.
@@ -60,17 +52,8 @@ const ONLY_OWNER_CHANGES: &str = "only the owner may change settings";
 /// Why anyone but the owner may not read or rotate a token.
 const ONLY_OWNER_TOKENS: &str = "only the owner may manage tokens";
 
-/// Why anyone but the owner may not test a model.
-const ONLY_OWNER_TESTS: &str = "only the owner may test a model";
-
 /// Why anyone but the owner may not check for or install an update.
 const ONLY_OWNER_UPDATES: &str = "only the owner may update Acan";
-
-/// The prompt a model test sends. It asks for the smallest reply, so a test costs little.
-const TEST_PROMPT: &str = "Reply with the word ok.";
-
-/// The most tokens a model test's reply may take.
-const TEST_MAX_TOKENS: u32 = 16;
 
 /// Defines a setting whose values have fixed names in the API and in the settings file. The names
 /// are the ones the settings page sends, so `parse` reads what the page sent.
@@ -134,7 +117,7 @@ named! {
     }
 }
 
-/// What the settings file holds. Model keys are never here, since they live in the keys file.
+/// What the settings file holds.
 /// A missing section, or field, reads as its default. A key this version does not use is kept in
 /// an `unknown` map at each level and written back on save, so a file another build wrote still
 /// loads, and its keys are not lost. See [`Stored::unknown_keys`].
@@ -159,10 +142,6 @@ impl Stored {
         keys.extend(named("harness.", &self.harness.unknown));
         keys.extend(named("projects.", &self.projects.unknown));
         keys.extend(named("budgets.", &self.budgets.unknown));
-        keys.extend(named(
-            "budgets.call_limits.",
-            &self.budgets.call_limits.unknown,
-        ));
         keys.extend(named("look.", &self.look.unknown));
         keys.extend(named("notifications.", &self.notifications.unknown));
         keys
@@ -178,7 +157,6 @@ impl Stored {
         known.harness.unknown.clear();
         known.projects.unknown.clear();
         known.budgets.unknown.clear();
-        known.budgets.call_limits.unknown.clear();
         known.look.unknown.clear();
         known.notifications.unknown.clear();
         known
@@ -231,8 +209,7 @@ pub(crate) struct Projects {
     pub(crate) unknown: BTreeMap<String, Value>,
 }
 
-/// The limits the budgets set. The repair rounds and the call limits are the ones the server
-/// offers; see [`Budgets::default`].
+/// The limits the budgets set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Budgets {
@@ -243,10 +220,6 @@ pub(crate) struct Budgets {
     pub(crate) max_episodes: u32,
     /// The wall time a repair may take, in milliseconds.
     pub(crate) wall_time_ms: u64,
-    /// The model cost a repair may reach, in micro-dollars.
-    pub(crate) model_cost_micros: u64,
-    /// The most calls each role may make.
-    pub(crate) call_limits: CallLimits,
     /// How long a task may declare with no progress before it is stuck, in milliseconds.
     pub(crate) stuck_declare_ms: u64,
     /// How long a build may run with no progress before it is stuck, in milliseconds.
@@ -264,61 +237,10 @@ impl Default for Budgets {
             repair_rounds: 2,
             max_episodes: 4,
             wall_time_ms: 600_000,
-            model_cost_micros: 2_000_000,
-            call_limits: CallLimits::default(),
             stuck_declare_ms: 300_000,
             stuck_build_ms: 900_000,
             drift_threshold: 50,
             unknown: BTreeMap::new(),
-        }
-    }
-}
-
-/// The most calls one role may make, by role.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub(crate) struct CallLimits {
-    pub(crate) foreman: u32,
-    pub(crate) worker: u32,
-    pub(crate) fast: u32,
-    pub(crate) vision: u32,
-    pub(crate) director: u32,
-    pub(crate) wonder: u32,
-    pub(crate) statemap: u32,
-    /// Keys this version does not use, kept as the file holds them. See [`Stored`].
-    #[serde(flatten)]
-    pub(crate) unknown: BTreeMap<String, Value>,
-}
-
-/// The call limit every role starts with.
-const DEFAULT_CALL_LIMIT: u32 = 30;
-
-impl Default for CallLimits {
-    fn default() -> Self {
-        Self {
-            foreman: DEFAULT_CALL_LIMIT,
-            worker: DEFAULT_CALL_LIMIT,
-            fast: DEFAULT_CALL_LIMIT,
-            vision: DEFAULT_CALL_LIMIT,
-            director: DEFAULT_CALL_LIMIT,
-            wonder: DEFAULT_CALL_LIMIT,
-            statemap: DEFAULT_CALL_LIMIT,
-            unknown: BTreeMap::new(),
-        }
-    }
-}
-
-impl CallLimits {
-    /// Sets the call limit of `role`.
-    pub(crate) fn set(&mut self, role: Role, limit: u32) {
-        match role {
-            Role::Foreman => self.foreman = limit,
-            Role::Worker => self.worker = limit,
-            Role::Fast => self.fast = limit,
-            Role::Vision => self.vision = limit,
-            Role::Director => self.director = limit,
-            Role::Wonder => self.wonder = limit,
-            Role::Statemap => self.statemap = limit,
         }
     }
 }
@@ -379,7 +301,6 @@ impl Default for Notifications {
 /// A part of the settings that a change names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Section {
-    Models,
     Harness,
     Projects,
     Budgets,
@@ -388,19 +309,13 @@ pub(crate) enum Section {
 }
 
 /// How the setting at `path` takes effect, as the `applied` map of a response and `GET` name it.
-/// The path is dotted, as a request names the setting. `live` means the server uses it at once.
-/// `stored` means it is saved, and no server path reads it yet. `restart` means it takes effect at
-/// the next start. `client` means the page applies it. The statemap call limit is labelled
-/// `live` until its role is removed.
+/// The path is dotted, as a request names the setting. `stored` means it is saved, and no server
+/// path reads it yet. `restart` means it takes effect at the next start. `client` means the page
+/// applies it.
 fn applied_label(path: &str) -> &'static str {
-    let mut parts = path.split('.');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some("models"), _, _) => "live",
-        (Some("harness"), _, _) => "stored",
-        (Some("projects"), _, _) => "restart",
-        (Some("budgets"), Some("call_limits"), Some("statemap")) => "live",
-        (Some("budgets"), _, _) => "stored",
-        (Some("look" | "notifications"), _, _) => "client",
+    match path.split('.').next() {
+        Some("projects") => "restart",
+        Some("look" | "notifications") => "client",
         _ => "stored",
     }
 }
@@ -411,16 +326,10 @@ fn note(applied: &mut BTreeMap<String, &'static str>, path: String) {
     applied.insert(path, label);
 }
 
-/// Records each setting under `value`, at its dotted `path`. An object's fields are walked, so each
-/// budget limit is its own setting. A provider's key is one setting however it is written, so
-/// `models.keys` names each provider. Any other value, arrays included, is one setting.
+/// Records each setting under `value`, at its dotted `path`. An object's fields are walked.
+/// Any other value, arrays included, is one setting.
 fn note_each(value: &Value, path: &str, applied: &mut BTreeMap<String, &'static str>) {
     match value {
-        Value::Object(fields) if path == "models.keys" => {
-            for name in fields.keys() {
-                note(applied, format!("{path}.{name}"));
-            }
-        }
         Value::Object(fields) => {
             for (name, field) in fields {
                 let child = if path.is_empty() {
@@ -437,37 +346,17 @@ fn note_each(value: &Value, path: &str, applied: &mut BTreeMap<String, &'static 
 
 /// The settings the server holds, and what the routes read and change them through.
 pub(crate) struct Settings<C> {
-    /// The projects. The default project's client holds the model keys, and every project's tokens
-    /// may authenticate a request.
+    /// The projects. Every project's tokens may authenticate a request.
     projects: Arc<Registry<C>>,
     /// The member the owner token belongs to. Only this member may change the settings.
     founder: MemberId,
     /// The settings file.
     file: PathBuf,
-    /// The user's own model client, which holds the keys when no project runs. Keys are user-wide,
-    /// so it reports the same keys a project's client does. `None` when the server has none.
-    keys: Option<Arc<C>>,
     /// The settings as the server last loaded or saved them. Replaced only after a change is
     /// written.
     stored: RwLock<Stored>,
     /// Held for a whole change, so two changes never interleave.
     changes: Mutex<()>,
-}
-
-/// The model client the settings read and change the keys through: the default project's client,
-/// or the user's own when no project runs.
-enum Keys<C> {
-    Project(Host<C>),
-    Own(Arc<C>),
-}
-
-impl<C: ModelClient> Keys<C> {
-    fn client(&self) -> &C {
-        match self {
-            Self::Project(host) => host.client(),
-            Self::Own(client) => client,
-        }
-    }
 }
 
 /// Who a request acts for, as the settings see it.
@@ -479,19 +368,17 @@ enum Caller {
 
 impl<C: ModelClient + 'static> Settings<C> {
     /// The settings `stored`, kept in `file`, for the projects in `projects`. `founder` is the
-    /// member whose token is the owner's. `keys` is the user's own client, if there is one.
+    /// member whose token is the owner's.
     pub(crate) fn new(
         file: PathBuf,
         stored: Stored,
         projects: Arc<Registry<C>>,
         founder: MemberId,
-        keys: Option<Arc<C>>,
     ) -> Self {
         Self {
             projects,
             founder,
             file,
-            keys,
             stored: RwLock::new(stored),
             changes: Mutex::new(()),
         }
@@ -521,29 +408,8 @@ impl<C: ModelClient + 'static> Settings<C> {
             .clone()
     }
 
-    /// The model client the settings read and change the keys through: the default project's, or
-    /// the user's own when no project runs. `None` when neither is held.
-    fn keys(&self) -> Option<Keys<C>> {
-        let entries = self.projects.entries();
-        let default_id = self.projects.default_id();
-        let default = entries
-            .iter()
-            .find(|entry| entry.id == default_id)
-            .or_else(|| entries.first());
-        match default {
-            Some(entry) => Some(Keys::Project(entry.host.clone())),
-            None => self.keys.clone().map(Keys::Own),
-        }
-    }
-
-    /// The key status the settings show: the status of the keys client, or none when none is held.
-    fn key_status(&self) -> KeyStatus {
-        self.keys()
-            .map_or_else(KeyStatus::default, |keys| keys.client().key_status())
-    }
-
-    /// The document `GET /api/settings` returns to `caller`. It holds no key, and no setting this
-    /// version does not use.
+    /// The document `GET /api/settings` returns to `caller`. It holds only settings this version
+    /// uses.
     fn view(&self, caller: Caller, stored: &Stored) -> View {
         let stored = &stored.without_unknown();
         View {
@@ -553,13 +419,12 @@ impl<C: ModelClient + 'static> Settings<C> {
                 Caller::Member => "member",
             },
             editable: caller == Caller::Owner,
-            models: ModelsView::of(self.key_status()),
             harness: HarnessView::of(&stored.harness),
             projects: self.projects_view(),
             budgets: stored.budgets.clone(),
             look: stored.look.clone(),
             notifications: stored.notifications.clone(),
-            applied: self.applied_fields(),
+            applied: Self::applied_fields(),
             project_changes: (caller == Caller::Owner).then(|| ProjectChangesView {
                 add: self.pending_adds(stored),
                 remove: stored.projects.remove.clone(),
@@ -592,9 +457,8 @@ impl<C: ModelClient + 'static> Settings<C> {
             .collect()
     }
 
-    /// How each setting a change can name takes effect, by its dotted path. The projects listed
-    /// are the running ones, as `GET` lists them.
-    fn applied_fields(&self) -> BTreeMap<String, &'static str> {
+    /// How each setting a change can name takes effect, by its dotted path.
+    fn applied_fields() -> BTreeMap<String, &'static str> {
         let mut applied = BTreeMap::new();
         note_each(
             &json!({
@@ -606,13 +470,9 @@ impl<C: ModelClient + 'static> Settings<C> {
             &mut applied,
         );
         for role in Role::ALL {
-            note(&mut applied, format!("models.roles.{role}"));
             note(&mut applied, format!("harness.roles.{role}"));
         }
         note(&mut applied, "harness.custom_command".to_owned());
-        for provider in self.key_status().providers {
-            note(&mut applied, format!("models.keys.{}", provider.name));
-        }
         note(&mut applied, "projects.add".to_owned());
         note(&mut applied, "projects.remove".to_owned());
         applied
@@ -699,13 +559,12 @@ struct View {
     version: u32,
     you: &'static str,
     editable: bool,
-    models: ModelsView,
     harness: HarnessView,
     projects: Vec<ProjectView>,
     budgets: Budgets,
     look: Look,
     notifications: Notifications,
-    /// How each setting takes effect, by its dotted path: `live`, `stored`, `restart` or `client`.
+    /// How each setting takes effect, by its dotted path: `stored`, `restart` or `client`.
     applied: BTreeMap<String, &'static str>,
     /// Only the owner's document has this key. The folders settings added and removed as projects,
     /// which the next start applies.
@@ -739,44 +598,6 @@ struct TokensView {
 struct AgentTokenView {
     id: String,
     masked: String,
-}
-
-/// The model keys and role picks, as the client reports them. Never a key.
-#[derive(Debug, Serialize)]
-struct ModelsView {
-    configured: bool,
-    can_save: bool,
-    source: Option<KeySource>,
-    keys: Vec<KeyView>,
-    roles: Vec<RoleStatus>,
-}
-
-impl ModelsView {
-    fn of(status: KeyStatus) -> Self {
-        Self {
-            configured: status.configured,
-            can_save: status.can_save,
-            source: status.source,
-            keys: status
-                .providers
-                .into_iter()
-                .map(|provider| KeyView {
-                    set: provider.source.is_some(),
-                    source: provider.source,
-                    provider: provider.name,
-                })
-                .collect(),
-            roles: status.roles,
-        }
-    }
-}
-
-/// Whether one provider has a key, and where the key came from.
-#[derive(Debug, Serialize)]
-struct KeyView {
-    provider: String,
-    set: bool,
-    source: Option<KeyOrigin>,
 }
 
 /// The adapter of every role, and the custom command.
@@ -822,14 +643,12 @@ async fn get_settings<C: ModelClient + 'static>(
 
 /// `PUT /api/settings`. Only the owner may change the settings. The body names the sections to
 /// change and the values in each. The whole change is checked before anything is written, and a
-/// failing field changes nothing. The model keys are checked and saved through the client, and each
-/// key's result is reported. The other sections are written to the settings file.
+/// failing field changes nothing.
 ///
 /// Status codes: `200` with the settings after the change, how each changed setting takes effect
-/// by its dotted path, and the result of each key. `400` for a body that is not a settings object, or names a section or field
-/// the server does not take. `401` for an unknown token. `403` for any token but the owner's. `409`
-/// when the model keys cannot be changed here, or the current state refuses the change. `422` with
-/// each failing field. `500` when the settings file cannot be written.
+/// by its dotted path. `400` for a body that is not a settings object or names a section or field
+/// the server does not take. `401` for an unknown token. `403` for any token but the owner's. `422`
+/// with each failing field. `500` when the settings file cannot be written.
 async fn put_settings<C: ModelClient + 'static>(
     State(state): State<Arc<Settings<C>>>,
     headers: HeaderMap,
@@ -852,17 +671,7 @@ async fn put_settings<C: ModelClient + 'static>(
     let changes = validate::check(&patch, &state.stored(), &running, &default_id)
         .map_err(ApiError::Invalid)?;
 
-    let mut keys = BTreeMap::new();
-    if let Some(models) = &changes.models {
-        let held = state.keys().ok_or(ApiError::Conflict("no_codebase"))?;
-        refuse_model_conflicts(&held.client().key_status(), models)?;
-        keys = apply_models(held.client(), models).await?;
-    }
-    if changes
-        .sections
-        .iter()
-        .any(|section| *section != Section::Models)
-    {
+    if !changes.sections.is_empty() {
         file::save(&state.file, &changes.next).map_err(|err| ApiError::Internal(err.into()))?;
         *state.stored.write().unwrap_or_else(PoisonError::into_inner) = changes.next.clone();
     }
@@ -876,7 +685,7 @@ async fn put_settings<C: ModelClient + 'static>(
     let settings = state.view(Caller::Owner, &state.stored());
     Ok((
         StatusCode::OK,
-        Json(json!({ "settings": settings, "applied": applied, "keys": keys })),
+        Json(json!({ "settings": settings, "applied": applied })),
     )
         .into_response())
 }
@@ -936,85 +745,6 @@ async fn post_project<C: ModelClient + 'static>(
             Err(ApiError::Internal(err))
         }
     }
-}
-
-/// Refuses a model change the current state does not allow, before any key is checked or saved.
-/// A key the change sets may still be refused by its provider, so a role pick for that provider
-/// is allowed here and checked when it is applied.
-fn refuse_model_conflicts(status: &KeyStatus, models: &ModelsChange) -> Result<(), ApiError> {
-    if models.is_empty() {
-        return Ok(());
-    }
-    if !status.can_save {
-        let why = if status.source == Some(KeySource::RoutingFile) {
-            "routing_file"
-        } else {
-            "unavailable"
-        };
-        return Err(ApiError::Conflict(why));
-    }
-    for (provider, change) in &models.keys {
-        let from_environment = status
-            .providers
-            .iter()
-            .any(|known| known.name == *provider && known.source == Some(KeyOrigin::Environment));
-        if matches!(change, KeyChange::Clear) && from_environment {
-            return Err(ApiError::Conflict("this key comes from the environment"));
-        }
-    }
-    for (_, pick) in &models.roles {
-        let Some(provider) = pick else {
-            continue;
-        };
-        let set_now = models
-            .keys
-            .iter()
-            .any(|(name, change)| name == provider && matches!(change, KeyChange::Set(_)));
-        let cleared = models
-            .keys
-            .iter()
-            .any(|(name, change)| name == provider && matches!(change, KeyChange::Clear));
-        let held = status
-            .providers
-            .iter()
-            .any(|known| known.name == *provider && (known.saved || known.environment));
-        if !(set_now || (held && !cleared)) {
-            return Err(ApiError::Conflict("no_key"));
-        }
-    }
-    Ok(())
-}
-
-/// Saves, checks and clears the model keys, then picks the role providers, through the client.
-/// Returns each key's result: `stored`, `rejected` or `unreachable` for a key that was checked, and
-/// `cleared` for a key that was removed.
-async fn apply_models<C: ModelClient>(
-    client: &C,
-    models: &ModelsChange,
-) -> Result<BTreeMap<String, &'static str>, ApiError> {
-    let mut results = BTreeMap::new();
-    for (provider, change) in &models.keys {
-        let result = match change {
-            KeyChange::Set(key) => {
-                match client.save_key(provider, key).await.map_err(setup_error)? {
-                    KeyOutcome::Stored { .. } => "stored",
-                    KeyOutcome::Rejected => "rejected",
-                    KeyOutcome::Unreachable => "unreachable",
-                }
-            }
-            KeyChange::Clear => {
-                client.remove_key(provider).map_err(setup_error)?;
-                "cleared"
-            }
-        };
-        results.insert(provider.clone(), result);
-    }
-    for (role, pick) in &models.roles {
-        client
-            .set_role(*role, pick.as_deref())
-            .map_err(setup_error)?;
-    }
-    Ok(results)
 }
 
 /// `GET /api/settings/tokens/owner`. Only the owner may read the owner's token. It is returned
@@ -1108,87 +838,6 @@ fn rotation_failed(step: &str, err: &anyhow::Error) -> Response {
         .into_response()
 }
 
-/// The result of a model test. Its `error` is one of a fixed set of names, so no text a provider
-/// sent, no key and no URL is ever returned.
-#[derive(Debug, Serialize)]
-struct RoleTest {
-    role: &'static str,
-    ok: bool,
-    provider: Option<String>,
-    model: Option<String>,
-    ms: u64,
-    error: Option<&'static str>,
-}
-
-impl RoleTest {
-    /// The result for a role with no route. No provider can answer it, so no request is sent.
-    fn no_key(role: Role) -> Self {
-        Self {
-            role: role.as_str(),
-            ok: false,
-            provider: None,
-            model: None,
-            ms: 0,
-            error: Some("no_key"),
-        }
-    }
-}
-
-/// The fixed name a failed model test reports. The provider's text, a key and a URL are dropped.
-fn test_error(err: &LlmError) -> &'static str {
-    match err {
-        LlmError::MissingKey { .. } | LlmError::RoleOff { .. } => "no_key",
-        LlmError::Timeout { .. } => "timeout",
-        LlmError::Transport { .. } | LlmError::ServerError { .. } => "unreachable",
-        LlmError::PaymentRequired { .. }
-        | LlmError::Status {
-            status: 401 | 403, ..
-        } => "rejected",
-        _ => "failed",
-    }
-}
-
-/// `POST /api/settings/models/roles/{role}/test`. Only the owner may test a role's model. The
-/// test sends one short prompt to the role's provider, and reports whether it answered, which
-/// provider and model it asked, and how long it took. A role with no route has no provider to ask,
-/// so no request is sent and the error is `no_key`.
-///
-/// Status codes: `200` with the result. `401` for an unknown token, `403` for any token but the
-/// owner's, and `404` with `what: "role"` for a role the server does not have.
-async fn test_role<C: ModelClient + 'static>(
-    State(state): State<Arc<Settings<C>>>,
-    UrlPath(name): UrlPath<String>,
-    headers: HeaderMap,
-) -> Result<Json<RoleTest>, ApiError> {
-    state.owner_only(&headers, ONLY_OWNER_TESTS)?;
-    let role = name
-        .parse::<Role>()
-        .map_err(|_| ApiError::NotFound("role"))?;
-    let held = state.keys().ok_or(ApiError::Conflict("no_codebase"))?;
-    let client = held.client();
-    let Some(destination) = client.destination(role) else {
-        return Ok(Json(RoleTest::no_key(role)));
-    };
-    let request = ChatRequest {
-        messages: vec![Message::user(TEST_PROMPT)],
-        temperature: Some(0.0),
-        max_tokens: Some(TEST_MAX_TOKENS),
-        ..ChatRequest::default()
-    };
-    let started = Instant::now();
-    let outcome = client.chat(role, request).await;
-    let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let error = outcome.err().map(|err| test_error(&err));
-    Ok(Json(RoleTest {
-        role: role.as_str(),
-        ok: error.is_none(),
-        provider: Some(destination.provider),
-        model: Some(destination.model),
-        ms,
-        error,
-    }))
-}
-
 /// `GET /api/settings/update/check`. Only the owner may check. It reports the running version and
 /// the newest pre-release on GitHub, and downloads nothing. GitHub being unreachable is a state.
 ///
@@ -1275,106 +924,12 @@ pub(crate) fn routes<C: ModelClient + 'static>(state: Arc<Settings<C>>) -> Route
             "/api/settings/tokens/agents/rotate",
             post(rotate_agent_tokens::<C>),
         )
-        .route(
-            "/api/settings/models/roles/{role}/test",
-            post(test_role::<C>),
-        )
         .with_state(state)
 }
 
 #[cfg(test)]
 mod tests {
-    use acan_llm::ProviderStatus;
-
     use super::*;
-
-    /// A status where each `(provider, saved, environment)` has a key, and the setup saved the keys.
-    fn status(providers: &[(&str, bool, bool)]) -> KeyStatus {
-        KeyStatus {
-            configured: true,
-            source: Some(KeySource::Setup),
-            can_save: true,
-            providers: providers
-                .iter()
-                .map(|(name, saved, environment)| ProviderStatus::new(name, *saved, *environment))
-                .collect(),
-            roles: Vec::new(),
-        }
-    }
-
-    fn pick(provider: &str) -> ModelsChange {
-        ModelsChange {
-            keys: Vec::new(),
-            roles: vec![(Role::Foreman, Some(provider.to_owned()))],
-        }
-    }
-
-    #[test]
-    fn a_role_pick_needs_a_key_for_its_provider() {
-        let saved = status(&[("meta", true, false), ("baseten", false, false)]);
-        assert!(refuse_model_conflicts(&saved, &pick("meta")).is_ok());
-        assert!(matches!(
-            refuse_model_conflicts(&saved, &pick("baseten")),
-            Err(ApiError::Conflict("no_key"))
-        ));
-    }
-
-    #[test]
-    fn a_role_pick_for_a_key_set_in_the_same_change_is_allowed() {
-        let saved = status(&[("baseten", false, false)]);
-        let change = ModelsChange {
-            keys: vec![("baseten".to_owned(), KeyChange::Set("typed-key".to_owned()))],
-            roles: vec![(Role::Foreman, Some("baseten".to_owned()))],
-        };
-        assert!(refuse_model_conflicts(&saved, &change).is_ok());
-    }
-
-    #[test]
-    fn a_role_pick_for_a_key_cleared_in_the_same_change_is_refused() {
-        let saved = status(&[("meta", true, false)]);
-        let change = ModelsChange {
-            keys: vec![("meta".to_owned(), KeyChange::Clear)],
-            roles: vec![(Role::Foreman, Some("meta".to_owned()))],
-        };
-        assert!(matches!(
-            refuse_model_conflicts(&saved, &change),
-            Err(ApiError::Conflict("no_key"))
-        ));
-    }
-
-    #[test]
-    fn an_environment_key_cannot_be_cleared_here() {
-        let environment = status(&[("meta", false, true)]);
-        let change = ModelsChange {
-            keys: vec![("meta".to_owned(), KeyChange::Clear)],
-            roles: Vec::new(),
-        };
-        assert!(matches!(
-            refuse_model_conflicts(&environment, &change),
-            Err(ApiError::Conflict("this key comes from the environment"))
-        ));
-    }
-
-    #[test]
-    fn a_routing_file_keeps_its_own_keys() {
-        let routing = KeyStatus {
-            configured: true,
-            source: Some(KeySource::RoutingFile),
-            can_save: false,
-            providers: Vec::new(),
-            roles: Vec::new(),
-        };
-        assert!(matches!(
-            refuse_model_conflicts(&routing, &pick("meta")),
-            Err(ApiError::Conflict("routing_file"))
-        ));
-    }
-
-    #[test]
-    fn a_change_with_no_model_part_is_never_refused_for_models() {
-        let routing = KeyStatus::default();
-        assert!(refuse_model_conflicts(&routing, &ModelsChange::default()).is_ok());
-    }
 
     #[test]
     fn the_defaults_match_the_budgets_the_server_offers() {
@@ -1382,8 +937,6 @@ mod tests {
         assert_eq!(budgets.repair_rounds, 2);
         assert_eq!(budgets.max_episodes, 4);
         assert_eq!(budgets.wall_time_ms, 600_000);
-        assert_eq!(budgets.model_cost_micros, 2_000_000);
-        assert_eq!(budgets.call_limits, CallLimits::default());
         assert_eq!(budgets.stuck_declare_ms, 300_000);
         assert_eq!(budgets.stuck_build_ms, 900_000);
         assert_eq!(budgets.drift_threshold, 50);
@@ -1406,13 +959,12 @@ mod tests {
             &mut stored.harness.unknown,
             &mut stored.projects.unknown,
             &mut stored.budgets.unknown,
-            &mut stored.budgets.call_limits.unknown,
             &mut stored.look.unknown,
             &mut stored.notifications.unknown,
         ] {
             unknown.insert("extra".to_owned(), json!("hidden-value"));
         }
-        assert_eq!(stored.unknown_keys().len(), 7, "each level holds one");
+        assert_eq!(stored.unknown_keys().len(), 6, "each level holds one");
 
         let shown = stored.without_unknown();
         assert!(shown.unknown_keys().is_empty());
@@ -1485,13 +1037,9 @@ mod tests {
 
     #[test]
     fn each_setting_says_how_it_takes_effect() {
-        assert_eq!(applied_label("models.roles.foreman"), "live");
-        assert_eq!(applied_label("models.keys.fireworks"), "live");
         assert_eq!(applied_label("harness.roles.foreman"), "stored");
         assert_eq!(applied_label("harness.custom_command"), "stored");
         assert_eq!(applied_label("budgets.repair_rounds"), "stored");
-        assert_eq!(applied_label("budgets.call_limits.worker"), "stored");
-        assert_eq!(applied_label("budgets.call_limits.statemap"), "live");
         assert_eq!(applied_label("projects.add"), "restart");
         assert_eq!(applied_label("projects.remove"), "restart");
         assert_eq!(applied_label("look.theme"), "client");
@@ -1502,99 +1050,22 @@ mod tests {
     fn a_change_names_each_setting_it_sets_by_its_path() {
         let mut applied = BTreeMap::new();
         note_each(
-            &json!({"repair_rounds": 3, "call_limits": {"statemap": 9, "worker": 40}}),
-            "budgets",
+            &json!({"roles": {"foreman": "codex"}, "custom_command": ["run"]}),
+            "harness",
             &mut applied,
         );
         assert_eq!(
             applied,
             BTreeMap::from([
-                ("budgets.call_limits.statemap".to_owned(), "live"),
-                ("budgets.call_limits.worker".to_owned(), "stored"),
-                ("budgets.repair_rounds".to_owned(), "stored"),
+                ("harness.custom_command".to_owned(), "stored"),
+                ("harness.roles.foreman".to_owned(), "stored"),
             ])
         );
-
-        let mut applied = BTreeMap::new();
-        note_each(
-            &json!({"keys": {"fireworks": {"clear": true}}, "roles": {"foreman": null}}),
-            "models",
-            &mut applied,
-        );
-        assert_eq!(
-            applied,
-            BTreeMap::from([
-                ("models.keys.fireworks".to_owned(), "live"),
-                ("models.roles.foreman".to_owned(), "live"),
-            ])
-        );
-    }
-
-    #[test]
-    fn the_statemap_role_has_a_call_limit_that_defaults_to_thirty() {
-        let mut limits = CallLimits::default();
-        assert_eq!(limits.statemap, 30);
-        limits.set(Role::Statemap, 12);
-        assert_eq!(limits.statemap, 12);
-        assert_eq!(limits.wonder, 30, "setting one role leaves the others");
     }
 
     #[test]
     fn a_masked_token_shows_its_first_five_and_last_four_characters() {
         assert_eq!(mask("acan_0123456789abcdef"), "acan_…cdef");
         assert_eq!(mask("short"), "…", "a short token is hidden entirely");
-    }
-
-    #[test]
-    fn a_failed_model_test_reports_one_of_the_fixed_names() {
-        let provider = || "a-provider".to_owned();
-        assert_eq!(
-            test_error(&LlmError::Timeout {
-                provider: provider()
-            }),
-            "timeout"
-        );
-        assert_eq!(
-            test_error(&LlmError::MissingKey {
-                provider: provider(),
-                env_var: "A_KEY".to_owned(),
-            }),
-            "no_key"
-        );
-        assert_eq!(
-            test_error(&LlmError::RoleOff {
-                role: Role::Statemap,
-                reason: "no key",
-            }),
-            "no_key"
-        );
-        assert_eq!(
-            test_error(&LlmError::Status {
-                provider: provider(),
-                status: 401,
-                body: String::new(),
-            }),
-            "rejected"
-        );
-        assert_eq!(
-            test_error(&LlmError::Status {
-                provider: provider(),
-                status: 500,
-                body: String::new(),
-            }),
-            "failed"
-        );
-        assert_eq!(
-            test_error(&LlmError::ServerError {
-                provider: provider(),
-                status: 503,
-                attempts: 3,
-            }),
-            "unreachable"
-        );
-        assert_eq!(
-            test_error(&LlmError::NoScriptedReply { role: Role::Fast }),
-            "failed"
-        );
     }
 }

@@ -456,14 +456,14 @@ mod tests {
                 true,
                 false,
                 json!([
-                    {"name": name, "browser_download_url": format!("{}/dl/setup", server.uri())},
+                    {"name": name, "browser_download_url": format!("{}/dl/installer", server.uri())},
                     {"name": SUMS_NAME, "browser_download_url": format!("{}/dl/sums", server.uri())},
                 ]),
             )]),
         )
         .await;
         Mock::given(method("GET"))
-            .and(path("/dl/setup"))
+            .and(path("/dl/installer"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(setup.to_vec()))
             .mount(&server)
             .await;
@@ -491,14 +491,14 @@ mod tests {
                 true,
                 false,
                 json!([
-                    {"name": name, "browser_download_url": format!("{}/dl/setup", server.uri())},
+                    {"name": name, "browser_download_url": format!("{}/dl/installer", server.uri())},
                     {"name": SUMS_NAME, "browser_download_url": format!("{}/dl/sums", server.uri())},
                 ]),
             )]),
         )
         .await;
         Mock::given(method("GET"))
-            .and(path("/dl/setup"))
+            .and(path("/dl/installer"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(b"tampered".to_vec()))
             .mount(&server)
             .await;

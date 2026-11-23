@@ -116,7 +116,6 @@ dependencies = [
  "futures-util",
  "percent-encoding",
  "reqwest",
- "schemars",
  "semver",
  "serde",
  "serde_json",

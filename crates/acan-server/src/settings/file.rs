@@ -2,7 +2,7 @@
 //!
 //! The file is written to a temporary name in the same folder and renamed over the old one, so a
 //! crash leaves the old settings or the new ones, never a half-written file. On Unix the file is
-//! mode 0600 and its folder is created 0700, as the keys file is.
+//! mode 0600 and its folder is created 0700.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -84,7 +84,7 @@ mod tests {
     use super::*;
     use acan_llm::Role;
 
-    use crate::settings::{Adapter, Budgets, CallLimits, Look, Theme};
+    use crate::settings::{Adapter, Budgets, Look, Theme};
 
     fn write(path: &Path, text: &str) {
         fs::write(path, text).expect("the test file is written");
@@ -153,18 +153,15 @@ mod tests {
     fn a_misspelt_setting_is_reported_by_its_path() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("settings.json");
-        write(
-            &path,
-            r#"{"budgets": {"call_limits": {"statemapp": 3}}, "lok": {}}"#,
-        );
+        write(&path, r#"{"budgets": {"repair_round": 3}, "lok": {}}"#);
         let stored = load(&path).expect("a misspelt key loads");
         assert_eq!(
             stored.unknown_keys(),
-            vec!["lok".to_owned(), "budgets.call_limits.statemapp".to_owned()]
+            vec!["lok".to_owned(), "budgets.repair_round".to_owned()]
         );
         assert_eq!(
-            stored.budgets.call_limits.statemap,
-            CallLimits::default().statemap
+            stored.budgets.repair_rounds,
+            Budgets::default().repair_rounds
         );
     }
 
@@ -178,8 +175,7 @@ mod tests {
                 "top": 1,
                 "harness": {"roles": {"worker": "codex"}, "wrapper": {"depth": 2}},
                 "projects": {"live": ["/some/folder"]},
-                "budgets": {"repair_rounds": 5, "spare": true,
-                            "call_limits": {"statemap": 12, "planner": 7}},
+                "budgets": {"repair_rounds": 5, "spare": true},
                 "look": {"theme": "dark", "glow": "soft"},
                 "notifications": {"sound": true, "chime": null}
             }"#,
@@ -192,7 +188,6 @@ mod tests {
                 "harness.wrapper".to_owned(),
                 "projects.live".to_owned(),
                 "budgets.spare".to_owned(),
-                "budgets.call_limits.planner".to_owned(),
                 "look.glow".to_owned(),
                 "notifications.chime".to_owned(),
             ]
@@ -202,7 +197,6 @@ mod tests {
             Some(&Adapter::Codex)
         );
         assert_eq!(stored.budgets.repair_rounds, 5);
-        assert_eq!(stored.budgets.call_limits.statemap, 12);
         assert_eq!(stored.look.theme, Theme::Dark);
         assert!(stored.notifications.sound);
 
@@ -214,7 +208,6 @@ mod tests {
         assert_eq!(saved["harness"]["wrapper"]["depth"], 2);
         assert_eq!(saved["projects"]["live"][0], "/some/folder");
         assert_eq!(saved["budgets"]["spare"], true);
-        assert_eq!(saved["budgets"]["call_limits"]["planner"], 7);
         assert_eq!(saved["look"]["glow"], "soft");
         assert!(saved["notifications"]["chime"].is_null());
         assert!(
@@ -232,7 +225,7 @@ mod tests {
         let path = dir.path().join("settings.json");
         for text in [
             r#"{"look": {"motion": "yes"}}"#,
-            r#"{"budgets": {"call_limits": {"statemap": "many"}}}"#,
+            r#"{"budgets": {"repair_rounds": "many"}}"#,
             r#"{"look": "dark"}"#,
         ] {
             write(&path, text);

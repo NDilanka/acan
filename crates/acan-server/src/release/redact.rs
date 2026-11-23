@@ -80,8 +80,7 @@ impl Redaction {
         Self { secrets, roots }
     }
 
-    /// Adds one secret value, such as a model key saved while the server runs. A value shorter
-    /// than the minimum is not a secret, so it is not added.
+    /// Adds one secret value. A value shorter than the minimum is not a secret, so it is not added.
     pub fn add_secret(&mut self, secret: &str) {
         if secret.len() < MIN_SECRET_LEN || self.secrets.iter().any(|known| known == secret) {
             return;
