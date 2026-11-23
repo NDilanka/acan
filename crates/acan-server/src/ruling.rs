@@ -21,7 +21,6 @@ use acan_intent::{
     NonEmpty, NormalizationHash, NormalizationVersion, ObservedRun, OrderRef, Predicate, ProbeHash,
     RulingId, RunManifest, ScopeHash, Selector, Supersedes, UnixMillis, admit,
 };
-use acan_llm::ModelClient;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 
@@ -66,8 +65,8 @@ struct DraftExample {
 
 /// The ruling draft of an episode. The episode's latest evidence names the candidate run the
 /// ruling is on, so the example of that run and the episode's probe is `ruled_on`.
-pub(crate) fn draft<C: ModelClient>(
-    host: &Host<C>,
+pub(crate) fn draft(
+    host: &Host,
     order: OrderId,
     episode: EpisodeId,
 ) -> Result<RulingDraftView, ApiError> {
@@ -207,8 +206,8 @@ pub(crate) struct RulingBody {
 /// predicate does not give the decision's answer on the example it is ruled on. 409 when the draft
 /// is stale or the origin refuses the chain, 403 when the member is neither the order's poster nor
 /// an owner, and 404 when the order, episode or example is missing.
-pub(crate) async fn record<C: ModelClient + 'static>(
-    host: &Host<C>,
+pub(crate) async fn record(
+    host: &Host,
     member: &MemberId,
     order: OrderId,
     episode: EpisodeId,

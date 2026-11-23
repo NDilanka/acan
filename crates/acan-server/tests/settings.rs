@@ -8,7 +8,6 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use acan_llm::{Stub, UsageLedger};
 use acan_server::{Running, ServerConfig, start};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::StatusCode;
@@ -85,9 +84,7 @@ fn config(repo: &Path) -> ServerConfig {
 
 async fn boot(repo: &Path) -> Running {
     write_tokens(repo);
-    start(config(repo), Stub::default(), UsageLedger::default())
-        .await
-        .expect("the server starts")
+    start(config(repo)).await.expect("the server starts")
 }
 
 async fn send(
@@ -469,7 +466,7 @@ async fn a_settings_file_that_does_not_parse_stops_the_start_and_is_kept() {
     fs::create_dir_all(repo.path().join(".acan")).expect("the state dir");
     fs::write(settings_file(repo.path()), "{ not json").expect("the file is written");
     write_tokens(repo.path());
-    let message = match start(config(repo.path()), Stub::default(), UsageLedger::default()).await {
+    let message = match start(config(repo.path())).await {
         Ok(_) => panic!("a server must not start over a settings file it cannot read"),
         Err(err) => err.to_string(),
     };
@@ -1234,9 +1231,7 @@ async fn no_export_holds_the_text_of_a_dotenv_value_or_of_a_token() {
         { "token": FAKE_TOKEN, "principal": { "kind": "agent", "id": "agent-2" } },
     ]);
     fs::write(state.join("tokens.json"), tokens.to_string()).expect("the tokens file");
-    let running = start(config(repo.path()), Stub::default(), UsageLedger::default())
-        .await
-        .expect("the server starts");
+    let running = start(config(repo.path())).await.expect("the server starts");
     record_a_run(&running).await;
 
     let response = get_path(

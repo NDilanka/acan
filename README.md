@@ -54,7 +54,6 @@ Acan is a Rust workspace. Each crate under `crates/` has one job.
 | `acan-intent` | The contract of Acan's scope-first behavior gate: scopes, probes, observations, rulings, receipts and the plant view. |
 | `acan-git` | Per-task git worktrees and queue-ordered landing onto the protected branch. |
 | `acan-scan` | Scans a source repository with tree-sitter into a plant: machines, belts, and per-file symbols and imports. |
-| `acan-llm` | Acan's single OpenAI-compatible model client. |
 | `acan-agent` | The worker harness: a model-driven worker that takes a task from the origin over MCP. Builds the `acan-worker` binary. |
 | `acan-witness` | Runs a witness check against a task's worktree and reports the outcome. |
 | `acan-server` | The `acan` binary: one world's origin served over HTTP and WebSocket, with its event log in SQLite. |

@@ -82,9 +82,8 @@ fn write_private(path: &Path, text: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acan_llm::Role;
 
-    use crate::settings::{Adapter, Budgets, Look, Theme};
+    use crate::settings::{Adapter, Budgets, Look, Role, Theme};
 
     fn write(path: &Path, text: &str) {
         fs::write(path, text).expect("the test file is written");

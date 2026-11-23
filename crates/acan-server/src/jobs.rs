@@ -48,7 +48,6 @@ use acan_intent::{
     AppContract, CommitSha, ContainerPolicy, DiscrepancyEpisode, GateContext, PreparedCommit,
     ProbeCorpus, RepoPath, Scope, ScopeConfirmation,
 };
-use acan_llm::ModelClient;
 use acan_witness::RunnerConfig;
 use tokio::sync::Semaphore;
 use tokio::task::{self, JoinHandle, JoinSet};
@@ -85,7 +84,7 @@ pub(crate) const DEPS_DIR: &str = "deps";
 const SNAPSHOT_DIR: &str = "snapshots";
 
 /// Starts the job loop for `host`.
-pub fn spawn<C: ModelClient + 'static>(host: Host<C>) -> JoinHandle<()> {
+pub fn spawn(host: Host) -> JoinHandle<()> {
     tokio::spawn(run(host))
 }
 
@@ -144,7 +143,7 @@ struct WorktreeSync {
     running: HashMap<task::Id, TaskId>,
 }
 
-async fn run<C: ModelClient + 'static>(host: Host<C>) {
+async fn run(host: Host) {
     // Derived jobs read the index, so they wait until the codebase has mapped. A project whose
     // mapping failed runs none.
     if host.wait_mapped().await.is_err() {
@@ -288,7 +287,7 @@ fn next_retry<K: Eq + std::hash::Hash>(
 }
 
 /// Starts one task for each pending scope-first run that is not already running and is due.
-fn start_contrasts<C: ModelClient + 'static>(host: &Host<C>, contrasts: &mut Contrasts) {
+fn start_contrasts(host: &Host, contrasts: &mut Contrasts) {
     let pending: Vec<GateRunId> = host.read(|world| {
         world
             .pending_contrasts()
@@ -367,8 +366,8 @@ fn record_failure<K: Eq + std::hash::Hash + std::fmt::Debug>(
     );
 }
 
-fn start_derived<C: ModelClient + 'static>(
-    host: &Host<C>,
+fn start_derived(
+    host: &Host,
     tasks: &mut JoinSet<(Job, Result<(), JobError>)>,
     in_flight: &mut HashMap<task::Id, Job>,
     retries: &mut HashMap<Job, Retry>,
@@ -398,7 +397,7 @@ fn start_derived<C: ModelClient + 'static>(
 /// claimed or queued, reset and created again when the generation changed, removed once the task
 /// has none. A task with a step in flight waits for that step, which reconciles again when it
 /// finishes.
-fn reconcile<C: ModelClient + 'static>(host: &Host<C>, worktrees: &mut WorktreeSync) {
+fn reconcile(host: &Host, worktrees: &mut WorktreeSync) {
     let Some(workspace) = host.workspace() else {
         return;
     };
@@ -477,11 +476,7 @@ fn live_generations(world: &World) -> HashMap<TaskId, Generation> {
         .collect()
 }
 
-async fn run_one<C: ModelClient>(
-    host: Host<C>,
-    job: Job,
-    attempt: u32,
-) -> (Job, Result<(), JobError>) {
+async fn run_one(host: Host, job: Job, attempt: u32) -> (Job, Result<(), JobError>) {
     let result = match execute(&host, &job).await {
         Ok(Some(command)) => host
             .submit(Command::System(command))
@@ -504,7 +499,7 @@ async fn run_one<C: ModelClient>(
 
 /// Reports a failure that used up every attempt as the job's own result. A git failure moves the
 /// land queue or the gate on, instead of waiting for a change that may never come.
-async fn report_exhausted<C: ModelClient>(host: &Host<C>, job: &Job, err: &JobError) {
+async fn report_exhausted(host: &Host, job: &Job, err: &JobError) {
     let command = match job {
         Job::Land { task, head } if matches!(err, JobError::Git(_)) => SystemCmd::LandResult {
             task: *task,
@@ -531,7 +526,7 @@ async fn report_exhausted<C: ModelClient>(host: &Host<C>, job: &Job, err: &JobEr
     }
 }
 
-async fn execute<C: ModelClient>(host: &Host<C>, job: &Job) -> Result<Option<SystemCmd>, JobError> {
+async fn execute(host: &Host, job: &Job) -> Result<Option<SystemCmd>, JobError> {
     match job {
         // Removed in V1. The variants leave acan-core in a later change.
         Job::Split { .. } | Job::DraftScope { .. } | Job::Explain { .. } => Ok(None),
@@ -557,8 +552,8 @@ async fn sleep_until(deadline: Timestamp) {
 }
 
 /// Runs one frozen witness against the commit its gate tests, and reports what it found.
-async fn run_witness<C: ModelClient>(
-    host: &Host<C>,
+async fn run_witness(
+    host: &Host,
     run: GateRunId,
     witness: WitnessId,
 ) -> Result<Option<SystemCmd>, JobError> {
@@ -581,8 +576,8 @@ async fn run_witness<C: ModelClient>(
 /// run, or a generation that no longer matches, returns no result and creates no worktree. A
 /// worktree at another commit is an error outcome, which the gate counts as a failure. A git
 /// failure is an error of the job and follows the retry path.
-async fn check_at<C: ModelClient>(
-    host: &Host<C>,
+async fn check_at(
+    host: &Host,
     task: TaskId,
     run: GateRunId,
     witness: WitnessId,
@@ -653,11 +648,7 @@ fn current_witness(
 /// derives a `Land` only for that front, so merges happen one at a time, in queue order.
 ///
 /// A scope-first task lands through the final gate instead: see [`gated_land`].
-async fn land<C: ModelClient>(
-    host: &Host<C>,
-    task: TaskId,
-    head: &CommitId,
-) -> Result<Option<SystemCmd>, JobError> {
+async fn land(host: &Host, task: TaskId, head: &CommitId) -> Result<Option<SystemCmd>, JobError> {
     let result = match host.workspace() {
         Some(workspace) => match host.read(|world| landing(world, task)) {
             Landing::Gated(delivery) => {
@@ -685,8 +676,8 @@ async fn land<C: ModelClient>(
 
 /// The legacy land: merges the worker's head as it is. `Err` is a refusal the origin records;
 /// the outer error is a git failure the job retries.
-async fn legacy_land<C: ModelClient>(
-    host: &Host<C>,
+async fn legacy_land(
+    host: &Host,
     workspace: &Arc<Workspace>,
     task: TaskId,
     head: &CommitId,
@@ -709,7 +700,7 @@ async fn legacy_land<C: ModelClient>(
 /// its task is building, and a worktree with work of its own is left where it is. A failure is
 /// logged and does not undo the land: the waiter then builds on its old base, and a conflicting
 /// land is refused and reopens it.
-async fn catch_up<C: ModelClient>(host: &Host<C>, workspace: &Workspace, landed: &CommitId) {
+async fn catch_up(host: &Host, workspace: &Workspace, landed: &CommitId) {
     for (task, generation) in host.read(not_yet_building) {
         // Under the task lock the generation cannot move, so the worktree of a newer claim is
         // never reset back to this one.
@@ -824,8 +815,8 @@ struct Pass {
 impl Pass {
     /// Starts a pass on the protected head as it is now. `label` names the pass directory, so a
     /// gate run and a scope confirmation each get their own.
-    async fn new<C: ModelClient>(
-        host: &Host<C>,
+    async fn new(
+        host: &Host,
         repo: &Repo,
         label: impl std::fmt::Display,
     ) -> Result<Self, JobError> {
@@ -929,8 +920,8 @@ fn install_refusal(err: deps::DepsError) -> JobError {
 /// The episodes of `order` as the judge reads them. A repeat of a failure is judged with the state
 /// and bounce count the repair loop holds, so a second or third bounce counts as a repeat of the
 /// same episode and not as a first failure.
-fn judged_episodes<C: ModelClient>(
-    host: &Host<C>,
+fn judged_episodes(
+    host: &Host,
     order: OrderId,
     run: GateRunId,
 ) -> Result<Vec<DiscrepancyEpisode>, JobError> {
@@ -947,10 +938,7 @@ fn judged_episodes<C: ModelClient>(
 /// fails rather than judging a different commit. Then the candidate is observed and judged, and
 /// the receipt is recorded. The context must still match the recorded one, or the origin would
 /// refuse the receipt.
-async fn contrast<C: ModelClient + 'static>(
-    host: &Host<C>,
-    run: GateRunId,
-) -> Result<(), JobError> {
+async fn contrast(host: &Host, run: GateRunId) -> Result<(), JobError> {
     let Some(workspace) = host.workspace() else {
         return Err(JobError::Unavailable(
             "this server has no git repository to gate candidates in".to_owned(),
@@ -1107,8 +1095,8 @@ async fn contrast<C: ModelClient + 'static>(
 /// # Errors
 ///
 /// Returns an error when git or the ruling log cannot be read.
-pub(crate) async fn confirmed_inputs_command<C: ModelClient>(
-    host: &Host<C>,
+pub(crate) async fn confirmed_inputs_command(
+    host: &Host,
     order: OrderId,
     confirmation: &ScopeConfirmation,
 ) -> anyhow::Result<Option<SystemCmd>> {
@@ -1125,8 +1113,8 @@ pub(crate) async fn confirmed_inputs_command<C: ModelClient>(
 
 /// The record of the protected inputs `confirmation` was confirmed under, read from `pass` on the
 /// protected head as it is now.
-fn confirmed_inputs<C: ModelClient>(
-    host: &Host<C>,
+fn confirmed_inputs(
+    host: &Host,
     pass: &Pass,
     repo: &Repo,
     order: OrderId,
@@ -1180,8 +1168,8 @@ fn discard_pass(pass: &Pass) {
 /// gate then reads the receipt its run passed with and the context computed now, and the tested
 /// merged commit is installed only when both clear it. A refusal is a land result the origin
 /// records, so the queue moves on. A git failure is the job's error and follows the retry path.
-async fn gated_land<C: ModelClient>(
-    host: &Host<C>,
+async fn gated_land(
+    host: &Host,
     workspace: &Arc<Workspace>,
     delivery: &Delivery,
     head: &CommitId,
@@ -1271,8 +1259,8 @@ async fn gated_land<C: ModelClient>(
 /// confirm the scope again.
 ///
 /// Returns `None` when the scope was re-bound: the land decided nothing, so it records no result.
-async fn rebind<C: ModelClient>(
-    host: &Host<C>,
+async fn rebind(
+    host: &Host,
     delivery: &Delivery,
     current: &GateContext,
 ) -> Result<Option<Result<CommitId, String>>, JobError> {

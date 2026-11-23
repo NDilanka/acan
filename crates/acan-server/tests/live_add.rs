@@ -3,8 +3,7 @@
 //! refuses a folder the server already serves, and is kept in the settings file so the next start
 //! serves it too.
 //!
-//! Each test starts a server over temporary repositories on an ephemeral port. The model client is
-//! the offline stub.
+//! Each test starts a server over temporary repositories on an ephemeral port.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -12,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use acan_llm::{Stub, UsageLedger};
 use acan_server::projects::{ProjectSet, ProjectSpec};
 use acan_server::{
     ClientFactory, DEFAULT_WITNESS_CONCURRENCY, Running, ServeConfig, apply_project_changes,
@@ -79,20 +77,15 @@ fn config(projects: &ProjectSet) -> ServeConfig {
     }
 }
 
-/// The stub model for each project, as the test client every add opens.
-fn stub_opener() -> ClientFactory<Stub> {
-    Box::new(|_: &ProjectSpec| Ok::<_, anyhow::Error>((Stub::default(), UsageLedger::default())))
+/// The check every add passes.
+fn stub_opener() -> ClientFactory {
+    Box::new(|_: &ProjectSpec| Ok::<_, anyhow::Error>(()))
 }
 
 /// Starts a server over `projects` that can add projects while it runs.
 async fn start(projects: &ProjectSet) -> Running {
-    let clients = projects
-        .projects
-        .iter()
-        .map(|_| (Stub::default(), UsageLedger::default()))
-        .collect();
     let settings = default_settings_file(projects);
-    start_projects_adding(config(projects), clients, Some(settings), stub_opener())
+    start_projects_adding(config(projects), Some(settings), stub_opener())
         .await
         .expect("the server starts")
 }
@@ -387,9 +380,8 @@ async fn a_server_started_without_live_adds_refuses_them() {
     let alpha = repo(root.path(), "alpha");
     let beta = repo(root.path(), "beta");
     let projects = ProjectSet::from_repos(std::slice::from_ref(&alpha));
-    let clients = vec![(Stub::default(), UsageLedger::default())];
     let settings = default_settings_file(&projects);
-    let running = start_projects_serving(config(&projects), clients, Some(settings))
+    let running = start_projects_serving(config(&projects), Some(settings))
         .await
         .expect("the server starts");
     let token = owner_token(&alpha);

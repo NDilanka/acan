@@ -1,7 +1,7 @@
 //! The server over real HTTP and WebSocket connections on an ephemeral port.
 //!
 //! Each test boots a server on a temporary repository, so every command runs through acan-core's
-//! origin and the host. The model client is the offline stub.
+//! origin and the host.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -11,7 +11,6 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use acan_core::{HumanCmd, MemberId, Role as MemberRole, Stamped};
-use acan_llm::{Stub, UsageLedger};
 use acan_server::{Running, ServerConfig, scan, start};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::StatusCode;
@@ -58,13 +57,9 @@ fn loopback() -> SocketAddr {
 }
 
 async fn boot(repo: &Path) -> Running {
-    start(
-        config(repo, loopback(), false),
-        Stub::default(),
-        UsageLedger::default(),
-    )
-    .await
-    .expect("the server starts")
+    start(config(repo, loopback(), false))
+        .await
+        .expect("the server starts")
 }
 
 fn owner_token(running: &Running) -> String {
@@ -196,13 +191,9 @@ async fn a_non_loopback_bind_is_refused_without_team_and_writes_nothing() {
     let dir = temp_repo();
     let addr = SocketAddr::from(([0, 0, 0, 0], 0));
 
-    let err = start(
-        config(dir.path(), addr, false),
-        Stub::default(),
-        UsageLedger::default(),
-    )
-    .await
-    .expect_err("a non-loopback bind needs the team flag");
+    let err = start(config(dir.path(), addr, false))
+        .await
+        .expect_err("a non-loopback bind needs the team flag");
 
     assert!(
         err.to_string().contains("--team"),
@@ -336,13 +327,9 @@ async fn the_owner_token_is_minted_once_and_survives_a_restart() {
     let token = owner_token(&first);
     first.stop().await.expect("the first server stops");
 
-    let second = start(
-        config(dir.path(), loopback(), false),
-        Stub::default(),
-        UsageLedger::default(),
-    )
-    .await
-    .expect("the server restarts");
+    let second = start(config(dir.path(), loopback(), false))
+        .await
+        .expect("the server restarts");
     assert!(
         second.owner_token.is_none(),
         "a restart does not print a new owner token"

@@ -16,7 +16,6 @@ use acan_intent::{
     ContestRequest, GetReceiptRequest, GetRulingsRequest, GetScopeRequest, McpError, McpErrorCode,
     PostReadbackRequest,
 };
-use acan_llm::ModelClient;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -89,11 +88,7 @@ impl Rpc {
 }
 
 /// Handles one JSON-RPC message from an agent.
-pub(crate) async fn post<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
-    headers: HeaderMap,
-    body: String,
-) -> Response {
+pub(crate) async fn post(State(host): State<Host>, headers: HeaderMap, body: String) -> Response {
     let agent = match authenticate(&host, bearer(&headers)) {
         Ok(Principal::Agent(agent)) => agent,
         Ok(Principal::Member(_)) => {
@@ -195,11 +190,7 @@ fn initialize(params: &Value) -> Value {
     })
 }
 
-async fn call_tool<C: ModelClient>(
-    host: &Host<C>,
-    agent: &AgentId,
-    params: &Value,
-) -> Result<Value, Rpc> {
+async fn call_tool(host: &Host, agent: &AgentId, params: &Value) -> Result<Value, Rpc> {
     let name = params["name"]
         .as_str()
         .ok_or_else(|| Rpc::new(INVALID_PARAMS, "tools/call needs a tool name"))?;
@@ -220,12 +211,7 @@ fn tool_result(text: &str, is_error: bool) -> Value {
     json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
 }
 
-async fn dispatch<C: ModelClient>(
-    host: &Host<C>,
-    agent: &AgentId,
-    name: &str,
-    args: Value,
-) -> Result<Value, String> {
+async fn dispatch(host: &Host, agent: &AgentId, name: &str, args: Value) -> Result<Value, String> {
     match name {
         "list_tasks" => Ok(list_tasks(host)),
         "get_task" => get_task(host, agent, args),
@@ -339,11 +325,7 @@ fn task_arg(raw: &str) -> Result<TaskId, String> {
 }
 
 /// Sends one agent command through the writer. A refused command becomes its rejection text.
-async fn submit<C: ModelClient>(
-    host: &Host<C>,
-    agent: &AgentId,
-    cmd: AgentCmd,
-) -> Result<Vec<Stamped>, String> {
+async fn submit(host: &Host, agent: &AgentId, cmd: AgentCmd) -> Result<Vec<Stamped>, String> {
     host.submit(Command::Agent {
         agent: agent.clone(),
         cmd,
@@ -359,7 +341,7 @@ async fn submit<C: ModelClient>(
     })
 }
 
-fn list_tasks<C: ModelClient>(host: &Host<C>) -> Value {
+fn list_tasks(host: &Host) -> Value {
     host.read(|world| {
         let rows: Vec<Value> = world
             .orders()
@@ -371,7 +353,7 @@ fn list_tasks<C: ModelClient>(host: &Host<C>) -> Value {
     })
 }
 
-fn get_task<C: ModelClient>(host: &Host<C>, agent: &AgentId, args: Value) -> Result<Value, String> {
+fn get_task(host: &Host, agent: &AgentId, args: Value) -> Result<Value, String> {
     let TaskArgs { task } = parse(args)?;
     let task = task_arg(&task)?;
     host.read(|world| {
@@ -474,7 +456,7 @@ fn clash_json(clash: &Clash) -> Value {
     })
 }
 
-fn task_snapshot<C: ModelClient>(host: &Host<C>, task: TaskId) -> Result<Value, String> {
+fn task_snapshot(host: &Host, task: TaskId) -> Result<Value, String> {
     host.read(|world| {
         world
             .task(task)
@@ -483,11 +465,7 @@ fn task_snapshot<C: ModelClient>(host: &Host<C>, task: TaskId) -> Result<Value, 
     })
 }
 
-async fn post_readback<C: ModelClient>(
-    host: &Host<C>,
-    agent: &AgentId,
-    args: Value,
-) -> Result<Value, String> {
+async fn post_readback(host: &Host, agent: &AgentId, args: Value) -> Result<Value, String> {
     let args: ReadbackArgs = parse(args)?;
     let task = task_arg(&args.task)?;
     let events = submit(
@@ -507,11 +485,7 @@ async fn post_readback<C: ModelClient>(
     Ok(json!({ "task": task.to_string(), "readback": readback }))
 }
 
-async fn claim_task<C: ModelClient>(
-    host: &Host<C>,
-    agent: &AgentId,
-    args: Value,
-) -> Result<Value, String> {
+async fn claim_task(host: &Host, agent: &AgentId, args: Value) -> Result<Value, String> {
     let TaskArgs { task } = parse(args)?;
     let task = task_arg(&task)?;
     submit(host, agent, AgentCmd::Claim { task }).await?;
@@ -535,11 +509,7 @@ fn held_claim<'w>(world: &'w World, task: TaskId, agent: &AgentId) -> Result<&'w
     }
 }
 
-async fn heartbeat_task<C: ModelClient>(
-    host: &Host<C>,
-    agent: &AgentId,
-    args: Value,
-) -> Result<Value, String> {
+async fn heartbeat_task(host: &Host, agent: &AgentId, args: Value) -> Result<Value, String> {
     let args: FenceArgs = parse(args)?;
     let fence = args.fence()?;
     let events = submit(host, agent, AgentCmd::Renew { fence }).await?;
@@ -554,11 +524,7 @@ async fn heartbeat_task<C: ModelClient>(
     }))
 }
 
-async fn release_task<C: ModelClient>(
-    host: &Host<C>,
-    agent: &AgentId,
-    args: Value,
-) -> Result<Value, String> {
+async fn release_task(host: &Host, agent: &AgentId, args: Value) -> Result<Value, String> {
     let args: FenceArgs = parse(args)?;
     let fence = args.fence()?;
     submit(host, agent, AgentCmd::Release { fence }).await?;
@@ -569,11 +535,7 @@ async fn release_task<C: ModelClient>(
     }))
 }
 
-async fn declare_changes<C: ModelClient>(
-    host: &Host<C>,
-    agent: &AgentId,
-    args: Value,
-) -> Result<Value, String> {
+async fn declare_changes(host: &Host, agent: &AgentId, args: Value) -> Result<Value, String> {
     let args: DeclareArgs = parse(args)?;
     let fence = Fence {
         task: task_arg(&args.task)?,
@@ -606,11 +568,7 @@ async fn declare_changes<C: ModelClient>(
     Ok(row)
 }
 
-async fn report_built<C: ModelClient>(
-    host: &Host<C>,
-    agent: &AgentId,
-    args: Value,
-) -> Result<Value, String> {
+async fn report_built(host: &Host, agent: &AgentId, args: Value) -> Result<Value, String> {
     let args: ReportArgs = parse(args)?;
     let fence = Fence {
         task: task_arg(&args.task)?,
@@ -627,11 +585,7 @@ async fn report_built<C: ModelClient>(
     Ok(row)
 }
 
-async fn get_worktree<C: ModelClient>(
-    host: &Host<C>,
-    agent: &AgentId,
-    args: Value,
-) -> Result<Value, String> {
+async fn get_worktree(host: &Host, agent: &AgentId, args: Value) -> Result<Value, String> {
     let TaskArgs { task } = parse(args)?;
     let task = task_arg(&task)?;
     let view = worktree_of(host, agent, task).await.map_err(api_message)?;

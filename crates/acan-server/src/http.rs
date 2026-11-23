@@ -19,7 +19,6 @@ use acan_intent::{
     GetRulingsResponse, GetScopeRequest, GetScopeResponse, MachineId, McpError, McpErrorCode,
     McpV1, TaskRef,
 };
-use acan_llm::ModelClient;
 use acan_scan::Plant;
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, Request, State};
@@ -59,75 +58,58 @@ pub(crate) struct Mount<'a> {
 
 /// The routes one project's host answers under `mount`. The owner names who may export or clear
 /// the project's data, and the project it belongs to.
-pub(crate) fn project_routes<C: ModelClient + 'static>(
-    mount: Mount<'_>,
-    host: Host<C>,
-    owner: DataOwner,
-) -> Router {
+pub(crate) fn project_routes(mount: Mount<'_>, host: Host, owner: DataOwner) -> Router {
     let api = mount.api;
     Router::new()
-        .route(mount.mcp, post(mcp::post::<C>))
-        .route(&format!("{api}/commands"), post(post_command::<C>))
-        .route(&format!("{api}/events"), get(get_events::<C>))
-        .route(&format!("{api}/plant"), get(get_plant::<C>))
-        .route(&format!("{api}/contract"), get(get_contract::<C>))
-        .route(&format!("{api}/scan"), post(post_scan::<C>))
-        .route(&format!("{api}/plant/kinds"), put(put_plant_kinds::<C>))
-        .route(&format!("{api}/update"), get(get_update::<C>))
-        .route(&format!("{api}/bug-report"), get(get_bug_report::<C>))
-        .route(&format!("{api}/stream"), get(stream::upgrade::<C>))
+        .route(mount.mcp, post(mcp::post))
+        .route(&format!("{api}/commands"), post(post_command))
+        .route(&format!("{api}/events"), get(get_events))
+        .route(&format!("{api}/plant"), get(get_plant))
+        .route(&format!("{api}/contract"), get(get_contract))
+        .route(&format!("{api}/scan"), post(post_scan))
+        .route(&format!("{api}/plant/kinds"), put(put_plant_kinds))
+        .route(&format!("{api}/update"), get(get_update))
+        .route(&format!("{api}/bug-report"), get(get_bug_report))
+        .route(&format!("{api}/stream"), get(stream::upgrade))
         .route(
             &format!("{api}/settings/data/export"),
-            get(data::get_export::<C>),
+            get(data::get_export),
         )
         .route(
             &format!("{api}/settings/data/clear"),
-            post(data::post_clear::<C>),
+            post(data::post_clear),
         )
-        .route(
-            &format!("{api}/tasks/{{task}}/worktree"),
-            get(get_worktree::<C>),
-        )
-        .route(&format!("{api}/tasks/{{task}}/scope"), get(get_scope::<C>))
-        .route(
-            &format!("{api}/tasks/{{task}}/rulings"),
-            get(get_rulings::<C>),
-        )
-        .route(
-            &format!("{api}/tasks/{{task}}/receipt"),
-            get(get_receipt::<C>),
-        )
+        .route(&format!("{api}/tasks/{{task}}/worktree"), get(get_worktree))
+        .route(&format!("{api}/tasks/{{task}}/scope"), get(get_scope))
+        .route(&format!("{api}/tasks/{{task}}/rulings"), get(get_rulings))
+        .route(&format!("{api}/tasks/{{task}}/receipt"), get(get_receipt))
         .route(
             &format!("{api}/orders/{{order}}/plant-view"),
-            get(get_plant_view::<C>),
+            get(get_plant_view),
         )
         .route(
             &format!("{api}/orders/{{order}}/scope/confirmation"),
-            get(get_scope_confirmation::<C>),
+            get(get_scope_confirmation),
         )
         .route(
             &format!("{api}/orders/{{order}}/episodes/{{episode}}/ruling-draft"),
-            get(get_ruling_draft::<C>),
+            get(get_ruling_draft),
         )
         .route(
             &format!("{api}/orders/{{order}}/episodes/{{episode}}/ruling"),
-            post(post_ruling::<C>),
+            post(post_ruling),
         )
         .layer(Extension(owner))
         .layer(middleware::from_fn_with_state(
             host.clone(),
-            refuse_when_stopped::<C>,
+            refuse_when_stopped,
         ))
         .with_state(host)
 }
 
 /// Refuses a request to a project whose writer has stopped, before any route runs. The other
 /// projects are not affected: each one has its own writer.
-async fn refuse_when_stopped<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
-    request: Request,
-    next: Next,
-) -> Response {
+async fn refuse_when_stopped(State(host): State<Host>, request: Request, next: Next) -> Response {
     if host.writer_stopped() {
         return ApiError::ProjectUnavailable.into_response();
     }
@@ -139,10 +121,10 @@ async fn refuse_when_stopped<C: ModelClient + 'static>(
 /// does not claim. Health, version and settings are server-wide.
 /// `founder` is the member whose token is the owner's: only it may export or clear a project's
 /// data.
-pub(crate) fn router<C: ModelClient + 'static>(
-    projects: Arc<Registry<C>>,
+pub(crate) fn router(
+    projects: Arc<Registry>,
     web: Option<PublicRoot>,
-    settings: Arc<Settings<C>>,
+    settings: Arc<Settings>,
     founder: MemberId,
 ) -> Router {
     let mut router = Router::new()
@@ -150,10 +132,10 @@ pub(crate) fn router<C: ModelClient + 'static>(
         .route("/version", get(version))
         .merge(
             Router::new()
-                .route("/api/projects", get(registry::list_projects::<C>))
-                .route("/api/stream/all", get(stream_all::upgrade::<C>))
-                .route("/api/signin", post(crate::signin::mint::<C>))
-                .route("/api/signin/exchange", post(crate::signin::exchange::<C>))
+                .route("/api/projects", get(registry::list_projects))
+                .route("/api/stream/all", get(stream_all::upgrade))
+                .route("/api/signin", post(crate::signin::mint))
+                .route("/api/signin/exchange", post(crate::signin::exchange))
                 .with_state(Arc::clone(&projects)),
         )
         .merge(settings::routes(settings));
@@ -190,8 +172,8 @@ pub(crate) fn router<C: ModelClient + 'static>(
 /// Answers a request that no route of the router claims. A project added while the server runs has
 /// its routes in the registry, not in the router, so its requests go there first. Anything else is
 /// a public file, or not found.
-async fn unmatched<C: ModelClient + 'static>(
-    projects: Arc<Registry<C>>,
+async fn unmatched(
+    projects: Arc<Registry>,
     web: Option<Arc<PublicRoot>>,
     request: Request,
 ) -> Response {
@@ -363,19 +345,13 @@ pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// The principal a token acts for.
-pub(crate) fn authenticate<C: ModelClient>(
-    host: &Host<C>,
-    token: Option<&str>,
-) -> Result<Principal, ApiError> {
+pub(crate) fn authenticate(host: &Host, token: Option<&str>) -> Result<Principal, ApiError> {
     token
         .and_then(|token| host.tokens().principal(token))
         .ok_or(ApiError::Unauthorized)
 }
 
-pub(crate) fn member<C: ModelClient>(
-    host: &Host<C>,
-    headers: &HeaderMap,
-) -> Result<MemberId, ApiError> {
+pub(crate) fn member(host: &Host, headers: &HeaderMap) -> Result<MemberId, ApiError> {
     match authenticate(host, bearer(headers))? {
         Principal::Member(member) => Ok(member),
         Principal::Agent(_) => Err(ApiError::Forbidden("only members may do this over HTTP")),
@@ -396,8 +372,8 @@ async fn version() -> Json<VersionInfo> {
 /// ConfirmScope, ResolveContest and RecordRuling. Only a member reaches the origin, and the origin
 /// checks that the member is the order's poster or an owner. An agent token gets 403 here. A scope
 /// revision with a fixed base anchor in a must-keep rule gets 400, see [`refuse_fixed_must_keep`].
-async fn post_command<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn post_command(
+    State(host): State<Host>,
     headers: HeaderMap,
     Json(cmd): Json<HumanCmd>,
 ) -> Result<Json<Vec<Stamped>>, ApiError> {
@@ -436,8 +412,8 @@ struct EventsQuery {
 
 /// The log from `from`, as the caller's principal may read it. A member gets each event as stored;
 /// an agent gets the member-only fields redacted, with the same seq, time and actor.
-async fn get_events<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn get_events(
+    State(host): State<Host>,
     headers: HeaderMap,
     Query(query): Query<EventsQuery>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
@@ -462,8 +438,8 @@ struct PlantResponse {
     scan: ScanSummary,
 }
 
-async fn get_plant<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn get_plant(
+    State(host): State<Host>,
     headers: HeaderMap,
 ) -> Result<Json<PlantResponse>, ApiError> {
     authenticate(&host, bearer(&headers))?;
@@ -489,16 +465,16 @@ async fn get_plant<C: ModelClient + 'static>(
 
 /// Whether the protected app contract is in place, and its version. Any authenticated principal may
 /// read it: it is the protected head's file, and the agent's worktree holds the same one.
-async fn get_contract<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn get_contract(
+    State(host): State<Host>,
     headers: HeaderMap,
 ) -> Result<Json<ContractView>, ApiError> {
     authenticate(&host, bearer(&headers))?;
     Ok(Json(contract_of(&host).await?))
 }
 
-async fn post_scan<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn post_scan(
+    State(host): State<Host>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Stamped>>, ApiError> {
     member(&host, &headers)?;
@@ -510,8 +486,8 @@ async fn post_scan<C: ModelClient + 'static>(
 /// name to a kind name, or to null to clear the kind the user set. The change is written to
 /// `.acan/kinds.json` in the repo. Only the owner may do this: a member gets 403, and an agent
 /// gets 403 from [`member`].
-async fn put_plant_kinds<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn put_plant_kinds(
+    State(host): State<Host>,
     headers: HeaderMap,
     Json(body): Json<BTreeMap<String, Option<String>>>,
 ) -> Result<Json<Vec<Stamped>>, ApiError> {
@@ -554,8 +530,8 @@ async fn put_plant_kinds<C: ModelClient + 'static>(
 }
 
 /// The update check's status. Any principal may read it.
-async fn get_update<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn get_update(
+    State(host): State<Host>,
     headers: HeaderMap,
 ) -> Result<Json<UpdateStatus>, ApiError> {
     authenticate(&host, bearer(&headers))?;
@@ -564,8 +540,8 @@ async fn get_update<C: ModelClient + 'static>(
 
 /// The bug report: a pre-filled issue link, and its full text. Members only, since the person
 /// using the app is the one who files it.
-async fn get_bug_report<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn get_bug_report(
+    State(host): State<Host>,
     headers: HeaderMap,
 ) -> Result<Json<BugReport>, ApiError> {
     member(&host, &headers)?;
@@ -582,7 +558,7 @@ pub(crate) struct ContractView {
 /// The contract at the protected head, read from the same snapshot the gate tests against. It is
 /// present when the app contract and the probe corpus both read and decode, since the gate needs
 /// both. A server with no git repository has no protected head to read, so that is an error.
-pub(crate) async fn contract_of<C: ModelClient>(host: &Host<C>) -> Result<ContractView, ApiError> {
+pub(crate) async fn contract_of(host: &Host) -> Result<ContractView, ApiError> {
     let workspace = host
         .workspace()
         .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("the server has no git repository")))?;
@@ -612,8 +588,8 @@ pub(crate) struct WorktreeView {
 /// Where the worktree of a claimed task is. Only the agent holding that task's lease may read
 /// it, so the path reaches the one agent that works in it. The worktree is created here if the
 /// lease grant has not created it yet.
-async fn get_worktree<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn get_worktree(
+    State(host): State<Host>,
     headers: HeaderMap,
     Path(task): Path<String>,
 ) -> Result<Json<WorktreeView>, ApiError> {
@@ -631,8 +607,8 @@ async fn get_worktree<C: ModelClient + 'static>(
 
 /// The worktree of `task` for the agent holding its lease. Shared by the HTTP route and the MCP
 /// `get_worktree` tool, so both answer the same way.
-pub(crate) async fn worktree_of<C: ModelClient>(
-    host: &Host<C>,
+pub(crate) async fn worktree_of(
+    host: &Host,
     agent: &AgentId,
     task: TaskId,
 ) -> Result<WorktreeView, ApiError> {
@@ -686,8 +662,8 @@ struct RulingsQuery {
 
 /// The confirmed scope of a task's order. Any authenticated principal may read it, as with the
 /// other reads, because an agent reads the same scope over MCP before it reads back.
-async fn get_scope<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn get_scope(
+    State(host): State<Host>,
     headers: HeaderMap,
     Path(task): Path<String>,
 ) -> Result<Json<GetScopeResponse>, ApiError> {
@@ -700,8 +676,8 @@ async fn get_scope<C: ModelClient + 'static>(
 }
 
 /// The rulings in force on the named machines, or on every machine.
-async fn get_rulings<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn get_rulings(
+    State(host): State<Host>,
     headers: HeaderMap,
     Path(task): Path<String>,
     Query(query): Query<RulingsQuery>,
@@ -724,8 +700,8 @@ async fn get_rulings<C: ModelClient + 'static>(
 
 /// The plant view of the order's latest receipt. Members only, as the
 /// other order reads are; a 404 names what the order lacks.
-async fn get_plant_view<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn get_plant_view(
+    State(host): State<Host>,
     headers: HeaderMap,
     Path(order): Path<String>,
 ) -> Result<Json<acan_intent::PlantView>, ApiError> {
@@ -738,8 +714,8 @@ async fn get_plant_view<C: ModelClient + 'static>(
 /// the hashes and bindings the origin checks, read from the lane and the ledger, so a script and
 /// a UI send the same bytes. It confirms nothing. The member sends it, and the origin accepts it
 /// only if the open choices and broad items are answered in it.
-async fn get_scope_confirmation<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn get_scope_confirmation(
+    State(host): State<Host>,
     headers: HeaderMap,
     Path(order): Path<String>,
 ) -> Result<Json<ScopeConfirmation>, ApiError> {
@@ -757,8 +733,8 @@ async fn get_scope_confirmation<C: ModelClient + 'static>(
 
 /// The ruling draft of an episode: what a member rules from. Members only, since a human rules.
 /// See [`ruling::draft`].
-async fn get_ruling_draft<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn get_ruling_draft(
+    State(host): State<Host>,
     headers: HeaderMap,
     Path((order, episode)): Path<(String, String)>,
 ) -> Result<Json<RulingDraftView>, ApiError> {
@@ -771,8 +747,8 @@ async fn get_ruling_draft<C: ModelClient + 'static>(
 /// A member's ruling on one episode. The body is the decision and predicate the member chose and
 /// the draft it was made from; the server builds the ledger event. Members only, since a human
 /// rules. See [`ruling::record`].
-async fn post_ruling<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn post_ruling(
+    State(host): State<Host>,
     headers: HeaderMap,
     Path((order, episode)): Path<(String, String)>,
     body: Bytes,
@@ -788,8 +764,8 @@ async fn post_ruling<C: ModelClient + 'static>(
 }
 
 /// The latest receipt of a task's gate runs.
-async fn get_receipt<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+async fn get_receipt(
+    State(host): State<Host>,
     headers: HeaderMap,
     Path(task): Path<String>,
 ) -> Result<Json<GetReceiptResponse>, ApiError> {

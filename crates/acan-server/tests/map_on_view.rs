@@ -1,8 +1,7 @@
 //! A server that maps on first view: each codebase waits for a page's stream, takes no writes
 //! while it waits, and maps once a page connects.
 //!
-//! Each test boots a server on a temporary repository, on an ephemeral port. The model client is
-//! the offline stub, so no test calls a model.
+//! Each test boots a server on a temporary repository, on an ephemeral port.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -11,7 +10,6 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use acan_core::{HumanCmd, MemberId, Role as MemberRole};
-use acan_llm::{Stub, UsageLedger};
 use acan_server::projects::ProjectSet;
 use acan_server::{
     DEFAULT_WITNESS_CONCURRENCY, Running, ServeConfig, start_projects_serving,
@@ -47,10 +45,6 @@ fn config(repo: &Path, map_on_first_view: bool) -> ServeConfig {
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
         map_on_first_view,
     }
-}
-
-fn clients() -> Vec<(Stub, UsageLedger)> {
-    vec![(Stub::default(), UsageLedger::default())]
 }
 
 fn owner_token(running: &Running) -> String {
@@ -116,7 +110,7 @@ async fn add_member(running: &Running, token: &str) -> reqwest::Response {
 #[tokio::test]
 async fn a_codebase_waits_for_its_first_page_before_it_maps() {
     let dir = temp_repo();
-    let running = start_projects_serving(config(dir.path(), true), clients(), None)
+    let running = start_projects_serving(config(dir.path(), true), None)
         .await
         .expect("the server starts without waiting for the maps");
     let token = owner_token(&running);
@@ -159,7 +153,7 @@ async fn a_codebase_waits_for_its_first_page_before_it_maps() {
 #[tokio::test]
 async fn the_blocking_start_refuses_a_server_that_waits_for_a_page() {
     let dir = temp_repo();
-    let refused = start_projects_with_settings(config(dir.path(), true), clients(), None).await;
+    let refused = start_projects_with_settings(config(dir.path(), true), None).await;
     assert!(
         refused.is_err(),
         "a start that waits for the maps would wait for a page that may never come"

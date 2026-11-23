@@ -70,7 +70,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use acan_core::{MemberId, Origin, Seq, WorldId, WorldRef};
-use acan_llm::{ModelClient, UsageLedger};
 use anyhow::{Context, bail, ensure};
 use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, watch};
@@ -365,17 +364,12 @@ async fn drain_streams(streams: &Mutex<JoinSet<()>>, project: &str) {
 /// Returns an error when the bind address is non-loopback without `team`, the state directory,
 /// tokens or database cannot be opened, the stored log does not replay, the scan fails, the web
 /// directory is not a dedicated public directory, or the address cannot be bound.
-pub async fn start<C: ModelClient + 'static>(
-    config: ServerConfig,
-    client: C,
-    ledger: UsageLedger,
-) -> anyhow::Result<Running> {
-    start_projects(ServeConfig::from(config), vec![(client, ledger)]).await
+pub async fn start(config: ServerConfig) -> anyhow::Result<Running> {
+    start_projects(ServeConfig::from(config)).await
 }
 
 /// Opens every project's world, replays it, scans its code, and starts one listener that serves
-/// them all. `clients` holds one model client and usage ledger per project, in the order of
-/// `config.projects.projects`.
+/// them all.
 ///
 /// Every project opens before anything binds, so a project that fails to open leaves nothing
 /// running. The witness pool is one pool for all projects. The settings are kept as in
@@ -384,11 +378,8 @@ pub async fn start<C: ModelClient + 'static>(
 /// # Errors
 ///
 /// Returns the errors of [`start_projects_with_settings`].
-pub async fn start_projects<C: ModelClient + 'static>(
-    config: ServeConfig,
-    clients: Vec<(C, UsageLedger)>,
-) -> anyhow::Result<Running> {
-    start_projects_with_settings(config, clients, None).await
+pub async fn start_projects(config: ServeConfig) -> anyhow::Result<Running> {
+    start_projects_with_settings(config, None).await
 }
 
 /// As [`start_projects`], and keeps the settings in `settings_file`. `None` keeps them in
@@ -397,7 +388,7 @@ pub async fn start_projects<C: ModelClient + 'static>(
 /// defaults.
 ///
 /// The folders settings added and removed are the caller's to apply, with
-/// [`apply_project_changes`], before it builds the clients.
+/// [`apply_project_changes`], before the start.
 ///
 /// # Errors
 ///
@@ -405,16 +396,15 @@ pub async fn start_projects<C: ModelClient + 'static>(
 /// validate, a project's state directory, tokens or database cannot be opened, a stored log does
 /// not replay, a scan fails, the web directory is not a dedicated public directory for every
 /// repository, the settings file cannot be read or does not parse, or the address cannot be bound.
-pub async fn start_projects_with_settings<C: ModelClient + 'static>(
+pub async fn start_projects_with_settings(
     config: ServeConfig,
-    clients: Vec<(C, UsageLedger)>,
     settings_file: Option<PathBuf>,
 ) -> anyhow::Result<Running> {
     ensure!(
         !config.map_on_first_view,
         "a server that maps on first view waits for a page, so it must start with start_projects_serving"
     );
-    let running = start_projects_serving(config, clients, settings_file).await?;
+    let running = start_projects_serving(config, settings_file).await?;
     if let Err(err) = running.wait_mapped().await {
         let _ = running.stop().await;
         return Err(err);
@@ -430,12 +420,11 @@ pub async fn start_projects_with_settings<C: ModelClient + 'static>(
 ///
 /// Returns the errors [`start_projects_with_settings`] returns, except that a codebase that fails
 /// to map does not fail the start.
-pub async fn start_projects_serving<C: ModelClient + 'static>(
+pub async fn start_projects_serving(
     config: ServeConfig,
-    clients: Vec<(C, UsageLedger)>,
     settings_file: Option<PathBuf>,
 ) -> anyhow::Result<Running> {
-    start_listening(config, clients, settings_file, None, None).await
+    start_listening(config, settings_file, None, None).await
 }
 
 /// As [`start_projects_serving`], and a project added while the server runs is opened with
@@ -445,13 +434,12 @@ pub async fn start_projects_serving<C: ModelClient + 'static>(
 /// # Errors
 ///
 /// Returns the errors [`start_projects_serving`] returns.
-pub async fn start_projects_adding<C: ModelClient + 'static>(
+pub async fn start_projects_adding(
     config: ServeConfig,
-    clients: Vec<(C, UsageLedger)>,
     settings_file: Option<PathBuf>,
-    opener: ClientFactory<C>,
+    opener: ClientFactory,
 ) -> anyhow::Result<Running> {
-    start_listening(config, clients, settings_file, Some(opener), None).await
+    start_listening(config, settings_file, Some(opener), None).await
 }
 
 /// As [`start_projects_adding`], for a server that belongs to the user's `folder` rather than to a
@@ -464,20 +452,18 @@ pub async fn start_projects_adding<C: ModelClient + 'static>(
 ///
 /// Returns the errors [`start_projects_serving`] returns, plus an error when the user's folder
 /// cannot be created or overlaps the public folder.
-pub async fn start_open<C: ModelClient + 'static>(
+pub async fn start_open(
     config: ServeConfig,
-    clients: Vec<(C, UsageLedger)>,
     folder: UserFolder,
-    opener: ClientFactory<C>,
+    opener: ClientFactory,
 ) -> anyhow::Result<Running> {
-    start_listening(config, clients, None, Some(opener), Some(folder)).await
+    start_listening(config, None, Some(opener), Some(folder)).await
 }
 
-async fn start_listening<C: ModelClient + 'static>(
+async fn start_listening(
     config: ServeConfig,
-    clients: Vec<(C, UsageLedger)>,
     settings_file: Option<PathBuf>,
-    opener: Option<ClientFactory<C>>,
+    opener: Option<ClientFactory>,
     folder: Option<UserFolder>,
 ) -> anyhow::Result<Running> {
     if !config.addr.ip().is_loopback() && !config.team {
@@ -491,12 +477,6 @@ async fn start_listening<C: ModelClient + 'static>(
     }
     config.projects.validate()?;
     let specs = config.projects.projects.clone();
-    ensure!(
-        clients.len() == specs.len(),
-        "every project needs a model client: {} projects, {} clients",
-        specs.len(),
-        clients.len()
-    );
     ensure!(
         folder.is_some() || !specs.is_empty(),
         "there is nothing to serve: give at least one project, or start with the user's folder"
@@ -546,8 +526,8 @@ async fn start_listening<C: ModelClient + 'static>(
     let home_dir = home.as_ref().map(|home| home.dir.clone());
 
     let mut openings = Vec::with_capacity(specs.len());
-    let inputs = specs.into_iter().zip(clients).zip(tokens);
-    for ((spec, (client, ledger)), tokens) in inputs {
+    let inputs = specs.into_iter().zip(tokens);
+    for (spec, tokens) in inputs {
         let state_dir = spec.repo.join(STATE_DIR);
         let store = EventStore::open(&state_dir.join(DB_FILE)).await?;
         let log = store.load_from(Seq::new(0)).await?;
@@ -571,8 +551,6 @@ async fn start_listening<C: ModelClient + 'static>(
             origin,
             scan,
             tokens,
-            client,
-            ledger,
         });
     }
 
@@ -586,7 +564,7 @@ async fn start_listening<C: ModelClient + 'static>(
     // One witness pool for every project, so the server runs at most `witness_concurrency`
     // witness runs at once.
     let slots = Arc::new(Semaphore::new(config.witness_concurrency));
-    let mut entries: Vec<Entry<C>> = Vec::with_capacity(openings.len());
+    let mut entries: Vec<Entry> = Vec::with_capacity(openings.len());
     for opening in openings {
         let Opening {
             spec,
@@ -594,8 +572,6 @@ async fn start_listening<C: ModelClient + 'static>(
             origin,
             scan,
             tokens,
-            client,
-            ledger,
         } = opening;
         let git = open_git(&spec).await;
         let host = Host::new_mapping(
@@ -604,8 +580,6 @@ async fn start_listening<C: ModelClient + 'static>(
                 store,
                 tokens,
                 scan,
-                ledger,
-                client,
                 repo: spec.repo.clone(),
                 shutdown: shutdown_rx.clone(),
                 git,
@@ -711,7 +685,7 @@ async fn start_listening<C: ModelClient + 'static>(
 /// writes. A failure is recorded on the project, which then takes no writes, and the server keeps
 /// running so the page can show why. With `on_view`, the scan starts only once a page has
 /// connected to the project.
-pub(crate) async fn map_project<C: ModelClient + 'static>(host: Host<C>, on_view: bool) {
+pub(crate) async fn map_project(host: Host, on_view: bool) {
     if on_view {
         host.wait_viewed().await;
     }
@@ -784,14 +758,12 @@ pub fn apply_project_changes(
 }
 
 /// A project whose world is open and scanned, waiting for its host. Nothing is bound yet.
-struct Opening<C> {
+struct Opening {
     spec: ProjectSpec,
     store: EventStore,
     origin: Origin,
     scan: Scan,
     tokens: Tokens,
-    client: C,
-    ledger: UsageLedger,
 }
 
 /// Opens a project's git state for worktrees, witnesses and landing. A directory that is not a
