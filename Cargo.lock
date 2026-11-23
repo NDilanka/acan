@@ -35,6 +35,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "acan-droid"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "acan-git"
 version = "0.1.0"
 dependencies = [
