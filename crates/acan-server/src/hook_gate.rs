@@ -1,7 +1,8 @@
 //! The daemon's local hook listener, live order policies, and first-run check.
 //!
-//! A hook gives early feedback. It does not sandbox an allowed shell or replace the landing
-//! check on the resulting diff.
+//! The hook gives fast pre-tool feedback. It does not sandbox an allowed shell, and paths can
+//! change between this check and tool execution. The landing gate's post-hook scan of the
+//! resulting commit is the non-racy, commit-time enforcement boundary.
 
 #![forbid(unsafe_code)]
 
@@ -17,11 +18,11 @@ use acan_hook::protocol::{Decision, HookRequest, HookResponse, PROTOCOL_VERSION,
 use acan_hook::transport::Endpoint;
 use acan_hook::{BLOCK_EXIT_CODE, ENDPOINT_ENV, MAX_TIMEOUT_MS, ORDER_ENV, TIMEOUT_ENV};
 use acan_intent::{PathCoverage, PathScope, RepoPath, RepoRules, ScopeEntry};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::process::Command;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
 
@@ -66,6 +67,7 @@ struct Registration {
 #[derive(Debug)]
 struct RegisteredPolicy {
     policy: ActiveOrderPolicy,
+    is_probe: bool,
     // Keep the given spelling too: Droid may report an absolute path using it, e.g. on macOS
     // where a worktree under /var has a canonical path under /private/var.
     given_root: PathBuf,
@@ -82,7 +84,11 @@ impl HookRegistry {
     /// # Errors
     ///
     /// Returns an error for an invalid or already active id, or a root that is not a directory.
-    pub fn register_order(&self, mut policy: ActiveOrderPolicy) -> io::Result<()> {
+    pub fn register_order(&self, policy: ActiveOrderPolicy) -> io::Result<()> {
+        self.register(policy, false)
+    }
+
+    fn register(&self, mut policy: ActiveOrderPolicy, is_probe: bool) -> io::Result<()> {
         let id = &policy.order_id;
         if id.is_empty() || id.trim() != id || id.chars().any(char::is_control) {
             return Err(io::Error::new(
@@ -108,7 +114,11 @@ impl HookRegistry {
         orders.insert(
             policy.order_id.clone(),
             Registration {
-                policy: Arc::new(RegisteredPolicy { policy, given_root }),
+                policy: Arc::new(RegisteredPolicy {
+                    policy,
+                    is_probe,
+                    given_root,
+                }),
                 heartbeat: watch::Sender::new(None),
             },
         );
@@ -192,13 +202,25 @@ impl HookRegistry {
         {
             return Err("unknown order".to_owned());
         }
+        // Probe registrations verify the hook path, not a real order's claims on the repo.
+        // The probe should never authorize a write, even though it has a broad synthetic scope.
+        if policy.is_probe {
+            return if writes.is_empty() {
+                Ok(())
+            } else {
+                Err("probe orders cannot write".to_owned())
+            };
+        }
         for path in writes {
             let target = PathScope::new([ScopeEntry::File {
                 path: path.clone(),
                 new: false,
             }])
             .expect("one valid path makes a scope");
-            for (id, other) in orders.iter().filter(|(id, _)| *id != &request.order) {
+            for (id, other) in &*orders {
+                if id == &request.order || other.policy.is_probe {
+                    continue;
+                }
                 let other = &other.policy.policy;
                 if other.scope.coverage(&path, &other.rules) == PathCoverage::Covered
                     || !other.scope.overlaps(&target).is_empty()
@@ -222,8 +244,8 @@ impl RegisteredPolicy {
         let input = request
             .raw_tool_input
             .as_ref()
-            .map(|value| value.as_object().ok_or("raw_tool_input is not an object"))
-            .transpose()?;
+            .and_then(Value::as_object)
+            .ok_or("raw_tool_input must be an object")?;
         let mut writes = BTreeSet::new();
         match name {
             "Read" | "Grep" | "Glob" | "LS" | "View" => {
@@ -233,10 +255,7 @@ impl RegisteredPolicy {
                     .map(String::as_str)
                     .collect::<Vec<_>>();
                 for key in ["file_path", "path", "directory_path", "folder"] {
-                    if let Some(value) = input
-                        .and_then(|input| input.get(key))
-                        .filter(|v| !v.is_null())
-                    {
+                    if let Some(value) = input.get(key).filter(|v| !v.is_null()) {
                         paths.push(value.as_str().ok_or("invalid read path")?);
                     }
                 }
@@ -258,30 +277,9 @@ impl RegisteredPolicy {
             "WebSearch" | "FetchUrl" => {}
             "Edit" | "Create" | "Write" | "MultiEdit" | "Delete" | "Patch" | "ApplyPatch"
             | "NotebookEdit" | "Rename" | "Move" => {
-                // A free-form patch can name paths outside its structured fields. Without a
-                // verified parser for it, a claimed file_path does not make it safe.
-                if matches!(name, "Patch" | "ApplyPatch")
-                    && input.is_some_and(|input| {
-                        input
-                            .keys()
-                            .any(|key| !is_write_path_key(key) && key != "paths")
-                    })
-                {
-                    return Err("cannot verify the targets of a free-form patch".to_owned());
-                }
-                let mut paths = request
-                    .file_path
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>();
-                if let Some(input) = &request.raw_tool_input {
-                    collect_write_paths(input, &mut paths)?;
-                }
-                if paths.is_empty() {
-                    return Err("no write target path".to_owned());
-                }
-                let cwd = self.cwd(request.cwd.as_deref())?;
-                for path in paths {
+                let cwd = self.mutating_cwd(request.cwd.as_deref())?;
+                let paths = write_paths(name, input)?;
+                for path in paths.into_iter().chain(request.file_path.as_deref()) {
                     let (lexical, resolved) = self.resolve(&cwd, path)?;
                     if resolved.is_dir() {
                         return Err("a write target must be a file, not a directory".to_owned());
@@ -303,8 +301,9 @@ impl RegisteredPolicy {
                 if !self.policy.allow_shell {
                     return Err("shell tools are not allowed for this order".to_owned());
                 }
+                self.mutating_cwd(request.cwd.as_deref())?;
                 let raw_command = input
-                    .and_then(|input| input.get("command"))
+                    .get("command")
                     .map(|v| v.as_str().ok_or("invalid command"))
                     .transpose()?;
                 if matches!((request.command.as_deref(), raw_command), (Some(a), Some(b)) if a != b)
@@ -327,6 +326,14 @@ impl RegisteredPolicy {
             _ => return Err(format!("tool {name:?} is not allowed")),
         }
         Ok(writes)
+    }
+
+    fn mutating_cwd(&self, cwd: Option<&str>) -> Result<PathBuf, String> {
+        let cwd = cwd.ok_or("missing cwd for a mutating tool")?;
+        if !Path::new(cwd).is_absolute() {
+            return Err("invalid cwd: a mutating tool needs an absolute cwd".to_owned());
+        }
+        self.cwd(Some(cwd))
     }
 
     fn cwd(&self, cwd: Option<&str>) -> Result<PathBuf, String> {
@@ -491,40 +498,97 @@ fn is_protected_dir(part: &str) -> bool {
         .any(|dir| part.eq_ignore_ascii_case(dir))
 }
 
-fn is_write_path_key(key: &str) -> bool {
-    matches!(
-        key,
-        "file_path" | "path" | "old_path" | "new_path" | "target_file" | "notebook_path"
-    )
+fn write_paths<'a>(tool: &str, input: &'a Map<String, Value>) -> Result<Vec<&'a str>, String> {
+    let allowed: &[&str] = match tool {
+        "Edit" => &[
+            "file_path",
+            "path",
+            "old_str",
+            "new_str",
+            "change_all",
+            "old_string",
+            "new_string",
+            "replace_all",
+        ],
+        "Create" | "Write" => &["file_path", "path", "content"],
+        "MultiEdit" => &["file_path", "path", "paths", "edits"],
+        "Delete" => &["file_path", "path"],
+        // A free-form patch can name additional paths. Only structured targets can be checked.
+        "Patch" | "ApplyPatch" => &["file_path", "path", "target_file", "paths"],
+        "NotebookEdit" => &[
+            "file_path",
+            "path",
+            "notebook_path",
+            "cell_id",
+            "new_source",
+            "cell_type",
+            "edit_mode",
+        ],
+        "Rename" | "Move" => &["file_path", "path", "old_path", "new_path"],
+        _ => unreachable!("write tool without an input schema"),
+    };
+    let mut paths = Vec::new();
+    collect_write_paths(input, allowed, &mut paths).map_err(|err| {
+        if matches!(tool, "Patch" | "ApplyPatch") {
+            format!("cannot verify the targets of a free-form patch: {err}")
+        } else {
+            format!("{tool}: {err}")
+        }
+    })?;
+    if paths.is_empty() {
+        return Err("no write target path".to_owned());
+    }
+    Ok(paths)
 }
 
-fn collect_write_paths<'a>(input: &'a Value, paths: &mut Vec<&'a str>) -> Result<(), String> {
-    match input {
-        Value::Object(fields) => {
-            for (key, value) in fields {
-                match key.as_str() {
-                    key if is_write_path_key(key) => {
-                        paths.push(
-                            value
-                                .as_str()
-                                .ok_or_else(|| format!("{key} is not a path string"))?,
-                        );
-                    }
-                    "paths" => {
-                        for value in value.as_array().ok_or("paths is not an array")? {
-                            paths.push(value.as_str().ok_or("paths contains a non-string target")?);
-                        }
-                    }
-                    _ => collect_write_paths(value, paths)?,
+fn collect_write_paths<'a>(
+    input: &'a Map<String, Value>,
+    allowed: &[&str],
+    paths: &mut Vec<&'a str>,
+) -> Result<(), String> {
+    for (key, value) in input {
+        if !allowed.contains(&key.as_str()) {
+            return Err(format!("unrecognized input key {key:?}"));
+        }
+        match key.as_str() {
+            "file_path" | "path" | "old_path" | "new_path" | "target_file" | "notebook_path" => {
+                paths.push(
+                    value
+                        .as_str()
+                        .ok_or_else(|| format!("{key} is not a path string"))?,
+                );
+            }
+            "paths" => {
+                for value in value.as_array().ok_or("paths is not an array")? {
+                    paths.push(value.as_str().ok_or("paths contains a non-string target")?);
                 }
             }
-        }
-        Value::Array(items) => {
-            for item in items {
-                collect_write_paths(item, paths)?;
+            "edits" => {
+                for edit in value.as_array().ok_or("edits is not an array")? {
+                    collect_write_paths(
+                        edit.as_object().ok_or("edits contains a non-object")?,
+                        &[
+                            "file_path",
+                            "path",
+                            "target_file",
+                            "old_str",
+                            "new_str",
+                            "change_all",
+                            "old_string",
+                            "new_string",
+                            "replace_all",
+                        ],
+                        paths,
+                    )?;
+                }
             }
+            "change_all" | "replace_all" if !value.is_boolean() => {
+                return Err(format!("{key} is not a boolean"));
+            }
+            "change_all" | "replace_all" => {}
+            _ if !value.is_string() => return Err(format!("{key} is not a string")),
+            _ => {}
         }
-        _ => {}
     }
     Ok(())
 }
@@ -532,7 +596,7 @@ fn collect_write_paths<'a>(input: &'a Value, paths: &mut Vec<&'a str>) -> Result
 /// Checks literal shell words without executing them. Separators expose chained commands;
 /// dynamic substitutions and other syntax that would hide words are refused.
 fn check_shell(command: &str) -> Result<(), String> {
-    let words = shell_words(command)?;
+    let (words, has_redirection_or_grouping) = shell_words(command)?;
     for (index, word) in words.iter().enumerate() {
         if word
             .split(|ch: char| {
@@ -574,33 +638,90 @@ fn check_shell(command: &str) -> Result<(), String> {
             return Err("nested shell commands cannot be checked".to_owned());
         }
         if bin == "git" {
-            let args = &words[index + 1..];
-            let subcommand = args.iter().find(|arg| arg.as_str() != "--no-pager");
-            if !subcommand.is_some_and(|arg| {
-                matches!(
-                    arg.as_str(),
-                    "status"
-                        | "diff"
-                        | "log"
-                        | "show"
-                        | "rev-parse"
-                        | "ls-files"
-                        | "ls-tree"
-                        | "merge-base"
-                        | "show-ref"
-                )
-            }) {
-                return Err("only read-only git commands are allowed".to_owned());
+            // Redirections may appear between argv tokens, or apply to an entire group.
+            // Do not let them hide later Git options or direct Git's output to a file.
+            if has_redirection_or_grouping {
+                return Err("git commands cannot use redirection or grouping".to_owned());
             }
+            if words.iter().any(|word| {
+                word.split_once('=').is_some_and(|(name, value)| {
+                    let name = name.trim().to_ascii_uppercase();
+                    name.starts_with("GIT_") && !(name == "GIT_OPTIONAL_LOCKS" && value == "0")
+                })
+            }) {
+                return Err("git environment overrides are not allowed".to_owned());
+            }
+            check_git(&words[index + 1..])?;
         }
     }
     Ok(())
 }
 
-fn shell_words(command: &str) -> Result<Vec<String>, String> {
+fn check_git(words: &[String]) -> Result<(), String> {
+    const DENIED_LONG: &[&str] = &[
+        "--output",
+        "--config-env",
+        "--git-dir",
+        "--work-tree",
+        "--exec-path",
+        "--ext-diff",
+        "--textconv",
+        "--filters",
+        "--open-files-in-pager",
+        "--help",
+    ];
+    let args = words
+        .iter()
+        .map(String::as_str)
+        .take_while(|arg| !arg.is_empty());
+    let subcommand = args
+        .clone()
+        .find(|arg| !matches!(*arg, "--no-pager" | "--no-optional-locks"));
+    for arg in args {
+        let flag = arg.split_once('=').map_or(arg, |(flag, _)| flag);
+        // Git's parse-options accepts unambiguous long prefixes and bundled short options.
+        let denied = if flag.starts_with("--") {
+            flag.len() > 2 && DENIED_LONG.iter().any(|name| name.starts_with(flag))
+        } else {
+            flag.strip_prefix('-').is_some_and(|options| {
+                options.contains(['o', 'c', 'C'])
+                    || (subcommand == Some("grep") && options.contains('O'))
+            })
+        };
+        if denied {
+            return Err(format!("git argument {arg:?} is not allowed"));
+        }
+    }
+    if !matches!(
+        subcommand,
+        Some(
+            "status"
+                | "diff"
+                | "log"
+                | "show"
+                | "rev-parse"
+                | "ls-files"
+                | "grep"
+                | "describe"
+                | "shortlog"
+                | "blame"
+                | "cat-file"
+                | "ls-tree"
+                | "merge-base"
+                | "rev-list"
+                | "--version"
+        )
+    ) {
+        return Err("only read-only git commands are allowed".to_owned());
+    }
+    Ok(())
+}
+
+fn shell_words(command: &str) -> Result<(Vec<String>, bool), String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut quote = None;
+    let mut has_redirection_or_grouping = false;
     let mut chars = command.chars().peekable();
     while let Some(ch) = chars.next() {
         let control = ch.is_control() && !matches!(ch, '\n' | '\r' | '\t');
@@ -632,6 +753,7 @@ fn shell_words(command: &str) -> Result<Vec<String>, String> {
         } else if ch == '"' || (cfg!(unix) && ch == '\'') {
             quote = Some(ch);
         } else if ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '<' | '>' | '(' | ')') {
+            has_redirection_or_grouping |= matches!(ch, '<' | '>' | '(' | ')');
             if !word.is_empty() {
                 words.push(std::mem::take(&mut word));
             }
@@ -653,7 +775,7 @@ fn shell_words(command: &str) -> Result<Vec<String>, String> {
     if words.iter().all(String::is_empty) {
         return Err("missing command".to_owned());
     }
-    Ok(words)
+    Ok((words, has_redirection_or_grouping))
 }
 
 /// A bound hook listener. Dropping it stops the listener; [`Self::shutdown`] drains it first.
@@ -675,10 +797,10 @@ impl HookServer {
     }
 
     /// Listens at an absolute Unix socket path. Never replaces a regular file, a symlink or
-    /// a live listener. The bound socket is private to the current user.
+    /// a live listener. The parent directory must be private to the current user.
     #[cfg(unix)]
     pub async fn bind_unix(path: impl AsRef<Path>, registry: HookRegistry) -> io::Result<Self> {
-        use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
+        use std::os::unix::fs::PermissionsExt;
         use tokio::net::{UnixListener, UnixStream};
 
         let path = path.as_ref();
@@ -689,33 +811,29 @@ impl HookServer {
                 "socket needs a file name",
             ));
         };
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true).mode(0o700).create(parent)?;
-        let path = fs::canonicalize(parent)?.join(name);
-        match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.file_type().is_socket() => {
-                let existing = SocketFile::new(path.clone(), &meta);
+        let (parent_path, parent) = private_socket_parent(parent)?;
+        let path = parent_path.join(name);
+        let parent = Arc::new(parent);
+        match SocketFile::inspect(Arc::clone(&parent), name) {
+            Ok(existing) => {
+                verify_socket_parent(&parent_path, &parent)?;
                 match timeout(CONNECTION_TIMEOUT, UnixStream::connect(&path)).await {
                     Ok(Err(err)) if err.kind() == io::ErrorKind::ConnectionRefused => {
                         existing.remove_if_same()?;
-                        // The stale socket is only a comparison handle; do not own the new one.
                     }
                     Ok(Err(err)) => return Err(err),
                     _ => return Err(io::Error::new(io::ErrorKind::AddrInUse, "socket is in use")),
                 }
             }
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "path is not a socket",
-                ));
-            }
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => return Err(err),
         }
+        verify_socket_parent(&parent_path, &parent)?;
         let listener = UnixListener::bind(&path)?;
-        let socket = SocketFile::new(path.clone(), &fs::symlink_metadata(&path)?);
-        if let Err(err) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
+        let socket = SocketFile::inspect(Arc::clone(&parent), name)?;
+        let secured = verify_socket_parent(&parent_path, &parent)
+            .and_then(|()| fs::set_permissions(&path, fs::Permissions::from_mode(0o600)));
+        if let Err(err) = secured {
             let _ = socket.remove_if_same();
             return Err(err);
         }
@@ -724,7 +842,17 @@ impl HookServer {
         Ok(server)
     }
 
-    /// Listens on a local Windows named pipe, e.g. `\\.\pipe\acan-hook`.
+    /// Listens on a fresh, randomly named local Windows pipe. Prefer this over a fixed name:
+    /// the first instance rejects preexisting servers, and all instances reject remote clients,
+    /// but the name itself is not authentication for local clients.
+    #[cfg(windows)]
+    pub fn bind_default_named_pipe(registry: HookRegistry) -> io::Result<Self> {
+        let path = format!(r"\\.\pipe\acan-hook-{}", uuid::Uuid::new_v4());
+        Self::bind_named_pipe(path, registry)
+    }
+
+    /// Listens on an explicitly named local Windows pipe. Fails if that name is already in use
+    /// and rejects remote clients.
     #[cfg(windows)]
     pub fn bind_named_pipe(path: impl AsRef<Path>, registry: HookRegistry) -> io::Result<Self> {
         let endpoint = local_endpoint(path.as_ref())?;
@@ -803,37 +931,107 @@ fn local_endpoint(path: &Path) -> io::Result<String> {
 }
 
 #[cfg(unix)]
+fn private_socket_parent(path: &Path) -> io::Result<(PathBuf, fs::File)> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::DirBuilderExt;
+
+    // Remove trailing separators and `.` so symlink_metadata will not dereference a final link.
+    let path: PathBuf = path.components().collect();
+    if let Err(err) = fs::symlink_metadata(&path) {
+        if err.kind() != io::ErrorKind::NotFound {
+            return Err(err);
+        }
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&path)?;
+    }
+    // Inspect before opening (including after create), and compare to the opened directory.
+    socket_parent_metadata(&path)?;
+    let dir = fs::File::from(rustix::fs::open(
+        &path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?);
+    verify_socket_parent(&path, &dir)?;
+    let canonical = fs::canonicalize(&path)?;
+    verify_socket_parent(&canonical, &dir)?;
+    Ok((canonical, dir))
+}
+
+#[cfg(unix)]
+fn socket_parent_metadata(path: &Path) -> io::Result<fs::Metadata> {
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.is_dir()
+        || meta.mode() & 0o077 != 0
+        || meta.uid() != rustix::process::geteuid().as_raw()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "socket parent must be a real directory owned by the current user and private to them",
+        ));
+    }
+    Ok(meta)
+}
+
+#[cfg(unix)]
+fn verify_socket_parent(path: &Path, dir: &fs::File) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = socket_parent_metadata(path)?;
+    let opened = dir.metadata()?;
+    if (meta.dev(), meta.ino()) != (opened.dev(), opened.ino()) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "socket parent directory changed",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 #[derive(Debug)]
 struct SocketFile {
-    path: PathBuf,
-    device: u64,
-    inode: u64,
+    parent: Arc<fs::File>,
+    name: std::ffi::OsString,
+    stat: rustix::fs::Stat,
 }
 
 #[cfg(unix)]
 impl SocketFile {
-    fn new(path: PathBuf, meta: &fs::Metadata) -> Self {
-        use std::os::unix::fs::MetadataExt;
-        Self {
-            path,
-            device: meta.dev(),
-            inode: meta.ino(),
+    fn inspect(parent: Arc<fs::File>, name: &std::ffi::OsStr) -> io::Result<Self> {
+        use rustix::fs::{AtFlags, FileType, statat};
+
+        let stat = statat(&*parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::Socket {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "path is not a socket",
+            ));
         }
+        Ok(Self {
+            parent,
+            name: name.to_owned(),
+            stat,
+        })
     }
 
     fn remove_if_same(&self) -> io::Result<()> {
-        use std::os::unix::fs::{FileTypeExt, MetadataExt};
-        match fs::symlink_metadata(&self.path) {
-            Ok(meta)
-                if meta.file_type().is_socket()
-                    && meta.dev() == self.device
-                    && meta.ino() == self.inode =>
+        use rustix::fs::{AtFlags, FileType, statat, unlinkat};
+
+        // Use the opened parent, not a pathname that could be redirected after bind.
+        match statat(&*self.parent, &self.name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat)
+                if FileType::from_raw_mode(stat.st_mode) == FileType::Socket
+                    && (stat.st_dev, stat.st_ino) == (self.stat.st_dev, self.stat.st_ino) =>
             {
-                fs::remove_file(&self.path)
+                unlinkat(&*self.parent, &self.name, AtFlags::empty()).map_err(io::Error::from)
             }
             Ok(_) => Ok(()),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err),
+            Err(rustix::io::Errno::NOENT) => Ok(()),
+            Err(err) => Err(err.into()),
         }
     }
 }
@@ -892,6 +1090,7 @@ async fn serve(
     mut stopped: watch::Receiver<bool>,
 ) -> io::Result<()> {
     let mut tasks = JoinSet::new();
+    let policy_slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let result = loop {
         tokio::select! {
             biased;
@@ -899,7 +1098,7 @@ async fn serve(
             _ = tasks.join_next(), if !tasks.is_empty() => {}
             stream = listener.accept(), if tasks.len() < MAX_CONNECTIONS => match stream {
                 Ok(stream) => {
-                    tasks.spawn(exchange(stream, registry.clone()));
+                    tasks.spawn(exchange(stream, registry.clone(), Arc::clone(&policy_slots)));
                 }
                 Err(err) => break Err(err),
             },
@@ -910,7 +1109,33 @@ async fn serve(
     result
 }
 
-async fn exchange(mut stream: Box<dyn Connection>, registry: HookRegistry) {
+async fn check_policy(
+    policy_slots: Arc<Semaphore>,
+    limit: Duration,
+    decide: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
+    let permit = policy_slots
+        .try_acquire_owned()
+        .map_err(|_| "too many outstanding hook policy checks".to_owned())?;
+    timeout(
+        limit,
+        tokio::task::spawn_blocking(move || {
+            // A timed-out caller cannot cancel running filesystem I/O. Keep its slot
+            // reserved until the blocking check actually exits.
+            let _permit = permit;
+            decide()
+        }),
+    )
+    .await
+    .map_err(|_| "hook policy check timed out".to_owned())?
+    .map_err(|_| "hook policy check failed".to_owned())?
+}
+
+async fn exchange(
+    mut stream: Box<dyn Connection>,
+    registry: HookRegistry,
+    policy_slots: Arc<Semaphore>,
+) {
     let mut line = Vec::new();
     let read = timeout(CONNECTION_TIMEOUT, async {
         BufReader::new((&mut stream).take(MAX_REQUEST_BYTES as u64 + 1))
@@ -931,14 +1156,12 @@ async fn exchange(mut stream: Box<dyn Connection>, registry: HookRegistry) {
         Err(_) => Err("request read timed out".to_owned()),
     };
     let verdict = match request {
-        Ok(request) => timeout(
-            CONNECTION_TIMEOUT,
-            tokio::task::spawn_blocking(move || registry.decide(request)),
-        )
-        .await
-        .map_err(|_| "hook policy check timed out".to_owned())
-        .and_then(|result| result.map_err(|_| "hook policy check failed".to_owned()))
-        .and_then(|verdict| verdict),
+        Ok(request) => {
+            check_policy(policy_slots, CONNECTION_TIMEOUT, move || {
+                registry.decide(request)
+            })
+            .await
+        }
         Err(reason) => Err(reason),
     };
     let reply = match verdict {
@@ -1036,14 +1259,17 @@ impl FirstRunHookProbe {
         let scope = PathScope::new([ScopeEntry::RepoRoot { tests: false }])
             .expect("a repo root makes a scope");
         registry
-            .register_order(ActiveOrderPolicy {
-                order_id: order_id.clone(),
-                worktree_root: worktree.clone(),
-                scope,
-                rules: RepoRules::default(),
-                allow_shell: false,
-                allowed_mcp_tools: BTreeSet::new(),
-            })
+            .register(
+                ActiveOrderPolicy {
+                    order_id: order_id.clone(),
+                    worktree_root: worktree.clone(),
+                    scope,
+                    rules: RepoRules::default(),
+                    allow_shell: false,
+                    allowed_mcp_tools: BTreeSet::new(),
+                },
+                true,
+            )
             .map_err(HookProbeError::Registration)?;
         Ok(Self {
             registry,
@@ -1109,9 +1335,9 @@ impl FirstRunHookProbe {
             .await?;
         // The hook also exits 2 for an unreachable daemon or a malformed reply. Confirm that
         // it received our policy decision, not merely that it failed closed.
-        if !stderr
-            .split(|byte| *byte == b'\n')
-            .any(|line| line.starts_with(b"acan hook: blocked: "))
+        if !String::from_utf8_lossy(&stderr)
+            .lines()
+            .any(|line| line == "acan hook: blocked: .acan/world.db: protected path")
         {
             return Err(HookProbeError::MissingDenial);
         }
@@ -1167,5 +1393,33 @@ impl FirstRunHookProbe {
 impl Drop for FirstRunHookProbe {
     fn drop(&mut self) {
         self.registry.unregister_order(&self.order_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn timed_out_policy_check_occupies_slot_until_it_exits() {
+        let slots = Arc::new(Semaphore::new(1));
+        let (release, blocking) = std::sync::mpsc::channel();
+        let verdict = check_policy(Arc::clone(&slots), Duration::ZERO, move || {
+            let _ = blocking.recv();
+            Ok(())
+        })
+        .await;
+        assert_eq!(verdict.unwrap_err(), "hook policy check timed out");
+        assert_eq!(
+            check_policy(Arc::clone(&slots), Duration::ZERO, || unreachable!())
+                .await
+                .unwrap_err(),
+            "too many outstanding hook policy checks"
+        );
+        release.send(()).expect("unblock policy check");
+        let _permit = timeout(Duration::from_secs(2), slots.acquire())
+            .await
+            .expect("blocking check releases its slot")
+            .expect("semaphore is open");
     }
 }

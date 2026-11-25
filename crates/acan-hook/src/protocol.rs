@@ -20,6 +20,7 @@ pub enum RequestKind {
 
 /// One question from the hook to the daemon.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookRequest {
     pub version: u32,
     pub kind: RequestKind,
@@ -91,7 +92,7 @@ pub fn encode_request(request: &HookRequest) -> Result<String, HookError> {
 /// # Errors
 ///
 /// Returns [`HookError::BadInput`] when the line is incomplete, is not a single JSON
-/// object with unique keys and a known request kind, or has the wrong version.
+/// object with unique keys, known fields and a known request kind, or has the wrong version.
 pub fn parse_request(line: &str) -> Result<HookRequest, HookError> {
     let body = line
         .strip_suffix('\n')

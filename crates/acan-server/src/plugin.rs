@@ -102,18 +102,31 @@ pub fn install_plugin_bundle(
 }
 
 /// Checks the manifest, exact hook entries and optional local MCP config without changing them.
+/// Refuses symlinks and, on Unix, group- or world-writable directories or files in the bundle.
 ///
 /// # Errors
 ///
-/// Returns an error for missing required files, invalid JSON/config, or a different executable.
+/// Returns an error for unsafe paths, missing required files, invalid JSON/config, or a
+/// different executable.
 pub fn verify_plugin_bundle(root: &Path, expected_hook_bin: &Path) -> Result<(), PluginError> {
     let command = hook_command(expected_hook_bin)?;
+    // A trailing separator or `.` can otherwise make symlink_metadata follow a root symlink.
+    let root: PathBuf = root.components().collect();
+    let root = root.as_path();
     for dir in [
         root,
         root.join(".factory-plugin").as_path(),
         root.join("hooks").as_path(),
     ] {
-        require_dir(dir)?;
+        if !has_safe_permissions(&require_dir(dir)?) {
+            return Err(io_at(
+                dir,
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "group/world-writable directory",
+                ),
+            ));
+        }
     }
     let manifest = read_json(root, MANIFEST, false)?.expect("required manifest");
     let valid_manifest = manifest.as_object().is_some_and(|fields| {
@@ -170,9 +183,27 @@ fn mcp_config(url: &str) -> Value {
 
 fn hook_command(path: &Path) -> Result<String, PluginError> {
     let raw = path.to_str().ok_or(PluginError::BadHookPath)?;
+    #[cfg(windows)]
+    let checked = if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        use std::path::{Component, Prefix};
+
+        if !matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+        ) || rest.as_bytes().get(2) != Some(&b'\\')
+        {
+            return Err(PluginError::BadHookPath);
+        }
+        rest
+    } else {
+        raw
+    };
+    #[cfg(not(windows))]
+    let checked = raw;
+
     if !path.is_absolute()
         || path.file_name().is_none()
-        || raw.chars().any(|ch| {
+        || checked.chars().any(|ch| {
             ch.is_control()
                 || matches!(
                     ch,
@@ -248,14 +279,25 @@ fn create_private_dir(path: &Path) -> Result<(), PluginError> {
     Ok(())
 }
 
-fn require_dir(path: &Path) -> Result<(), PluginError> {
-    if !fs::symlink_metadata(path)
-        .map_err(|err| io_at(path, err))?
-        .is_dir()
-    {
+fn require_dir(path: &Path) -> Result<fs::Metadata, PluginError> {
+    let meta = fs::symlink_metadata(path).map_err(|err| io_at(path, err))?;
+    if meta.is_symlink() || !meta.is_dir() {
         return Err(io_at(path, io::Error::other("not a real directory")));
     }
-    Ok(())
+    Ok(meta)
+}
+
+fn has_safe_permissions(meta: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.mode() & 0o022 == 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        true
+    }
 }
 
 fn write_json(path: &Path, value: &Value) -> Result<(), PluginError> {
@@ -286,7 +328,9 @@ fn read_json(
 ) -> Result<Option<Value>, PluginError> {
     let path = root.join(file);
     match fs::symlink_metadata(&path) {
-        Ok(meta) if meta.is_file() => {}
+        Ok(meta) if meta.is_symlink() => return Err(invalid(file, "expected a regular file")),
+        Ok(meta) if meta.is_file() && has_safe_permissions(&meta) => {}
+        Ok(meta) if meta.is_file() => return Err(invalid(file, "group/world-writable file")),
         Ok(_) => return Err(invalid(file, "expected a regular file")),
         Err(err) if optional && err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(io_at(&path, err)),
