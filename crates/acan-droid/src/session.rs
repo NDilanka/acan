@@ -607,5 +607,17 @@ fn response_result(
 }
 
 fn rpc_failure(error: RpcError) -> DroidError {
-    DroidError::Rpc(error.code, error.message)
+    match DroidEvent::response_error(None, error) {
+        DroidEvent::RateLimited {
+            message,
+            retry_after,
+            headroom,
+        } => DroidError::RateLimited {
+            message,
+            retry_after,
+            headroom,
+        },
+        DroidEvent::RequestFailed { error, .. } => DroidError::Rpc(error.code, error.message),
+        _ => unreachable!("an RPC error is either a rate limit or a failed request"),
+    }
 }
