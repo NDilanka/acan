@@ -570,3 +570,39 @@ async fn preserves_staged_chmod_under_filemode_false_and_force_added_ignored_fil
         "expected force-added ignored file preserved, got:\n{tree}"
     );
 }
+
+#[tokio::test]
+async fn rebuilds_scratch_index_without_assume_unchanged_or_split_index_side_effects() {
+    let f = fixture().await;
+    git(f.task.path(), &["config", "core.splitIndex", "true"]);
+    git(
+        f.task.path(),
+        &["config", "splitIndex.sharedIndexExpire", "now"],
+    );
+    // Force a sharedindex file to be written for the real task index, and mark a tracked file
+    // assume-unchanged before modifying it to the exact same byte length.
+    write(f.task.path(), "src/other.txt", "added\n");
+    git(f.task.path(), &["add", "src/other.txt"]);
+    git(
+        f.task.path(),
+        &["update-index", "--assume-unchanged", "src/app.txt"],
+    );
+    let original = fs::read_to_string(f.task.path().join("src/app.txt")).expect("read app.txt");
+    let replacement = "X".repeat(original.len());
+    assert_ne!(original, replacement);
+    write(f.task.path(), "src/app.txt", &replacement);
+
+    let scope = scope("src/");
+    let staged = f
+        .stage(&scope, &RepoRules::default())
+        .await
+        .expect("stage captures assume-unchanged edit without breaking split index");
+    let content = git(
+        &f.repo.root,
+        &["show", &format!("{}:src/app.txt", staged.commit)],
+    );
+    assert_eq!(content, replacement);
+    // The real worktree's split index must still be intact and usable afterwards.
+    let status = git(f.task.path(), &["status", "--porcelain"]);
+    assert!(status.contains("A  src/other.txt"));
+}

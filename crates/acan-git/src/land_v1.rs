@@ -289,7 +289,15 @@ async fn stage(
     }
     let tree = git::ok(
         root,
-        &hooks.args(&["-c", "core.fsmonitor=false", "write-tree"]),
+        &hooks.args(&[
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.splitIndex=false",
+            "-c",
+            "splitIndex.sharedIndexExpire=never",
+            "write-tree",
+        ]),
         &index.env,
     )
     .await?;
@@ -637,12 +645,63 @@ impl Scan<'_> {
             }
         };
         if existing_index.is_file() {
-            std::fs::copy(&existing_index, &index)?;
+            // Rebuild from logical staged entries rather than byte-copying `.git/index`:
+            // this preserves staged filemode changes and force-added ignored files while
+            // stripping assume-unchanged/stat-cache state and split-index sharedindex links.
+            let ls_args = hooks.args(&[
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.splitIndex=false",
+                "ls-files",
+                "--stage",
+                "-z",
+            ]);
+            let staged = git::run_raw(self.root, &ls_args, &[], None).await?;
+            if !staged.status.success() {
+                return Err(staged.into_error(&ls_args).into());
+            }
+            if !staged.stdout.is_empty() {
+                let update_args = hooks.args(&[
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-c",
+                    "core.splitIndex=false",
+                    "-c",
+                    "splitIndex.sharedIndexExpire=never",
+                    "update-index",
+                    "-z",
+                    "--index-info",
+                ]);
+                let updated =
+                    git::run_raw(self.root, &update_args, &env, Some(&staged.stdout)).await?;
+                if !updated.status.success() {
+                    return Err(updated.into_error(&update_args).into());
+                }
+            }
         } else {
-            let args = hooks.args(&["-c", "core.fsmonitor=false", "read-tree", base.as_str()]);
+            let args = hooks.args(&[
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.splitIndex=false",
+                "-c",
+                "splitIndex.sharedIndexExpire=never",
+                "read-tree",
+                base.as_str(),
+            ]);
             git::ok(self.root, &args, &env).await?;
         }
-        let args = hooks.args(&["-c", "core.fsmonitor=false", "add", "-A"]);
+        let args = hooks.args(&[
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.splitIndex=false",
+            "-c",
+            "splitIndex.sharedIndexExpire=never",
+            "add",
+            "-A",
+        ]);
         git::ok(self.root, &args, &env).await?;
         Ok(ScratchIndex { _dir: dir, env })
     }
