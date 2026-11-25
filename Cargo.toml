@@ -1,6 +1,16 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = [
+    "crates/acan-core",
+    "crates/acan-droid",
+    "crates/acan-git",
+    "crates/acan-hook",
+    "crates/acan-intent",
+    "crates/acan-layout",
+    "crates/acan-scan",
+    "crates/acan-server",
+    "crates/acan-witness",
+]
 
 [workspace.package]
 edition = "2024"
