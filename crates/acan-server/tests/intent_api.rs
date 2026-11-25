@@ -15,7 +15,6 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use acan_intent::Scope;
-use acan_llm::{Stub, UsageLedger};
 use acan_server::{DEFAULT_WITNESS_CONCURRENCY, Running, ServerConfig, start};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -72,9 +71,7 @@ async fn boot(repo: &Path) -> Running {
         witness_http_base_url: None,
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
     };
-    start(config, Stub::default(), UsageLedger::default())
-        .await
-        .expect("the server starts")
+    start(config).await.expect("the server starts")
 }
 
 fn url(running: &Running, path: &str) -> String {

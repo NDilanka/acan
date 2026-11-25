@@ -1,8 +1,7 @@
 //! Several projects in one server: each project's routes and tokens, the unprefixed default, and
 //! the one human token every project accepts.
 //!
-//! Each test boots a server over temporary repositories on an ephemeral port. The model client is
-//! the offline stub.
+//! Each test boots a server over temporary repositories on an ephemeral port.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -11,7 +10,6 @@ use std::sync::OnceLock;
 
 use std::time::Duration;
 
-use acan_llm::{Stub, UsageLedger};
 use acan_server::projects::ProjectSet;
 use acan_server::{DEFAULT_WITNESS_CONCURRENCY, Running, ServeConfig, start_projects};
 use futures_util::{SinkExt, StreamExt};
@@ -71,11 +69,7 @@ fn config(repos: &[PathBuf], addr: SocketAddr) -> ServeConfig {
 
 /// Starts a server over `repos` on `addr`. The error is what the server refused.
 async fn try_boot(repos: &[PathBuf], addr: SocketAddr) -> anyhow::Result<Running> {
-    let clients = repos
-        .iter()
-        .map(|_| (Stub::default(), UsageLedger::default()))
-        .collect();
-    start_projects(config(repos, addr), clients).await
+    start_projects(config(repos, addr)).await
 }
 
 async fn boot(repos: &[PathBuf]) -> Running {

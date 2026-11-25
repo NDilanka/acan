@@ -3,8 +3,8 @@
 //! codebases again after a restart.
 //!
 //! Each test makes its user folder and repositories in a temporary directory and listens on an
-//! ephemeral port. The model client is the offline stub. A code's expiry is checked by the unit
-//! tests beside the sign-in codes, since it takes a minute to reach over HTTP.
+//! ephemeral port. A code's expiry is checked by the unit tests beside the sign-in codes, since it
+//! takes a minute to reach over HTTP.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -14,7 +14,6 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use acan_core::MemberId;
-use acan_llm::{Stub, UsageLedger};
 use acan_server::projects::{ProjectSet, ProjectSpec};
 use acan_server::{
     ClientFactory, DEFAULT_WITNESS_CONCURRENCY, Running, ServeConfig, Tokens, UserFolder,
@@ -83,22 +82,17 @@ fn config(projects: &ProjectSet) -> ServeConfig {
     }
 }
 
-/// The stub model for each project, as the test client every add opens.
-fn stub_opener() -> ClientFactory<Stub> {
-    Box::new(|_: &ProjectSpec| Ok::<_, anyhow::Error>((Stub::default(), UsageLedger::default())))
+/// The check every add passes.
+fn stub_opener() -> ClientFactory {
+    Box::new(|_: &ProjectSpec| Ok::<_, anyhow::Error>(()))
 }
 
 /// Starts a server on the user's folder `folder` over `projects`, which may be empty.
 async fn open(projects: &ProjectSet, folder: &Path) -> Running {
-    let clients = projects
-        .projects
-        .iter()
-        .map(|_| (Stub::default(), UsageLedger::default()))
-        .collect();
     let user = UserFolder {
         dir: folder.to_path_buf(),
     };
-    start_open(config(projects), clients, user, stub_opener())
+    start_open(config(projects), user, stub_opener())
         .await
         .expect("the server starts")
 }
@@ -271,8 +265,7 @@ async fn a_server_without_a_user_folder_has_no_sign_in() {
     let root = tempfile::tempdir().expect("temp dir");
     let alpha = repo(root.path(), "alpha");
     let projects = ProjectSet::from_repos(std::slice::from_ref(&alpha));
-    let clients = vec![(Stub::default(), UsageLedger::default())];
-    let running = start_projects(config(&projects), clients)
+    let running = start_projects(config(&projects))
         .await
         .expect("the server starts");
     let token = running

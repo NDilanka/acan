@@ -1,16 +1,15 @@
 //! Project changes that a settings change records, and the start applies: a local worker count per
 //! project, a folder added as a project, a folder removed, and an added folder that cannot be served.
 //!
-//! Each test starts servers over temporary repositories on an ephemeral port. The model client is
-//! the offline stub. A restart applies the changes the way the binary does: the folders the command
-//! line names are changed by what the settings file holds, before the clients are built.
+//! Each test starts servers over temporary repositories on an ephemeral port. A restart applies
+//! the changes the way the binary does: the folders the command line names are changed by what the
+//! settings file holds, before the server starts.
 
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use acan_llm::{Stub, UsageLedger};
 use acan_server::projects::ProjectSet;
 use acan_server::{
     DEFAULT_WITNESS_CONCURRENCY, Running, ServeConfig, apply_project_changes,
@@ -51,11 +50,6 @@ fn client() -> &'static reqwest::Client {
 
 /// Starts a server over `projects`, with its settings in the default project's state directory.
 async fn start(projects: &ProjectSet) -> Running {
-    let clients = projects
-        .projects
-        .iter()
-        .map(|_| (Stub::default(), UsageLedger::default()))
-        .collect();
     let config = ServeConfig {
         projects: projects.clone(),
         addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -65,7 +59,7 @@ async fn start(projects: &ProjectSet) -> Running {
         map_on_first_view: false,
     };
     let settings = default_settings_file(projects);
-    start_projects_with_settings(config, clients, Some(settings))
+    start_projects_with_settings(config, Some(settings))
         .await
         .expect("the server starts")
 }

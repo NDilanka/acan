@@ -15,7 +15,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use acan_core::{Event, MemberId, Seq, TaskId};
 use acan_intent::{GetReceiptRequest, McpErrorCode, McpV1};
-use acan_llm::ModelClient;
 use anyhow::{Context, anyhow, bail, ensure};
 use axum::Json;
 use axum::body::Bytes;
@@ -143,8 +142,8 @@ struct Manifest<'a> {
 /// an unknown token. `403` for any token but the owner's. `409` with `no_recorded_run` when the
 /// export holds the recorded run and the project has none. `500` when an entry still holds a
 /// configured secret, or the archive cannot be written. Nothing is sent on `500`.
-pub(crate) async fn get_export<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+pub(crate) async fn get_export(
+    State(host): State<Host>,
     Extension(owner): Extension<DataOwner>,
     headers: HeaderMap,
     Query(query): Query<ExportQuery>,
@@ -260,8 +259,8 @@ fn is_start_event(event: &Event) -> bool {
 
 /// Refuses anyone but the owner with `why`. An unknown token is refused as unauthorized, since
 /// `authenticate` answers it first.
-fn require_owner<C: ModelClient>(
-    host: &Host<C>,
+fn require_owner(
+    host: &Host,
     headers: &HeaderMap,
     founder: &MemberId,
     why: &'static str,
@@ -274,10 +273,7 @@ fn require_owner<C: ModelClient>(
 
 /// The receipt of every task that has one, as `GET .../tasks/{task}/receipt` answers it, with its
 /// text scrubbed. Tasks are read from the world, in id order. A task with no receipt has no entry.
-fn receipt_entries<C: ModelClient>(
-    host: &Host<C>,
-    redaction: &Redaction,
-) -> Result<Vec<(String, Vec<u8>)>, ApiError> {
+fn receipt_entries(host: &Host, redaction: &Redaction) -> Result<Vec<(String, Vec<u8>)>, ApiError> {
     let mut tasks: Vec<TaskId> = host.read(|world| {
         world
             .orders()
@@ -329,8 +325,8 @@ fn scrub(redaction: &Redaction, value: &mut Value) {
 /// The three files of the recorded run, as `acan export-replay` writes them. They are written to a
 /// temporary folder, read back into memory, and deleted when this returns. `replay::export` refuses
 /// any file that still holds a configured secret, so that refusal reaches the caller as an error.
-async fn replay_entries<C: ModelClient>(
-    host: &Host<C>,
+async fn replay_entries(
+    host: &Host,
     redaction: &Redaction,
 ) -> Result<Vec<(String, Vec<u8>)>, ApiError> {
     let folder = tempfile::tempdir().context("creating the export folder")?;
@@ -410,8 +406,8 @@ pub(crate) struct ClearBody {
 /// Status codes: `200` with what was cleared and what was kept. `400` for a body that is not JSON,
 /// names anything but `local`, does not confirm with `true`, or has an extra key. `401` for an
 /// unknown token. `403` for any token but the owner's. `409` when the dependency cache is a link.
-pub(crate) async fn post_clear<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+pub(crate) async fn post_clear(
+    State(host): State<Host>,
     Extension(owner): Extension<DataOwner>,
     headers: HeaderMap,
     body: Bytes,

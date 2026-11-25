@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use acan_core::{AgentId, MemberId};
-use acan_llm::{ModelClient, Role};
 use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
@@ -81,6 +80,62 @@ macro_rules! named {
             }
         }
     };
+}
+
+/// A job the harness runs a call for. Each role may run through its own adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Role {
+    Foreman,
+    Worker,
+    Fast,
+    Vision,
+    Director,
+    Wonder,
+    Statemap,
+}
+
+impl Role {
+    /// Every role, in the order the settings page lists them.
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Foreman,
+        Self::Worker,
+        Self::Fast,
+        Self::Vision,
+        Self::Director,
+        Self::Wonder,
+        Self::Statemap,
+    ];
+
+    /// The name the settings file and the API use.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Foreman => "foreman",
+            Self::Worker => "worker",
+            Self::Fast => "fast",
+            Self::Vision => "vision",
+            Self::Director => "director",
+            Self::Wonder => "wonder",
+            Self::Statemap => "statemap",
+        }
+    }
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Role {
+    type Err = ();
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|role| role.as_str() == name)
+            .ok_or(())
+    }
 }
 
 named! {
@@ -345,9 +400,9 @@ fn note_each(value: &Value, path: &str, applied: &mut BTreeMap<String, &'static 
 }
 
 /// The settings the server holds, and what the routes read and change them through.
-pub(crate) struct Settings<C> {
+pub(crate) struct Settings {
     /// The projects. Every project's tokens may authenticate a request.
-    projects: Arc<Registry<C>>,
+    projects: Arc<Registry>,
     /// The member the owner token belongs to. Only this member may change the settings.
     founder: MemberId,
     /// The settings file.
@@ -366,13 +421,13 @@ enum Caller {
     Member,
 }
 
-impl<C: ModelClient + 'static> Settings<C> {
+impl Settings {
     /// The settings `stored`, kept in `file`, for the projects in `projects`. `founder` is the
     /// member whose token is the owner's.
     pub(crate) fn new(
         file: PathBuf,
         stored: Stored,
-        projects: Arc<Registry<C>>,
+        projects: Arc<Registry>,
         founder: MemberId,
     ) -> Self {
         Self {
@@ -633,8 +688,8 @@ struct ProjectView {
 
 /// `GET /api/settings`. Any member may read the settings. An agent gets 403, and an unknown token
 /// gets 401. Only the owner is told the settings are editable.
-async fn get_settings<C: ModelClient + 'static>(
-    State(state): State<Arc<Settings<C>>>,
+async fn get_settings(
+    State(state): State<Arc<Settings>>,
     headers: HeaderMap,
 ) -> Result<Json<View>, ApiError> {
     let caller = state.caller(&headers, ONLY_MEMBERS_READ)?;
@@ -649,8 +704,8 @@ async fn get_settings<C: ModelClient + 'static>(
 /// by its dotted path. `400` for a body that is not a settings object or names a section or field
 /// the server does not take. `401` for an unknown token. `403` for any token but the owner's. `422`
 /// with each failing field. `500` when the settings file cannot be written.
-async fn put_settings<C: ModelClient + 'static>(
-    State(state): State<Arc<Settings<C>>>,
+async fn put_settings(
+    State(state): State<Arc<Settings>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
@@ -706,8 +761,8 @@ struct AddProject {
 /// is already served, or the server was started without live adds. `422` with the reason when the
 /// path is not an existing absolute folder, sits inside another project's state folder, or is inside
 /// the public folder. `500` when the folder cannot be opened or the settings cannot be saved.
-async fn post_project<C: ModelClient + 'static>(
-    State(state): State<Arc<Settings<C>>>,
+async fn post_project(
+    State(state): State<Arc<Settings>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
@@ -749,8 +804,8 @@ async fn post_project<C: ModelClient + 'static>(
 
 /// `GET /api/settings/tokens/owner`. Only the owner may read the owner's token. It is returned
 /// whole, the one place a read carries a token. `401` for an unknown token, `403` for any other.
-async fn get_owner_token<C: ModelClient + 'static>(
-    State(state): State<Arc<Settings<C>>>,
+async fn get_owner_token(
+    State(state): State<Arc<Settings>>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     state.owner_only(&headers, ONLY_OWNER_TOKENS)?;
@@ -767,8 +822,8 @@ async fn get_owner_token<C: ModelClient + 'static>(
 /// When a project's tokens file cannot be written, the rotation stops there: the projects before
 /// it hold the new token, and the others still hold the old one. The response is `500` and names
 /// the step that failed. It never claims success, and it never carries a token.
-async fn rotate_owner_token<C: ModelClient + 'static>(
-    State(state): State<Arc<Settings<C>>>,
+async fn rotate_owner_token(
+    State(state): State<Arc<Settings>>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     state.owner_only(&headers, ONLY_OWNER_TOKENS)?;
@@ -801,8 +856,8 @@ async fn rotate_owner_token<C: ModelClient + 'static>(
 ///
 /// A failure stops the rotation and returns `500` with the step that failed, as the owner rotation
 /// does.
-async fn rotate_agent_tokens<C: ModelClient + 'static>(
-    State(state): State<Arc<Settings<C>>>,
+async fn rotate_agent_tokens(
+    State(state): State<Arc<Settings>>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     state.owner_only(&headers, ONLY_OWNER_TOKENS)?;
@@ -843,8 +898,8 @@ fn rotation_failed(step: &str, err: &anyhow::Error) -> Response {
 ///
 /// Status codes: `200` with the check. `401` for an unknown token. `403` for any token but the
 /// owner's.
-async fn get_update_check<C: ModelClient + 'static>(
-    State(state): State<Arc<Settings<C>>>,
+async fn get_update_check(
+    State(state): State<Arc<Settings>>,
     headers: HeaderMap,
 ) -> Result<Json<update::Check>, ApiError> {
     state.owner_only(&headers, ONLY_OWNER_UPDATES)?;
@@ -861,8 +916,8 @@ async fn get_update_check<C: ModelClient + 'static>(
 /// owner's. `409` with `no_flavor`, `offline`, `no_prerelease`, `no_asset` or `checksum_mismatch`
 /// when the update cannot be verified, which installs nothing. `500` when the download cannot be
 /// written or the setup cannot start.
-async fn post_update<C: ModelClient + 'static>(
-    State(state): State<Arc<Settings<C>>>,
+async fn post_update(
+    State(state): State<Arc<Settings>>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     state.owner_only(&headers, ONLY_OWNER_UPDATES)?;
@@ -906,23 +961,20 @@ fn update_failure(err: update::UpdateError) -> ApiError {
 
 /// The settings routes. They are global, since the settings belong to the server and not to a
 /// project.
-pub(crate) fn routes<C: ModelClient + 'static>(state: Arc<Settings<C>>) -> Router {
+pub(crate) fn routes(state: Arc<Settings>) -> Router {
     Router::new()
-        .route(
-            "/api/settings",
-            get(get_settings::<C>).put(put_settings::<C>),
-        )
-        .route("/api/settings/projects", post(post_project::<C>))
-        .route("/api/settings/update", post(post_update::<C>))
-        .route("/api/settings/update/check", get(get_update_check::<C>))
-        .route("/api/settings/tokens/owner", get(get_owner_token::<C>))
+        .route("/api/settings", get(get_settings).put(put_settings))
+        .route("/api/settings/projects", post(post_project))
+        .route("/api/settings/update", post(post_update))
+        .route("/api/settings/update/check", get(get_update_check))
+        .route("/api/settings/tokens/owner", get(get_owner_token))
         .route(
             "/api/settings/tokens/owner/rotate",
-            post(rotate_owner_token::<C>),
+            post(rotate_owner_token),
         )
         .route(
             "/api/settings/tokens/agents/rotate",
-            post(rotate_agent_tokens::<C>),
+            post(rotate_agent_tokens),
         )
         .with_state(state)
 }

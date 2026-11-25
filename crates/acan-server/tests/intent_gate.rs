@@ -58,7 +58,6 @@ use acan_intent::{
     EpisodeKey, FixtureId, FoldedLedger, ItemClass, ItemState, LedgerEvent, Outcome, ProbeCorpus,
     Receipt, Scope, ScopeConfirmation, canonical_episode_selector, fold,
 };
-use acan_llm::{Stub, UsageLedger};
 use acan_server::{
     DEFAULT_PROBE_CONCURRENCY, DEFAULT_WITNESS_CONCURRENCY, EventStore, Host, HostParts, Tokens,
     scan, spawn_jobs,
@@ -882,7 +881,7 @@ async fn a_pending_ruling_survives_a_restart_and_is_answered_in_the_log() {
     // The owner posts the order the residue belongs to, so a ruling on it has an order to name.
     // Nothing is ruled yet: the core ledger is empty and the residue is pending.
     let state = tempfile::tempdir().expect("a temporary state root");
-    let first = host_over(state.path(), Stub::default()).await;
+    let first = host_over(state.path()).await;
     owner_says(
         &first,
         HumanCmd::PostOrder {
@@ -917,7 +916,7 @@ async fn a_pending_ruling_survives_a_restart_and_is_answered_in_the_log() {
 
     // A restart rebuilds the host from the same store, and nothing from the first start is kept.
     // The ruling is still pending: the answer state comes from the stored events alone.
-    let restarted = host_over(state.path(), Stub::default()).await;
+    let restarted = host_over(state.path()).await;
     assert_eq!(
         land::pending(&judged.receipt, &answered_in(&restarted)),
         vec![waiting.clone()],
@@ -972,7 +971,7 @@ async fn a_pending_ruling_survives_a_restart_and_is_answered_in_the_log() {
     drop(restarted);
 
     // A second restart folds the same answer from the stored events, and nothing is pending.
-    let rebuilt = host_over(state.path(), Stub::default()).await;
+    let rebuilt = host_over(state.path()).await;
     let folded = rebuilt
         .folded_rulings()
         .expect("the rebuilt host folds the ledger");
@@ -1007,7 +1006,7 @@ async fn a_pending_ruling_survives_a_restart_and_is_answered_in_the_log() {
 }
 
 /// The episodes the host's core ledger answers, read the way the gate reads them.
-fn answered_in(host: &Host<Stub>) -> BTreeSet<EpisodeId> {
+fn answered_in(host: &Host) -> BTreeSet<EpisodeId> {
     host.read(|world| land::answered(world.ledger().events()))
 }
 
@@ -1031,16 +1030,11 @@ const SIGNUP_FILE: &str = "src/auth.ts";
 /// every probe three times in Docker, so this covers a slow machine.
 const LIVE_WAIT: Duration = Duration::from_secs(900);
 
-/// A stub model client; the job loop no longer calls a model to split orders.
-fn foreman() -> Stub {
-    Stub::default()
-}
-
 /// A host built over `root`, the way the server builds one: its own store and state directory
 /// under `root/.acan`, the protected branch when `root` is a git checkout, and nothing running.
 /// Like the server, it writes the state directory's `.gitignore` only when there is none: the
 /// demo tracks its own, and overwriting that file would dirty the protected checkout.
-async fn host_over(root: &Path, client: Stub) -> Host<Stub> {
+async fn host_over(root: &Path) -> Host {
     let state = root.join(".acan");
     fs::create_dir_all(&state).expect("the state dir");
     let ignore = state.join(".gitignore");
@@ -1079,8 +1073,6 @@ async fn host_over(root: &Path, client: Stub) -> Host<Stub> {
         store,
         tokens,
         scan: scan(root).expect("the scan succeeds"),
-        ledger: UsageLedger::default(),
-        client,
         repo: root.to_path_buf(),
         shutdown,
         git,
@@ -1101,14 +1093,14 @@ fn trace_server() {
 
 /// A live host with its job loop running.
 struct Live {
-    host: Host<Stub>,
+    host: Host,
     jobs: JoinHandle<()>,
 }
 
 impl Live {
     async fn start(root: &Path) -> Self {
         trace_server();
-        let host = host_over(root, foreman()).await;
+        let host = host_over(root).await;
         let jobs = spawn_jobs(host.clone());
         host.wake_jobs();
         Self { host, jobs }
@@ -1123,7 +1115,7 @@ impl Live {
 }
 
 /// Sends `cmd` as the owner.
-async fn owner_says(host: &Host<Stub>, cmd: HumanCmd) {
+async fn owner_says(host: &Host, cmd: HumanCmd) {
     host.submit(Command::Human {
         member: owner(),
         cmd,
@@ -1133,7 +1125,7 @@ async fn owner_says(host: &Host<Stub>, cmd: HumanCmd) {
 }
 
 /// Sends `cmd` as the worker.
-async fn worker_says(host: &Host<Stub>, cmd: AgentCmd) {
+async fn worker_says(host: &Host, cmd: AgentCmd) {
     host.submit(Command::Agent {
         agent: worker(),
         cmd,
@@ -1188,7 +1180,7 @@ async fn report_built(live: &Live, demo: &Demo, candidate: &CommitSha) -> (Order
 
 /// Registers the worker, posts the demo order, and records its single split task. Returns
 /// the order and its one task.
-async fn post_and_split(host: &Host<Stub>) -> (OrderId, TaskId) {
+async fn post_and_split(host: &Host) -> (OrderId, TaskId) {
     owner_says(host, HumanCmd::RegisterAgent { agent: worker() }).await;
     owner_says(
         host,
@@ -1223,13 +1215,7 @@ async fn post_and_split(host: &Host<Stub>) -> (OrderId, TaskId) {
 
 /// The owner confirms `scope` for `order`, the worker reads it back, claims, declares, and
 /// reports `candidate` built. The gate run it starts waits for its prepared candidate.
-async fn build(
-    host: &Host<Stub>,
-    order: OrderId,
-    task: TaskId,
-    scope: &Scope,
-    candidate: &CommitSha,
-) {
+async fn build(host: &Host, order: OrderId, task: TaskId, scope: &Scope, candidate: &CommitSha) {
     owner_says(
         host,
         HumanCmd::ReviseScope {
@@ -1540,12 +1526,12 @@ fn gating_run(world: &World, task: TaskId) -> Option<GateRunId> {
 async fn passed_candidate(
     demo: &Demo,
     candidate: &CommitSha,
-) -> (Host<Stub>, OrderId, TaskId, GateRunId) {
+) -> (Host, OrderId, TaskId, GateRunId) {
     let live = Live::start(&demo.root).await;
     let (order, task) = post_and_split(&live.host).await;
     live.stop().await;
 
-    let host = host_over(&demo.root, foreman()).await;
+    let host = host_over(&demo.root).await;
     let scope = limit_scope(&order.to_string(), &demo.head(), 1);
     build(&host, order, task, &scope, candidate).await;
     let run = host
@@ -1671,7 +1657,7 @@ async fn a_land_installed_before_its_result_was_recorded_is_recorded_as_landed()
     );
     assert_eq!(demo.head(), candidate, "the install moved the branch");
 
-    let host = host_over(&demo.root, foreman()).await;
+    let host = host_over(&demo.root).await;
     let jobs = spawn_jobs(host.clone());
     host.wake_jobs();
     until("the queued land to be decided", || {
@@ -1701,7 +1687,7 @@ async fn a_land_installed_before_its_result_was_recorded_is_recorded_as_landed()
 
 /// Records a passing receipt for `run` on the context it was prepared with, as a judge that passed
 /// would. The task is queued when this returns. Returns the merged commit that receipt tests.
-async fn pass_on_prepared(host: &Host<Stub>, order: OrderId, run: GateRunId) -> CommitSha {
+async fn pass_on_prepared(host: &Host, order: OrderId, run: GateRunId) -> CommitSha {
     let prepared = host
         .read(|world| {
             world
@@ -1746,7 +1732,7 @@ async fn a_moved_protected_head_rebinds_the_scope_and_the_candidate_is_judged_ag
     .await;
     live.stop().await;
 
-    let host = host_over(&demo.root, foreman()).await;
+    let host = host_over(&demo.root).await;
     let old_merged = pass_on_prepared(&host, order, run).await;
 
     let moved = demo.advance(|root| {
@@ -1835,7 +1821,7 @@ async fn a_moved_protected_input_refuses_the_rebind_and_nothing_lands() {
     .await;
     live.stop().await;
 
-    let host = host_over(&demo.root, foreman()).await;
+    let host = host_over(&demo.root).await;
     pass_on_prepared(&host, order, run).await;
 
     let moved = demo.advance(|root| {

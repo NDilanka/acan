@@ -5,7 +5,6 @@ use std::io::{self, IsTerminal};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-use acan_llm::{Stub, UsageLedger};
 use acan_server::init_cli::{self, InitArgs};
 use acan_server::open::{self, Browser, RunDir};
 use acan_server::projects::{ProjectSet, ProjectSpec};
@@ -298,7 +297,6 @@ async fn serve(args: ServeArgs) -> Result<()> {
         release::spawn_update_check();
     }
 
-    let clients = projects.projects.iter().map(|_| stub_client()).collect();
     let config = ServeConfig {
         projects,
         addr: SocketAddr::new(args.bind, args.port),
@@ -317,8 +315,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let map_on_view = args.map_on_first_view;
     // A server that maps on first view is listening before its codebases map, so it does not wait
     // for them: the first page is what starts each map. Otherwise the start waits for every map.
-    let mut running =
-        start_projects_adding(config, clients, Some(settings), Box::new(open_stub)).await?;
+    let mut running = start_projects_adding(config, Some(settings), Box::new(open_stub)).await?;
     if !map_on_view && let Err(err) = running.wait_mapped().await {
         let _ = running.stop().await;
         return Err(err);
@@ -428,7 +425,6 @@ async fn open_server(args: OpenServerArgs) -> Result<()> {
         release::spawn_update_check();
     }
 
-    let clients = projects.projects.iter().map(|_| stub_client()).collect();
     let config = ServeConfig {
         projects,
         addr: SocketAddr::from((Ipv4Addr::LOCALHOST, args.port)),
@@ -439,7 +435,7 @@ async fn open_server(args: OpenServerArgs) -> Result<()> {
     };
     let user = UserFolder { dir: folder };
     // The codebases map while the server already answers, so the launcher's wait stays short.
-    let mut running = start_open(config, clients, user, Box::new(open_stub)).await?;
+    let mut running = start_open(config, user, Box::new(open_stub)).await?;
     let written = run
         .write_pid(std::process::id())
         .and_then(|()| run.write_port(running.local_addr.port()));
@@ -469,15 +465,9 @@ async fn open_server(args: OpenServerArgs) -> Result<()> {
     outcome.and(stopped)
 }
 
-/// The client and ledger a project starts with, whether it opens at startup or is added later.
-fn stub_client() -> (Stub, UsageLedger) {
-    let client = Stub::default();
-    let ledger = client.ledger().clone();
-    (client, ledger)
-}
-
-fn open_stub(_: &ProjectSpec) -> Result<(Stub, UsageLedger)> {
-    Ok(stub_client())
+/// The check a project added while the server runs passes before it opens.
+fn open_stub(_: &ProjectSpec) -> Result<()> {
+    Ok(())
 }
 
 /// Completes on Ctrl-C. A process with no console may be unable to listen for it, and then this

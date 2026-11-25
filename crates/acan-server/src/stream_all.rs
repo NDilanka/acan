@@ -26,7 +26,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use acan_core::{Seq, Stamped};
-use acan_llm::ModelClient;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::HeaderMap;
@@ -64,9 +63,9 @@ struct Subscription {
 }
 
 /// One project a multiplexed stream serves: what its token may read, and where its client is.
-struct Member<C> {
+struct Member {
     id: String,
-    host: Host<C>,
+    host: Host,
     principal: Principal,
     resume: Resume,
 }
@@ -106,8 +105,8 @@ struct ProjectScan<'a, T: Serialize> {
 ///
 /// The token is checked after the upgrade, so a token that is a member of no project gets a
 /// 1008 close frame rather than a refused upgrade, as the protocol describes.
-pub(crate) async fn upgrade<C: ModelClient + 'static>(
-    State(projects): State<Arc<Registry<C>>>,
+pub(crate) async fn upgrade(
+    State(projects): State<Arc<Registry>>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -121,8 +120,8 @@ pub(crate) async fn upgrade<C: ModelClient + 'static>(
 }
 
 /// Registers the stream so shutdown can wait for it to close, then runs it.
-fn track<C: ModelClient + 'static>(
-    projects: &Arc<Registry<C>>,
+fn track(
+    projects: &Arc<Registry>,
     socket: WebSocket,
     header_token: Option<String>,
     revocations: broadcast::Receiver<String>,
@@ -134,8 +133,8 @@ fn track<C: ModelClient + 'static>(
     streams.spawn(pump);
 }
 
-async fn pump<C: ModelClient + 'static>(
-    projects: Arc<Registry<C>>,
+async fn pump(
+    projects: Arc<Registry>,
     mut socket: WebSocket,
     header_token: Option<String>,
     mut revocations: broadcast::Receiver<String>,
@@ -337,7 +336,7 @@ async fn pump<C: ModelClient + 'static>(
 
 /// The projects `token` is a member of, each with what that token may read. The subscription
 /// fills in where each one starts.
-fn members_of<C: ModelClient>(entries: &[Arc<Entry<C>>], token: &str) -> Vec<Member<C>> {
+fn members_of(entries: &[Arc<Entry>], token: &str) -> Vec<Member> {
     entries
         .iter()
         .filter_map(|entry| {
@@ -489,7 +488,6 @@ mod tests {
     use std::str::FromStr;
     use std::time::Duration;
 
-    use acan_llm::{Stub, UsageLedger};
     use futures_util::{SinkExt, StreamExt};
     use serde_json::{Value, json};
     use tokio::net::TcpStream;
@@ -533,13 +531,7 @@ mod tests {
             witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
             map_on_first_view: false,
         };
-        let clients = repos
-            .iter()
-            .map(|_| (Stub::default(), UsageLedger::default()))
-            .collect();
-        let running = start_projects(config, clients)
-            .await
-            .expect("the server starts");
+        let running = start_projects(config).await.expect("the server starts");
         let token = running
             .owner_token
             .as_ref()

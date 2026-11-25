@@ -17,7 +17,6 @@
 use std::time::Duration;
 
 use acan_core::{Seq, Stamped};
-use acan_llm::ModelClient;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
@@ -79,8 +78,8 @@ enum Access {
 /// Returns [`ApiError::Unauthorized`] before the upgrade when an `Authorization` header carries
 /// an unknown token. Without the header, the upgrade proceeds and the first frame must
 /// authenticate.
-pub async fn upgrade<C: ModelClient + 'static>(
-    State(host): State<Host<C>>,
+pub async fn upgrade(
+    State(host): State<Host>,
     headers: HeaderMap,
     Query(query): Query<StreamQuery>,
     ws: WebSocketUpgrade,
@@ -102,8 +101,8 @@ pub async fn upgrade<C: ModelClient + 'static>(
 }
 
 /// Registers the stream so shutdown can wait for it to close, then runs it.
-fn track<C: ModelClient + 'static>(
-    host: &Host<C>,
+fn track(
+    host: &Host,
     socket: WebSocket,
     from: Seq,
     access: Access,
@@ -143,8 +142,8 @@ pub(crate) async fn next_text(socket: &mut WebSocket) -> Option<String> {
 
 /// Waits for a valid token frame and returns the principal it names, with the token's text. `None`
 /// means the client sent anything else, sent nothing in time, or left.
-async fn first_frame_authenticates<C: ModelClient>(
-    host: &Host<C>,
+async fn first_frame_authenticates(
+    host: &Host,
     socket: &mut WebSocket,
 ) -> Option<(Principal, String)> {
     let text = next_text(socket).await?;
@@ -153,8 +152,8 @@ async fn first_frame_authenticates<C: ModelClient>(
     Some((principal, frame.token))
 }
 
-async fn pump<C: ModelClient>(
-    host: Host<C>,
+async fn pump(
+    host: Host,
     mut socket: WebSocket,
     from: Seq,
     access: Access,
@@ -460,7 +459,6 @@ mod tests {
     use acan_core::{
         Actor, CodeRev, Event, HumanCmd, MemberId, Role as MemberRole, Seq, Stamped, Timestamp,
     };
-    use acan_llm::{Stub, UsageLedger};
     use futures_util::StreamExt;
     use serde_json::Value;
     use tokio::net::TcpStream;
@@ -495,9 +493,7 @@ mod tests {
             witness_http_base_url: None,
             witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
         };
-        start(config, Stub::default(), UsageLedger::default())
-            .await
-            .expect("the server starts")
+        start(config).await.expect("the server starts")
     }
 
     async fn connect(running: &Running, token: &str) -> Socket {

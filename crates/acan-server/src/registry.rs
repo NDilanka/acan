@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use acan_core::MemberId;
-use acan_llm::ModelClient;
 use axum::Json;
 use axum::Router;
 use axum::extract::State;
@@ -25,16 +24,16 @@ use crate::signin::SignIns;
 /// Every project one server runs, and which of them answers the unprefixed routes. A project added
 /// while the server runs joins the list, so the list is read through [`Registry::entries`]. The list
 /// may be empty: a server opened with no codebase runs none until one is added.
-pub(crate) struct Registry<C> {
+pub(crate) struct Registry {
     /// The id the unprefixed routes map to. Empty while no project runs, and then the first project
     /// added becomes the default.
     default_id: RwLock<String>,
     /// The projects, in the order the server was given them and then the order they were added.
-    entries: RwLock<Vec<Arc<Entry<C>>>>,
+    entries: RwLock<Vec<Arc<Entry>>>,
     /// The multiplexed streams, which span projects, so shutdown waits for them here.
     streams: Arc<Mutex<JoinSet<()>>>,
     /// What a project added while the server runs is opened with. `None` refuses such adds.
-    live: Option<LiveContext<C>>,
+    live: Option<LiveContext>,
     /// The server's shutdown signal, which every stream that is not a project's follows.
     shutdown: watch::Receiver<bool>,
     /// The user's own folder, when the server was opened with `acan open`. Its owner token signs in
@@ -57,13 +56,13 @@ pub(crate) struct HomeTokens {
 }
 
 /// One project as the server runs it.
-pub(crate) struct Entry<C> {
+pub(crate) struct Entry {
     /// The URL segment and the key every API and log line uses for this project.
     pub(crate) id: String,
     /// The name the UI shows.
     pub(crate) name: String,
     /// The project's host: its writer, its snapshot, its tokens and its git state.
-    pub(crate) host: Host<C>,
+    pub(crate) host: Host,
     /// The protected branch head the list last read, with the seq of the snapshot it was read at.
     /// It is read again only when the snapshot moves, so the list does not run git per request.
     pub(crate) head: tokio::sync::Mutex<Option<(u64, Option<String>)>>,
@@ -77,15 +76,15 @@ pub(crate) struct Entry<C> {
     pub(crate) plain: Option<Router>,
 }
 
-impl<C> Registry<C> {
+impl Registry {
     /// A registry of `entries`, whose default is `default_id`. The entries may be empty, and then
     /// the default is empty too. `live` says how a project added later is opened, and `None` refuses
     /// such adds. `shutdown` is the server's signal, and `home` is the user's folder if there is one.
     pub(crate) fn new(
         default_id: String,
-        entries: Vec<Entry<C>>,
+        entries: Vec<Entry>,
         streams: Arc<Mutex<JoinSet<()>>>,
-        live: Option<LiveContext<C>>,
+        live: Option<LiveContext>,
         shutdown: watch::Receiver<bool>,
         home: Option<HomeTokens>,
     ) -> Self {
@@ -109,7 +108,7 @@ impl<C> Registry<C> {
     }
 
     /// Every project, in the order it joined the registry.
-    pub(crate) fn entries(&self) -> Vec<Arc<Entry<C>>> {
+    pub(crate) fn entries(&self) -> Vec<Arc<Entry>> {
         self.entries
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -118,7 +117,7 @@ impl<C> Registry<C> {
 
     /// Adds a project that was opened while the server runs. The first one added becomes the
     /// default when no project ran before.
-    pub(crate) fn add(&self, entry: Entry<C>) {
+    pub(crate) fn add(&self, entry: Entry) {
         {
             let mut default_id = self
                 .default_id
@@ -150,7 +149,7 @@ impl<C> Registry<C> {
     }
 
     /// What a project added while the server runs is opened with, or `None` when such adds are off.
-    pub(crate) fn live(&self) -> Option<&LiveContext<C>> {
+    pub(crate) fn live(&self) -> Option<&LiveContext> {
         self.live.as_ref()
     }
 
@@ -182,7 +181,7 @@ impl<C> Registry<C> {
     }
 }
 
-impl<C: ModelClient> Registry<C> {
+impl Registry {
     /// The principal `token` acts for in any project or in the user's folder, or `None` for an
     /// unknown token. Each project's tokens are asked, then the user's folder.
     pub(crate) fn principal(&self, token: &str) -> Option<Principal> {
@@ -235,8 +234,8 @@ struct NeedsYouView {
 /// project's tokens file, so a token sees only the projects it may use. A token that is a member
 /// of none gets 401, the same answer an unknown token gets from any route. The owner of a user's
 /// folder gets an empty list while no project runs.
-pub(crate) async fn list_projects<C: ModelClient + 'static>(
-    State(projects): State<Arc<Registry<C>>>,
+pub(crate) async fn list_projects(
+    State(projects): State<Arc<Registry>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ProjectView>>, ApiError> {
     let token = bearer(&headers).ok_or(ApiError::Unauthorized)?;
@@ -258,7 +257,7 @@ pub(crate) async fn list_projects<C: ModelClient + 'static>(
 }
 
 /// One project's entry in the list, read from its last committed snapshot.
-async fn view<C: ModelClient + 'static>(entry: &Entry<C>, default_id: &str) -> ProjectView {
+async fn view(entry: &Entry, default_id: &str) -> ProjectView {
     let now = crate::host::now();
     let (seq, workers, needs) = entry.host.read(|world| {
         let seq = world.next_seq().get().saturating_sub(1);
@@ -309,7 +308,7 @@ async fn view<C: ModelClient + 'static>(entry: &Entry<C>, default_id: &str) -> P
 
 /// The protected branch head at snapshot `seq`. Read from git only when `seq` differs from the
 /// seq it was last read at. `None` when the project has no usable git state.
-async fn head_commit<C: ModelClient + 'static>(entry: &Entry<C>, seq: u64) -> Option<String> {
+async fn head_commit(entry: &Entry, seq: u64) -> Option<String> {
     let mut cached = entry.head.lock().await;
     if let Some((cached_seq, commit)) = cached.as_ref()
         && *cached_seq == seq
@@ -339,7 +338,6 @@ mod tests {
     use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
 
-    use acan_llm::{Stub, UsageLedger};
     use reqwest::StatusCode;
     use serde_json::{Value, json};
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -369,13 +367,7 @@ mod tests {
             witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
             map_on_first_view: false,
         };
-        let clients = repos
-            .iter()
-            .map(|_| (Stub::default(), UsageLedger::default()))
-            .collect();
-        start_projects(config, clients)
-            .await
-            .expect("the server starts")
+        start_projects(config).await.expect("the server starts")
     }
 
     async fn get(running: &Running, path: &str, token: &str) -> (StatusCode, Value) {

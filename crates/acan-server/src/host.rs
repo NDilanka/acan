@@ -8,7 +8,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use acan_core::{Command, Event, HumanCmd, Origin, Rejection, Stamped, Timestamp, World};
 use acan_intent::{CoreDerived, FoldedLedger, fold};
-use acan_llm::{ModelClient, UsageLedger};
 use acan_scan::Progress;
 use anyhow::Context as _;
 use tokio::sync::{Notify, Semaphore, broadcast, watch};
@@ -45,7 +44,7 @@ pub enum SubmitError {
 }
 
 /// Everything a [`Host`] owns at startup.
-pub struct HostParts<C> {
+pub struct HostParts {
     /// The origin, already opened or replayed from the stored log.
     pub origin: Origin,
     /// The stored log the origin writes to.
@@ -54,10 +53,6 @@ pub struct HostParts<C> {
     pub tokens: Tokens,
     /// The scan the origin reads for detection.
     pub scan: Scan,
-    /// The usage ledger the model client records into.
-    pub ledger: UsageLedger,
-    /// The model client that runs derived jobs.
-    pub client: C,
     /// The repository being served.
     pub repo: PathBuf,
     /// Signalled when the server shuts down; streams close and new work stops.
@@ -76,11 +71,11 @@ pub struct HostParts<C> {
 }
 
 /// One world's host. Cloning shares the same writer, log and broadcast.
-pub struct Host<C> {
-    inner: Arc<Inner<C>>,
+pub struct Host {
+    inner: Arc<Inner>,
 }
 
-struct Inner<C> {
+struct Inner {
     writer: Writer,
     snapshots: watch::Receiver<Arc<Snapshot>>,
     store: EventStore,
@@ -89,8 +84,6 @@ struct Inner<C> {
     /// The live transition touches of accepted writes. Never stored.
     touches: broadcast::Sender<TransitionTouch>,
     wake: Arc<Notify>,
-    ledger: UsageLedger,
-    client: C,
     repo: PathBuf,
     shutdown: watch::Receiver<bool>,
     streams: Arc<Mutex<JoinSet<()>>>,
@@ -118,7 +111,7 @@ struct Inner<C> {
     mapping_hold: crate::stream::Hold,
 }
 
-impl<C> Clone for Host<C> {
+impl Clone for Host {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -126,7 +119,7 @@ impl<C> Clone for Host<C> {
     }
 }
 
-impl<C: ModelClient> Host<C> {
+impl Host {
     /// Builds a host from its parts and starts the writer task. The caller decides when to run
     /// jobs.
     ///
@@ -134,7 +127,7 @@ impl<C: ModelClient> Host<C> {
     ///
     /// Panics when called outside a Tokio runtime, or when `probe_concurrency` is zero.
     #[must_use]
-    pub fn new(parts: HostParts<C>) -> Self {
+    pub fn new(parts: HostParts) -> Self {
         let slots = Arc::new(Semaphore::new(parts.witness_concurrency));
         Self::new_with_slots(parts, slots)
     }
@@ -146,7 +139,7 @@ impl<C: ModelClient> Host<C> {
     ///
     /// Panics when called outside a Tokio runtime, or when `probe_concurrency` is zero.
     #[must_use]
-    pub fn new_with_slots(parts: HostParts<C>, slots: Arc<Semaphore>) -> Self {
+    pub fn new_with_slots(parts: HostParts, slots: Arc<Semaphore>) -> Self {
         Self::build(parts, slots, false)
     }
 
@@ -158,11 +151,11 @@ impl<C: ModelClient> Host<C> {
     ///
     /// Panics when called outside a Tokio runtime, or when `probe_concurrency` is zero.
     #[must_use]
-    pub(crate) fn new_mapping(parts: HostParts<C>, slots: Arc<Semaphore>) -> Self {
+    pub(crate) fn new_mapping(parts: HostParts, slots: Arc<Semaphore>) -> Self {
         Self::build(parts, slots, true)
     }
 
-    fn build(parts: HostParts<C>, slots: Arc<Semaphore>, mapping: bool) -> Self {
+    fn build(parts: HostParts, slots: Arc<Semaphore>, mapping: bool) -> Self {
         assert!(
             parts.probe_concurrency > 0,
             "probe_concurrency must allow at least one probe, got {}",
@@ -201,8 +194,6 @@ impl<C: ModelClient> Host<C> {
                 events,
                 touches,
                 wake,
-                ledger: parts.ledger,
-                client: parts.client,
                 repo: parts.repo,
                 shutdown: parts.shutdown,
                 streams: Arc::new(Mutex::new(JoinSet::new())),
@@ -277,18 +268,6 @@ impl<C: ModelClient> Host<C> {
     #[must_use]
     pub fn store(&self) -> &EventStore {
         &self.inner.store
-    }
-
-    /// Model usage recorded by the client.
-    #[must_use]
-    pub fn ledger(&self) -> &UsageLedger {
-        &self.inner.ledger
-    }
-
-    /// The model client that runs derived jobs.
-    #[must_use]
-    pub fn client(&self) -> &C {
-        &self.inner.client
     }
 
     /// The repository being served.
@@ -579,7 +558,6 @@ pub(crate) mod testing {
     use std::sync::Arc;
 
     use acan_core::{MemberId, Origin, Timestamp, WorldId, WorldRef};
-    use acan_llm::{ModelClient, UsageLedger};
     use tokio::sync::{Semaphore, watch};
 
     use super::{Host, HostParts};
@@ -588,35 +566,25 @@ pub(crate) mod testing {
     use crate::store::EventStore;
     use crate::{DEFAULT_PROBE_CONCURRENCY, DEFAULT_WITNESS_CONCURRENCY};
 
-    /// A host over the repository at `repo`, which holds only the world's opening event, with
-    /// `client` as its model client and no git workspace.
-    pub(crate) async fn host_with<C: ModelClient + 'static>(repo: &Path, client: C) -> Host<C> {
-        host_signalled(repo, client).await.0
+    /// A host over the repository at `repo`, which holds only the world's opening event and has
+    /// no git workspace.
+    pub(crate) async fn host_with(repo: &Path) -> Host {
+        host_signalled(repo).await.0
     }
 
     /// [`host_with`], and the sender that signals the host's shutdown. Dropping the sender leaves
     /// the host unsignalled for good.
-    pub(crate) async fn host_signalled<C: ModelClient + 'static>(
-        repo: &Path,
-        client: C,
-    ) -> (Host<C>, watch::Sender<bool>) {
-        fixture(repo, client, false).await
+    pub(crate) async fn host_signalled(repo: &Path) -> (Host, watch::Sender<bool>) {
+        fixture(repo, false).await
     }
 
     /// A host over `repo` that is still mapping: its scan is the skeleton, and it takes no writes
     /// until its scan commits and it opens.
-    pub(crate) async fn mapping_host<C: ModelClient + 'static>(
-        repo: &Path,
-        client: C,
-    ) -> (Host<C>, watch::Sender<bool>) {
-        fixture(repo, client, true).await
+    pub(crate) async fn mapping_host(repo: &Path) -> (Host, watch::Sender<bool>) {
+        fixture(repo, true).await
     }
 
-    async fn fixture<C: ModelClient + 'static>(
-        repo: &Path,
-        client: C,
-        mapping: bool,
-    ) -> (Host<C>, watch::Sender<bool>) {
+    async fn fixture(repo: &Path, mapping: bool) -> (Host, watch::Sender<bool>) {
         let state = repo.join(".acan");
         std::fs::create_dir_all(&state).expect("the state dir");
         let store = EventStore::open(&state.join("world.db"))
@@ -646,8 +614,6 @@ pub(crate) mod testing {
             } else {
                 scan(repo).expect("the scan")
             },
-            ledger: UsageLedger::default(),
-            client,
             repo: repo.to_path_buf(),
             shutdown,
             git: None,
@@ -671,7 +637,6 @@ mod mapping_tests {
     use std::time::Duration;
 
     use acan_core::{Command, HumanCmd, MemberId, Role};
-    use acan_llm::Stub;
     use tokio::time::timeout;
 
     use super::SubmitError;
@@ -703,7 +668,7 @@ mod mapping_tests {
             "export function load() {\n  return 1;\n}\n",
         )
         .expect("write fixture");
-        let (host, _shutdown) = mapping_host(repo, Stub::default()).await;
+        let (host, _shutdown) = mapping_host(repo).await;
         let hold = host.inner.mapping_hold.clone();
         hold.hold();
         let scanning = tokio::spawn({
@@ -767,7 +732,7 @@ mod mapping_tests {
             "export function load() {\n  return 1;\n}\n",
         )
         .expect("write fixture");
-        let (host, _shutdown) = mapping_host(repo, Stub::default()).await;
+        let (host, _shutdown) = mapping_host(repo).await;
         host.hold_until_viewed();
         assert_eq!(host.scan_feed().status().stage, Stage::Waiting);
         assert!(

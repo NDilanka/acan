@@ -10,7 +10,6 @@ use std::str::FromStr;
 
 use acan_core::{CodeIndex, MachineKey, OrderId, World};
 use acan_intent::{MachineId, PlantView, ProbeCorpus, Receipt, RouteEntry, RouteTemplate, Scope};
-use acan_llm::ModelClient;
 use anyhow::anyhow;
 
 use crate::STATE_DIR;
@@ -32,10 +31,7 @@ const NO_RECEIPT: &str = "no receipt for this order yet";
 /// no receipt for its confirmed scope. Returns [`ApiError::Internal`] when the receipt's corpus
 /// cannot be read or does not match the receipt, or when the view cannot be built from the
 /// receipt; the detail goes to the log.
-pub(crate) async fn order_view<C: ModelClient + 'static>(
-    host: &Host<C>,
-    order: OrderId,
-) -> Result<PlantView, ApiError> {
+pub(crate) async fn order_view(host: &Host, order: OrderId) -> Result<PlantView, ApiError> {
     let (receipt, scope, plate) = host.read(|world| latest(world, order))?;
     let workspace = host.workspace().ok_or_else(|| {
         ApiError::Internal(anyhow!(
@@ -145,7 +141,6 @@ fn machine_id(key: &MachineKey) -> Result<MachineId, ApiError> {
 #[cfg(test)]
 mod tests {
     use acan_intent::{ProbeCorpus, Receipt, Scope};
-    use acan_llm::Stub;
     use serde::de::DeserializeOwned;
     use serde_json::Value;
 
@@ -222,7 +217,7 @@ mod tests {
     #[tokio::test]
     async fn an_order_the_world_does_not_have_is_not_found() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let host = host_with(dir.path(), Stub::default()).await;
+        let host = host_with(dir.path()).await;
         let order = "o-1".parse().expect("an order id");
 
         let err = order_view(&host, order)

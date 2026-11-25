@@ -11,7 +11,6 @@ use acan_core::{
     Command, HumanCmd, MemberId, Origin, Role as MemberRole, Seq, SystemCmd, Timestamp, WorldId,
     WorldRef,
 };
-use acan_llm::{Stub, UsageLedger};
 use acan_server::{
     DEFAULT_PROBE_CONCURRENCY, DEFAULT_WITNESS_CONCURRENCY, EventStore, Host, HostParts, Running,
     ServerConfig, Tokens, scan, start,
@@ -66,7 +65,7 @@ fn token_of(running: &Running) -> String {
         .to_owned()
 }
 
-async fn host_for(dir: &tempfile::TempDir) -> (Host<Stub>, EventStore) {
+async fn host_for(dir: &tempfile::TempDir) -> (Host, EventStore) {
     let state = dir.path().join(".acan");
     fs::create_dir_all(&state).expect("state dir");
     let path = state.join("world.db");
@@ -90,8 +89,6 @@ async fn host_for(dir: &tempfile::TempDir) -> (Host<Stub>, EventStore) {
         store: store.clone(),
         tokens,
         scan: scan(dir.path()).expect("scan"),
-        ledger: UsageLedger::default(),
-        client: Stub::default(),
         repo: dir.path().to_path_buf(),
         shutdown,
         git: None,
@@ -172,9 +169,7 @@ async fn a_cancelled_submit_still_commits_and_the_log_stays_contiguous() {
 #[tokio::test]
 async fn stop_waits_for_an_in_flight_write_and_the_log_replays_afterwards() {
     let dir = repo();
-    let running = start(config(&dir), Stub::default(), UsageLedger::default())
-        .await
-        .expect("start");
+    let running = start(config(&dir)).await.expect("start");
     let token = token_of(&running);
     let addr = running.local_addr;
     let path = dir.path().join(".acan/world.db");
@@ -316,7 +311,7 @@ async fn a_web_root_that_holds_private_state_is_refused() {
             web: Some(web.clone()),
             ..config(&dir)
         };
-        let err = start(config, Stub::default(), UsageLedger::default())
+        let err = start(config)
             .await
             .expect_err("a root holding private state is refused");
         assert!(
@@ -350,14 +345,10 @@ async fn public_files_are_served_but_private_state_is_not_reachable_without_a_to
     let public = dir.path().join("public");
     fs::create_dir_all(&public).expect("public directory");
     fs::write(public.join("index.html"), "<p>acan</p>").expect("index page");
-    let running = start(
-        ServerConfig {
-            web: Some(public.clone()),
-            ..config(&dir)
-        },
-        Stub::default(),
-        UsageLedger::default(),
-    )
+    let running = start(ServerConfig {
+        web: Some(public.clone()),
+        ..config(&dir)
+    })
     .await
     .expect("a dedicated public directory is accepted");
     link_dir(&dir.path().join(".acan"), &public.join("leak"));

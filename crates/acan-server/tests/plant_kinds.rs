@@ -1,15 +1,13 @@
 //! Who may set a machine's kind, and what the change does: the owner writes `.acan/kinds.json`,
 //! the rescan redraws the machine, and a member or an agent gets 403.
 //!
-//! Each test boots a server over a temporary repository on an ephemeral port. The model client is
-//! the offline stub.
+//! Each test boots a server over a temporary repository on an ephemeral port.
 
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use acan_llm::{Stub, UsageLedger};
 use acan_server::projects::ProjectSet;
 use acan_server::{DEFAULT_WITNESS_CONCURRENCY, Running, ServeConfig, start_projects};
 use reqwest::{Method, StatusCode};
@@ -52,9 +50,7 @@ async fn boot(repo: &Path) -> Running {
         witness_concurrency: DEFAULT_WITNESS_CONCURRENCY,
         map_on_first_view: false,
     };
-    start_projects(config, vec![(Stub::default(), UsageLedger::default())])
-        .await
-        .expect("the server starts")
+    start_projects(config).await.expect("the server starts")
 }
 
 /// One client for every request, so the tests share its connection pool.

@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use acan_core::{MemberId, Origin, Seq};
-use acan_llm::{ModelClient, UsageLedger};
 use anyhow::Context as _;
 use tokio::sync::{Semaphore, watch};
 
@@ -23,13 +22,12 @@ use crate::store::EventStore;
 use crate::{DB_FILE, DEFAULT_PROBE_CONCURRENCY, Runtime, STATE_DIR};
 use crate::{index, jobs, map_project, open_git, prepare_state_dir};
 
-/// Opens the client and usage ledger of a project added while the server runs.
-pub type ClientFactory<C> =
-    Box<dyn Fn(&ProjectSpec) -> anyhow::Result<(C, UsageLedger)> + Send + Sync>;
+/// Checks a project added while the server runs before it opens.
+pub type ClientFactory = Box<dyn Fn(&ProjectSpec) -> anyhow::Result<()> + Send + Sync>;
 
 /// What a live add needs from the server that started. Built by startup, so a project opened later
 /// gets the same witness pool, shutdown signal and owner as the others.
-pub(crate) struct LiveContext<C> {
+pub(crate) struct LiveContext {
     /// The member whose token is the owner's.
     pub(crate) founder: MemberId,
     /// Signalled when the server shuts down.
@@ -40,8 +38,8 @@ pub(crate) struct LiveContext<C> {
     pub(crate) witness_concurrency: usize,
     /// The public folder, if one is served. A project's folder must sit outside it.
     pub(crate) web: Option<PathBuf>,
-    /// Opens the model client of a project added while the server runs.
-    pub(crate) open_client: ClientFactory<C>,
+    /// Checks a project added while the server runs before it opens.
+    pub(crate) open_client: ClientFactory,
     /// The runtimes of projects added while the server runs. Shutdown stops them.
     pub(crate) runtimes: Arc<Mutex<Vec<Runtime>>>,
     /// The user's folder, when the server was opened with one. Its tokens file is read first, so a
@@ -57,8 +55,8 @@ pub(crate) struct LiveContext<C> {
 ///
 /// Returns the status the request should get: `400` for an empty path, `409` when the folder is
 /// already served, and `422` with the rule it breaks for any other path.
-pub(crate) fn check_new<C: ModelClient + 'static>(
-    projects: &Registry<C>,
+pub(crate) fn check_new(
+    projects: &Registry,
     folder: &str,
     web: Option<&Path>,
 ) -> Result<ProjectSpec, ApiError> {
@@ -110,11 +108,11 @@ pub(crate) fn check_new<C: ModelClient + 'static>(
 ///
 /// # Errors
 ///
-/// Returns an error when the project's folder, tokens, event log or model client cannot be opened,
-/// or when its state folder cannot be written. A project that fails here is not registered.
-pub(crate) async fn open<C: ModelClient + 'static>(
-    live: &LiveContext<C>,
-    registry: &Registry<C>,
+/// Returns an error when the project's folder, tokens or event log cannot be opened, or when its
+/// state folder cannot be written. A project that fails here is not registered.
+pub(crate) async fn open(
+    live: &LiveContext,
+    registry: &Registry,
     spec: ProjectSpec,
 ) -> anyhow::Result<(String, String)> {
     let state_dir = spec.repo.join(STATE_DIR);
@@ -150,7 +148,7 @@ pub(crate) async fn open<C: ModelClient + 'static>(
     let scan = tokio::task::spawn_blocking(move || index::skeleton(&repo))
         .await
         .context("the skeleton scan task did not finish")??;
-    let (client, ledger) = (live.open_client)(&spec)?;
+    (live.open_client)(&spec)?;
     let git = open_git(&spec).await;
     let host = Host::new_mapping(
         HostParts {
@@ -158,8 +156,6 @@ pub(crate) async fn open<C: ModelClient + 'static>(
             store,
             tokens,
             scan,
-            ledger,
-            client,
             repo: spec.repo.clone(),
             shutdown: live.shutdown.clone(),
             git,
