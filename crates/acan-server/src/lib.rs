@@ -14,6 +14,7 @@ mod auth;
 pub mod deps;
 mod examples;
 mod git;
+pub mod hook_gate;
 mod host;
 mod http;
 mod index;
@@ -37,6 +38,7 @@ mod observe;
 pub mod open;
 pub mod order_runner;
 mod plant_view;
+pub mod plugin;
 pub mod projects;
 mod public;
 #[allow(

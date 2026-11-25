@@ -103,6 +103,7 @@ dependencies = [
  "percent-encoding",
  "regex",
  "reqwest",
+ "rustix",
  "semver",
  "serde",
  "serde_json",
