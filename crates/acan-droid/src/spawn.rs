@@ -66,6 +66,13 @@ impl SpawnConfig {
         self
     }
 
+    /// Adds one explicit variable using the existing environment's cleanup rules.
+    #[must_use]
+    pub fn with_env_var(mut self, name: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.env.insert(name, value);
+        self
+    }
+
     /// Overrides the default version range.
     #[must_use]
     pub fn with_version_policy(mut self, policy: VersionPolicy) -> Self {
