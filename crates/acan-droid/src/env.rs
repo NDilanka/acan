@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -15,6 +15,7 @@ const RESERVED_PREFIXES: [&[u8]; 3] = [b"BUN_", b"FACTORY_", b"DROID_"];
 #[derive(Clone, Default)]
 pub struct CleanEnv {
     extras: BTreeMap<OsString, OsString>,
+    removed: BTreeSet<String>,
 }
 
 impl fmt::Debug for CleanEnv {
@@ -40,6 +41,14 @@ impl CleanEnv {
         }
     }
 
+    /// Removes a name from both the inherited environment and existing explicit variables.
+    /// A subsequent explicit insertion can set a new value for that name.
+    pub fn remove(&mut self, name: &str) {
+        self.extras
+            .retain(|key, _| !key.as_encoded_bytes().eq_ignore_ascii_case(name.as_bytes()));
+        self.removed.insert(name.to_owned());
+    }
+
     pub(crate) fn apply(&self, command: &mut Command) {
         self.apply_from(command, env::vars_os());
     }
@@ -51,7 +60,13 @@ impl CleanEnv {
     ) {
         command
             .env_clear()
-            .envs(inherited.into_iter().filter(|(name, _)| !is_reserved(name)))
+            .envs(inherited.into_iter().filter(|(name, _)| {
+                !is_reserved(name)
+                    && !self.removed.iter().any(|removed| {
+                        name.as_encoded_bytes()
+                            .eq_ignore_ascii_case(removed.as_bytes())
+                    })
+            }))
             .envs(&self.extras)
             .env(AUTO_UPDATE, "false");
     }
@@ -76,6 +91,10 @@ mod tests {
         env.insert("ACAN_TEST_ORDER", "test-order");
         env.insert("factory_droid_auto_update_enabled", "true");
         env.insert("BuN_explicit", "blocked");
+        env.insert("ACAN_TEST_ENDPOINT", "stale explicit endpoint");
+        env.remove("ACAN_TEST_ENDPOINT");
+        env.remove("ACAN_TEST_ORDER");
+        env.insert("ACAN_TEST_ORDER", "test-order");
         // Use synthetic inherited values instead of changing the test process's environment.
         let inherited = [
             ("BUN_JSC_useJIT", "false"),
@@ -83,6 +102,8 @@ mod tests {
             ("DrOiD_SESSION", "synthetic"),
             ("FACTORY_DROID_AUTO_UPDATE_ENABLED", "true"),
             ("ACAN_TEST_KEEP", "keep"),
+            ("ACAN_TEST_ENDPOINT", "stale inherited endpoint"),
+            ("acan_test_order", "stale inherited order"),
         ]
         .map(|(name, value)| (name.into(), value.into()));
 

@@ -34,6 +34,7 @@ mod mcp;
 mod observations;
 mod observe;
 pub mod open;
+pub mod order_runner;
 mod plant_view;
 pub mod projects;
 mod public;

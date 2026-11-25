@@ -65,6 +65,16 @@ pub enum DroidError {
     /// Droid rejected a JSON-RPC request.
     #[error("droid RPC error {0}: {1}")]
     Rpc(i64, String),
+    /// Droid reported a quota or rate limit before the turn could start.
+    #[error("droid rate limit: {message}")]
+    RateLimited {
+        /// Droid's error message.
+        message: String,
+        /// Suggested wait, when supplied.
+        retry_after: Option<std::time::Duration>,
+        /// Quota information, when supplied.
+        headroom: Headroom,
+    },
     /// The startup handshake did not confirm the requested settings.
     #[error("droid settings did not confirm the requested {0}")]
     SettingsMismatch(&'static str),
