@@ -792,8 +792,9 @@ fn shell_words(command: &str) -> Result<(Vec<String>, bool), String> {
     let mut has_redirection_or_grouping = false;
     let mut chars = command.chars().peekable();
     while let Some(ch) = chars.next() {
-        let control = ch.is_control() && !matches!(ch, '\n' | '\r' | '\t');
-        if control || (cfg!(windows) && matches!(ch, '%' | '!' | '^')) {
+        let control = ch.is_control() && !matches!(ch, '\n' | '\t');
+        let unsupported_space = ch.is_whitespace() && !matches!(ch, ' ' | '\t' | '\n');
+        if control || unsupported_space || (cfg!(windows) && matches!(ch, '%' | '!' | '^')) {
             return Err("command contains unsupported shell syntax".to_owned());
         }
         if quote == Some(ch) {
@@ -820,12 +821,15 @@ fn shell_words(command: &str) -> Result<(Vec<String>, bool), String> {
             word.push(ch);
         } else if ch == '"' || (cfg!(unix) && ch == '\'') {
             quote = Some(ch);
-        } else if ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '<' | '>' | '(' | ')') {
+        } else if matches!(
+            ch,
+            ' ' | '\t' | '\n' | ';' | '&' | '|' | '<' | '>' | '(' | ')'
+        ) {
             has_redirection_or_grouping |= matches!(ch, '<' | '>' | '(' | ')');
             if !word.is_empty() {
                 words.push(std::mem::take(&mut word));
             }
-            if matches!(ch, '\n' | '\r' | ';' | '&' | '|' | '<' | '>' | '(' | ')') {
+            if matches!(ch, '\n' | ';' | '&' | '|' | '<' | '>' | '(' | ')') {
                 words.push(String::new());
             }
         } else if matches!(ch, '*' | '?' | '[' | ']' | '{' | '}' | '~' | '#') {
