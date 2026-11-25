@@ -539,3 +539,34 @@ async fn refuses_a_nonportable_path_inherited_unchanged_from_the_protected_head(
         head
     );
 }
+
+#[tokio::test]
+async fn preserves_staged_chmod_under_filemode_false_and_force_added_ignored_files() {
+    let f = fixture().await;
+    write(f.task.path(), ".gitignore", "src/forced.gen\n");
+    write(f.task.path(), "src/forced.gen", "generated in scope\n");
+    git(f.task.path(), &["config", "core.filemode", "false"]);
+    git(
+        f.task.path(),
+        &["update-index", "--chmod=+x", "src/app.txt"],
+    );
+    git(f.task.path(), &["add", "-f", "src/forced.gen"]);
+
+    let scope = scope(".");
+    let staged = f
+        .stage(&scope, &RepoRules::default())
+        .await
+        .expect("stage preserves index metadata");
+    let tree = git(
+        &f.repo.root,
+        &["ls-tree", "-r", staged.commit.as_str(), "--", "src/"],
+    );
+    assert!(
+        tree.contains("100755 blob") && tree.contains("src/app.txt"),
+        "expected executable mode preserved for src/app.txt, got:\n{tree}"
+    );
+    assert!(
+        tree.contains("src/forced.gen"),
+        "expected force-added ignored file preserved, got:\n{tree}"
+    );
+}

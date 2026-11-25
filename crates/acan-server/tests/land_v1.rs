@@ -177,6 +177,7 @@ const SK_TOKEN: &str = "sk-fake_token_0123456789";
 const BEARER: &str = "Bearer demo.header.signature";
 const FINE_PAT: &str = "github_pat_0123456789abcdef_test";
 const SLACK_TOKEN: &str = "xoxb-0000000000-test";
+const SLACK_REFRESH: &str = "xoxe-1-0000000000-refresh";
 const DAEMON_SECRET_VAR: &str = "ACAN_LANDING_REGRESSION_SECRET";
 
 // Run this binary as a check so the command/args and timeouts work on both Unix and Windows
@@ -207,12 +208,16 @@ fn check_fixture() {
             eprint!("{}", "e".repeat(200 * 1024));
         }
         "secrets" => {
-            println!("{LITERAL} {SK_TOKEN} {BEARER} {FINE_PAT} {SLACK_TOKEN}");
-            eprintln!("{LITERAL} {SK_TOKEN} {BEARER} {FINE_PAT} {SLACK_TOKEN}");
+            println!("{LITERAL} {SK_TOKEN} {BEARER} {FINE_PAT} {SLACK_TOKEN} {SLACK_REFRESH}");
+            eprintln!("{LITERAL} {SK_TOKEN} {BEARER} {FINE_PAT} {SLACK_TOKEN} {SLACK_REFRESH}");
         }
         "cut secret" => {
             // The cap lands inside the literal on stderr, with no other output on that stream.
             eprint!("{}{LITERAL}{}", "x".repeat(1012), "z".repeat(4096));
+        }
+        "cut xoxe" => {
+            // The cap lands inside a Slack refresh token on stderr.
+            eprint!("{}{SLACK_REFRESH}{}", "x".repeat(1014), "z".repeat(4096));
         }
         "failure" => panic!("failed with {LITERAL}"),
         #[cfg(unix)]
@@ -595,8 +600,17 @@ async fn masks_check_output_before_returning_or_persisting_it() {
         &receipt.audit.checks[0].stdout,
         &records[0].checks[0].stderr,
     ] {
-        assert!(output.contains("[REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED]"));
-        for secret in [LITERAL, SK_TOKEN, BEARER, FINE_PAT, SLACK_TOKEN] {
+        assert!(
+            output.contains("[REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED]")
+        );
+        for secret in [
+            LITERAL,
+            SK_TOKEN,
+            BEARER,
+            FINE_PAT,
+            SLACK_TOKEN,
+            SLACK_REFRESH,
+        ] {
             assert!(!output.contains(secret));
         }
     }
@@ -619,6 +633,18 @@ async fn masks_a_literal_cut_in_half_at_the_capture_boundary() {
     assert!(output.stderr.ends_with("[REDACTED]"));
     assert!(!output.stderr.contains("fake"));
     assert!(output.stderr.len() <= 1024);
+
+    let f_xoxe = fixture("cut xoxe").await;
+    let sink_xoxe = f_xoxe.sink();
+    let receipt_xoxe =
+        execute_v1_landing(f_xoxe.request(&checks, &SecretMasker::default(), &sink_xoxe))
+            .await
+            .expect("land cut xoxe");
+    let output_xoxe = &receipt_xoxe.audit.checks[0];
+    assert!(output_xoxe.truncated);
+    assert!(output_xoxe.stderr.ends_with("[REDACTED]"));
+    assert!(!output_xoxe.stderr.contains("xoxe"));
+    assert!(output_xoxe.stderr.len() <= 1024);
 }
 
 #[test]
@@ -627,10 +653,11 @@ fn masks_other_high_confidence_tokens_and_private_key_blocks() {
     assert_eq!(
         masker.mask(concat!(
             "ghp_1234567890abcdef acan_owner_0123456789abcdef AKIA0000111122223333 ",
+            "xoxe-1-0000000000-refresh xoxe.xoxp-1-0000000000-access ",
             "-----BEGIN OPENSSH PRIVATE KEY-----\nnot a real key\n-----END OPENSSH PRIVATE KEY-----",
             "\nkeep this"
         )),
-        "[REDACTED] [REDACTED] [REDACTED] [REDACTED]\nkeep this",
+        "[REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED]\nkeep this",
     );
 }
 
@@ -706,6 +733,18 @@ async fn masks_diagnostics_from_staging_check_spawn_and_install() {
     assert!(matches!(&staged, LandGateError::Stage(detail) if detail.contains("[REDACTED]")));
     assert!(!format!("{staged:?} {staged}").contains(SLACK_TOKEN));
     fs::remove_file(outside).expect("restore task worktree");
+
+    let refresh_token = "xoxe-1-0000000000-refresh";
+    let outside_refresh = f.worktree.path().join(refresh_token);
+    fs::write(&outside_refresh, "outside scope").expect("create outside-scope refresh file");
+    let staged_refresh = execute_v1_landing(f.request(&checks, &masker, &sink))
+        .await
+        .expect_err("refuse out-of-scope refresh token file");
+    assert!(
+        matches!(&staged_refresh, LandGateError::Stage(detail) if detail.contains("[REDACTED]"))
+    );
+    assert!(!format!("{staged_refresh:?} {staged_refresh}").contains(refresh_token));
+    fs::remove_file(outside_refresh).expect("restore task worktree");
 
     let missing = FrozenCheckSet::freeze(
         vec![CheckCommand {

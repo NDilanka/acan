@@ -172,8 +172,6 @@ impl Repo {
             let args = hooks.args(&[
                 "merge-tree",
                 "--write-tree",
-                "--merge-base",
-                staged.base.as_str(),
                 expected_head.as_str(),
                 staged.commit.as_str(),
             ]);
@@ -629,8 +627,21 @@ impl Scan<'_> {
             "GIT_INDEX_FILE".to_owned(),
             crate::repo::path_str(&index)?.to_owned(),
         )];
-        let args = hooks.args(&["-c", "core.fsmonitor=false", "read-tree", base.as_str()]);
-        git::ok(self.root, &args, &env).await?;
+        let index_path_raw = git::ok(self.root, &["rev-parse", "--git-path", "index"], &[]).await?;
+        let existing_index = {
+            let candidate = Path::new(index_path_raw.trim_end_matches(['\r', '\n']));
+            if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                self.root.join(candidate)
+            }
+        };
+        if existing_index.is_file() {
+            std::fs::copy(&existing_index, &index)?;
+        } else {
+            let args = hooks.args(&["-c", "core.fsmonitor=false", "read-tree", base.as_str()]);
+            git::ok(self.root, &args, &env).await?;
+        }
         let args = hooks.args(&["-c", "core.fsmonitor=false", "add", "-A"]);
         git::ok(self.root, &args, &env).await?;
         Ok(ScratchIndex { _dir: dir, env })

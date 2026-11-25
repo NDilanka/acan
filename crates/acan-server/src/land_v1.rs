@@ -152,7 +152,7 @@ static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
         r"|sk-[A-Za-z0-9_-]{16,}",
         r"|gh[pousr]_[A-Za-z0-9_]{16,}",
         r"|github_pat_[A-Za-z0-9_]{16,}",
-        r"|xox[baprs]-[A-Za-z0-9-]{10,}",
+        r"|xox(?:e\.xox[baprs]|[bapers])-[A-Za-z0-9-]{10,}",
         r"|acan_[a-z_]*[0-9a-f]{16,}",
         r"|(?i:\bBearer)[ \t]+[A-Za-z0-9._~+/-]+=*",
         r"|AKIA[0-9A-Z]{16}",
@@ -164,7 +164,7 @@ static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
 static PARTIAL_TOKENS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"(?:sk-[A-Za-z0-9_-]*|gh[pousr]_[A-Za-z0-9_]*|github_pat_[A-Za-z0-9_]*",
-        r"|xox[baprs]-[A-Za-z0-9-]*|acan_[a-z_0-9]*",
+        r"|xox(?:e(?:\.xox[baprs]?)?|[bapers])-[A-Za-z0-9-]*|acan_[a-z_0-9]*",
         r"|AKIA[0-9A-Z]*|(?i:\bBearer)[ \t]+|-----BEGIN [A-Z0-9 -]*)\z",
     ))
     .expect("valid partial secret patterns")
