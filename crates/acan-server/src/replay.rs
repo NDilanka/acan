@@ -2,10 +2,10 @@
 //!
 //! The export writes three files into a folder: `plant.json`, the plant of the checkout as the
 //! page draws it; `events.json`, the stored log as an agent reads it; and `manifest.json`, what
-//! the page needs to label itself. Events are read through the agent view, so scope drafts and
-//! their failure reasons are null. The plant's root is the folder name, not the path. Before
-//! anything is written, every file goes through the bug report's redaction. A file that still
-//! holds a secret, a token or a private path fails the export, and nothing is written.
+//! the page needs to label itself. Events are read through the agent view, so unrecognized event
+//! kinds retain their tag but not their payload. The plant's root is the folder name, not the
+//! path. Before anything is written, every file goes through the bug report's redaction. A file
+//! that still holds a secret, a token or a private path fails the export, and nothing is written.
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;

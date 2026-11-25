@@ -130,7 +130,7 @@ pub struct Order {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderState {
-    /// Waiting for the foreman's split.
+    /// Waiting for a human to split the order.
     Splitting,
     /// Tasks exist.
     Split,
@@ -148,7 +148,7 @@ pub enum OrderState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum OrderPhase {
-    /// The foreman is splitting the order.
+    /// The order is waiting to be split.
     Splitting,
     /// Workers are reading back and claiming.
     ReadingBack,
@@ -194,7 +194,7 @@ impl NeedsYou {
     }
 }
 
-/// One unit of work the foreman split from an order.
+/// One unit of work split from an order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskSpec {
     /// A short title.
@@ -461,9 +461,10 @@ pub(crate) fn decide_post_order(
     }])
 }
 
-/// `SplitReady`: rejects a result for an old revision or an order that is not `Splitting`.
-pub(crate) fn decide_split_ready(
+/// `SplitOrder`: only the poster or an owner may split an order at its current revision.
+pub(crate) fn decide_split(
     world: &World,
+    member: &MemberId,
     order: OrderId,
     rev: OrderRev,
     tasks: Vec<TaskSpec>,
@@ -471,6 +472,12 @@ pub(crate) fn decide_split_ready(
     let o = world
         .order(order)
         .ok_or_else(|| Rejection::unknown("order", order))?;
+    let owner = world.member(member).is_some_and(|m| m.role == Role::Owner);
+    if &o.posted_by != member && !owner {
+        return Err(Rejection::forbidden(
+            "only the poster or an owner splits an order",
+        ));
+    }
     match o.state {
         OrderState::Splitting => {}
         OrderState::Split => return Err(Rejection::wrong_state("order", "split")),
@@ -491,8 +498,7 @@ pub(crate) fn decide_split_ready(
 }
 
 /// `PostReadback`: an agent reads back a task. Allowed while the task is `Open` or held by
-/// another agent, so a standby agent can be matched and ready when the lease ends. Either way
-/// the readback joins the order's `Review` job.
+/// another agent, so a standby agent can be matched and ready when the lease ends.
 pub(crate) fn decide_readback(
     world: &World,
     agent: &AgentId,
@@ -527,10 +533,9 @@ pub(crate) fn decide_readback(
 /// `ReadbacksReviewed`: records verdicts for the current revision and pins at most one
 /// question.
 ///
-/// Accepted only while the order's `Review` job is derived, and only for readbacks in that
-/// job, each named once. The job's set can grow while a review is running, so any part of it
-/// is accepted; a readback that already has its verdict, or whose task is no longer open or
-/// claimed, is not, so a late retry cannot rewrite the verdict a live claim stands on.
+/// Accepted only for legacy orders with pending readbacks and no open question. A result can
+/// cover any subset of pending readbacks, each named once. A readback that already has its
+/// verdict or whose task is no longer open or claimed is not pending.
 pub(crate) fn decide_reviewed(
     world: &World,
     order: OrderId,

@@ -1169,8 +1169,8 @@ fn claimed_generation(world: &World, task: TaskId) -> Option<acan_core::Generati
 }
 
 /// Drives the world to a built candidate with core commands only. The owner registers the
-/// worker, posts the order, and confirms the scope once the job loop has split it. The worker
-/// reads back, claims, declares, and reports `candidate`. Returns the order and its one task.
+/// worker, posts and splits the order, and confirms the scope. The worker reads back, claims,
+/// declares, and reports `candidate`. Returns the order and its one task.
 async fn report_built(live: &Live, demo: &Demo, candidate: &CommitSha) -> (OrderId, TaskId) {
     let (order, task) = post_and_split(&live.host).await;
     let scope = scope_of(&order.to_string(), &demo.head());
@@ -1195,17 +1195,19 @@ async fn post_and_split(host: &Host) -> (OrderId, TaskId) {
         host.read(|world| world.orders().next().map(|order| order.id))
     })
     .await;
-    host.submit(Command::System(SystemCmd::SplitReady {
-        order,
-        rev: OrderRev::new(0),
-        tasks: vec![TaskSpec {
-            title: "signup".to_owned(),
-            brief: "keep the signup answer as it is".to_owned(),
-            scope: vec![MachineKey::from_str(MACHINE).expect("valid machine key")],
-        }],
-    }))
-    .await
-    .expect("the split is accepted");
+    owner_says(
+        host,
+        HumanCmd::SplitOrder {
+            order,
+            rev: OrderRev::new(0),
+            tasks: vec![TaskSpec {
+                title: "signup".to_owned(),
+                brief: "keep the signup answer as it is".to_owned(),
+                scope: vec![MachineKey::from_str(MACHINE).expect("valid machine key")],
+            }],
+        },
+    )
+    .await;
     let task = until("the split task", || {
         host.read(|world| world.tasks_of(order).next().map(|task| task.id))
     })

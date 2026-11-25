@@ -29,11 +29,10 @@ mod world;
 
 pub use clash::{
     Barrier, BarrierHold, Clash, ClashKey, ClashState, ContractRef, Declaration, DeclarationInput,
-    Explanation, Overlap, OverlapKind, Settlement, SymbolRef, detect,
+    Overlap, OverlapKind, Settlement, SymbolRef, detect,
 };
 pub use event::{
-    Actor, AgentCmd, CallFailure, Command, Event, HumanCmd, Rejection, ReplayError, Stamped,
-    SystemCmd, VisionCounts, VisionStatus,
+    Actor, AgentCmd, Command, Event, HumanCmd, Rejection, ReplayError, Stamped, SystemCmd,
 };
 pub use gate::{GateRun, GateVerdict, WitnessOutcome};
 pub use ids::{
@@ -45,7 +44,7 @@ pub use index::{Belt, CodeIndex, IndexedFile, IndexedSymbol, Locus};
 pub use job::Job;
 pub use lane::{
     ConfirmedInputs, LaneRun, MAX_PREDICTIONS, PendingContrast, ProtectedInputs, ScopeBinding,
-    ScopeDraftOutcome, ScopeLane, ScopedReadback, confirmation_body,
+    ScopeLane, ScopedReadback, confirmation_body,
 };
 pub use lease::{Claim, DECLARE_BARRIER_MS, Fence, LEASE_TTL_MS, Lease, LeaseEnd};
 pub use member::{AgentPrincipal, Member, Role, SettleRight};
@@ -58,4 +57,4 @@ pub use repair::{
     ScoreOutcome, score_predictions,
 };
 pub use ruling::{Ledger, LedgerRefusal};
-pub use world::{Ctx, ModelUsage, Origin, Replica, Step, TokenCount, World, WorldRef};
+pub use world::{Ctx, Origin, Replica, UnknownEvent, World, WorldRef};

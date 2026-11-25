@@ -1,14 +1,14 @@
 mod common;
 
 use acan_core::{
-    AgentCmd, Check, Event, HumanCmd, Job, Judgement, LeaseEnd, OrderId, OrderPhase, OrderRev,
-    OrderState, ReadbackVerdict, Rejection, ReplayError, Replica, SystemCmd, TaskSpec, TaskState,
-    WitnessKind, WitnessSpec,
+    Actor, AgentCmd, Check, Event, HumanCmd, Judgement, LeaseEnd, OrderId, OrderPhase, OrderRev,
+    OrderState, ReadbackVerdict, Rejection, ReplayError, Replica, Role, SystemCmd, TaskSpec,
+    TaskState, WitnessKind, WitnessSpec,
 };
 use common::{Fx, events, machine};
 
 #[test]
-fn a_posted_order_mints_locked_witnesses_and_derives_a_split_job() {
+fn a_posted_order_mints_locked_witnesses_and_waits_for_a_human_split() {
     let mut fx = Fx::new();
     let owner = fx.owner.clone();
     let witnesses = vec![WitnessSpec {
@@ -36,10 +36,8 @@ fn a_posted_order_mints_locked_witnesses_and_derives_a_split_job() {
     let witness = world.witness(order.witnesses[0]).expect("witness minted");
     assert!(matches!(witness.kind, WitnessKind::Check { .. }));
     assert_eq!(witness.pinned_by, fx.owner);
-    assert!(world.jobs().contains(&Job::Split {
-        order: order.id,
-        rev: OrderRev::new(0)
-    }));
+    assert!(world.tasks_of(order.id).next().is_none());
+    assert!(world.jobs().is_empty());
 }
 
 #[test]
@@ -51,29 +49,26 @@ fn a_split_order_reads_back_and_derives_no_review_job() {
     );
     let a = fx.agent_a.clone();
     fx.read_back(&a, fx.task1);
-    assert_eq!(
-        fx.origin.world().jobs(),
-        vec![Job::DraftScope {
-            order: fx.order,
-            rev: OrderRev::new(0)
-        }],
-        "the legacy review is retired: a readback derives no review job, only the scope draft"
-    );
+    assert!(fx.origin.world().jobs().is_empty());
 }
 
 #[test]
-fn a_second_split_result_is_rejected() {
+fn a_second_split_is_rejected() {
     let mut fx = Fx::new();
+    let owner = fx.owner.clone();
     let spec = TaskSpec {
         title: "again".to_owned(),
         brief: String::new(),
         scope: vec![machine("api")],
     };
-    let got = fx.system(SystemCmd::SplitReady {
-        order: fx.order,
-        rev: OrderRev::new(0),
-        tasks: vec![spec],
-    });
+    let got = fx.human(
+        &owner,
+        HumanCmd::SplitOrder {
+            order: fx.order,
+            rev: OrderRev::new(0),
+            tasks: vec![spec],
+        },
+    );
     assert!(
         matches!(got, Err(Rejection::WrongState { .. })),
         "got {got:?}"
@@ -312,6 +307,56 @@ fn only_the_poster_or_an_owner_cancels() {
 }
 
 #[test]
+fn only_the_poster_or_an_owner_splits_an_order() {
+    let mut fx = Fx::new();
+    let (owner, poster) = (fx.owner.clone(), fx.bob.clone());
+    let other: acan_core::MemberId = "other".parse().expect("valid member");
+    fx.human(
+        &owner,
+        HumanCmd::AddMember {
+            member: other.clone(),
+            role: Role::Member,
+        },
+    )
+    .expect("member added");
+
+    for splitter in [&poster, &owner] {
+        fx.human(
+            &poster,
+            HumanCmd::PostOrder {
+                machine: machine("auth"),
+                sentence: "Tidy the login docs".to_owned(),
+                witnesses: vec![],
+            },
+        )
+        .expect("order posted by a member");
+        let order = fx.origin.world().orders().last().expect("new order").id;
+        let split = HumanCmd::SplitOrder {
+            order,
+            rev: OrderRev::new(0),
+            tasks: vec![TaskSpec {
+                title: "docs".to_owned(),
+                brief: String::new(),
+                scope: vec![machine("auth")],
+            }],
+        };
+        assert!(matches!(
+            fx.human(&other, split.clone()),
+            Err(Rejection::Forbidden { .. })
+        ));
+        let batch = fx.human(splitter, split).expect("the split is accepted");
+        let [stamped] = batch.as_slice() else {
+            panic!("one split event, got {batch:?}");
+        };
+        assert_eq!(&stamped.actor, &Actor::Member(splitter.clone()));
+        assert!(matches!(
+            &stamped.event,
+            Event::OrderSplit { order: id, tasks, .. } if *id == order && tasks.len() == 1
+        ));
+    }
+}
+
+#[test]
 fn an_empty_split_is_rejected() {
     let mut fx = Fx::new();
     let owner = fx.owner.clone();
@@ -325,11 +370,14 @@ fn an_empty_split_is_rejected() {
     )
     .expect("order posted");
     let order = fx.origin.world().orders().last().expect("second order").id;
-    let got = fx.system(SystemCmd::SplitReady {
-        order,
-        rev: OrderRev::new(0),
-        tasks: vec![],
-    });
+    let got = fx.human(
+        &owner,
+        HumanCmd::SplitOrder {
+            order,
+            rev: OrderRev::new(0),
+            tasks: vec![],
+        },
+    );
     assert!(matches!(got, Err(Rejection::Invalid { .. })), "got {got:?}");
 }
 

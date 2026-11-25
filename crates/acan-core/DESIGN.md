@@ -12,11 +12,11 @@ Each world has one append-only event log. The **origin** is the only process tha
 - A team origin is the same `acan` binary on a shared host.
 - A joined desktop sends `HumanCmd` over HTTP and receives `Stamped` events over WebSocket. It does not act while its origin is unreachable.
 
-The server stores each `Stamped` event as JSON and streams the same JSON. A client resumes from `Replica::next_seq`.
+The server stores each `Stamped` event as JSON and streams it as JSON. New events are stamped `shareable: false`; stored logs without the flag decode the same way. A client resumes from `Replica::next_seq`.
 
-Model calls, witness runs and merges are **jobs**. `World::jobs` derives them from state, so a crashed server restarts them by asking again. The server runs each job and reports the result as a `SystemCmd`. A `Barrier` job is a timer: it reports `Tick` once its deadline passes. A result for a job that is no longer derived is rejected.
+Witness runs, barriers and merges are **jobs**. `World::jobs` derives them from state, so a crashed server restarts them by asking again. The server runs each job and reports the result as a `SystemCmd`. A `Barrier` job is a timer: it reports `Tick` once its deadline passes. A result for a job that is no longer derived is rejected.
 
-A `Review` job covers every readback of the order, on an open or claimed task, that lacks a verdict at the current revision. A readback on a claimed task is a standby: once matched, its agent can claim the moment the lease ends. A review result is accepted only while the job is derived and no question is open, and only for readbacks still in the job, each named once. Any part of the job is accepted, because the job grows while a review runs. A late retry therefore cannot rewrite the verdict a live claim stands on.
+Legacy logs still fold readback review verdicts. No job asks for those verdicts. A readback on a claimed task is a standby: once matched, its agent can claim the moment the lease ends. A review cannot rewrite an already matched verdict.
 
 Clash detection is the pure function `detect`. The origin runs it inside `execute` and records the blocking results as `ClashFound` and `ClashDissolved` events. Replicas never run detection and never need the code index.
 
@@ -27,7 +27,7 @@ Clash detection is the pure function `detect`. The origin runs it inside `execut
 | `Origin::open`, `Origin::replay` | server | Start a world, or rebuild it from the stored log. Reports `ReplayError::InvalidEvent` for a damaged log. |
 | `Origin::execute(&Ctx, Command)` | server | Decide a command. Returns the stamped events to persist and broadcast, or a `Rejection`. A rejected command changes nothing. |
 | `Replica::from_log`, `Replica::ingest` | browser, joined desktop | Fold a fetched log, then apply streamed events. Reports `ReplayError::SeqGap` when events were missed, and `ReplayError::InvalidEvent` for a damaged or forged event. |
-| `World` read methods | everyone | `order`, `tasks_of`, `clashes_for`, `phase`, `barrier`, `land_queue`, `jobs`, `settle_right`, `usage`. |
+| `World` read methods | everyone | `order`, `tasks_of`, `clashes_for`, `phase`, `barrier`, `land_queue`, `jobs`, `settle_right`, `unknown_events`. |
 | `detect(&[&Declaration], &CodeIndex)` | origin, tests | Pure overlap classification. |
 | `Command`, `HumanCmd`, `AgentCmd`, `SystemCmd` | server, MCP adapter | The write vocabulary. `HumanCmd` is the HTTP body; `AgentCmd` is the MCP tool arguments. |
 
@@ -57,7 +57,7 @@ fn follow(replica: &mut acan_core::Replica, streamed: &[Stamped]) -> Result<(), 
 }
 ```
 
-Replay checks every event before applying it. An event that refers to an order, task, readback, question, witness, clash or gate run the log never created, creates one twice, or opens the world a second time is refused with `ReplayError::InvalidEvent`, and nothing from it on is applied. The decide functions rely on these references, so a damaged log can never turn a later command into a panic.
+Replay checks known events before applying them. An event that refers to an order, task, readback, question, witness, clash or gate run the log never created, creates one twice, or opens the world a second time is refused with `ReplayError::InvalidEvent`, and nothing from it on is applied. The decide functions rely on these references, so a damaged log can never turn a later command into a panic. Unknown event kinds advance the same cursor and keep their metadata and payload in `World::unknown_events`, without affecting known state. A malformed known event still fails to decode.
 
 `Command` is not deserializable. The server builds it from an authenticated session, so a request can never choose its own principal, and `SystemCmd` can never arrive over the wire.
 
@@ -134,7 +134,7 @@ The owner settles any clash. A member settles a choice whose yielding task is he
 
 A blocking clash dissolves when either party stops holding a declaration (its lease ends, it narrows, or its order is cancelled). A settled `Serialize` or `SplitAtContract` clash still holds its waiter, so it dissolves on the same terms, and when redetection no longer finds its overlap. The one exception is a first task that passed its gate and waits in the land queue. It has no declaration left, but its waiter must not build until it lands, so the clash stands until then. A `Contract` clash records which task owns the interface (`Clash::contract`), because its menu offers to split at that interface.
 
-**Order phase** is derived by `World::phase`, not stored. The order stores only `Splitting`, `Split` or `Cancelled`. Everything after the split comes from its tasks, its open question and its clashes, so the phase cannot drift from them.
+**Order phase** is derived by `World::phase`, not stored. The order stores only `Splitting`, `Split` or `Cancelled`. Its poster or an owner uses `SplitOrder` to create the tasks at the current revision. Everything after the split comes from its tasks, its open question and its clashes, so the phase cannot drift from them.
 
 **Gate verdict** is derived from a run's results. A witness that errors never counts as a pass. A run's witness set is frozen when it starts.
 

@@ -8,14 +8,18 @@ use std::fmt;
 
 use acan_intent::{
     CommitSha, Contest, ContestId, ContestKind, ContestStatus, EpisodeId, GateContext, LedgerEvent,
-    Prediction, PreparedCommit, ProbeHash, Receipt, RepoPath, Scope, ScopeConfirmation, ScopeDraft,
-    ScopeHash, ScopeRev,
+    Prediction, PreparedCommit, ProbeHash, Receipt, RepoPath, Scope, ScopeConfirmation, ScopeHash,
+    ScopeRev,
 };
-use serde::{Deserialize, Serialize};
+use serde::de::{
+    DeserializeSeed, Error as _, MapAccess, Visitor,
+    value::{MapAccessDeserializer, StrDeserializer, StringDeserializer},
+};
+use serde::ser::{Error as _, SerializeMap};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::{Map, Value};
 
-use crate::clash::{
-    ClashKey, ContractRef, Declaration, DeclarationInput, Explanation, OverlapKind, Settlement,
-};
+use crate::clash::{ClashKey, ContractRef, Declaration, DeclarationInput, OverlapKind, Settlement};
 use crate::gate::{GateVerdict, WitnessOutcome};
 use crate::ids::{
     AgentId, ClashId, CodeRev, CommitId, GateRunId, Generation, MachineKey, MemberId, OrderId,
@@ -29,7 +33,7 @@ use crate::order::{
     Question, QuestionDraft, Readback, ReadbackVerdict, TaskSpec, Witness, WitnessSpec,
 };
 use crate::repair::ReceiptRecord;
-use crate::world::{Step, WorldRef};
+use crate::world::WorldRef;
 
 /// A command with the principal the host authenticated.
 ///
@@ -79,6 +83,15 @@ pub enum HumanCmd {
         sentence: String,
         /// The checks that must hold.
         witnesses: Vec<WitnessSpec>,
+    },
+    /// Poster or owner. Splits the order into tasks at its current revision.
+    SplitOrder {
+        /// The order.
+        order: OrderId,
+        /// The order revision.
+        rev: OrderRev,
+        /// The tasks.
+        tasks: Vec<TaskSpec>,
     },
     /// Answers an open question with option 0 or 1.
     AnswerQuestion {
@@ -203,15 +216,6 @@ pub enum AgentCmd {
 pub enum SystemCmd {
     /// The host rescanned; `Ctx::index` is the new index.
     IndexUpdated,
-    /// The foreman split an order.
-    SplitReady {
-        /// The order.
-        order: OrderId,
-        /// The revision the job was derived at.
-        rev: OrderRev,
-        /// The tasks.
-        tasks: Vec<TaskSpec>,
-    },
     /// The foreman reviewed readbacks. Legacy lane only; see [`Event::ReadbacksReviewed`].
     ReadbacksReviewed {
         /// The order.
@@ -222,13 +226,6 @@ pub enum SystemCmd {
         verdicts: Vec<(ReadbackId, ReadbackVerdict)>,
         /// A question, when readbacks disagree.
         question: Option<QuestionDraft>,
-    },
-    /// The foreman explained a clash.
-    ClashExplained {
-        /// The clash.
-        clash: ClashId,
-        /// The explanation.
-        explanation: Explanation,
     },
     /// A witness finished.
     WitnessResult {
@@ -247,25 +244,6 @@ pub enum SystemCmd {
         head: CommitId,
         /// The merge commit, or why it failed.
         result: Result<CommitId, String>,
-    },
-    /// A model call finished, for the usage panel. A call that was attempted and gave no reply
-    /// is recorded too, with its `failure` and no token counts.
-    ModelUsed {
-        /// The model name.
-        model: String,
-        /// The provider that answered the call, or that the call was sent to when it failed.
-        provider: Option<String>,
-        /// Which step called it.
-        step: Step,
-        /// Prompt tokens. None when the call gave no reply.
-        input_tokens: Option<u32>,
-        /// Completion tokens. None when the call gave no reply.
-        output_tokens: Option<u32>,
-        /// Why the call gave no reply, when it was attempted and failed.
-        failure: Option<CallFailure>,
-        /// A short note on the call's outcome. Built by code, never by a model, at most 100
-        /// words. A command carries it into the event.
-        detail: Option<String>,
     },
     /// A timer tick. Expires due leases and lifts declare barriers past their deadline.
     Tick,
@@ -325,70 +303,6 @@ pub enum SystemCmd {
         /// Why the run is refused, in the words the task records. Never empty.
         reason: String,
     },
-    /// The foreman drafted the scope of an order revision.
-    ScopeDrafted {
-        /// The order.
-        order: OrderId,
-        /// The revision the job was derived at.
-        rev: OrderRev,
-        /// The draft, checked against the plant and the route table.
-        draft: Box<ScopeDraft>,
-    },
-    /// The scope draft of an order revision failed after its last attempt.
-    ScopeDraftFailed {
-        /// The order.
-        order: OrderId,
-        /// The revision the job was derived at.
-        rev: OrderRev,
-        /// Why the draft failed.
-        reason: String,
-    },
-    /// The advisory vision witness of a gate run finished. Nothing the gate decides reads it.
-    VisionChecked {
-        /// The task the run gates.
-        task: TaskId,
-        /// The run.
-        gate_run: GateRunId,
-        /// Whether the witness ran.
-        status: VisionStatus,
-        /// How many checks reached each verdict.
-        counts: VisionCounts,
-        /// How many verdicts ask a human to look.
-        human_questions: u32,
-    },
-}
-
-/// Whether an advisory vision witness ran to the end.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VisionStatus {
-    /// Every check has a verdict, `not_checked` included.
-    Done,
-    /// The witness could not run its checks.
-    Failed,
-}
-
-/// How many checks of a vision witness reached each verdict.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VisionCounts {
-    /// Every must-keep item still holds.
-    pub consistent: u32,
-    /// At least one must-keep item does not hold.
-    pub inconsistent: u32,
-    /// The model could not decide, or its reply did not parse.
-    pub unclear: u32,
-    /// The call failed or a page could not be rendered.
-    pub not_checked: u32,
-}
-
-/// Why a model call that was attempted gave no reply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CallFailure {
-    /// The provider did not answer in time.
-    Timeout,
-    /// The provider failed, or the call did not produce a reply.
-    Error,
 }
 
 /// Who caused an event.
@@ -412,14 +326,147 @@ pub struct Stamped {
     pub at: Timestamp,
     /// Who caused it.
     pub actor: Actor,
+    /// Whether this event may be shared outside its local world log.
+    #[serde(default)]
+    pub shareable: bool,
     /// What happened.
     pub event: Event,
 }
 
-/// A fact the origin accepted. Applying it never fails, reads a clock, or runs detection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Event {
+// Derive the known tags from the same variants as the wire schema. The fallback must
+// never accept a known tag whose fields failed to decode.
+macro_rules! event_schema {
+    ($($(#[$attr:meta])* $variant:ident { $($fields:tt)* },)*) => {
+        /// A fact the origin accepted. Applying it never fails, reads a clock, or runs detection.
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        pub enum Event {
+            $($(#[$attr])* $variant { $($fields)* },)*
+            /// An event kind this version does not interpret.
+            #[serde(untagged, serialize_with = "encode_unknown")]
+            Unknown {
+                /// The original wire tag.
+                event_type: String,
+                /// The other fields of the event object, excluding `type`.
+                payload: Map<String, Value>,
+            },
+        }
+
+        #[derive(Deserialize)]
+        #[serde(remote = "Event", tag = "type", rename_all = "snake_case")]
+        enum WireEvent {
+            $($variant { $($fields)* },)*
+            #[serde(untagged, deserialize_with = "decode_unknown")]
+            Unknown {
+                event_type: String,
+                payload: Map<String, Value>,
+            },
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum EventType {
+            $($variant,)*
+            #[serde(other)]
+            Unrecognized,
+        }
+    };
+}
+
+impl<'de> Deserialize<'de> for Event {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct EventObject;
+
+        impl<'de> Visitor<'de> for EventObject {
+            type Value = Event;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an event object with a string type tag")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, map: M) -> Result<Event, M::Error> {
+                WireEvent::deserialize(MapAccessDeserializer::new(EventFields { map, tag: false }))
+            }
+        }
+
+        // Internally tagged enums can also decode sequences; the log only accepts objects.
+        deserializer.deserialize_map(EventObject)
+    }
+}
+
+// Serde's enum identifiers also accept numeric variant indexes. Require a string tag
+// without buffering the fields into a JSON map, which would hide duplicate known fields.
+struct EventFields<M> {
+    map: M,
+    tag: bool,
+}
+
+impl<'de, M: MapAccess<'de>> MapAccess<'de> for EventFields<M> {
+    type Error = M::Error;
+
+    fn next_key_seed<K: DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, Self::Error> {
+        let Some(key) = self.map.next_key::<String>()? else {
+            return Ok(None);
+        };
+        self.tag = key == "type";
+        seed.deserialize(StringDeserializer::new(key)).map(Some)
+    }
+
+    fn next_value_seed<V: DeserializeSeed<'de>>(
+        &mut self,
+        seed: V,
+    ) -> Result<V::Value, Self::Error> {
+        if self.tag {
+            seed.deserialize(StringDeserializer::new(self.map.next_value::<String>()?))
+        } else {
+            self.map.next_value_seed(seed)
+        }
+    }
+}
+
+fn decode_unknown<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<(String, Map<String, Value>), D::Error> {
+    #[derive(Deserialize)]
+    struct UnknownFields {
+        #[serde(rename = "type")]
+        event_type: String,
+        #[serde(flatten)]
+        payload: Map<String, Value>,
+    }
+
+    let UnknownFields {
+        event_type,
+        payload,
+    } = UnknownFields::deserialize(deserializer)?;
+    match EventType::deserialize(StrDeserializer::<D::Error>::new(&event_type))? {
+        EventType::Unrecognized => Ok((event_type, payload)),
+        _ => Err(D::Error::custom("invalid fields for a known event type")),
+    }
+}
+
+fn encode_unknown<S: Serializer>(
+    event_type: &str,
+    payload: &Map<String, Value>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if payload.contains_key("type") {
+        return Err(S::Error::custom(
+            "event payload must not contain its type tag",
+        ));
+    }
+    let mut map = serializer.serialize_map(Some(payload.len() + 1))?;
+    map.serialize_entry("type", event_type)?;
+    for (key, value) in payload {
+        map.serialize_entry(key, value)?;
+    }
+    map.end()
+}
+
+event_schema! {
     /// The first event of every log.
     WorldOpened {
         world: WorldRef,
@@ -501,10 +548,6 @@ pub enum Event {
     ClashDissolved {
         clash: ClashId,
     },
-    ClashExplained {
-        clash: ClashId,
-        explanation: Explanation,
-    },
     ClashProposed {
         clash: ClashId,
         choice: Settlement,
@@ -545,28 +588,6 @@ pub enum Event {
     },
     OrderCancelled {
         order: OrderId,
-    },
-    ModelUsed {
-        model: String,
-        /// The provider that answered the call, or that the call was sent to when it failed.
-        /// Absent in logs written before it existed.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        provider: Option<String>,
-        step: Step,
-        /// Prompt tokens. Absent when the call gave no reply.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        input_tokens: Option<u32>,
-        /// Completion tokens. Absent when the call gave no reply.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        output_tokens: Option<u32>,
-        /// Set when the call was attempted and gave no reply. Such an entry has no token counts
-        /// and is not counted in the usage totals. Absent in logs written before it existed.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        failure: Option<CallFailure>,
-        /// A short note on the call's outcome. Built by code, never by a model, at most 100
-        /// words. Absent in logs written before it existed.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<String>,
     },
     /// A human set the order's scope revision. Clears any confirmation.
     ScopeRevised {
@@ -630,37 +651,6 @@ pub enum Event {
     /// A human ruling appended to the ruling log.
     RulingRecorded {
         event: Box<LedgerEvent>,
-    },
-    /// The foreman drafted a scope for an order revision. The draft carries no authority: it
-    /// never confirms a scope and never sets a verdict, count, class, mask or observed value.
-    /// Only a human's `ReviseScope` and `ConfirmScope` do that.
-    ScopeDrafted {
-        /// The order.
-        order: OrderId,
-        /// The order revision the draft was for.
-        rev: OrderRev,
-        /// The draft, with the model that proposed it.
-        draft: Box<ScopeDraft>,
-    },
-    /// The scope draft of an order revision failed after every attempt. Nothing was drafted and
-    /// nothing falls back to an offline draft.
-    ScopeDraftFailed {
-        /// The order.
-        order: OrderId,
-        /// The order revision the draft was for.
-        rev: OrderRev,
-        /// Why the draft failed.
-        reason: String,
-    },
-    /// An advisory vision verdict summary. The contract names it `vision.checked`, so it keeps
-    /// that spelling instead of the snake case tag. Applying it changes nothing.
-    #[serde(rename = "vision.checked")]
-    VisionChecked {
-        task: TaskId,
-        gate_run: GateRunId,
-        status: VisionStatus,
-        counts: VisionCounts,
-        human_questions: u32,
     },
 }
 
@@ -775,9 +765,50 @@ mod tests {
     fn round_trips(line: &str) -> Stamped {
         let stamped: Stamped = serde_json::from_str(line).expect("a legacy line decodes");
         let again = serde_json::to_value(&stamped).expect("it encodes");
-        let original: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
-        assert_eq!(again, original, "a legacy line re-encodes to the same JSON");
+        let mut original: Value = serde_json::from_str(line).expect("valid JSON");
+        original["shareable"] = Value::Bool(false);
+        assert_eq!(
+            again, original,
+            "a legacy line re-encodes with the default flag"
+        );
         stamped
+    }
+
+    #[test]
+    fn stamped_events_are_local_by_default_and_preserve_explicit_sharing() {
+        use crate::{CodeIndex, Ctx, Origin};
+
+        let founder: MemberId = "owner".parse().expect("valid member");
+        let world = WorldRef {
+            id: "w".parse().expect("valid world"),
+            repo: "demo".to_owned(),
+        };
+        let now = Timestamp::from_millis(1000);
+        let (mut origin, opened) = Origin::open(world, founder, now);
+        assert!(!opened.shareable, "the origin opens a local world log");
+
+        let mut json = serde_json::to_value(&opened).expect("the opening encodes");
+        json.as_object_mut().expect("an object").remove("shareable");
+        assert_eq!(
+            serde_json::from_value::<Stamped>(json.clone()).expect("legacy opening decodes"),
+            opened
+        );
+        for flag in [true, false] {
+            json["shareable"] = Value::Bool(flag);
+            let decoded: Stamped = serde_json::from_value(json.clone()).expect("flag decodes");
+            assert_eq!(decoded.shareable, flag);
+            assert_eq!(serde_json::to_value(decoded).expect("flag encodes"), json);
+        }
+
+        let index = CodeIndex::new("rev-test".parse().expect("valid revision"));
+        let batch = origin
+            .execute(
+                &Ctx { now, index: &index },
+                Command::System(SystemCmd::IndexUpdated),
+            )
+            .expect("the index update is accepted");
+        assert!(!batch.is_empty());
+        assert!(batch.iter().all(|stamped| !stamped.shareable));
     }
 
     #[test]

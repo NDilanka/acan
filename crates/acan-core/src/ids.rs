@@ -107,7 +107,7 @@ counter_id!(
     "o"
 );
 counter_id!(
-    /// A task the foreman split from an order. Displays as `t-1`.
+    /// A task split from an order. Displays as `t-1`.
     TaskId,
     "t"
 );

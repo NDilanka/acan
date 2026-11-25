@@ -1273,6 +1273,7 @@ async fn an_export_skips_a_task_that_has_no_receipt() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK, "the order is accepted");
+    let posted = json(response).await;
     let register = json!({ "cmd": "register_agent", "agent": "agent-1" });
     let response = post_text(
         &running,
@@ -1282,9 +1283,15 @@ async fn an_export_skips_a_task_that_has_no_receipt() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK, "the agent is registered");
-    running.stop().await.expect("the server stops");
-    common::record_split(repo.path(), SPLIT_SENTENCE).await;
-    let running = boot(repo.path()).await;
+    let split = common::split_order(&posted, SPLIT_SENTENCE);
+    let response = post_text(
+        &running,
+        "/api/commands",
+        Some(OWNER_TOKEN),
+        &split.to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "the split is accepted");
 
     // The split made a task, and no gate run has given it a receipt. Its export is skipped.
     let response = get_path(

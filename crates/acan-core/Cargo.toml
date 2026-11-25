@@ -9,7 +9,5 @@ description = "Acan's world model: orders, claims, clashes and gates as a pure e
 [dependencies]
 acan-intent = { path = "../acan-intent" }
 serde.workspace = true
-thiserror.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
+thiserror.workspace = true

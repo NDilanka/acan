@@ -411,7 +411,7 @@ struct EventsQuery {
 }
 
 /// The log from `from`, as the caller's principal may read it. A member gets each event as stored;
-/// an agent gets the member-only fields redacted, with the same seq, time and actor.
+/// an agent gets unrecognized event kinds without their payload, with the same log position.
 async fn get_events(
     State(host): State<Host>,
     headers: HeaderMap,

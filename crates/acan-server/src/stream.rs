@@ -794,6 +794,7 @@ mod tests {
             seq: Seq::new(seq),
             at: Timestamp::from_millis(seq),
             actor: Actor::System,
+            shareable: false,
             event: Event::IndexUpdated {
                 rev: CodeRev::from_str("rev-test").expect("valid revision"),
             },
