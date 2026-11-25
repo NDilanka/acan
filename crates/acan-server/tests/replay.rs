@@ -5,11 +5,11 @@ use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 
-use acan_core::{Actor, CodeRev, Event, OrderId, OrderRev, Seq, Stamped, Timestamp};
+use acan_core::{Actor, CodeRev, Event, Seq, Stamped, Timestamp};
 use acan_server::EventStore;
 use acan_server::release::Redaction;
 use acan_server::replay::{self, FORMAT, LABEL};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn temp_repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -23,6 +23,7 @@ fn stamped(seq: u64, event: Event) -> Stamped {
         seq: Seq::new(seq),
         at: Timestamp::from_millis(seq * 10),
         actor: Actor::System,
+        shareable: false,
         event,
     }
 }
@@ -44,7 +45,10 @@ fn read_json(dir: &Path, name: &str) -> Value {
 #[tokio::test]
 async fn the_export_writes_three_files_read_as_an_agent_reads_them() {
     let repo = temp_repo();
-    let order = OrderId::from_str("o-1").expect("a valid order id");
+    let extension: Event = serde_json::from_value(json!({
+        "type": "team_sync_checkpoint", "cursor": 3, "note": "opaque payload"
+    }))
+    .expect("an unrecognized event decodes");
     record(
         repo.path(),
         &[
@@ -54,14 +58,7 @@ async fn the_export_writes_three_files_read_as_an_agent_reads_them() {
                     rev: CodeRev::from_str("rev-1").expect("a valid revision"),
                 },
             ),
-            stamped(
-                1,
-                Event::ScopeDraftFailed {
-                    order,
-                    rev: OrderRev::new(0),
-                    reason: "the draft failed".to_owned(),
-                },
-            ),
+            stamped(1, extension),
         ],
     )
     .await;
@@ -87,9 +84,9 @@ async fn the_export_writes_three_files_read_as_an_agent_reads_them() {
     assert_eq!(events.len(), 2);
     assert_eq!(events[0]["seq"], 0);
     assert_eq!(
-        events[1]["event"]["reason"],
-        Value::Null,
-        "a failed draft's reason is member-only, so the replay does not show it"
+        events[1]["event"],
+        json!({"type": "team_sync_checkpoint"}),
+        "the replay preserves the tag but not an opaque payload"
     );
 
     let plant = read_json(&dir, "plant.json");

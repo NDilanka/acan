@@ -76,7 +76,7 @@ fn order_of(fx: &mut Fx, n: usize) -> Vec<TaskId> {
             scope: vec![machine("api")],
         })
         .collect();
-    fx.system(SystemCmd::SplitReady { order, rev, tasks })
+    fx.human(&owner, HumanCmd::SplitOrder { order, rev, tasks })
         .expect("split accepted");
     fx.order = order;
     fx.origin.world().tasks_of(order).map(|t| t.id).collect()

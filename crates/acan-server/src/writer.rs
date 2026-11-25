@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use acan_core::{Command, Ctx, Event, Origin, Rejection, Stamped, SystemCmd, World};
+use acan_core::{Command, Ctx, Origin, Rejection, Stamped, SystemCmd, World};
 use anyhow::Context as _;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -292,17 +292,7 @@ async fn commit(
     }
     // The live transition touches of the stored batch. They never fail the write.
     publish_batch(&batch, scan, touches);
-    // Accounting-only batches must not wake the job loop: a job whose reply was unusable would
-    // otherwise requeue itself and every other failed job without any user activity. A usage or
-    // vision record is no job's input either.
-    if batch.iter().any(|stamped| {
-        !matches!(
-            &stamped.event,
-            Event::ModelUsed { .. } | Event::VisionChecked { .. }
-        )
-    }) {
-        wake.notify_one();
-    }
+    wake.notify_one();
     Ok(batch)
 }
 

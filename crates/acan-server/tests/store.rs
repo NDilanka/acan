@@ -8,6 +8,7 @@ fn stamped(seq: u64) -> Stamped {
         seq: Seq::new(seq),
         at: Timestamp::from_millis(1_000 + seq),
         actor: Actor::System,
+        shareable: false,
         event: Event::MemberAdded {
             member: Member {
                 id: MemberId::from_str(&format!("member-{seq}")).expect("valid member id"),
@@ -54,6 +55,28 @@ async fn events_survive_reopening_the_database() {
         .await
         .expect("load after restart");
     assert_eq!(loaded, events, "a restarted server sees the same log");
+}
+
+#[tokio::test]
+async fn an_unknown_event_and_its_sharing_flag_survive_storage() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = EventStore::open(&dir.path().join("world.db"))
+        .await
+        .expect("open store");
+    let entry = serde_json::json!({
+        "seq": 0,
+        "at": 1000,
+        "actor": {"kind": "system"},
+        "shareable": true,
+        "event": {"type": "team_sync_checkpoint", "items": [17, null, {"key": "value"}]}
+    });
+    let event: Stamped = serde_json::from_value(entry.clone()).expect("the event decodes");
+    store.append(&[event]).await.expect("append");
+    let loaded = store.load_from(Seq::new(0)).await.expect("load the log");
+    assert_eq!(
+        serde_json::to_value(loaded).expect("encodes"),
+        serde_json::json!([entry])
+    );
 }
 
 #[tokio::test]
