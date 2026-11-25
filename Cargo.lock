@@ -32,6 +32,7 @@ version = "0.1.0"
 dependencies = [
  "acan-core",
  "acan-intent",
+ "serde",
  "tempfile",
  "thiserror",
  "tokio",
@@ -96,6 +97,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "percent-encoding",
+ "regex",
  "reqwest",
  "semver",
  "serde",
