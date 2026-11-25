@@ -236,12 +236,16 @@ async fn unix_socket_refuses_non_private_or_symlink_parents() {
         .expect_err("must refuse an alias to a private parent");
     assert_eq!(err.kind(), ErrorKind::PermissionDenied);
     assert!(!path.exists());
-    HookServer::bind_unix(&path, registry)
+    let uncanonical = parent.join(".").join("hook.sock");
+    let server = HookServer::bind_unix(&uncanonical, registry)
         .await
-        .expect("private parent works")
-        .shutdown()
-        .await
-        .expect("shutdown");
+        .expect("private parent works");
+    let canonical = parent
+        .canonicalize()
+        .expect("canonical parent")
+        .join("hook.sock");
+    assert_eq!(server.endpoint(), canonical.to_string_lossy());
+    server.shutdown().await.expect("shutdown");
 }
 
 #[cfg(unix)]
@@ -482,7 +486,10 @@ async fn mutating_tools_require_an_explicit_absolute_worktree_cwd() {
         .expect("listen");
     for (name, args) in [
         ("Edit", json!({"file_path": dir.path().join("src/app.rs")})),
-        ("Execute", json!({"command": "git status"})),
+        (
+            "Execute",
+            json!({"command": "git --no-optional-locks status"}),
+        ),
     ] {
         let mut input = json!({
             "hook_event_name": "PreToolUse", "tool_name": name, "tool_input": args,
@@ -564,6 +571,34 @@ async fn mutating_tools_reject_unrecognized_and_malformed_input_keys() {
         denied(tool(&server, dir.path(), name, input).await, reason);
     }
     server.shutdown().await.expect("shutdown");
+
+    let shell_registry = HookRegistry::new();
+    register(&shell_registry, ORDER, dir.path(), "src/", true);
+    let shell_server = HookServer::bind_loopback(0, shell_registry)
+        .await
+        .expect("listen");
+    for name in ["Execute", "Bash", "Shell", "Terminal", "RunCommand"] {
+        allowed(
+            tool(
+                &shell_server,
+                dir.path(),
+                name,
+                json!({"command": "cargo test", "description": "run unit tests", "timeout": 60}),
+            )
+            .await,
+        );
+        denied(
+            tool(
+                &shell_server,
+                dir.path(),
+                name,
+                json!({"command": "cargo test", "workdir": "/tmp"}),
+            )
+            .await,
+            "unrecognized input key \"workdir\"",
+        );
+    }
+    shell_server.shutdown().await.expect("shutdown");
 }
 
 #[cfg(unix)]
@@ -632,15 +667,15 @@ async fn git_commands_allow_only_read_only_subcommands_without_unsafe_options() 
         .expect("listen");
     for subcommand in [
         "status",
-        "diff",
-        "log",
-        "show",
+        "diff --no-ext-diff --no-textconv",
+        "log --no-ext-diff --no-textconv",
+        "show --no-ext-diff --no-textconv",
         "rev-parse",
         "ls-files",
         "grep",
         "describe",
         "shortlog",
-        "blame",
+        "blame --no-ext-diff --no-textconv",
         "cat-file",
         "ls-tree",
         "merge-base",
@@ -657,7 +692,36 @@ async fn git_commands_allow_only_read_only_subcommands_without_unsafe_options() 
             .await,
         );
     }
+    allowed(
+        tool(
+            &server,
+            dir.path(),
+            "Execute",
+            json!({"command": "GIT_OPTIONAL_LOCKS=0 git status"}),
+        )
+        .await,
+    );
     for (arguments, reason) in [
+        ("status", "requires --no-optional-locks"),
+        ("diff", "requires --no-ext-diff and --no-textconv"),
+        (
+            "diff --no-ext-diff",
+            "requires --no-ext-diff and --no-textconv",
+        ),
+        (
+            "diff --no-textconv",
+            "requires --no-ext-diff and --no-textconv",
+        ),
+        ("log", "requires --no-ext-diff and --no-textconv"),
+        ("show HEAD", "requires --no-ext-diff and --no-textconv"),
+        (
+            "blame src/lib.rs",
+            "requires --no-ext-diff and --no-textconv",
+        ),
+        (
+            "diff -- --no-ext-diff --no-textconv",
+            "requires --no-ext-diff and --no-textconv",
+        ),
         ("show-ref", "only read-only git commands"),
         ("diff --output result.txt", "git argument"),
         ("show --output=result.txt", "git argument"),
@@ -781,7 +845,7 @@ async fn shell_and_mcp_tools_require_their_own_allowances() {
         .expect("listen");
     for command in [
         "cargo test",
-        "git status && cargo test",
+        "git --no-optional-locks status && cargo test",
         "echo .github/workflows/ci.yml",
     ] {
         allowed(tool(&server, dir.path(), "Execute", json!({"command": command})).await);

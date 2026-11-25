@@ -301,6 +301,19 @@ impl RegisteredPolicy {
                 if !self.policy.allow_shell {
                     return Err("shell tools are not allowed for this order".to_owned());
                 }
+                const ALLOWED_SHELL_KEYS: &[&str] = &[
+                    "command",
+                    "description",
+                    "timeout",
+                    "summary",
+                    "riskLevel",
+                    "risk_level",
+                ];
+                for key in input.keys() {
+                    if !ALLOWED_SHELL_KEYS.contains(&key.as_str()) {
+                        return Err(format!("{name}: unrecognized input key {key:?}"));
+                    }
+                }
                 self.mutating_cwd(request.cwd.as_deref())?;
                 let raw_command = input
                     .get("command")
@@ -643,21 +656,27 @@ fn check_shell(command: &str) -> Result<(), String> {
             if has_redirection_or_grouping {
                 return Err("git commands cannot use redirection or grouping".to_owned());
             }
+            let mut env_no_optional_locks = false;
             if words.iter().any(|word| {
                 word.split_once('=').is_some_and(|(name, value)| {
                     let name = name.trim().to_ascii_uppercase();
-                    name.starts_with("GIT_") && !(name == "GIT_OPTIONAL_LOCKS" && value == "0")
+                    if name == "GIT_OPTIONAL_LOCKS" && value == "0" {
+                        env_no_optional_locks = true;
+                        false
+                    } else {
+                        name.starts_with("GIT_")
+                    }
                 })
             }) {
                 return Err("git environment overrides are not allowed".to_owned());
             }
-            check_git(&words[index + 1..])?;
+            check_git(&words[index + 1..], env_no_optional_locks)?;
         }
     }
     Ok(())
 }
 
-fn check_git(words: &[String]) -> Result<(), String> {
+fn check_git(words: &[String], env_no_optional_locks: bool) -> Result<(), String> {
     const DENIED_LONG: &[&str] = &[
         "--output",
         "--config-env",
@@ -670,14 +689,27 @@ fn check_git(words: &[String]) -> Result<(), String> {
         "--open-files-in-pager",
         "--help",
     ];
-    let args = words
+    let args: Vec<&str> = words
         .iter()
         .map(String::as_str)
-        .take_while(|arg| !arg.is_empty());
-    let subcommand = args
-        .clone()
-        .find(|arg| !matches!(*arg, "--no-pager" | "--no-optional-locks"));
-    for arg in args {
+        .take_while(|arg| !arg.is_empty())
+        .collect();
+    let mut subcommand_idx = None;
+    let mut has_no_optional_locks = env_no_optional_locks;
+    for (idx, &arg) in args.iter().enumerate() {
+        if arg == "--no-optional-locks" {
+            has_no_optional_locks = true;
+            continue;
+        }
+        if arg == "--no-pager" {
+            continue;
+        }
+        subcommand_idx = Some((idx, arg));
+        break;
+    }
+    let subcommand = subcommand_idx.map(|(_, cmd)| cmd);
+    let sub_args = subcommand_idx.map_or(&[][..], |(idx, _)| &args[idx + 1..]);
+    for &arg in &args {
         let flag = arg.split_once('=').map_or(arg, |(flag, _)| flag);
         // Git's parse-options accepts unambiguous long prefixes and bundled short options.
         let denied = if flag.starts_with("--") {
@@ -713,6 +745,27 @@ fn check_git(words: &[String]) -> Result<(), String> {
         )
     ) {
         return Err("only read-only git commands are allowed".to_owned());
+    }
+    if subcommand == Some("status") && !has_no_optional_locks {
+        return Err(
+            "git status requires --no-optional-locks or GIT_OPTIONAL_LOCKS=0 to stay read-only"
+                .to_owned(),
+        );
+    }
+    if matches!(subcommand, Some("diff" | "log" | "show" | "blame")) {
+        let opts_before_sep: Vec<&str> = sub_args
+            .iter()
+            .copied()
+            .take_while(|arg| *arg != "--")
+            .collect();
+        let has_no_ext_diff = opts_before_sep.contains(&"--no-ext-diff");
+        let has_no_textconv = opts_before_sep.contains(&"--no-textconv");
+        if !(has_no_ext_diff && has_no_textconv) {
+            return Err(format!(
+                "git {} requires --no-ext-diff and --no-textconv to stay read-only",
+                subcommand.unwrap_or_default()
+            ));
+        }
     }
     Ok(())
 }
@@ -804,7 +857,7 @@ impl HookServer {
         use tokio::net::{UnixListener, UnixStream};
 
         let path = path.as_ref();
-        let endpoint = local_endpoint(path)?;
+        let _ = local_endpoint(path)?;
         let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -813,6 +866,7 @@ impl HookServer {
         };
         let (parent_path, parent) = private_socket_parent(parent)?;
         let path = parent_path.join(name);
+        let endpoint = local_endpoint(&path)?;
         let parent = Arc::new(parent);
         match SocketFile::inspect(Arc::clone(&parent), name) {
             Ok(existing) => {
