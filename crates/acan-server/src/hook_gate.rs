@@ -810,8 +810,10 @@ fn shell_words(command: &str) -> Result<(Vec<String>, bool), String> {
         {
             let escaped = chars.next().ok_or("unfinished shell escape")?;
             if escaped != '\n' {
-                if escaped.is_control() {
-                    return Err("command contains a control character".to_owned());
+                if escaped.is_control()
+                    || (escaped.is_whitespace() && !matches!(escaped, ' ' | '\t'))
+                {
+                    return Err("command contains unsupported shell syntax".to_owned());
                 }
                 word.push(escaped);
             }

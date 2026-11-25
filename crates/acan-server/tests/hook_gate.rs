@@ -807,6 +807,11 @@ async fn git_commands_allow_only_read_only_subcommands_without_unsafe_options() 
             "GIT_OPTIONAL_LOCKS=0\rgit status",
             "unsupported shell syntax",
         ),
+        #[cfg(unix)]
+        (
+            "GIT_OPTIONAL_LOCKS=0\\\u{00a0}git status",
+            "unsupported shell syntax",
+        ),
     ] {
         denied(
             tool(&server, dir.path(), "Execute", json!({"command": command})).await,
