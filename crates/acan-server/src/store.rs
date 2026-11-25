@@ -7,6 +7,8 @@ use anyhow::Context;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
+use crate::land_v1::LandingAuditRecord;
+
 /// The stored log of one world.
 #[derive(Clone)]
 pub struct EventStore {
@@ -51,6 +53,19 @@ impl EventStore {
                 .await?;
         }
         tx.commit().await?;
+        Ok(())
+    }
+
+    /// Store one V1 landing authorization before the protected ref is allowed to move.
+    /// These events do not consume positions in the origin's sequence.
+    pub(crate) async fn append_v1_landing(
+        &self,
+        record: &LandingAuditRecord,
+    ) -> anyhow::Result<()> {
+        sqlx::query("INSERT INTO v1_landing_events (json) VALUES (?)")
+            .bind(serde_json::to_string(record)?)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
