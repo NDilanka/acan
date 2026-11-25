@@ -1,12 +1,12 @@
 mod common;
 
 use acan_core::{
-    Actor, AgentCmd, Check, Command, CommitId, Ctx, Event, Explanation, Fence, HumanCmd, Judgement,
-    OrderPhase, OrderRev, Origin, Rejection, ReplayError, Replica, Settlement, Stage, Stamped,
-    Step, SystemCmd, TaskId, TaskSpec, TaskState, VisionCounts, VisionStatus, WitnessOutcome,
-    WitnessSpec,
+    Actor, AgentCmd, Check, Command, CommitId, Ctx, Event, Fence, HumanCmd, Judgement, OrderPhase,
+    OrderRev, Origin, ReplayError, Replica, Seq, Settlement, Stage, Stamped, SystemCmd, TaskId,
+    TaskSpec, TaskState, UnknownEvent, WitnessOutcome, WitnessSpec,
 };
 use common::{Fx, events, machine, stored, sym};
+use serde_json::{Value, json};
 
 fn commit(raw: &str) -> CommitId {
     raw.parse().expect("valid commit")
@@ -71,16 +71,6 @@ fn full_loop() -> Fx {
     );
     assert_eq!(phase(&fx), OrderPhase::ReadingBack);
     fx.system(SystemCmd::IndexUpdated).expect("first scan");
-    fx.system(SystemCmd::ModelUsed {
-        model: "muse-spark".to_owned(),
-        provider: None,
-        step: Step::Split,
-        input_tokens: Some(900),
-        output_tokens: Some(120),
-        failure: None,
-        detail: None,
-    })
-    .expect("usage recorded");
 
     let first = fx.read_back(&a, t1);
     fx.review(first, Judgement::Match).expect("review accepted");
@@ -120,18 +110,6 @@ fn full_loop() -> Fx {
     );
     assert_eq!(phase(&fx), OrderPhase::Clashing);
     let clash = fx.origin.world().clashes().next().expect("clash").id;
-    fx.system(SystemCmd::ClashExplained {
-        clash,
-        explanation: Explanation {
-            consequence: "both rewrite the limiter".to_owned(),
-            breaks: None,
-            suggested: Some(Settlement::Serialize {
-                first: t1,
-                then: t2,
-            }),
-        },
-    })
-    .expect("explanation accepted");
     fx.human(
         &owner,
         HumanCmd::SettleClash {
@@ -187,39 +165,6 @@ fn the_stored_json_replays_to_the_same_world() {
 }
 
 #[test]
-fn a_log_with_the_old_model_used_shape_replays() {
-    // A log as the server wrote it before providers, failures and details: a usage row has no
-    // provider, failure or detail key, and its token counts are plain numbers. The log is written
-    // out here, so the old shape does not depend on the current writer.
-    let old = r#"[
-        {"seq":0,"at":1000,"actor":{"kind":"system"},"event":{"type":"world_opened","world":{"id":"w","repo":"demo"},"founder":"owner"}},
-        {"seq":1,"at":2000,"actor":{"kind":"system"},"event":{"type":"model_used","model":"muse-spark","step":"split","input_tokens":900,"output_tokens":120}}
-    ]"#;
-    let stored: Vec<Stamped> = serde_json::from_str(old).expect("the old shape parses");
-    assert!(
-        matches!(
-            stored[1].event,
-            Event::ModelUsed {
-                provider: None,
-                failure: None,
-                detail: None,
-                ..
-            }
-        ),
-        "an old row decodes with no provider, failure or detail: {:?}",
-        stored[1].event
-    );
-
-    let replica = Replica::from_log(stored).expect("the old shape folds");
-    let count = replica.world().usage().totals["muse-spark"][&Step::Split];
-    assert_eq!(
-        (count.input, count.output, count.calls),
-        (900, 120, 1),
-        "an old row is counted as a reply"
-    );
-}
-
-#[test]
 fn a_stored_event_naming_an_absent_order_is_refused_at_replay() {
     let mut fx = Fx::new();
     let task: TaskId = "t-99".parse().expect("valid task id");
@@ -251,6 +196,7 @@ fn a_streamed_event_naming_an_absent_task_is_refused_and_not_applied() {
         seq: replica.next_seq(),
         at: fx.now,
         actor: Actor::System,
+        shareable: false,
         event: Event::BuildCleared {
             task: "t-99".parse().expect("valid task id"),
         },
@@ -291,44 +237,131 @@ fn json_replay_then_further_commands_allocate_the_same_ids() {
 }
 
 #[test]
-fn a_vision_check_names_its_own_gate_run_and_changes_nothing_the_gate_reads() {
-    let mut fx = full_loop();
-    let (task, run) = fx
-        .log
-        .iter()
-        .find_map(|stamped| match &stamped.event {
-            Event::BuildReported { task, run, .. } => Some((*task, *run)),
-            _ => None,
-        })
-        .expect("the loop reported a build");
-    let other = if task == fx.task1 { fx.task2 } else { fx.task1 };
-    let check = |task| SystemCmd::VisionChecked {
-        task,
-        gate_run: run,
-        status: VisionStatus::Done,
-        counts: VisionCounts {
-            inconsistent: 1,
-            ..VisionCounts::default()
-        },
-        human_questions: 1,
-    };
-    assert!(
-        matches!(fx.system(check(other)), Err(Rejection::Unknown { .. })),
-        "a check naming another task's run is refused"
+fn unknown_events_round_trip_and_fold_without_changing_known_state() {
+    let fx = Fx::new();
+    let mut json = serde_json::to_value(&fx.log).expect("the log encodes");
+    let next = fx.origin.world().next_seq().get();
+    let future = json!({
+        "cursor": [3, null, {"ready": true}],
+        "payload": {"type": "nested", "watermark": u64::MAX}
+    });
+    let usage =
+        json!({"model": "example", "step": "split", "input_tokens": 900, "output_tokens": 120});
+    let draft = json!({"order": 999, "rev": 0, "draft": {"proposal": "legacy"}});
+    json.as_array_mut().expect("a log array").extend([
+        json!({
+            "seq": next, "at": 2000, "actor": {"kind": "member", "id": "other"},
+            "shareable": true,
+            "event": {
+                "type": "team_sync_checkpoint",
+                "cursor": future["cursor"],
+                "payload": future["payload"]
+            }
+        }),
+        json!({
+            "seq": next + 1, "at": 2001, "actor": {"kind": "system"}, "shareable": false,
+            "event": {"type": "index_updated", "rev": "rev-2"}
+        }),
+        json!({
+            "seq": next + 2, "at": 2002, "actor": {"kind": "system"}, "shareable": false,
+            "event": {"type": "model_used", "model": "example", "step": "split",
+                      "input_tokens": 900, "output_tokens": 120}
+        }),
+        json!({
+            "seq": next + 3, "at": 2003, "actor": {"kind": "system"}, "shareable": false,
+            "event": {"type": "scope_drafted", "order": 999, "rev": 0, "draft": {"proposal": "legacy"}}
+        }),
+    ]);
+    let log: Vec<Stamped> = serde_json::from_value(json.clone()).expect("the mixed log decodes");
+    assert_eq!(
+        serde_json::to_value(&log).expect("the log re-encodes"),
+        json
     );
-    let gate = fx.origin.world().gate(run).cloned();
-    let phase_before = phase(&fx);
-    let batch = fx.system(check(task)).expect("the check is recorded");
-    assert!(matches!(
-        events(&batch).as_slice(),
-        [Event::VisionChecked { .. }]
-    ));
-    assert_eq!(fx.origin.world().gate(run).cloned(), gate);
-    assert_eq!(phase(&fx), phase_before);
 
-    let json = serde_json::to_string(&fx.log).expect("log serializes");
-    assert!(json.contains(r#""type":"vision.checked""#), "{json}");
-    let stored: Vec<Stamped> = serde_json::from_str(&json).expect("log parses");
-    let replica = Replica::from_log(stored).expect("log folds");
-    assert_eq!(replica.world(), fx.origin.world());
+    let origin = Origin::replay(stored(&log)).expect("the mixed log replays");
+    let world = origin.world();
+    assert_eq!(world.next_seq(), Seq::new(next + 4));
+    assert_eq!(
+        world.index_rev().expect("the index advanced").as_str(),
+        "rev-2"
+    );
+    assert_eq!(world.lane(fx.order), None);
+    assert_eq!(world.orders().count(), 1);
+    assert_eq!(
+        world.unknown_events(),
+        [
+            UnknownEvent {
+                seq: Seq::new(next),
+                at: acan_core::Timestamp::from_millis(2000),
+                actor: Actor::Member("other".parse().expect("valid member id")),
+                shareable: true,
+                event_type: "team_sync_checkpoint".to_owned(),
+                payload: future,
+            },
+            UnknownEvent {
+                seq: Seq::new(next + 2),
+                at: acan_core::Timestamp::from_millis(2002),
+                actor: Actor::System,
+                shareable: false,
+                event_type: "model_used".to_owned(),
+                payload: usage,
+            },
+            UnknownEvent {
+                seq: Seq::new(next + 3),
+                at: acan_core::Timestamp::from_millis(2003),
+                actor: Actor::System,
+                shareable: false,
+                event_type: "scope_drafted".to_owned(),
+                payload: draft,
+            },
+        ]
+    );
+
+    let mut replica = Replica::from_log(fx.log).expect("the initial log folds");
+    for stamped in &log[next as usize..] {
+        replica
+            .ingest(stamped)
+            .expect("the rest of the log streams");
+    }
+    assert_eq!(replica.world(), world);
+}
+
+#[test]
+fn the_recorded_replay_preserves_removed_event_kinds() {
+    let recording = include_str!("../../../replay/events.json");
+    let entries: Vec<Value> = serde_json::from_str(recording).expect("the recording is JSON");
+    let log: Vec<Stamped> = serde_json::from_str(recording).expect("the recording decodes");
+    let last = log.last().expect("the recording is not empty");
+    let origin = Origin::replay(log.iter().cloned()).expect("the recording replays");
+    assert_eq!(origin.world().next_seq().get(), last.seq.get() + 1);
+    let unknown: Vec<_> = entries
+        .into_iter()
+        .filter_map(|mut entry| {
+            let mut payload = entry["event"].take();
+            let event_type = payload.as_object_mut()?.remove("type")?;
+            let event_type = event_type.as_str()?;
+            if !matches!(event_type, "model_used" | "scope_drafted") {
+                return None;
+            }
+            Some((entry["seq"].as_u64()?, event_type.to_owned(), payload))
+        })
+        .collect();
+    assert!(unknown.iter().any(|(_, kind, _)| kind == "model_used"));
+    assert!(unknown.iter().any(|(_, kind, _)| kind == "scope_drafted"));
+    assert_eq!(
+        origin
+            .world()
+            .unknown_events()
+            .iter()
+            .map(|event| {
+                assert!(!event.shareable, "this recording predates sharing");
+                (
+                    event.seq.get(),
+                    event.event_type.clone(),
+                    event.payload.clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        unknown
+    );
 }

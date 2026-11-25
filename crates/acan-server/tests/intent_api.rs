@@ -1,11 +1,9 @@
 //! The scope-first lane over the real server. Agents reach it over MCP, and members reach the
 //! reads and the human commands over HTTP.
 //!
-//! Each test boots a server on a temporary repository with a stub client. A test that
-//! needs tasks records the order's split in the log while the server is stopped, since the server
-//! no longer splits orders. Every command runs through acan-core's origin. The tokens file
-//! is written before the server starts: an owner token for the member `owner`, and an agent token
-//! for `agent-1`, which the owner registers.
+//! Each test boots a server on a temporary repository. Every command runs through acan-core's
+//! origin. The tokens file is written before the server starts: an owner token for the member
+//! `owner`, and an agent token for `agent-1`, which the owner registers.
 
 mod common;
 
@@ -263,9 +261,8 @@ fn readback(task: &str, rev: u32, hash: &Value, summary: &str) -> Value {
     })
 }
 
-/// Boots a server, posts the order and registers the agent, then records the order's split with
-/// the server stopped and boots it again on the same log. Returns the server and the order's id,
-/// such as `o-1`.
+/// Boots a server, posts and splits the order, and registers the agent. Returns the server
+/// and the order's id, such as `o-1`.
 async fn split_order(repo: &Path) -> (Running, String) {
     let running = boot(repo).await;
     let post = json!({
@@ -274,15 +271,18 @@ async fn split_order(repo: &Path) -> (Running, String) {
         "sentence": SENTENCE,
         "witnesses": []
     });
-    let (status, _) = post_command(&running, OWNER_TOKEN, &post).await;
+    let (status, posted) = post_command(&running, OWNER_TOKEN, &post).await;
     assert_eq!(status, StatusCode::OK, "the order is accepted");
     let register = json!({ "cmd": "register_agent", "agent": AGENT });
     let (status, _) = post_command(&running, OWNER_TOKEN, &register).await;
     assert_eq!(status, StatusCode::OK, "the agent is registered");
 
-    running.stop().await.expect("the server stops");
-    let order = common::record_split(repo, SENTENCE).await;
-    (boot(repo).await, order.to_string())
+    let order = common::split_order(&posted, SENTENCE);
+    let (status, body) = post_command(&running, OWNER_TOKEN, &order).await;
+    assert_eq!(status, StatusCode::OK, "the split is accepted: {body}");
+    let id: acan_core::OrderId =
+        serde_json::from_value(order["order"].clone()).expect("the posted order id");
+    (running, id.to_string())
 }
 
 /// The first task of `order`, as the agent lists it over MCP.

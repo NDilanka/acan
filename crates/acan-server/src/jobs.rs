@@ -528,8 +528,6 @@ async fn report_exhausted(host: &Host, job: &Job, err: &JobError) {
 
 async fn execute(host: &Host, job: &Job) -> Result<Option<SystemCmd>, JobError> {
     match job {
-        // Removed in V1. The variants leave acan-core in a later change.
-        Job::Split { .. } | Job::DraftScope { .. } | Job::Explain { .. } => Ok(None),
         Job::Barrier { deadline, .. } => {
             sleep_until(*deadline).await;
             Ok(Some(SystemCmd::Tick))
