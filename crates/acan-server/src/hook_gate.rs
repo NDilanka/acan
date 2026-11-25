@@ -1,7 +1,8 @@
 //! The daemon's local hook listener, live order policies, and first-run check.
 //!
-//! A hook gives early feedback. It does not sandbox an allowed shell or replace the landing
-//! check on the resulting diff.
+//! The hook gives fast pre-tool feedback. It does not sandbox an allowed shell, and paths can
+//! change between this check and tool execution. The landing gate's post-hook scan of the
+//! resulting commit is the non-racy, commit-time enforcement boundary.
 
 #![forbid(unsafe_code)]
 
@@ -17,11 +18,11 @@ use acan_hook::protocol::{Decision, HookRequest, HookResponse, PROTOCOL_VERSION,
 use acan_hook::transport::Endpoint;
 use acan_hook::{BLOCK_EXIT_CODE, ENDPOINT_ENV, MAX_TIMEOUT_MS, ORDER_ENV, TIMEOUT_ENV};
 use acan_intent::{PathCoverage, PathScope, RepoPath, RepoRules, ScopeEntry};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::process::Command;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
 
@@ -66,6 +67,7 @@ struct Registration {
 #[derive(Debug)]
 struct RegisteredPolicy {
     policy: ActiveOrderPolicy,
+    is_probe: bool,
     // Keep the given spelling too: Droid may report an absolute path using it, e.g. on macOS
     // where a worktree under /var has a canonical path under /private/var.
     given_root: PathBuf,
@@ -82,7 +84,11 @@ impl HookRegistry {
     /// # Errors
     ///
     /// Returns an error for an invalid or already active id, or a root that is not a directory.
-    pub fn register_order(&self, mut policy: ActiveOrderPolicy) -> io::Result<()> {
+    pub fn register_order(&self, policy: ActiveOrderPolicy) -> io::Result<()> {
+        self.register(policy, false)
+    }
+
+    fn register(&self, mut policy: ActiveOrderPolicy, is_probe: bool) -> io::Result<()> {
         let id = &policy.order_id;
         if id.is_empty() || id.trim() != id || id.chars().any(char::is_control) {
             return Err(io::Error::new(
@@ -108,7 +114,11 @@ impl HookRegistry {
         orders.insert(
             policy.order_id.clone(),
             Registration {
-                policy: Arc::new(RegisteredPolicy { policy, given_root }),
+                policy: Arc::new(RegisteredPolicy {
+                    policy,
+                    is_probe,
+                    given_root,
+                }),
                 heartbeat: watch::Sender::new(None),
             },
         );
@@ -192,13 +202,20 @@ impl HookRegistry {
         {
             return Err("unknown order".to_owned());
         }
+        // Probe registrations verify the hook path, not a real order's claims on the repo.
+        if policy.is_probe {
+            return Ok(());
+        }
         for path in writes {
             let target = PathScope::new([ScopeEntry::File {
                 path: path.clone(),
                 new: false,
             }])
             .expect("one valid path makes a scope");
-            for (id, other) in orders.iter().filter(|(id, _)| *id != &request.order) {
+            for (id, other) in &*orders {
+                if id == &request.order || other.policy.is_probe {
+                    continue;
+                }
                 let other = &other.policy.policy;
                 if other.scope.coverage(&path, &other.rules) == PathCoverage::Covered
                     || !other.scope.overlaps(&target).is_empty()
@@ -222,8 +239,8 @@ impl RegisteredPolicy {
         let input = request
             .raw_tool_input
             .as_ref()
-            .map(|value| value.as_object().ok_or("raw_tool_input is not an object"))
-            .transpose()?;
+            .and_then(Value::as_object)
+            .ok_or("raw_tool_input must be an object")?;
         let mut writes = BTreeSet::new();
         match name {
             "Read" | "Grep" | "Glob" | "LS" | "View" => {
@@ -233,10 +250,7 @@ impl RegisteredPolicy {
                     .map(String::as_str)
                     .collect::<Vec<_>>();
                 for key in ["file_path", "path", "directory_path", "folder"] {
-                    if let Some(value) = input
-                        .and_then(|input| input.get(key))
-                        .filter(|v| !v.is_null())
-                    {
+                    if let Some(value) = input.get(key).filter(|v| !v.is_null()) {
                         paths.push(value.as_str().ok_or("invalid read path")?);
                     }
                 }
@@ -258,30 +272,13 @@ impl RegisteredPolicy {
             "WebSearch" | "FetchUrl" => {}
             "Edit" | "Create" | "Write" | "MultiEdit" | "Delete" | "Patch" | "ApplyPatch"
             | "NotebookEdit" | "Rename" | "Move" => {
-                // A free-form patch can name paths outside its structured fields. Without a
-                // verified parser for it, a claimed file_path does not make it safe.
-                if matches!(name, "Patch" | "ApplyPatch")
-                    && input.is_some_and(|input| {
-                        input
-                            .keys()
-                            .any(|key| !is_write_path_key(key) && key != "paths")
-                    })
-                {
-                    return Err("cannot verify the targets of a free-form patch".to_owned());
+                let cwd = request.cwd.as_deref().ok_or("missing cwd for a write tool")?;
+                if !Path::new(cwd).is_absolute() {
+                    return Err("invalid cwd: a write tool needs an absolute cwd".to_owned());
                 }
-                let mut paths = request
-                    .file_path
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>();
-                if let Some(input) = &request.raw_tool_input {
-                    collect_write_paths(input, &mut paths)?;
-                }
-                if paths.is_empty() {
-                    return Err("no write target path".to_owned());
-                }
-                let cwd = self.cwd(request.cwd.as_deref())?;
-                for path in paths {
+                let cwd = self.cwd(Some(cwd))?;
+                let paths = write_paths(name, input)?;
+                for path in paths.into_iter().chain(request.file_path.as_deref()) {
                     let (lexical, resolved) = self.resolve(&cwd, path)?;
                     if resolved.is_dir() {
                         return Err("a write target must be a file, not a directory".to_owned());
@@ -304,7 +301,7 @@ impl RegisteredPolicy {
                     return Err("shell tools are not allowed for this order".to_owned());
                 }
                 let raw_command = input
-                    .and_then(|input| input.get("command"))
+                    .get("command")
                     .map(|v| v.as_str().ok_or("invalid command"))
                     .transpose()?;
                 if matches!((request.command.as_deref(), raw_command), (Some(a), Some(b)) if a != b)
@@ -491,40 +488,78 @@ fn is_protected_dir(part: &str) -> bool {
         .any(|dir| part.eq_ignore_ascii_case(dir))
 }
 
-fn is_write_path_key(key: &str) -> bool {
-    matches!(
-        key,
-        "file_path" | "path" | "old_path" | "new_path" | "target_file" | "notebook_path"
-    )
+fn write_paths<'a>(tool: &str, input: &'a Map<String, Value>) -> Result<Vec<&'a str>, String> {
+    let allowed: &[&str] = match tool {
+        "Edit" => &["file_path", "path", "old_string", "new_string", "replace_all"],
+        "Create" | "Write" => &["file_path", "path", "content"],
+        "MultiEdit" => &["file_path", "path", "paths", "edits"],
+        "Delete" => &["file_path", "path"],
+        // A free-form patch can name additional paths. Only structured targets can be checked.
+        "Patch" | "ApplyPatch" => &["file_path", "path", "target_file", "paths"],
+        "NotebookEdit" => &[
+            "file_path",
+            "path",
+            "notebook_path",
+            "cell_id",
+            "new_source",
+            "cell_type",
+            "edit_mode",
+        ],
+        "Rename" | "Move" => &["file_path", "path", "old_path", "new_path"],
+        _ => unreachable!("write tool without an input schema"),
+    };
+    let mut paths = Vec::new();
+    collect_write_paths(input, allowed, &mut paths).map_err(|err| {
+        if matches!(tool, "Patch" | "ApplyPatch") {
+            format!("cannot verify the targets of a free-form patch: {err}")
+        } else {
+            format!("{tool}: {err}")
+        }
+    })?;
+    if paths.is_empty() {
+        return Err("no write target path".to_owned());
+    }
+    Ok(paths)
 }
 
-fn collect_write_paths<'a>(input: &'a Value, paths: &mut Vec<&'a str>) -> Result<(), String> {
-    match input {
-        Value::Object(fields) => {
-            for (key, value) in fields {
-                match key.as_str() {
-                    key if is_write_path_key(key) => {
-                        paths.push(
-                            value
-                                .as_str()
-                                .ok_or_else(|| format!("{key} is not a path string"))?,
-                        );
-                    }
-                    "paths" => {
-                        for value in value.as_array().ok_or("paths is not an array")? {
-                            paths.push(value.as_str().ok_or("paths contains a non-string target")?);
-                        }
-                    }
-                    _ => collect_write_paths(value, paths)?,
+fn collect_write_paths<'a>(
+    input: &'a Map<String, Value>,
+    allowed: &[&str],
+    paths: &mut Vec<&'a str>,
+) -> Result<(), String> {
+    for (key, value) in input {
+        if !allowed.contains(&key.as_str()) {
+            return Err(format!("unrecognized input key {key:?}"));
+        }
+        match key.as_str() {
+            "file_path" | "path" | "old_path" | "new_path" | "target_file" | "notebook_path" => {
+                paths.push(
+                    value
+                        .as_str()
+                        .ok_or_else(|| format!("{key} is not a path string"))?,
+                );
+            }
+            "paths" => {
+                for value in value.as_array().ok_or("paths is not an array")? {
+                    paths.push(value.as_str().ok_or("paths contains a non-string target")?);
                 }
             }
-        }
-        Value::Array(items) => {
-            for item in items {
-                collect_write_paths(item, paths)?;
+            "edits" => {
+                for edit in value.as_array().ok_or("edits is not an array")? {
+                    collect_write_paths(
+                        edit.as_object().ok_or("edits contains a non-object")?,
+                        &["file_path", "path", "target_file", "old_string", "new_string", "replace_all"],
+                        paths,
+                    )?;
+                }
             }
+            "replace_all" if !value.is_boolean() => {
+                return Err("replace_all is not a boolean".to_owned());
+            }
+            "replace_all" => {}
+            _ if !value.is_string() => return Err(format!("{key} is not a string")),
+            _ => {}
         }
-        _ => {}
     }
     Ok(())
 }
@@ -574,25 +609,48 @@ fn check_shell(command: &str) -> Result<(), String> {
             return Err("nested shell commands cannot be checked".to_owned());
         }
         if bin == "git" {
-            let args = &words[index + 1..];
-            let subcommand = args.iter().find(|arg| arg.as_str() != "--no-pager");
-            if !subcommand.is_some_and(|arg| {
-                matches!(
-                    arg.as_str(),
-                    "status"
-                        | "diff"
-                        | "log"
-                        | "show"
-                        | "rev-parse"
-                        | "ls-files"
-                        | "ls-tree"
-                        | "merge-base"
-                        | "show-ref"
-                )
-            }) {
-                return Err("only read-only git commands are allowed".to_owned());
-            }
+            check_git(&words[index + 1..])?;
         }
+    }
+    Ok(())
+}
+
+fn check_git(words: &[String]) -> Result<(), String> {
+    let args = words.iter().map(String::as_str).take_while(|arg| !arg.is_empty());
+    let subcommand = args.clone().find(|arg| *arg != "--no-pager");
+    const DENIED_LONG: &[&str] = &[
+        "--output",
+        "--config-env",
+        "--git-dir",
+        "--work-tree",
+        "--exec-path",
+        "--ext-diff",
+        "--textconv",
+        "--filters",
+        "--open-files-in-pager",
+    ];
+    for arg in args {
+        let flag = arg.split_once('=').map_or(arg, |(flag, _)| flag);
+        // Git's parse-options accepts unambiguous long prefixes and bundled short options.
+        let denied = if flag.starts_with("--") {
+            flag.len() > 2 && DENIED_LONG.iter().any(|name| name.starts_with(flag))
+        } else {
+            flag.strip_prefix('-').is_some_and(|options| {
+                options.contains(['o', 'c', 'C'])
+                    || (subcommand == Some("grep") && options.contains('O'))
+            })
+        };
+        if denied {
+            return Err(format!("git argument {arg:?} is not allowed"));
+        }
+    }
+    if !matches!(
+        subcommand,
+        Some("status" | "diff" | "log" | "show" | "rev-parse" | "ls-files" | "grep"
+            | "describe" | "shortlog" | "blame" | "cat-file" | "ls-tree" | "merge-base"
+            | "rev-list" | "--version")
+    ) {
+        return Err("only read-only git commands are allowed".to_owned());
     }
     Ok(())
 }
