@@ -15,6 +15,7 @@ path = "src/main.rs"
 acan-core = { path = "../acan-core" }
 acan-droid = { path = "../acan-droid" }
 acan-git = { path = "../acan-git" }
+acan-hook = { path = "../acan-hook" }
 acan-intent = { path = "../acan-intent" }
 acan-scan = { path = "../acan-scan" }
 acan-witness = { path = "../acan-witness" }

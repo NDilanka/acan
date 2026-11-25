@@ -306,6 +306,35 @@ async fn flat_errors_surface_and_end_the_active_turn() {
 }
 
 #[tokio::test]
+async fn a_rate_limit_buffered_after_confirmation_refuses_the_first_turn() {
+    let (mut session, mut peer) = replay();
+    let (written, received) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        peer.confirm().await;
+        peer.notify(json!({"type":"rate_limited","message":"No startup quota","retryAfterMs":750}))
+            .await;
+        written.send(()).expect("client waits for the notification");
+        assert!(peer.read_client_frame().await.is_none(), "no turn sent");
+    });
+    session
+        .initialize(init(), &settings(), WAIT)
+        .await
+        .expect("confirm settings");
+    received.await.expect("notification is available");
+    assert!(matches!(
+        session.check_startup_rate_limit().await,
+        Err(DroidError::RateLimited { message, retry_after: Some(delay), .. })
+            if message == "No startup quota" && delay == Duration::from_millis(750)
+    ));
+    assert!(matches!(
+        session.send_user_message("must not be sent").await,
+        Err(DroidError::NotConfirmed)
+    ));
+    drop(session);
+    server.await.expect("server replay passed");
+}
+
+#[tokio::test]
 async fn null_permission_calls_and_question_options_become_empty_lists() {
     let (mut session, mut peer) = replay();
     let server = tokio::spawn(async move {
@@ -845,6 +874,122 @@ fn spawn_config_rejects_unsafe_arguments() {
             SpawnConfig::new("never-executed").with_args([arg]),
             Err(DroidError::ForbiddenArgument("-o"))
         ));
+    }
+}
+
+#[cfg(unix)]
+mod unix_process_tree {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    fn sleeping_shim(dir: &Path) -> PathBuf {
+        let path = dir.join("sleeping droid");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+if [ "$1" = --version ]; then
+    printf '%s\n' '1.15.0'
+    exit 0
+fi
+sleep 30 &
+printf '%s\n' "$!" > descendant.pid
+if [ "$6" = --exit-on-release ]; then
+    while [ ! -f release ]; do sleep 0.02; done
+    exit 0
+fi
+wait
+"#,
+        )
+        .expect("write sleeping shim");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("make sleeping shim executable");
+        path
+    }
+
+    async fn descendant_pid(dir: &Path) -> String {
+        let path = dir.join("descendant.pid");
+        timeout(WAIT, async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&path).await
+                    && text.ends_with('\n')
+                    && text.trim().parse::<u32>().is_ok_and(|id| id > 1)
+                {
+                    return text.trim().to_owned();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the shim should start its descendant")
+    }
+
+    async fn is_alive(pid: &str) -> bool {
+        let output = tokio::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .await
+            .expect("inspect descendant status");
+        let state = std::str::from_utf8(&output.stdout).expect("read process status");
+        assert!(
+            output.status.success() || output.status.code() == Some(1),
+            "ps failed"
+        );
+        // A killed orphan may remain a zombie when PID 1 delays reaping it.
+        !state.trim().is_empty() && !state.trim().starts_with('Z')
+    }
+
+    async fn assert_terminated(pid: &str) {
+        timeout(WAIT, async {
+            while is_alive(pid).await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("descendant {pid} survived"));
+    }
+
+    #[tokio::test]
+    async fn kill_and_drop_terminate_unix_shim_descendants() {
+        for explicit_kill in [true, false] {
+            let dir = tempfile::tempdir().expect("make fake Droid directory");
+            let path = sleeping_shim(dir.path());
+            let mut session = spawn_fake(&fake_config(&path).with_working_dir(dir.path()))
+                .await
+                .expect("spawn shim");
+            let pid = descendant_pid(dir.path()).await;
+            assert!(is_alive(&pid).await, "descendant started alive");
+            if explicit_kill {
+                timeout(WAIT, session.kill())
+                    .await
+                    .expect("kill deadline")
+                    .expect("kill group");
+            } else {
+                drop(session);
+            }
+            assert_terminated(&pid).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn natural_exit_terminates_descendants_that_hold_stdout_open() {
+        let dir = tempfile::tempdir().expect("make fake Droid directory");
+        let path = sleeping_shim(dir.path());
+        let config = fake_config(&path)
+            .with_working_dir(dir.path())
+            .with_args(["--exit-on-release"])
+            .expect("pass shim mode");
+        let mut session = spawn_fake(&config).await.expect("spawn shim");
+        let pid = descendant_pid(dir.path()).await;
+        assert!(is_alive(&pid).await, "descendant started alive");
+        tokio::fs::write(dir.path().join("release"), "")
+            .await
+            .expect("release root");
+        assert!(matches!(
+            event(&mut session).await,
+            DroidEvent::Exited { status: Some(status) } if status.success()
+        ));
+        assert_terminated(&pid).await;
     }
 }
 

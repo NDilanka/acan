@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use acan_droid::{CleanEnv, RequestId, SessionInit, SessionSettings, SpawnConfig};
-use acan_intent::{Block, GenUiPlace, parse_and_validate_proposal};
+use acan_intent::{Block, GenUiPlace, MAX_BLOCKS, MAX_SNIPPET_CHARS, parse_and_validate_proposal};
 use acan_server::order_runner::{
     Card, CardDecision, CardKind, DeveloperAuthority, MAX_CONCURRENT_ORDERS, MAX_ONE_LINE_CHARS,
     OrderRunSpec, OrderRunState, OrderRunnerError, OrderRunnerManager, PersistedOrderState,
@@ -32,6 +32,36 @@ fn select(option_id: &str) -> CardDecision {
     CardDecision::SelectOption {
         option_id: option_id.to_owned(),
     }
+}
+
+fn option_ids(card: &Card) -> Vec<&str> {
+    card.options
+        .iter()
+        .map(|option| option.id.as_str())
+        .collect()
+}
+
+fn permission_evidence(card: &Card) -> Vec<(&str, Value)> {
+    card.evidence
+        .iter()
+        .map(|block| {
+            let Block::CodeSnippet {
+                language,
+                code,
+                caption: Some(caption),
+            } = block
+            else {
+                panic!("expected captioned JSON permission evidence: {block:?}");
+            };
+            assert_eq!(language.as_deref(), Some("json"));
+            assert!(!code.chars().any(char::is_control));
+            assert!(!code.contains(['\u{202e}', '\u{2069}']));
+            (
+                caption.as_str(),
+                serde_json::from_str(code).expect("complete JSON"),
+            )
+        })
+        .collect()
 }
 
 fn other(note: impl Into<String>) -> CardDecision {
@@ -61,9 +91,10 @@ fn permission() -> Step {
     frame(json!({
         "type":"request","id":"permission-1","method":"droid.request_permission","params":{
             "toolUses":[{
-                "toolUse":{"id":"tool-1","name":"Script"},
+                "toolUse":{"id":"tool-1","name":"Script","input":{"script":"run the preview"}},
+                "confirmationType":"script",
                 "details":{"calls":[
-                    {"toolName":"docs___preview","confirmation":{"type":"mcp_tool"}},
+                    {"toolName":"docs___preview","toolInput":{"section":"intro"},"confirmation":{"type":"mcp_tool","serverName":"docs"}},
                     {"toolName":"Execute","toolInput":{"command":"echo preview"},"confirmation":{"type":"exec"}}
                 ]}
             }],
@@ -100,6 +131,7 @@ enum Step {
     Expect(&'static str),
     UserMessage(&'static str),
     Emit(Value),
+    EmitBatch(Vec<Step>),
     WaitForRelease,
 }
 
@@ -147,6 +179,16 @@ impl FakeDroid {
     }
 }
 
+fn stale_hook_env(mut spec: OrderRunSpec<'_>) -> OrderRunSpec<'_> {
+    spec.spawn_config = spec
+        .spawn_config
+        .with_env_var("ACAN_ORDER_ID", "stale-order")
+        .with_env_var("acan_order_id", "stale-order-alias")
+        .with_env_var("ACAN_HOOK_ENDPOINT", "tcp://127.0.0.1:1")
+        .with_env_var("acan_hook_endpoint", "tcp://127.0.0.1:2");
+    spec
+}
+
 fn script_steps(script: &mut String, steps: &[Step]) {
     for step in steps {
         match step {
@@ -156,6 +198,16 @@ fn script_steps(script: &mut String, steps: &[Step]) {
                 writeln!(script, "expect {}", quoted(&fragment))
             }
             Step::Emit(frame) => writeln!(script, "emit {}", quoted(&frame.to_string())),
+            Step::EmitBatch(steps) => {
+                let mut batch = String::new();
+                for step in steps {
+                    let Step::Emit(frame) = step else {
+                        panic!("only frames can be emitted as a batch");
+                    };
+                    writeln!(batch, "{frame}").expect("append frame");
+                }
+                writeln!(script, "emit {}", quoted(batch.trim_end_matches('\n')))
+            }
             Step::WaitForRelease => {
                 #[cfg(unix)]
                 let line = "while [ ! -f release ]; do sleep 0.02; done";
@@ -211,7 +263,10 @@ emit() { printf '%s\n' "$1"; }
             quoted(ENDPOINT)
         )
         .unwrap();
+    } else {
+        script.push_str("[ -z \"${ACAN_ORDER_ID+x}${ACAN_HOOK_ENDPOINT+x}\" ] || exit 97\n");
     }
+    script.push_str("[ -z \"${acan_order_id+x}${acan_hook_endpoint+x}\" ] || exit 98\n");
     if let Some(retry) = retry {
         script.push_str("if [ -f started ]; then\n: > retried\n");
         script_steps(&mut script, retry);
@@ -263,6 +318,10 @@ function emit([string]$frame) { [Console]::WriteLine($frame) }
             quoted(ENDPOINT)
         )
         .unwrap();
+    } else {
+        script.push_str(
+            "if ((Test-Path Env:ACAN_ORDER_ID) -or (Test-Path Env:ACAN_HOOK_ENDPOINT)) { exit 97 }\n",
+        );
     }
     if let Some(retry) = retry {
         script.push_str(
@@ -392,7 +451,7 @@ async fn permission_and_batched_questions_round_trip_through_the_child() {
     );
     let runner = OrderRunnerManager::new();
     let authority = developer();
-    let mut spec = fake.spec("hooks");
+    let mut spec = stale_hook_env(fake.spec("hooks"));
     spec.hook_endpoint = Some(ENDPOINT.to_owned());
     runner.start_order(spec).expect("start order");
     let permission = wait_for_card(&runner, "hooks", CardKind::Permission).await;
@@ -402,12 +461,37 @@ async fn permission_and_batched_questions_round_trip_through_the_child() {
     );
     assert_eq!(
         permission.summary,
-        "Script; docs___preview; Execute: echo preview"
+        "Review all covered tool calls before approving."
     );
     assert_eq!(permission.options[0].id, "proceed_once");
     assert_eq!(permission.options[0].label, "Allow once");
     assert!(!permission.allow_other);
-    assert!(permission.evidence.is_empty());
+    assert_eq!(
+        permission_evidence(&permission),
+        [
+            (
+                "Tool use 1",
+                json!({
+                    "toolName":"Script","toolId":"tool-1","confirmationType":"script",
+                    "arguments":{"script":"run the preview"},"details":{}
+                })
+            ),
+            (
+                "Tool use 1 / Script call 1",
+                json!({
+                    "toolName":"docs___preview","confirmationType":"mcp_tool",
+                    "arguments":{"section":"intro"},"details":{"serverName":"docs"}
+                })
+            ),
+            (
+                "Tool use 1 / Script call 2",
+                json!({
+                    "toolName":"Execute","confirmationType":"exec",
+                    "arguments":{"command":"echo preview"},"details":{}
+                })
+            ),
+        ]
+    );
 
     let evidence = parse_and_validate_proposal(
         GenUiPlace::CardEvidence,
@@ -423,11 +507,24 @@ async fn permission_and_batched_questions_round_trip_through_the_child() {
         "evidence cannot rewrite the decision"
     );
     assert_eq!(
-        pending.evidence,
-        [Block::Text {
-            text: "One preview".into()
-        }]
+        &pending.evidence[..permission.evidence.len()],
+        permission.evidence
     );
+    assert_eq!(
+        pending.evidence.last(),
+        Some(&Block::Text {
+            text: "One preview".into()
+        })
+    );
+    let too_many =
+        json!({"summary":"More","blocks":vec![json!({"kind":"text","text":"More"}); MAX_BLOCKS]});
+    let too_many = parse_and_validate_proposal(GenUiPlace::CardEvidence, &too_many.to_string())
+        .expect("supplemental evidence fits on its own");
+    assert_eq!(
+        runner.attach_card_evidence(&permission.id, too_many),
+        Err(OrderRunnerError::EvidenceExceedsCardLimits)
+    );
+    assert_eq!(runner.pending_card("hooks"), Some(pending));
     let report = parse_and_validate_proposal(
         GenUiPlace::Report,
         r#"{"title":"Report","blocks":[{"kind":"text","text":"Not Card evidence"}]}"#,
@@ -507,6 +604,147 @@ async fn permission_and_batched_questions_round_trip_through_the_child() {
         )
         .expect("answer second question with one line");
     completed(&runner, "hooks").await;
+}
+
+#[test]
+fn permission_evidence_distinguishes_edits_and_mcp_arguments() {
+    let malicious_text = "line 1\n\"quoted\"\t\\ literal\u{202e}\u{2069}";
+    let edits = [
+        json!({"file_path":"src/main.rs","old_string":"before","new_string":malicious_text}),
+        json!({"file_path":"src/main.rs","old_string":"before","new_string":"different change"}),
+    ];
+    let mcp = [json!({"section":"summary"}), json!({"section":"history"})];
+    let request = serde_json::from_value(json!({
+        "confirmationType":"batch",
+        "details":{"type":"batch","calls":[
+            {"toolName":"docs___preview","toolInput":mcp[0],"confirmation":{"type":"mcp_tool","serverName":"docs"}},
+            {"toolName":"docs___preview","toolInput":mcp[1],"confirmation":{"type":"mcp_tool","serverName":"docs"}}
+        ]},
+        "toolUses":[
+            {"toolUse":{"id":"edit-1","name":"Edit","input":edits[0]},"confirmationType":"edit",
+             "details":{"filePath":"src/main.rs"}},
+            {"toolUse":{"id":"edit-2","name":"Edit","input":edits[1]},"confirmationType":"edit"}
+        ],
+        "options":[{"label":"Allow once","value":"proceed_once"}]
+    }))
+    .expect("parse covered calls");
+    let card = Card::from_permission("test", &RequestId::Number(1), &request);
+    assert_eq!(option_ids(&card), ["proceed_once"]);
+    assert_eq!(
+        permission_evidence(&card),
+        [
+            (
+                "Permission confirmation",
+                json!({"confirmationType":"batch","details":{"type":"batch"}})
+            ),
+            (
+                "Permission / Script call 1",
+                json!({
+                    "toolName":"docs___preview","confirmationType":"mcp_tool",
+                    "arguments":mcp[0],"details":{"serverName":"docs"}
+                })
+            ),
+            (
+                "Permission / Script call 2",
+                json!({
+                    "toolName":"docs___preview","confirmationType":"mcp_tool",
+                    "arguments":mcp[1],"details":{"serverName":"docs"}
+                })
+            ),
+            (
+                "Tool use 1",
+                json!({
+                    "toolName":"Edit","toolId":"edit-1","confirmationType":"edit",
+                    "arguments":edits[0],"details":{"filePath":"src/main.rs"}
+                })
+            ),
+            (
+                "Tool use 2",
+                json!({
+                    "toolName":"Edit","toolId":"edit-2","confirmationType":"edit","arguments":edits[1]
+                })
+            ),
+        ]
+    );
+}
+
+fn oversized_script(calls: usize, arg: String) -> Value {
+    json!({"toolUse":{"id":"tool-1","name":"Script"}, "confirmationType":"script",
+           "details":{"calls":vec![json!({"toolName":"Edit","toolInput":{"new_string":arg},
+                                         "confirmation":{"type":"edit"}}); calls]}})
+}
+
+#[test]
+fn permission_cards_fail_closed_at_each_display_limit() {
+    for (calls, arg) in [
+        (MAX_BLOCKS, "short".to_owned()), // The Script wrapper needs its own block.
+        (1, "\u{202e}".repeat(MAX_SNIPPET_CHARS / 5)), // Escaping pushes the code over the limit.
+        (5, "x".repeat(MAX_SNIPPET_CHARS - 256)), // Every snippet fits, but not the whole Card.
+    ] {
+        let request = serde_json::from_value(json!({
+            "toolUses":[oversized_script(calls, arg)],
+            "options":[{"label":"Allow once","value":"proceed_once"},{"label":"Cancel","value":"cancel"}]
+        }))
+        .expect("parse oversized request");
+        let card = Card::from_permission("test", &RequestId::Number(1), &request);
+        assert_eq!(option_ids(&card), ["cancel"]);
+        assert!(!card.allow_other);
+        assert!(
+            card.evidence.is_empty(),
+            "don't show only part of the request"
+        );
+        assert!(card.summary.contains("too large to review completely"));
+    }
+}
+
+#[tokio::test]
+async fn oversized_permission_cannot_be_approved_and_echoes_only_denial() {
+    let oversized = frame(json!({
+        "type":"request","id":"oversized","method":"droid.request_permission","params":{
+            "toolUses":[oversized_script(1, "x".repeat(MAX_SNIPPET_CHARS))],
+            "options":[{"label":"Allow once","value":"proceed_once"},
+                       {"label":"Always allow","value":"proceed_always"},
+                       {"label":"No","value":"deny"}]
+        }
+    }));
+    let fake = FakeDroid::new(
+        &turn(
+            PROMPT,
+            [
+                oversized,
+                Step::Expect(r#""id":"oversized","result":{"selectedOption":"deny"}"#),
+                notification("droid.turn_completed", json!({"reason":"cancelled"})),
+            ],
+        ),
+        None,
+        None,
+    );
+    let runner = OrderRunnerManager::new();
+    let authority = developer();
+    runner
+        .start_order(fake.spec("oversized"))
+        .expect("start order");
+    let card = wait_for_card(&runner, "oversized", CardKind::Permission).await;
+    assert_eq!(option_ids(&card), ["deny", "cancel"]);
+    assert!(!card.allow_other);
+    for option in ["proceed_once", "proceed_always"] {
+        assert_eq!(
+            runner.answer_card(&authority, &card.id, select(option)),
+            Err(OrderRunnerError::InvalidOption)
+        );
+    }
+    assert_eq!(
+        runner.answer_card(&authority, &card.id, other("Approve all")),
+        Err(OrderRunnerError::OtherNotAllowed)
+    );
+    assert_eq!(runner.pending_card("oversized"), Some(card.clone()));
+    runner
+        .answer_card(&authority, &card.id, select("deny"))
+        .expect("deny permission");
+    wait_for_state(&runner, "oversized", |state| {
+        *state == OrderRunState::Cancelled
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -694,6 +932,140 @@ async fn rpc_rate_limits_pause_during_startup_and_during_a_turn() {
 }
 
 #[tokio::test]
+async fn startup_rate_limit_notifications_pause_without_waiting_for_an_ack_and_release_the_slot() {
+    let rate_limit = || {
+        notification(
+            "droid.rate_limited",
+            json!({"message":"Startup quota","retryAfterMs":30,"headroom":{"remaining":0,"limit":5}}),
+        )
+    };
+    let during_init = FakeDroid::new(
+        &[
+            Step::Expect(HANDSHAKE[0]),
+            rate_limit(),
+            Step::WaitForRelease,
+        ],
+        None,
+        None,
+    );
+    let during_settings = FakeDroid::new(
+        &[
+            Step::Expect(HANDSHAKE[0]),
+            response(1, json!({"sessionId":"fixture-session"})),
+            Step::Expect(HANDSHAKE[1]),
+            rate_limit(),
+            Step::WaitForRelease,
+        ],
+        None,
+        None,
+    );
+    let after_ack = FakeDroid::new(
+        &[
+            Step::Expect(HANDSHAKE[0]),
+            response(1, json!({"sessionId":"fixture-session"})),
+            Step::Expect(HANDSHAKE[1]),
+            Step::EmitBatch(vec![
+                response(2, json!({"modelId":"fixture-model","autonomyLevel":"low"})),
+                rate_limit(),
+            ]),
+            Step::WaitForRelease,
+        ],
+        None,
+        None,
+    );
+    let runner = OrderRunnerManager::new();
+    runner
+        .start_order(during_init.spec("initializing"))
+        .expect("first slot");
+    runner
+        .start_order(during_settings.spec("updating"))
+        .expect("second slot");
+    let assert_paused = |id: &str, card: Card| {
+        assert_eq!(card.summary, "Startup quota (0 of 5 remaining)");
+        assert_eq!(
+            runner.state(id),
+            Some(OrderRunState::PausedLimit {
+                reason: "Startup quota".to_owned(),
+                retry_after_ms: Some(30),
+            })
+        );
+    };
+    assert_paused(
+        "initializing",
+        wait_for_card(&runner, "initializing", CardKind::RateLimit).await,
+    );
+    runner
+        .start_order(after_ack.spec("confirmed"))
+        .expect("reuse paused slot");
+    for id in ["updating", "confirmed"] {
+        assert_paused(id, wait_for_card(&runner, id, CardKind::RateLimit).await);
+    }
+}
+
+#[tokio::test]
+async fn no_hook_endpoint_strips_stale_explicit_values() {
+    let fake = FakeDroid::new(&turn(PROMPT, [complete(), CLOSE]), None, None);
+    let runner = OrderRunnerManager::new();
+    let id = "é".repeat(128);
+    runner
+        .start_order(stale_hook_env(fake.spec(&id)))
+        .expect("start without hooks");
+    completed(&runner, &id).await;
+}
+
+#[tokio::test]
+async fn invalid_hook_environment_is_rejected_before_starting() {
+    let fake = FakeDroid::new(&turn(PROMPT, [complete(), CLOSE]), None, None);
+    let runner = OrderRunnerManager::new();
+    for id in [
+        "",
+        " ",
+        " padded",
+        "trailing ",
+        "a b",
+        "a\u{a0}b",
+        "a\0b",
+        "a\nb",
+        "a\u{202e}b",
+        "a\u{2069}b",
+        &"é".repeat(129),
+    ] {
+        assert_eq!(
+            runner.start_order(fake.spec(id)),
+            Err(OrderRunnerError::InvalidOrderId),
+            "{id:?}"
+        );
+        assert_eq!(runner.state(id), None);
+    }
+    for endpoint in [
+        "",
+        " ",
+        "relative.sock",
+        "tcp://192.0.2.1:1234",
+        "tcp://127.0.0.1:1234\n",
+        "tcp://127.0.0.1:\0",
+        "/run/acan\u{202e}.sock",
+    ] {
+        let mut spec = fake.spec("valid");
+        spec.hook_endpoint = Some(endpoint.to_owned());
+        assert_eq!(
+            runner.start_order(spec),
+            Err(OrderRunnerError::InvalidHookEndpoint),
+            "{endpoint:?}"
+        );
+        assert_eq!(runner.state("valid"), None);
+    }
+    assert_eq!(
+        reconcile_on_startup(vec![PersistedOrderState {
+            order_id: " invalid".into(),
+            state: OrderRunState::Running,
+        }]),
+        Err(OrderRunnerError::InvalidOrderId)
+    );
+    assert!(!fake.started());
+}
+
+#[tokio::test]
 async fn startup_restores_interrupted_cards_without_starting_a_process() {
     use OrderRunState::*;
 
@@ -742,7 +1114,7 @@ async fn startup_restores_interrupted_cards_without_starting_a_process() {
     })
     .collect();
 
-    let expected = reconcile_on_startup(records.clone());
+    let expected = reconcile_on_startup(records.clone()).expect("reconcile persisted orders");
     let runner = OrderRunnerManager::new();
     let restored = runner
         .load_persisted_orders(records.clone(), [fake.spec("running")])
@@ -769,6 +1141,16 @@ async fn startup_restores_interrupted_cards_without_starting_a_process() {
             assert_eq!(card.summary, *reason);
             assert_eq!(card.request_id, None);
             assert_eq!(runner.pending_card(&order.order_id).as_ref(), Some(card));
+            let standalone = expected[index].card.as_ref().expect("interrupted Card");
+            assert_eq!(option_ids(standalone), ["cancel"]);
+            assert!(!standalone.allow_other);
+            if order.order_id == "running" {
+                assert_eq!(option_ids(card), ["resume", "cancel"]);
+                assert!(card.allow_other);
+            } else {
+                assert_eq!(option_ids(card), ["cancel"]);
+                assert!(!card.allow_other);
+            }
         } else {
             assert!(order.card.is_none());
         }
@@ -798,6 +1180,14 @@ async fn startup_restores_interrupted_cards_without_starting_a_process() {
     );
 
     let waiting = runner.pending_card("waiting").expect("waiting Card");
+    assert_eq!(
+        runner.answer_card(&authority, &waiting.id, select("resume")),
+        Err(OrderRunnerError::InvalidOption)
+    );
+    assert_eq!(
+        runner.answer_card(&authority, &waiting.id, other("Try again")),
+        Err(OrderRunnerError::OtherNotAllowed)
+    );
     runner
         .answer_card(&authority, &waiting.id, CardDecision::Cancel)
         .expect("cancel interrupted order");

@@ -73,6 +73,13 @@ impl SpawnConfig {
         self
     }
 
+    /// Removes both an inherited variable and any existing explicit value for it.
+    #[must_use]
+    pub fn without_env_var(mut self, name: &str) -> Self {
+        self.env.remove(name);
+        self
+    }
+
     /// Overrides the default version range.
     #[must_use]
     pub fn with_version_policy(mut self, policy: VersionPolicy) -> Self {
