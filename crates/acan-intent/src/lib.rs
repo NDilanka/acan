@@ -10,8 +10,8 @@
 //! [`Provenance`] in their types; see [`provenance`] for what a model may and may not author,
 //! and [`admit`] for how stored records become evidence.
 //!
-//! Every envelope serializes as `snake_case` JSON with a version tag, refuses unknown fields, and
-//! fails to decode on an unknown version. Internally tagged enums spell their fieldless variants
+//! Scope-first envelopes serialize as `snake_case` JSON with a version tag, refuse unknown fields,
+//! and fail to decode on an unknown version. Internally tagged enums spell their fieldless variants
 //! `Name {}` rather than `Name`: serde ignores `deny_unknown_fields` on unit variants of an
 //! internally tagged enum, so `{"kind": "any", "extra": 1}` would otherwise decode.
 
@@ -23,6 +23,7 @@ mod error;
 mod expr;
 pub mod fold;
 mod gate;
+pub mod genui;
 mod hash;
 mod ledger;
 mod mcp;
@@ -61,6 +62,15 @@ pub use expr::{
 pub use gate::{
     EnvManifest, FixtureSetManifest, GateContext, LedgerHead, OverlayManifest, PreparedCommit,
     ProbeSetEntry, ProbeSetManifest, RunnerManifest,
+};
+pub use genui::{
+    Block, CardEvidenceProposal, CheckItem, DraftOrderProposal, GenUiError, GenUiPlace,
+    KeyValueItem, LinkTarget, MAX_BLOCKS, MAX_CALLS_PER_VIEW_PER_TURN, MAX_CHECKS, MAX_LABEL_CHARS,
+    MAX_LIST_ITEMS, MAX_PROSE_CHARS, MAX_SCOPE_PATHS, MAX_SNIPPET_CHARS, MAX_TABLE_COLUMNS,
+    MAX_TABLE_ROWS, MAX_TARGET_CHARS, MAX_TOTAL_BYTES, MAX_TRACKED_VIEWS_PER_TURN,
+    MAX_VIEW_KEY_LEN, McpToolSpec, Proposal, ReceiptNotesProposal, ReportProposal, Tone,
+    TurnBudget, ValidatedProposal, classify_link_target, mcp_tool_spec, mcp_tool_specs,
+    parse_and_validate_proposal, validate_proposal,
 };
 pub use hash::{
     ArtifactHash, CanonicalError, ContentHash, ContrastExampleHash, EnvHash, EpisodeId,
