@@ -65,7 +65,7 @@ pub enum DroidError {
     /// Droid rejected a JSON-RPC request.
     #[error("droid RPC error {0}: {1}")]
     Rpc(i64, String),
-    /// The startup RPC hit a quota or rate limit.
+    /// Droid reported a quota or rate limit before the turn could start.
     #[error("droid rate limit: {message}")]
     RateLimited {
         /// Droid's error message.
