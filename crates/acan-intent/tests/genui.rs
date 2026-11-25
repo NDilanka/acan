@@ -1,11 +1,19 @@
 use acan_intent::{
-    Block, GenUiError, GenUiPlace, MAX_BLOCKS, MAX_CALLS_PER_VIEW_PER_TURN, MAX_CHECKS,
+    Block, GenUiError, GenUiPlace, LinkTarget, MAX_BLOCKS, MAX_CALLS_PER_VIEW_PER_TURN, MAX_CHECKS,
     MAX_LABEL_CHARS, MAX_LIST_ITEMS, MAX_PROSE_CHARS, MAX_SCOPE_PATHS, MAX_SNIPPET_CHARS,
-    MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, MAX_TARGET_CHARS, MAX_TOTAL_BYTES, Proposal,
-    ReceiptNotesProposal, ReportProposal, Tone, TurnBudget, ValidatedProposal, mcp_tool_spec,
-    mcp_tool_specs, parse_and_validate_proposal, validate_proposal,
+    MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, MAX_TARGET_CHARS, MAX_TOTAL_BYTES,
+    MAX_TRACKED_VIEWS_PER_TURN, MAX_VIEW_KEY_LEN, Proposal, ReceiptNotesProposal, ReportProposal,
+    Tone, TurnBudget, ValidatedProposal, classify_link_target, mcp_tool_spec, mcp_tool_specs,
+    parse_and_validate_proposal, validate_proposal,
 };
 use serde_json::{Value, json};
+
+const BIDI_CONTROLS: [char; 12] = [
+    '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}',
+    '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+];
+
+const LINE_SEPARATORS: [char; 2] = ['\u{2028}', '\u{2029}'];
 
 fn parse(place: GenUiPlace, payload: Value) -> Result<ValidatedProposal, GenUiError> {
     parse_and_validate_proposal(place, &payload.to_string())
@@ -153,6 +161,138 @@ fn the_tool_name_selects_one_strict_envelope() {
         parse(GenUiPlace::ReceiptNotes, json!({"summary":"","blocks":[]})),
         "summary",
     );
+}
+
+#[test]
+fn wire_enums_accept_only_exact_string_spellings() {
+    for raw in [
+        r#"{"warning":null}"#,
+        r#"["warning"]"#,
+        r#""Warning""#,
+        "false",
+        "0",
+        "null",
+    ] {
+        assert!(serde_json::from_str::<Tone>(raw).is_err(), "{raw}");
+        let tone: Value = serde_json::from_str(raw).unwrap();
+        assert!(
+            serde_json::from_value::<Tone>(tone.clone()).is_err(),
+            "{raw}"
+        );
+        assert!(
+            matches!(
+                parse_block(json!({"kind":"status_badge","tone":tone,"label":"Check"})),
+                Err(GenUiError::InvalidJson { .. })
+            ),
+            "{raw}"
+        );
+    }
+    for raw in [
+        r#"{"report":null}"#,
+        r#"["report"]"#,
+        r#""Report""#,
+        "false",
+        "0",
+        "null",
+    ] {
+        assert!(serde_json::from_str::<GenUiPlace>(raw).is_err(), "{raw}");
+        let place: Value = serde_json::from_str(raw).unwrap();
+        assert!(
+            serde_json::from_value::<GenUiPlace>(place).is_err(),
+            "{raw}"
+        );
+    }
+    assert_eq!(
+        serde_json::from_str::<Tone>(r#""warn\u0069ng""#).unwrap(),
+        Tone::Warning
+    );
+    assert_eq!(
+        serde_json::from_str::<GenUiPlace>(r#""rep\u006frt""#).unwrap(),
+        GenUiPlace::Report
+    );
+}
+
+#[test]
+fn optional_fields_are_omitted_and_reject_explicit_nulls() {
+    for (block, parent, fields) in [
+        (
+            json!({"kind":"callout","tone":"info","text":"Note"}),
+            "",
+            &["title"][..],
+        ),
+        (
+            json!({"kind":"check_list","items":[{"label":"Build","passed":true}]}),
+            "/items/0",
+            &["detail"],
+        ),
+        (
+            json!({"kind":"metric","label":"Time","value":"1 ms"}),
+            "",
+            &["delta"],
+        ),
+        (
+            json!({"kind":"file_ref","path":"src/lib.rs"}),
+            "",
+            &["line", "note"],
+        ),
+        (
+            json!({"kind":"diff_snippet","path":"src/lib.rs","before":"","after":""}),
+            "",
+            &["note"],
+        ),
+        (
+            json!({"kind":"code_snippet","code":"fn main() {}"}),
+            "",
+            &["language", "caption"],
+        ),
+        (
+            json!({"kind":"command_output","command":"cargo test","exit_code":0,"stdout":""}),
+            "",
+            &["stderr"],
+        ),
+    ] {
+        let validated = parse_block(block.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&validated.blocks()[0]).unwrap(), block);
+        for field in fields {
+            let mut with_null = block.clone();
+            with_null.pointer_mut(parent).unwrap()[*field] = Value::Null;
+            assert!(
+                serde_json::from_value::<Block>(with_null.clone()).is_err(),
+                "{with_null}"
+            );
+            assert!(
+                matches!(
+                    parse_block(with_null.clone()),
+                    Err(GenUiError::InvalidJson { .. })
+                ),
+                "{with_null}"
+            );
+        }
+    }
+    for (place, mut payload) in [
+        (
+            GenUiPlace::DraftOrder,
+            json!({"intent":"Build","scope_paths":[],"checks":[],"blocks":[]}),
+        ),
+        (
+            GenUiPlace::ReceiptNotes,
+            json!({"blocks":[{"kind":"divider"}]}),
+        ),
+        (GenUiPlace::Report, json!({"title":"Changes","blocks":[]})),
+    ] {
+        let serialized = match parse(place, payload.clone()).unwrap().into_inner() {
+            Proposal::DraftOrder(draft) => serde_json::to_value(draft),
+            Proposal::ReceiptNotes(notes) => serde_json::to_value(notes),
+            Proposal::Report(report) => serde_json::to_value(report),
+            other => panic!("unexpected proposal: {other:?}"),
+        };
+        assert_eq!(serialized.unwrap(), payload);
+        payload["summary"] = Value::Null;
+        assert!(
+            matches!(parse(place, payload), Err(GenUiError::InvalidJson { .. })),
+            "{place:?}"
+        );
+    }
 }
 
 #[test]
@@ -305,7 +445,61 @@ fn required_text_numeric_ranges_and_control_rules_are_enforced() {
 }
 
 #[test]
-fn refs_and_scope_paths_share_the_portable_repo_grammar() {
+fn text_rejects_bidi_controls_and_single_line_separators() {
+    for c in BIDI_CONTROLS.into_iter().chain(LINE_SEPARATORS) {
+        let text = format!("a{c}b");
+        invalid_field(
+            parse_block(json!({"kind":"heading","level":1,"text":text})),
+            "text",
+        );
+        invalid_field(
+            parse_block(json!({"kind":"table","columns":["A"],"rows":[[text]]})),
+            "rows",
+        );
+        invalid_field(
+            parse_block(json!({"kind":"file_ref","path":"src/lib.rs","note":text})),
+            "note",
+        );
+        invalid_field(
+            parse(
+                GenUiPlace::Report,
+                json!({"title":"Changes","summary":text,"blocks":[]}),
+            ),
+            "summary",
+        );
+    }
+    for c in BIDI_CONTROLS {
+        let text = format!("a{c}b");
+        for (block, field) in [
+            (json!({"kind":"text","text":text}), "text"),
+            (json!({"kind":"callout","tone":"info","text":text}), "text"),
+            (json!({"kind":"code_snippet","code":text}), "code"),
+            (
+                json!({"kind":"diff_snippet","path":"src/lib.rs","before":text,"after":""}),
+                "before",
+            ),
+            (
+                json!({"kind":"diff_snippet","path":"src/lib.rs","before":"","after":text}),
+                "after",
+            ),
+            (
+                json!({"kind":"command_output","command":"cargo test","exit_code":0,"stdout":text}),
+                "stdout",
+            ),
+            (
+                json!({"kind":"command_output","command":"cargo test","exit_code":0,"stdout":"","stderr":text}),
+                "stderr",
+            ),
+        ] {
+            invalid_field(parse_block(block), field);
+        }
+    }
+    assert!(parse_block(json!({"kind":"heading","level":1,"text":"עברית العربية"})).is_ok());
+    assert!(parse_block(json!({"kind":"text","text":"a\u{2028}b\u{2029}c\n\td"})).is_ok());
+}
+
+#[test]
+fn refs_scope_paths_and_repo_links_share_the_portable_repo_grammar() {
     for path in [
         "",
         "../x",
@@ -321,10 +515,29 @@ fn refs_and_scope_paths_share_the_portable_repo_grammar() {
         "src/a\0b",
         "src/a\tb",
         "file.txt:stream",
-    ] {
+        "COM¹",
+        "src/cOm².txt",
+        "CoM³/nested/file.txt",
+        "LPT¹.log",
+        "src/LpT²/file.txt",
+        "lpt³",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .chain(
+        BIDI_CONTROLS
+            .into_iter()
+            .chain(LINE_SEPARATORS)
+            .map(|c| format!("src/a{c}b")),
+    ) {
         assert_eq!(
             parse_block(json!({"kind":"file_ref","path":path})),
             Err(GenUiError::InvalidPath { field: "path" }),
+            "{path:?}"
+        );
+        assert_eq!(
+            parse_block(json!({"kind":"link","label":"Docs","target":path})),
+            Err(GenUiError::InvalidLink),
             "{path:?}"
         );
         assert_eq!(
@@ -353,14 +566,30 @@ fn refs_and_scope_paths_share_the_portable_repo_grammar() {
 }
 
 #[test]
-fn links_allow_web_hosts_or_safe_paths_but_not_other_schemes() {
-    let link = |target| parse_block(json!({"kind":"link","label":"Docs","target":target}));
+fn links_classify_strict_web_urls_and_literal_repo_paths() {
+    let link = |target: &str| parse_block(json!({"kind":"link","label":"Docs","target":target}));
     for target in [
         "https://example.com",
         "http://localhost:8080/docs?query=1#top",
+        "https://Sub-Domain.Example.com:1/docs%20and%2Fmore?a=b&x=@y#top",
+        "https://192.0.2.1:65535/",
         "HTTPS://[::1]/",
-        "src/lib.rs",
+        "https://[::ffff:192.0.2.2]:443/docs",
     ] {
+        assert_eq!(classify_link_target(target), Ok(LinkTarget::WebUrl(target)));
+        assert!(link(target).is_ok(), "{target}");
+    }
+    for target in [
+        "src/lib.rs",
+        "docs/COM⁴.txt",
+        "src/COM¹notes.md",
+        "docs/café.md",
+        "docs/1%25.txt",
+    ] {
+        assert_eq!(
+            classify_link_target(target),
+            Ok(LinkTarget::RepoPath(target))
+        );
         assert!(link(target).is_ok(), "{target}");
     }
     for target in [
@@ -376,17 +605,61 @@ fn links_allow_web_hosts_or_safe_paths_but_not_other_schemes() {
         "http://?query=1",
         "https://:443",
         "https://user@",
+        "https://user:pass@example.com",
+        "https://user@[::1]",
+        "https://%65xample.com",
+        "https://exa_mple.com",
+        "https://exämple.com",
+        "https://-example.com",
+        "https://example-.com",
+        "https://.example.com",
+        "https://example..com",
+        "https://example.com.",
+        "https://256.1.2.3",
+        "https://127.1",
+        "https://0x7f000001",
+        "https://0177.0.0.1",
+        "https://::1/",
         "https://[]",
+        "https://[example.com]",
+        "https://[::1]extra",
+        "https://[fe80::1%25eth0]",
+        "https://[::1]:",
+        "https://example.com:",
+        "https://example.com:0",
+        "https://example.com:65536",
+        "https://example.com:+443",
         "https://example.com:bad",
         "https://\\example.com",
         "//example.com",
         "../src/lib.rs",
         "src/a b",
         "src/a\u{00a0}b",
+        "src/%2e%2E/file",
+        "src/a%2fb",
+        "src/a%2Fb",
+        "src/a%5cb",
+        "src/a%5Cb",
+        "https://example.com/a b",
         "https://example.com/a\nb",
         "https://example.com/a\0b",
+        "https://example.com/café",
+        "https://example.com/a%zz",
+        "https://example.com/?q=%2",
+        "https://example.com/?q=\"",
+        "https://example.com/#<tag>",
+        "https://example.com/#a#b",
     ] {
+        assert_eq!(
+            classify_link_target(target),
+            Err(GenUiError::InvalidLink),
+            "{target:?}"
+        );
         assert_eq!(link(target), Err(GenUiError::InvalidLink), "{target:?}");
+    }
+    for c in BIDI_CONTROLS.into_iter().chain(LINE_SEPARATORS) {
+        let target = format!("https://example.com/docs?query=a{c}b#top");
+        assert_eq!(link(&target), Err(GenUiError::InvalidLink), "{target:?}");
     }
 }
 
@@ -550,6 +823,42 @@ fn block_and_byte_caps_apply_to_raw_and_typed_proposals() {
 }
 
 #[test]
+fn compact_proposals_pass_both_byte_caps_at_the_limit() {
+    let shape = |first: &str, second: &str| {
+        json!({"title":"Changes","blocks":[
+            {"kind":"code_snippet","code":first},
+            {"kind":"code_snippet","code":second}
+        ]})
+        .to_string()
+    };
+    let room = MAX_TOTAL_BYTES - shape("", "").len();
+    let code = "é".repeat(room / 4);
+    let raw = shape(&code, &(code.clone() + &"x".repeat(room % 4)));
+    assert_eq!(raw.len(), MAX_TOTAL_BYTES);
+    let validated = parse_and_validate_proposal(GenUiPlace::Report, &raw).unwrap();
+    assert_eq!(
+        validate_proposal(validated.clone().into_inner()),
+        Ok(validated)
+    );
+}
+
+#[test]
+fn oversized_in_memory_tables_hit_the_payload_cap() {
+    // Each table has a valid shape and each cell fits its field limit. Together they would
+    // serialize to over 18 MiB, but validation stops counting at the first excess write.
+    let table = Block::Table {
+        columns: vec!["Column".into(); MAX_TABLE_COLUMNS],
+        rows: vec![vec!["x".repeat(MAX_PROSE_CHARS); MAX_TABLE_COLUMNS]; MAX_TABLE_ROWS],
+    };
+    assert_eq!(
+        validate_proposal(report_with_blocks(vec![table; MAX_BLOCKS])),
+        Err(GenUiError::PayloadTooLarge {
+            limit: MAX_TOTAL_BYTES
+        })
+    );
+}
+
+#[test]
 fn budget_is_per_place_and_view_and_resets_after_each_turn() {
     let mut budget = TurnBudget::new();
     let report = GenUiPlace::Report;
@@ -579,6 +888,77 @@ fn budget_is_per_place_and_view_and_resets_after_each_turn() {
         assert_eq!(budget.remaining(place, view), MAX_CALLS_PER_VIEW_PER_TURN);
     }
     assert_eq!(budget.record_call(report, "view"), Ok(2));
+}
+
+#[test]
+fn budget_rejects_invalid_keys_and_bounds_distinct_pairs_across_places() {
+    let mut budget = TurnBudget::new();
+    let report = GenUiPlace::Report;
+    let card = GenUiPlace::CardEvidence;
+    let notes = GenUiPlace::ReceiptNotes;
+    let too_long = "é".repeat(MAX_VIEW_KEY_LEN + 1);
+    for key in [
+        "",
+        " a",
+        "a ",
+        "a b",
+        "a\tb",
+        "a\u{00a0}b",
+        "a\0b",
+        "a\u{007f}b",
+        &too_long,
+    ] {
+        assert!(
+            matches!(
+                budget.record_call(report, key),
+                Err(GenUiError::InvalidField {
+                    field: "view_key",
+                    ..
+                })
+            ),
+            "{key:?}"
+        );
+        assert_eq!(budget.remaining(report, key), 0, "{key:?}");
+    }
+    for c in BIDI_CONTROLS.into_iter().chain(LINE_SEPARATORS) {
+        let key = format!("a{c}b");
+        assert!(
+            matches!(
+                budget.record_call(report, &key),
+                Err(GenUiError::InvalidField {
+                    field: "view_key",
+                    ..
+                })
+            ),
+            "{key:?}"
+        );
+        assert_eq!(budget.remaining(report, &key), 0, "{key:?}");
+    }
+
+    let longest = "é".repeat(MAX_VIEW_KEY_LEN);
+    assert_eq!(budget.record_call(report, &longest), Ok(2));
+    assert_eq!(budget.record_call(card, &longest), Ok(2));
+    for i in 1..MAX_TRACKED_VIEWS_PER_TURN / 2 {
+        let key = format!("view-{i}");
+        assert_eq!(budget.record_call(report, &key), Ok(2));
+        assert_eq!(budget.record_call(card, &key), Ok(2));
+    }
+    assert_eq!(budget.remaining(notes, &longest), 0);
+    assert_eq!(
+        budget.record_call(notes, &longest),
+        Err(GenUiError::TurnBudgetFull {
+            limit: MAX_TRACKED_VIEWS_PER_TURN
+        })
+    );
+    assert_eq!(budget.remaining(report, &longest), 2);
+    assert_eq!(budget.record_call(report, &longest), Ok(1));
+    assert_eq!(budget.record_call(report, &longest), Ok(0));
+    budget.reset_turn();
+    assert_eq!(
+        budget.remaining(notes, &longest),
+        MAX_CALLS_PER_VIEW_PER_TURN
+    );
+    assert_eq!(budget.record_call(notes, &longest), Ok(2));
 }
 
 #[test]

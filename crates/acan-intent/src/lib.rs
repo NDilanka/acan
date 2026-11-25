@@ -65,10 +65,11 @@ pub use gate::{
 };
 pub use genui::{
     Block, CardEvidenceProposal, CheckItem, DraftOrderProposal, GenUiError, GenUiPlace,
-    KeyValueItem, MAX_BLOCKS, MAX_CALLS_PER_VIEW_PER_TURN, MAX_CHECKS, MAX_LABEL_CHARS,
+    KeyValueItem, LinkTarget, MAX_BLOCKS, MAX_CALLS_PER_VIEW_PER_TURN, MAX_CHECKS, MAX_LABEL_CHARS,
     MAX_LIST_ITEMS, MAX_PROSE_CHARS, MAX_SCOPE_PATHS, MAX_SNIPPET_CHARS, MAX_TABLE_COLUMNS,
-    MAX_TABLE_ROWS, MAX_TARGET_CHARS, MAX_TOTAL_BYTES, McpToolSpec, Proposal, ReceiptNotesProposal,
-    ReportProposal, Tone, TurnBudget, ValidatedProposal, mcp_tool_spec, mcp_tool_specs,
+    MAX_TABLE_ROWS, MAX_TARGET_CHARS, MAX_TOTAL_BYTES, MAX_TRACKED_VIEWS_PER_TURN,
+    MAX_VIEW_KEY_LEN, McpToolSpec, Proposal, ReceiptNotesProposal, ReportProposal, Tone,
+    TurnBudget, ValidatedProposal, classify_link_target, mcp_tool_spec, mcp_tool_specs,
     parse_and_validate_proposal, validate_proposal,
 };
 pub use hash::{

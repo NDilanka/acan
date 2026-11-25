@@ -6,8 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::io::{self, Write};
 use std::marker::PhantomData;
-use std::net::Ipv6Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -39,9 +40,13 @@ pub const MAX_SCOPE_PATHS: usize = 64;
 pub const MAX_CHECKS: usize = 16;
 /// The most calls one place and view may receive in a turn.
 pub const MAX_CALLS_PER_VIEW_PER_TURN: u8 = 3;
+/// The most characters in a view key.
+pub const MAX_VIEW_KEY_LEN: usize = 128;
+/// The most distinct place and view pairs tracked across all places in one turn.
+pub const MAX_TRACKED_VIEWS_PER_TURN: usize = 256;
 
 /// Where proposed blocks are shown.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GenUiPlace {
     /// An order draft, before approval.
@@ -79,14 +84,55 @@ impl GenUiPlace {
     }
 }
 
+impl<'de> Deserialize<'de> for GenUiPlace {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_str(StringEnumVisitor {
+            expected: "a generative UI place string",
+            parse: Self::from_tool_name,
+        })
+    }
+}
+
 /// The display tone of a callout or badge.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tone {
     Info,
     Success,
     Warning,
     Danger,
+}
+
+impl<'de> Deserialize<'de> for Tone {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_str(StringEnumVisitor {
+            expected: "a display tone string",
+            parse: |name| match name {
+                "info" => Some(Self::Info),
+                "success" => Some(Self::Success),
+                "warning" => Some(Self::Warning),
+                "danger" => Some(Self::Danger),
+                _ => None,
+            },
+        })
+    }
+}
+
+struct StringEnumVisitor<T> {
+    expected: &'static str,
+    parse: fn(&str) -> Option<T>,
+}
+
+impl<'de, T> Visitor<'de> for StringEnumVisitor<T> {
+    type Value = T;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.expected)
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<T, E> {
+        (self.parse)(value).ok_or_else(|| E::invalid_value(de::Unexpected::Str(value), &self))
+    }
 }
 
 /// One key and its displayed value.
@@ -103,6 +149,11 @@ pub struct KeyValueItem {
 pub struct CheckItem {
     pub label: String,
     pub passed: bool,
+    #[serde(
+        default,
+        deserialize_with = "reject_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub detail: Option<String>,
 }
 
@@ -117,6 +168,11 @@ pub enum Block {
     /// Emphasized text with an optional title.
     Callout {
         tone: Tone,
+        #[serde(
+            default,
+            deserialize_with = "reject_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         title: Option<String>,
         text: String,
     },
@@ -138,12 +194,27 @@ pub enum Block {
     Metric {
         label: String,
         value: String,
+        #[serde(
+            default,
+            deserialize_with = "reject_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         delta: Option<String>,
     },
     /// A repo-relative file reference with an optional one-based line number.
     FileRef {
         path: String,
+        #[serde(
+            default,
+            deserialize_with = "reject_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         line: Option<u32>,
+        #[serde(
+            default,
+            deserialize_with = "reject_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         note: Option<String>,
     },
     /// Before and after excerpts from one repo-relative path.
@@ -151,12 +222,27 @@ pub enum Block {
         path: String,
         before: String,
         after: String,
+        #[serde(
+            default,
+            deserialize_with = "reject_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         note: Option<String>,
     },
     /// A proposed code excerpt.
     CodeSnippet {
+        #[serde(
+            default,
+            deserialize_with = "reject_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         language: Option<String>,
         code: String,
+        #[serde(
+            default,
+            deserialize_with = "reject_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         caption: Option<String>,
     },
     /// Display-only command and output; the command is not executed.
@@ -164,6 +250,11 @@ pub enum Block {
         command: String,
         exit_code: i32,
         stdout: String,
+        #[serde(
+            default,
+            deserialize_with = "reject_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         stderr: Option<String>,
     },
     /// Column labels and equally wide rows of text.
@@ -183,6 +274,15 @@ pub enum Block {
     Divider {},
 }
 
+/// A validated link target, separated by how it may be presented.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkTarget<'a> {
+    /// An HTTP(S) URL that may be used as a browser link.
+    WebUrl(&'a str),
+    /// A literal repo-relative path, not a browser URL.
+    RepoPath(&'a str),
+}
+
 /// Arguments to `draft_order`. They propose an order without opening or approving it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -190,6 +290,11 @@ pub struct DraftOrderProposal {
     pub intent: String,
     pub scope_paths: Vec<String>,
     pub checks: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "reject_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub summary: Option<String>,
     #[serde(deserialize_with = "object_list")]
     pub blocks: Vec<Block>,
@@ -208,6 +313,11 @@ pub struct CardEvidenceProposal {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReceiptNotesProposal {
+    #[serde(
+        default,
+        deserialize_with = "reject_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub summary: Option<String>,
     #[serde(deserialize_with = "object_list")]
     pub blocks: Vec<Block>,
@@ -218,6 +328,11 @@ pub struct ReceiptNotesProposal {
 #[serde(deny_unknown_fields)]
 pub struct ReportProposal {
     pub title: String,
+    #[serde(
+        default,
+        deserialize_with = "reject_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub summary: Option<String>,
     #[serde(deserialize_with = "object_list")]
     pub blocks: Vec<Block>,
@@ -324,6 +439,9 @@ pub enum GenUiError {
     /// This place and view reached its call limit for the turn.
     #[error("{} call budget of {limit} per view per turn exceeded", place.tool_name())]
     BudgetExceeded { place: GenUiPlace, limit: u8 },
+    /// No additional place and view pairs can be tracked this turn.
+    #[error("turn budget cannot track more than {limit} place and view pairs")]
+    TurnBudgetFull { limit: usize },
 }
 
 /// Checks raw MCP arguments before decoding the proposal for the given tool.
@@ -345,8 +463,7 @@ pub fn parse_and_validate_proposal(
         GenUiPlace::Report => decode_object(raw_json).map(Proposal::Report),
     }
     .map_err(invalid_json)?;
-    validate_fields(&proposal)?;
-    Ok(ValidatedProposal(proposal))
+    validate_proposal(proposal)
 }
 
 /// Checks an in-memory proposal using the same field rules as the MCP boundary.
@@ -355,16 +472,40 @@ pub fn parse_and_validate_proposal(
 ///
 /// Refuses invalid content or an envelope whose compact JSON exceeds the byte limit.
 pub fn validate_proposal(proposal: Proposal) -> Result<ValidatedProposal, GenUiError> {
+    // Stop oversized in-memory proposals before walking every field or buffering any JSON.
+    let mut counter = LimitedCounter {
+        written: 0,
+        limit: MAX_TOTAL_BYTES,
+    };
+    let result = match &proposal {
+        Proposal::DraftOrder(proposal) => serde_json::to_writer(&mut counter, proposal),
+        Proposal::CardEvidence(proposal) => serde_json::to_writer(&mut counter, proposal),
+        Proposal::ReceiptNotes(proposal) => serde_json::to_writer(&mut counter, proposal),
+        Proposal::Report(proposal) => serde_json::to_writer(&mut counter, proposal),
+    };
+    validate_size(counter.written)?;
+    result.map_err(invalid_json)?;
     validate_fields(&proposal)?;
-    let json = match &proposal {
-        Proposal::DraftOrder(proposal) => serde_json::to_vec(proposal),
-        Proposal::CardEvidence(proposal) => serde_json::to_vec(proposal),
-        Proposal::ReceiptNotes(proposal) => serde_json::to_vec(proposal),
-        Proposal::Report(proposal) => serde_json::to_vec(proposal),
-    }
-    .map_err(invalid_json)?;
-    validate_size(json.len())?;
     Ok(ValidatedProposal(proposal))
+}
+
+struct LimitedCounter {
+    written: usize,
+    limit: usize,
+}
+
+impl Write for LimitedCounter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.written = self.written.saturating_add(buf.len());
+        if self.written > self.limit {
+            return Err(io::ErrorKind::FileTooLarge.into());
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn validate_size(bytes: usize) -> Result<(), GenUiError> {
@@ -528,9 +669,7 @@ fn validate_block(block: &Block) -> Result<(), GenUiError> {
         }
         Block::Link { label, target } => {
             required_text("label", label, MAX_LABEL_CHARS)?;
-            if !valid_link(target) {
-                return Err(GenUiError::InvalidLink);
-            }
+            classify_link_target(target)?;
         }
         Block::Divider {} => {}
     }
@@ -593,11 +732,15 @@ fn validate_text(
     if exceeds_chars(value, max) {
         return Err(invalid_field(field, format!("exceeds {max} characters")));
     }
-    if value
-        .chars()
-        .any(|c| c.is_control() && !(multiline && matches!(c, '\n' | '\t')))
-    {
-        return Err(invalid_field(field, "contains a control character"));
+    if value.chars().any(|c| {
+        is_bidi_control(c)
+            || (c.is_control() && !(multiline && matches!(c, '\n' | '\t')))
+            || (!multiline && is_line_separator(c))
+    }) {
+        return Err(invalid_field(
+            field,
+            "contains a control character or line separator",
+        ));
     }
     if required && value.trim().is_empty() {
         return Err(invalid_field(field, "must not be empty"));
@@ -609,50 +752,149 @@ fn exceeds_chars(value: &str, max: usize) -> bool {
     value.chars().nth(max).is_some()
 }
 
+fn is_bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
+fn is_line_separator(c: char) -> bool {
+    matches!(c, '\u{2028}' | '\u{2029}')
+}
+
 fn validate_path(field: &'static str, path: &str) -> Result<(), GenUiError> {
-    if exceeds_chars(path, MAX_TARGET_CHARS) || path.parse::<RepoPath>().is_err() {
+    if exceeds_chars(path, MAX_TARGET_CHARS)
+        || path
+            .chars()
+            .any(|c| is_bidi_control(c) || is_line_separator(c))
+        || path.split('/').any(is_superscript_device)
+        || path.parse::<RepoPath>().is_err()
+    {
         return Err(GenUiError::InvalidPath { field });
     }
     Ok(())
 }
 
-fn valid_link(target: &str) -> bool {
+fn is_superscript_device(segment: &str) -> bool {
+    let stem = segment.split('.').next().unwrap_or(segment).trim_end();
+    stem.strip_suffix(['\u{00b9}', '\u{00b2}', '\u{00b3}'])
+        .is_some_and(|prefix| {
+            prefix.eq_ignore_ascii_case("COM") || prefix.eq_ignore_ascii_case("LPT")
+        })
+}
+
+/// Validates a `Link` target and distinguishes browser links from literal repo paths.
+///
+/// # Errors
+///
+/// Returns [`GenUiError::InvalidLink`] for an invalid HTTP(S) URL or repo-relative path.
+pub fn classify_link_target(target: &str) -> Result<LinkTarget<'_>, GenUiError> {
     if exceeds_chars(target, MAX_TARGET_CHARS)
         || target
             .chars()
-            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+            .any(|c| c.is_whitespace() || c.is_control() || is_bidi_control(c) || c == '\\')
     {
-        return false;
+        return Err(GenUiError::InvalidLink);
     }
     if let Some((scheme, rest)) = target.split_once("://") {
-        return (scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http"))
-            && has_web_host(rest);
+        if (scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http"))
+            && valid_web_url(rest)
+        {
+            return Ok(LinkTarget::WebUrl(target));
+        }
+        return Err(GenUiError::InvalidLink);
     }
-    // RepoPath rejects colons, so schemes without `://` cannot pass as paths either.
-    target.parse::<RepoPath>().is_ok()
+    // RepoPath rejects colons. Also refuse encoded dots and separators in literal paths.
+    if target.as_bytes().windows(3).any(|bytes| {
+        matches!(
+            bytes,
+            [b'%', b'2', b'e' | b'E' | b'f' | b'F'] | [b'%', b'5', b'c' | b'C']
+        )
+    }) {
+        return Err(GenUiError::InvalidLink);
+    }
+    validate_path("target", target).map_err(|_| GenUiError::InvalidLink)?;
+    Ok(LinkTarget::RepoPath(target))
 }
 
-fn has_web_host(rest: &str) -> bool {
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host_port = authority.rsplit('@').next().unwrap_or_default();
-    if let Some(ipv6) = host_port.strip_prefix('[') {
+fn valid_web_url(rest: &str) -> bool {
+    let (authority, suffix) = rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len()));
+    valid_web_authority(authority) && valid_web_suffix(suffix)
+}
+
+fn valid_web_authority(authority: &str) -> bool {
+    if let Some(ipv6) = authority.strip_prefix('[') {
         return ipv6.split_once(']').is_some_and(|(host, suffix)| {
             host.parse::<Ipv6Addr>().is_ok()
                 && (suffix.is_empty() || suffix.strip_prefix(':').is_some_and(valid_port))
         });
     }
-    let (host, port) = host_port.split_once(':').unwrap_or((host_port, ""));
-    !host.is_empty() && !host.contains(['[', ']', '<', '>', '"', '|', '^']) && valid_port(port)
+    let host = if let Some((host, port)) = authority.split_once(':') {
+        if !valid_port(port) {
+            return false;
+        }
+        host
+    } else {
+        authority
+    };
+
+    // Browsers interpret a final numeric label as an IPv4 address, even in noncanonical forms.
+    // Accept only dotted quads in that case, so the literal host cannot name a different address.
+    let last = host.rsplit('.').next().unwrap_or(host);
+    if last.bytes().all(|b| b.is_ascii_digit())
+        || last
+            .strip_prefix("0x")
+            .or_else(|| last.strip_prefix("0X"))
+            .is_some_and(|digits| digits.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return host.parse::<Ipv4Addr>().is_ok();
+    }
+
+    host.len() <= 253
+        && host.split('.').all(|label| {
+            (1..=63).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
 }
 
 fn valid_port(port: &str) -> bool {
-    port.is_empty() || (port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok())
+    port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok_and(|port| port != 0)
+}
+
+fn valid_web_suffix(suffix: &str) -> bool {
+    let mut bytes = suffix.bytes();
+    let mut has_fragment = false;
+    while let Some(b) = bytes.next() {
+        match b {
+            b'#' if !has_fragment => has_fragment = true,
+            b'%' if bytes.next().is_some_and(|b| b.is_ascii_hexdigit())
+                && bytes.next().is_some_and(|b| b.is_ascii_hexdigit()) => {}
+            // RFC 3986 path, query and fragment characters, excluding the handled delimiters.
+            b if b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/?".contains(&b) => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn invalid_json(error: serde_json::Error) -> GenUiError {
     GenUiError::InvalidJson {
         message: error.to_string(),
     }
+}
+
+fn reject_null<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    let value = Option::<T>::deserialize(deserializer)?;
+    value
+        .map(Some)
+        .ok_or_else(|| de::Error::custom("null is not allowed; omit the field instead"))
 }
 
 // Serde's derived structs can also decode from positional arrays. Require named fields at
@@ -779,36 +1021,77 @@ impl TurnBudget {
     ///
     /// # Errors
     ///
-    /// Returns [`GenUiError::BudgetExceeded`] after the first three calls.
+    /// Returns [`GenUiError::InvalidField`] for an invalid view key,
+    /// [`GenUiError::BudgetExceeded`] after the first three calls for a place and view,
+    /// or [`GenUiError::TurnBudgetFull`] if a new pair cannot be tracked this turn.
     pub fn record_call(&mut self, place: GenUiPlace, view_key: &str) -> Result<u8, GenUiError> {
-        let views = self.calls.entry(place).or_default();
-        let calls = views.entry(view_key.to_owned()).or_default();
-        if *calls == MAX_CALLS_PER_VIEW_PER_TURN {
-            return Err(GenUiError::BudgetExceeded {
-                place,
-                limit: MAX_CALLS_PER_VIEW_PER_TURN,
+        if !valid_view_key(view_key) {
+            return Err(invalid_field(
+                "view_key",
+                format!(
+                    "must be non-empty and at most {MAX_VIEW_KEY_LEN} characters without whitespace or controls"
+                ),
+            ));
+        }
+        if let Some(calls) = self
+            .calls
+            .get_mut(&place)
+            .and_then(|views| views.get_mut(view_key))
+        {
+            if *calls == MAX_CALLS_PER_VIEW_PER_TURN {
+                return Err(GenUiError::BudgetExceeded {
+                    place,
+                    limit: MAX_CALLS_PER_VIEW_PER_TURN,
+                });
+            }
+            *calls += 1;
+            return Ok(MAX_CALLS_PER_VIEW_PER_TURN - *calls);
+        }
+        if self.is_full() {
+            return Err(GenUiError::TurnBudgetFull {
+                limit: MAX_TRACKED_VIEWS_PER_TURN,
             });
         }
-        *calls += 1;
-        Ok(MAX_CALLS_PER_VIEW_PER_TURN - *calls)
+        self.calls
+            .entry(place)
+            .or_default()
+            .insert(view_key.to_owned(), 1);
+        Ok(MAX_CALLS_PER_VIEW_PER_TURN - 1)
     }
 
     /// How many calls remain for this place and view in the current turn.
+    ///
+    /// Returns zero for invalid view keys or for untracked pairs when the budget is full.
     #[must_use]
     pub fn remaining(&self, place: GenUiPlace, view_key: &str) -> u8 {
-        let calls = self
-            .calls
-            .get(&place)
-            .and_then(|views| views.get(view_key))
-            .copied()
-            .unwrap_or_default();
-        MAX_CALLS_PER_VIEW_PER_TURN - calls
+        if !valid_view_key(view_key) {
+            return 0;
+        }
+        if let Some(calls) = self.calls.get(&place).and_then(|views| views.get(view_key)) {
+            MAX_CALLS_PER_VIEW_PER_TURN - calls
+        } else if self.is_full() {
+            0
+        } else {
+            MAX_CALLS_PER_VIEW_PER_TURN
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        self.calls.values().map(BTreeMap::len).sum::<usize>() >= MAX_TRACKED_VIEWS_PER_TURN
     }
 
     /// Clears every budget for the next turn.
     pub fn reset_turn(&mut self) {
         self.calls.clear();
     }
+}
+
+fn valid_view_key(key: &str) -> bool {
+    !key.is_empty()
+        && !exceeds_chars(key, MAX_VIEW_KEY_LEN)
+        && !key
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || is_bidi_control(c))
 }
 
 /// A model-facing, propose-only MCP tool definition.
