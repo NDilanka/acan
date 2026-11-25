@@ -86,6 +86,7 @@ name = "acan-server"
 version = "0.1.0"
 dependencies = [
  "acan-core",
+ "acan-droid",
  "acan-git",
  "acan-intent",
  "acan-scan",
