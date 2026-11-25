@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
+use std::future::{Future, poll_fn};
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
+use std::task::Poll;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -121,7 +123,7 @@ impl DroidSession {
     /// Checks the CLI version, then starts a child with a cleaned environment.
     ///
     /// Call [`Self::initialize`] before sending messages. Dropping the session kills the owned
-    /// process and, on Windows, its descendants.
+    /// process and its descendants in the owned Unix process group or Windows job.
     ///
     /// # Errors
     ///
@@ -135,14 +137,10 @@ impl DroidSession {
                 .stderr(Stdio::null()),
         )?;
         let stdout = process
-            .child
-            .stdout
-            .take()
+            .take_stdout()
             .ok_or(DroidError::Protocol("missing child stdout"))?;
         let stdin = process
-            .child
-            .stdin
-            .take()
+            .take_stdin()
             .ok_or(DroidError::Protocol("missing child stdin"))?;
         let mut session = Self::from_streams(stdout, stdin);
         session.process = Some(process);
@@ -195,7 +193,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
     ///
     /// # Errors
     ///
-    /// Aborts on missing or mismatched settings, timeout, malformed frames, or stream failure.
+    /// Aborts on a rate limit, missing or mismatched settings, timeout, or stream failure.
     /// A failed or cancelled handshake can never be reused to send a turn.
     pub async fn initialize(
         &mut self,
@@ -236,7 +234,11 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
                     {
                         break response_result(result, error);
                     }
-                    Some(message) => self.queue_startup(message)?,
+                    Some(message) => {
+                        if let Some(event) = Self::to_event(message)? {
+                            self.queue_startup(event)?;
+                        }
+                    }
                     None => break Err(DroidError::Exited("initialization")),
                 }
             }
@@ -287,7 +289,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
                                         .unwrap_or(false);
                                 }
                             }
-                            self.push_startup(event)?;
+                            self.queue_startup(event)?;
                         }
                     }
                     None => return Err(DroidError::Exited("settings confirmation")),
@@ -297,6 +299,35 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
         })
         .await
         .map_err(|_| DroidError::Timeout("settings confirmation"))?
+    }
+
+    /// Checks queued and immediately available startup frames without waiting for new ones.
+    ///
+    /// # Errors
+    ///
+    /// Returns a rate limit or stream error; other events remain queued for [`Self::next_event`].
+    pub async fn check_startup_rate_limit(&mut self) -> Result<(), DroidError> {
+        if let Some(index) = self
+            .queued
+            .iter()
+            .position(|event| matches!(event, DroidEvent::RateLimited { .. }))
+        {
+            let event = self.queued.remove(index).expect("queued rate limit");
+            return self.queue_startup(event);
+        }
+        loop {
+            // A notification can follow the last acknowledgement in the same batch of frames.
+            let frame = poll_fn(|cx| Poll::Ready(std::pin::pin!(self.read_inbound()).poll(cx))).await;
+            match frame {
+                Poll::Ready(Ok(Some(message))) => {
+                    if let Some(event) = Self::to_event(message)? {
+                        self.queue_startup(event)?;
+                    }
+                }
+                Poll::Ready(Err(error)) => return Err(error),
+                Poll::Ready(Ok(None)) | Poll::Pending => return Ok(()),
+            }
+        }
     }
 
     /// Sends a user message after initialization. The acknowledgement is handled by the event loop.
@@ -419,7 +450,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
         shutdown
     }
 
-    /// Stops the child (and its descendants on Windows), or closes an attached writer.
+    /// Stops the child and its owned process group or job, or closes an attached writer.
     ///
     /// # Errors
     ///
@@ -430,8 +461,6 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
             drop(stdin);
             if self.reaped.is_none() {
                 self.reaped = Some((process.kill().await?, Instant::now()));
-            } else {
-                process.root_exited();
             }
         } else if let Some(mut stdin) = stdin {
             time::timeout(EXIT_GRACE, stdin.shutdown())
@@ -492,11 +521,20 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
         Ok(())
     }
 
-    fn queue_startup(&mut self, message: InboundMessage) -> Result<(), DroidError> {
-        if let Some(event) = Self::to_event(message)? {
-            self.push_startup(event)?;
+    fn queue_startup(&mut self, event: DroidEvent) -> Result<(), DroidError> {
+        if let DroidEvent::RateLimited {
+            message,
+            retry_after,
+            headroom,
+        } = event
+        {
+            return Err(DroidError::RateLimited {
+                message,
+                retry_after,
+                headroom,
+            });
         }
-        Ok(())
+        self.push_startup(event)
     }
 
     fn push_startup(&mut self, event: DroidEvent) -> Result<(), DroidError> {
@@ -564,9 +602,8 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
                 tokio::select! {
                     biased;
                     frame = self.stdout.next() => frame?,
-                    status = process.child.wait() => {
+                    status = process.wait() => {
                         self.reaped = Some((status?, Instant::now() + EXIT_GRACE));
-                        process.root_exited();
                         continue;
                     }
                 }
@@ -581,14 +618,12 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> DroidSession<R, W> {
             {
                 // A closed stdout can't carry any further events, even if the child lingers.
                 self.stdin.take();
-                let status =
-                    if let Ok(status) = time::timeout(EXIT_GRACE, process.child.wait()).await {
-                        status?
-                    } else {
-                        process.kill().await?
-                    };
+                let status = if let Ok(status) = time::timeout(EXIT_GRACE, process.wait()).await {
+                    status?
+                } else {
+                    process.kill().await?
+                };
                 self.reaped = Some((status, Instant::now()));
-                process.root_exited();
             }
             self.mark_closed();
         }

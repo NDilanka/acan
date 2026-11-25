@@ -1,17 +1,22 @@
 //! One Droid turn per order attempt, with developer decisions routed through Cards.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use acan_droid::{
     AskAnswer, AskQuestion, AskUserReply, AskUserRequest, DroidError, DroidEvent, DroidSession,
-    Headroom, PermissionReply, PermissionRequest, RequestId, SessionInit, SessionSettings,
-    SpawnConfig,
+    Headroom, PermissionDetails, PermissionReply, PermissionRequest, RequestId, SessionInit,
+    SessionSettings, SpawnConfig,
 };
-use acan_intent::{Block, MAX_PROSE_CHARS, Proposal, ValidatedProposal};
+use acan_intent::{
+    Block, CardEvidenceProposal, MAX_BLOCKS, MAX_PROSE_CHARS, MAX_SNIPPET_CHARS, Proposal,
+    ValidatedProposal, validate_proposal,
+};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tokio::runtime::Handle;
 use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
@@ -24,10 +29,14 @@ pub const MAX_CONCURRENT_ORDERS: usize = 2;
 pub const MAX_ONE_LINE_CHARS: usize = 500;
 
 const MAX_QUEUED_REQUESTS: usize = 16;
+const MAX_ORDER_ID_CHARS: usize = 128;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const RESTART_REASON: &str = "daemon restarted before order finished";
 const RESUME: &str = "resume";
 const CANCEL: &str = "cancel";
+const DENY: &str = "deny";
+const ORDER_ENV: &str = "ACAN_ORDER_ID";
+const HOOK_ENV: &str = "ACAN_HOOK_ENDPOINT";
 
 /// The runner's current state for an order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,38 +120,31 @@ impl Card {
     /// Presents Droid's exact permission choices, including the inner calls of a Script.
     #[must_use]
     pub fn from_permission(order_id: &str, id: &RequestId, request: &PermissionRequest) -> Self {
-        let calls = request
-            .tool_uses
-            .iter()
-            .map(|item| (item.tool_use.name.as_str(), &item.tool_use.input))
-            .chain(
-                request
-                    .script_calls()
-                    .map(|call| (call.tool_name.as_str(), &call.tool_input)),
-            )
-            .map(
-                |(name, input)| match input.get("command").and_then(serde_json::Value::as_str) {
-                    Some(command) => format!("{name}: {command}"),
-                    None => name.to_owned(),
-                },
-            );
-        let mut summary = String::new();
-        for call in calls {
-            if !summary.is_empty() {
-                summary.push_str("; ");
-            }
-            summary.push_str(&call);
-            if let Some((end, _)) = summary.char_indices().nth(MAX_PROSE_CHARS - 1) {
-                summary.truncate(end);
-                summary.push('…');
-                break;
-            }
-        }
-        if summary.is_empty() {
-            summary = "Droid requested permission for a tool call".to_owned();
-        }
-        let mut card = Self::new(order_id, CardKind::Permission, "Tool permission", summary);
+        let mut card = Self::new(
+            order_id,
+            CardKind::Permission,
+            "Tool permission",
+            "Review all covered tool calls before approving.".to_owned(),
+        );
         card.request_id = Some(id.clone());
+        let has_calls = !request.tool_uses.is_empty() || request.script_calls().next().is_some();
+        let Some(blocks) = has_calls
+            .then(|| permission_blocks(&card.summary, request))
+            .flatten()
+        else {
+            card.summary = if has_calls {
+                "This permission request is too large to review completely. Deny or cancel it."
+            } else {
+                "Droid did not provide any tool calls to review. Deny or cancel this request."
+            }
+            .to_owned();
+            if request.options.iter().any(|option| option.value == DENY) {
+                card.offer(DENY, "Deny");
+            }
+            card.offer(CANCEL, "Cancel");
+            return card;
+        };
+        card.evidence = blocks;
         card.options = request
             .options
             .iter()
@@ -192,17 +194,22 @@ impl Card {
         card
     }
 
-    fn pause(order_id: &str, kind: CardKind, title: &str, summary: String) -> Self {
+    fn pause(order_id: &str, kind: CardKind, title: &str, summary: String, resumable: bool) -> Self {
         let mut card = Self::new(order_id, kind, title, summary);
-        card.allow_other = true;
-        card.options = [(RESUME, "Resume"), (CANCEL, "Cancel")]
-            .map(|(id, label)| CardOption {
-                id: id.to_owned(),
-                label: label.to_owned(),
-                description: None,
-            })
-            .into();
+        if resumable {
+            card.allow_other = true;
+            card.offer(RESUME, "Resume");
+        }
+        card.offer(CANCEL, "Cancel");
         card
+    }
+
+    fn offer(&mut self, id: &str, label: &str) {
+        self.options.push(CardOption {
+            id: id.to_owned(),
+            label: label.to_owned(),
+            description: None,
+        });
     }
 
     fn validate(&self, decision: &CardDecision) -> Result<(), OrderRunnerError> {
@@ -218,6 +225,120 @@ impl Card {
             CardDecision::Other { note } => validate_note(note),
             _ => Ok(()),
         }
+    }
+}
+
+// Keep each tool use and inner call identifiable, with its entire JSON input and confirmation.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionDisplay<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_id: Option<&'a str>,
+    confirmation_type: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arguments: Option<&'a Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<&'a Map<String, Value>>,
+}
+
+fn permission_blocks(summary: &str, request: &PermissionRequest) -> Option<Vec<Block>> {
+    let mut blocks = Vec::new();
+    let details = request.details.as_ref();
+    if request.confirmation_type.is_some() || details.is_some_and(|details| !details.fields.is_empty()) {
+        push_permission_block(
+            &mut blocks,
+            "Permission confirmation".to_owned(),
+            PermissionDisplay {
+                tool_name: None,
+                tool_id: None,
+                confirmation_type: request.confirmation_type.as_deref(),
+                arguments: None,
+                details: details.map(|details| &details.fields),
+            },
+        )?;
+    }
+    push_script_blocks(&mut blocks, "Permission", details)?;
+    for (index, item) in request.tool_uses.iter().enumerate() {
+        let caption = format!("Tool use {}", index + 1);
+        let details = item.details.as_ref();
+        push_permission_block(
+            &mut blocks,
+            caption.clone(),
+            PermissionDisplay {
+                tool_name: Some(&item.tool_use.name),
+                tool_id: Some(&item.tool_use.id),
+                confirmation_type: item.confirmation_type.as_deref(),
+                arguments: Some(&item.tool_use.input),
+                details: details.map(|details| &details.fields),
+            },
+        )?;
+        push_script_blocks(&mut blocks, &caption, details)?;
+    }
+    validate_card_blocks(summary, blocks)
+}
+
+fn push_script_blocks(
+    blocks: &mut Vec<Block>,
+    caption: &str,
+    details: Option<&PermissionDetails>,
+) -> Option<()> {
+    if let Some(details) = details {
+        for (index, call) in details.calls.iter().enumerate() {
+            push_permission_block(
+                blocks,
+                format!("{caption} / Script call {}", index + 1),
+                PermissionDisplay {
+                    tool_name: Some(&call.tool_name),
+                    tool_id: None,
+                    confirmation_type: Some(&call.confirmation.kind),
+                    arguments: Some(&call.tool_input),
+                    details: Some(&call.confirmation.fields),
+                },
+            )?;
+        }
+    }
+    Some(())
+}
+
+fn push_permission_block(
+    blocks: &mut Vec<Block>,
+    caption: String,
+    details: PermissionDisplay<'_>,
+) -> Option<()> {
+    if blocks.len() >= MAX_BLOCKS {
+        return None;
+    }
+    let json = serde_json::to_string(&details).ok()?;
+    if json.chars().nth(MAX_SNIPPET_CHARS).is_some() {
+        return None;
+    }
+    let mut code = String::with_capacity(json.len());
+    for ch in json.chars() {
+        if unsafe_line_char(ch) {
+            // serde_json leaves some Unicode controls and bidi characters unescaped.
+            write!(code, "\\u{:04x}", u32::from(ch)).expect("write to String");
+        } else {
+            code.push(ch);
+        }
+    }
+    blocks.push(Block::CodeSnippet {
+        language: Some("json".to_owned()),
+        code,
+        caption: Some(caption),
+    });
+    Some(())
+}
+
+fn validate_card_blocks(summary: &str, blocks: Vec<Block>) -> Option<Vec<Block>> {
+    let proposal = Proposal::CardEvidence(CardEvidenceProposal {
+        summary: summary.to_owned(),
+        blocks,
+    });
+    match validate_proposal(proposal).ok()?.into_inner() {
+        Proposal::CardEvidence(evidence) => Some(evidence.blocks),
+        _ => unreachable!("validated proposals preserve their place"),
     }
 }
 
@@ -256,12 +377,18 @@ pub enum OrderRunnerError {
     OtherNotAllowed,
     #[error("a note must be a non-empty single line of at most {MAX_ONE_LINE_CHARS} characters")]
     InvalidNote,
+    #[error("an order id must be at most {MAX_ORDER_ID_CHARS} characters, without whitespace or controls")]
+    InvalidOrderId,
+    #[error("a hook endpoint must be non-empty and contain no controls")]
+    InvalidHookEndpoint,
     #[error(
         "an order intent must be a non-empty single line of at most {MAX_PROSE_CHARS} characters"
     )]
     InvalidPrompt,
     #[error("only a validated card_evidence proposal can supply Card blocks")]
     InvalidEvidencePlace,
+    #[error("the proposed evidence would exceed the Card display limits")]
+    EvidenceExceedsCardLimits,
     #[error("order not found")]
     OrderNotFound,
     #[error("only a paused or interrupted order can be resumed")]
@@ -280,15 +407,21 @@ pub enum OrderRunnerError {
 
 // Match GenUI's single-line rules, including Unicode line separators and bidi controls.
 fn single_line(text: &str, max: usize) -> bool {
-    text.chars().nth(max).is_none()
-        && !text.trim().is_empty()
-        && !text.chars().any(|c| {
-            c.is_control()
-                || matches!(
-                    c,
-                    '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-                )
-        })
+    text.chars().nth(max).is_none() && !text.trim().is_empty() && !text.chars().any(unsafe_line_char)
+}
+
+fn unsafe_line_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        )
+}
+
+fn validate_order_id(order_id: &str) -> Result<(), OrderRunnerError> {
+    (single_line(order_id, MAX_ORDER_ID_CHARS) && !order_id.chars().any(char::is_whitespace))
+        .then_some(())
+        .ok_or(OrderRunnerError::InvalidOrderId)
 }
 
 fn validate_note(note: &str) -> Result<(), OrderRunnerError> {
@@ -321,14 +454,21 @@ struct Launch {
 
 impl OrderRunSpec<'_> {
     fn into_launch(self) -> Result<(String, Arc<Launch>), OrderRunnerError> {
+        validate_order_id(&self.order_id)?;
         if !single_line(&self.prompt, MAX_PROSE_CHARS) {
             return Err(OrderRunnerError::InvalidPrompt);
         }
-        let mut spawn_config = self.spawn_config;
+        let mut spawn_config = self
+            .spawn_config
+            .without_env_var(ORDER_ENV)
+            .without_env_var(HOOK_ENV);
         if let Some(endpoint) = self.hook_endpoint {
+            if endpoint.trim().is_empty() || endpoint.chars().any(unsafe_line_char) {
+                return Err(OrderRunnerError::InvalidHookEndpoint);
+            }
             spawn_config = spawn_config
-                .with_env_var("ACAN_ORDER_ID", &self.order_id)
-                .with_env_var("ACAN_HOOK_ENDPOINT", endpoint);
+                .with_env_var(ORDER_ENV, &self.order_id)
+                .with_env_var(HOOK_ENV, endpoint);
         }
         let launch = Launch {
             prompt: self.prompt,
@@ -358,12 +498,22 @@ pub struct ReconciledOrder {
     pub card: Option<Card>,
 }
 
-/// Restores durable states without launching a process. Only formerly live orders change state.
-#[must_use]
-pub fn reconcile_on_startup(records: Vec<PersistedOrderState>) -> Vec<ReconciledOrder> {
+/// Restores durable states without launching a process or offering to resume an order.
+/// Returns an error if a persisted order ID is invalid.
+pub fn reconcile_on_startup(
+    records: Vec<PersistedOrderState>,
+) -> Result<Vec<ReconciledOrder>, OrderRunnerError> {
+    reconcile_orders(records, |_| false)
+}
+
+fn reconcile_orders(
+    records: Vec<PersistedOrderState>,
+    resumable: impl Fn(&str) -> bool,
+) -> Result<Vec<ReconciledOrder>, OrderRunnerError> {
     records
         .into_iter()
         .map(|PersistedOrderState { order_id, state }| {
+            validate_order_id(&order_id)?;
             let state = match state {
                 OrderRunState::Running
                 | OrderRunState::WaitingCard { .. }
@@ -378,14 +528,15 @@ pub fn reconcile_on_startup(records: Vec<PersistedOrderState>) -> Vec<Reconciled
                     CardKind::Interrupted,
                     "Order interrupted",
                     reason.clone(),
+                    resumable(&order_id),
                 )),
                 _ => None,
             };
-            ReconciledOrder {
+            Ok(ReconciledOrder {
                 order_id,
                 state,
                 card,
-            }
+            })
         })
         .collect()
 }
@@ -422,6 +573,7 @@ struct Active {
 struct PendingCard {
     card: Card,
     answer: Option<oneshot::Sender<CardDecision>>,
+    required_evidence: usize,
 }
 
 impl OrderRunnerManager {
@@ -460,7 +612,7 @@ impl OrderRunnerManager {
             .into_iter()
             .map(OrderRunSpec::into_launch)
             .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let restored = reconcile_on_startup(records);
+        let restored = reconcile_orders(records, |id| launches.contains_key(id))?;
         let mut next = Table::default();
         for record in &restored {
             let replaced = next.orders.insert(
@@ -514,7 +666,8 @@ impl OrderRunnerManager {
         Some(table.cards.get(card_id)?.card.clone())
     }
 
-    /// Replaces the display-only evidence of a pending Card without changing its decision.
+    /// Replaces a pending Card's supplemental evidence without changing its decision or
+    /// replacing the actions shown for a permission request.
     pub fn attach_card_evidence(
         &self,
         card_id: &str,
@@ -523,7 +676,17 @@ impl OrderRunnerManager {
         let Proposal::CardEvidence(evidence) = evidence.into_inner() else {
             return Err(OrderRunnerError::InvalidEvidencePlace);
         };
-        lock(&self.table).card_mut(card_id)?.card.evidence = evidence.blocks;
+        let mut table = lock(&self.table);
+        let pending = table.card_mut(card_id)?;
+        let card = &mut pending.card;
+        if card.kind == CardKind::Permission {
+            let mut blocks = card.evidence[..pending.required_evidence].to_vec();
+            blocks.extend(evidence.blocks);
+            card.evidence = validate_card_blocks(&card.summary, blocks)
+                .ok_or(OrderRunnerError::EvidenceExceedsCardLimits)?;
+        } else {
+            card.evidence = evidence.blocks;
+        }
         Ok(())
     }
 
@@ -695,7 +858,15 @@ impl Table {
     fn open_card(&mut self, card: Card, answer: Option<oneshot::Sender<CardDecision>>) {
         let card_id = card.id.clone();
         self.order_mut(&card.order_id).card_id = Some(card_id.clone());
-        self.cards.insert(card_id, PendingCard { card, answer });
+        let required_evidence = card.evidence.len();
+        self.cards.insert(
+            card_id,
+            PendingCard {
+                card,
+                answer,
+                required_evidence,
+            },
+        );
     }
 
     fn close_card(&mut self, order_id: &str) {
@@ -775,9 +946,10 @@ impl Worker {
         };
         if matches!(outcome, Outcome::Completed) {
             let _ = session.shutdown(CLOSE_TIMEOUT).await;
-        } else {
-            let _ = session.kill().await;
         }
+        let _ = session.kill().await;
+        // Drop the owned process before finish makes the slot available, even if cleanup errored.
+        drop(session);
         outcome
     }
 
@@ -797,6 +969,7 @@ impl Worker {
                 launch.startup_timeout,
             )
             .await?;
+        session.check_startup_rate_limit().await?;
         let prompt = match note {
             Some(note) => format!("{} (Developer resume note: {note})", launch.prompt),
             None => launch.prompt.clone(),
@@ -869,6 +1042,7 @@ impl Worker {
                         CardKind::RateLimit,
                         "Droid rate limit",
                         summary,
+                        true,
                     ),
                     None,
                 );
@@ -972,12 +1146,17 @@ impl LiveTurn<'_> {
             LiveRequest::Permission(id, request) => {
                 let card = Card::from_permission(order_id, &id, &request);
                 let selected_option = match self.wait(card).await? {
+                    CardDecision::Cancel => CANCEL.to_owned(),
                     CardDecision::SelectOption { option_id } => option_id,
-                    CardDecision::Cancel if request.options.iter().any(|o| o.value == CANCEL) => {
-                        CANCEL.to_owned()
-                    }
-                    // The permission RPC has no separate decline response. Never invent an option.
                     _ => return Err(Outcome::Cancelled),
+                };
+                let selected_option = if request.options.iter().any(|o| o.value == selected_option) {
+                    selected_option
+                } else if selected_option == CANCEL && request.options.iter().any(|o| o.value == DENY) {
+                    DENY.to_owned()
+                } else {
+                    // The permission RPC has no separate decline response. Never invent an option.
+                    return Err(Outcome::Cancelled);
                 };
                 self.session
                     .reply_permission(&id, &PermissionReply { selected_option })
