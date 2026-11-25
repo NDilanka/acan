@@ -5,10 +5,10 @@ use std::io;
 use std::path::Path;
 
 use acan_core::CommitId;
-use acan_intent::{PathCoverage, PathScope, RepoPath, RepoRules};
+use acan_intent::{PathCoverage, PathScope, RepoPath, RepoRules, detect_case_collisions};
 use serde::{Deserialize, Serialize};
 
-use crate::{Author, Error, TaskWorktree, git};
+use crate::{Author, Error, LandOutcome, Repo, TaskWorktree, checkout, git};
 
 /// Why a task's worktree could not be committed.
 #[derive(Debug, thiserror::Error)]
@@ -35,21 +35,23 @@ pub enum LandV1Error {
     ProtectedIgnoredFiles { paths: Vec<String> },
     #[error("the task has no changes to commit")]
     NothingToCommit,
+    #[error("the task conflicts with protected head {protected_head}")]
+    MergeConflict { protected_head: CommitId },
     #[error(transparent)]
     Git(#[from] Error),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
 
-/// One changed path in the staged commit.
+/// One changed path relative to the head the commit is applied to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangedFile {
     pub path: String,
     pub status: ChangeStatus,
 }
 
-/// The change relative to the original task base. Copies are additions; they leave their
-/// source unchanged, but both endpoints still have to pass the scope check.
+/// Copies are additions. For Git-detected rename and copy pairs (`-M -C`), both endpoints
+/// have to pass the scope check; arbitrary content provenance is not inferred.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeStatus {
@@ -65,7 +67,9 @@ pub struct IgnoredAccounting {
     pub paths: Vec<String>,
 }
 
-/// A commit Acan made from an approved task worktree.
+/// A detached commit Acan made from an approved task worktree. When prepared for landing,
+/// `commit` and `changed` describe the exact candidate against the expected protected head;
+/// `base` always records the original task base.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StagedCommit {
     pub commit: CommitId,
@@ -74,8 +78,24 @@ pub struct StagedCommit {
     pub ignored: IgnoredAccounting,
 }
 
-/// Stages and commits the worktree's changes, with hooks and signing disabled. The index is
-/// scanned after staging and the exact commit is scanned again before updating the task ref.
+/// The candidate scanned against the head it can replace. Materialization and installation
+/// take the same value so neither can accidentally operate on the unmerged task commit.
+#[derive(Debug)]
+pub struct V1Candidate {
+    staged: StagedCommit,
+    expected_head: CommitId,
+}
+
+impl V1Candidate {
+    /// The exact commit and change accounting to record in the landing audit.
+    #[must_use]
+    pub fn staged(&self) -> &StagedCommit {
+        &self.staged
+    }
+}
+
+/// Stages the worktree's changes in a temporary index and creates a detached commit, with
+/// hooks and signing disabled. Neither the task branch nor its index is modified.
 ///
 /// # Errors
 ///
@@ -89,7 +109,7 @@ pub async fn stage_and_commit_worktree(
     author: &Author,
     message: &str,
 ) -> Result<StagedCommit, LandV1Error> {
-    stage(
+    let staged = stage(
         worktree_root,
         None,
         expected_base,
@@ -98,12 +118,13 @@ pub async fn stage_and_commit_worktree(
         author,
         message,
     )
-    .await
+    .await?;
+    validate_tree(worktree_root, &staged.commit).await?;
+    Ok(staged)
 }
 
 impl TaskWorktree {
-    /// Like [`stage_and_commit_worktree`], but pins the ref update to the registered task
-    /// branch. A checkout that switched branches cannot commit onto a different branch.
+    /// Stage a detached task commit before preparing it for its expected protected head.
     ///
     /// # Errors
     ///
@@ -130,6 +151,95 @@ impl TaskWorktree {
     }
 }
 
+impl Repo {
+    /// Prepare and scan the exact commit that may be installed, without moving either branch.
+    ///
+    /// # Errors
+    ///
+    /// Refuses merge conflicts, unsafe or unapproved changes against the protected head, and
+    /// nonportable or case-colliding paths anywhere in the final tree.
+    pub async fn prepare_v1_candidate(
+        &self,
+        mut staged: StagedCommit,
+        expected_head: &CommitId,
+        scope: &PathScope,
+        rules: &RepoRules,
+        author: &Author,
+    ) -> Result<V1Candidate, LandV1Error> {
+        let root = self.root();
+        if *expected_head != staged.base {
+            let hooks = git::EmptyHooks::new()?;
+            let args = hooks.args(&[
+                "merge-tree",
+                "--write-tree",
+                "--merge-base",
+                staged.base.as_str(),
+                expected_head.as_str(),
+                staged.commit.as_str(),
+            ]);
+            let out = git::run(root, &args, &[]).await?;
+            if out.status.code() == Some(1) {
+                return Err(LandV1Error::MergeConflict {
+                    protected_head: expected_head.clone(),
+                });
+            }
+            let tree = git::ensure_ok(out, &args)?;
+            staged.commit = commit_tree(
+                root,
+                &hooks,
+                tree.trim(),
+                &[expected_head, &staged.commit],
+                author,
+                "acan: merge task edits for landing",
+            )
+            .await?;
+        }
+        let scan = Scan { root, scope, rules };
+        let (changed, refused) = scan
+            .diff(&[expected_head.as_str(), staged.commit.as_str()], &[])
+            .await?;
+        if let Some(error) = refused.into_error() {
+            return Err(error);
+        }
+        validate_tree(root, &staged.commit).await?;
+        staged.changed = changed;
+        Ok(V1Candidate {
+            staged,
+            expected_head: expected_head.clone(),
+        })
+    }
+
+    /// Materialize a prepared candidate byte for byte, with no checkout metadata or local files.
+    ///
+    /// # Errors
+    ///
+    /// Fails on unsafe paths, non-regular files, or Git or filesystem errors.
+    pub async fn materialize_v1_candidate(
+        &self,
+        candidate: &V1Candidate,
+    ) -> Result<tempfile::TempDir, LandV1Error> {
+        let dir = tempfile::tempdir()?;
+        self.materialize_tree(candidate.staged.commit.as_str(), None, dir.path())
+            .await?;
+        Ok(dir)
+    }
+
+    /// Install the already prepared and audited candidate verbatim, only if the protected
+    /// branch still points at the expected head. No new merge is performed.
+    ///
+    /// # Errors
+    ///
+    /// Fails when Git cannot update the protected branch or its checkout.
+    pub async fn install_v1_candidate(
+        &self,
+        candidate: &V1Candidate,
+    ) -> Result<LandOutcome, Error> {
+        self.advance(&candidate.staged.commit, &candidate.expected_head)
+            .await
+            .map(LandOutcome::from)
+    }
+}
+
 async fn stage(
     root: &Path,
     task_ref: Option<&str>,
@@ -142,77 +252,104 @@ async fn stage(
     let scan = Scan { root, scope, rules };
     scan.check_head(base).await?;
     let top = git::ok(root, &["rev-parse", "--show-toplevel"], &[]).await?;
+    let canonical_root = root.canonicalize()?;
     if root.symlink_metadata()?.is_symlink()
-        || root.canonicalize()? != Path::new(top.trim_end_matches(['\r', '\n'])).canonicalize()?
+        || canonical_root != Path::new(top.trim_end_matches(['\r', '\n'])).canonicalize()?
     {
         return Err(LandV1Error::EscapeRefused {
             path: ".".to_owned(),
         });
     }
-    let head_ref = git::run(root, &["symbolic-ref", "-q", "HEAD"], &[]).await?;
-    let reference = match head_ref.status.code() {
-        Some(0) => head_ref.stdout.trim(),
-        Some(1) => "HEAD",
-        _ => {
-            return Err(git::ensure_ok(head_ref, &["symbolic-ref", "-q", "HEAD"])
-                .expect_err("symbolic-ref did not succeed")
-                .into());
-        }
-    };
-    if task_ref.is_some_and(|task_ref| task_ref != reference) {
-        return Err(bad_output(
-            "symbolic-ref HEAD",
-            "the checkout left the task branch",
-        ));
-    }
+    scan.check_branch(task_ref).await?;
 
-    let status = scan.status().await?;
-    if !status.changed {
-        return Err(LandV1Error::NothingToCommit);
-    }
+    scan.walk_worktree(&canonical_root).await?;
+    let hooks = git::EmptyHooks::new()?;
+    let status = scan.status(&hooks).await?;
     if let Some(refusal) = status.refusals.into_error() {
         // Porcelain cannot pair an unstaged delete with an untracked destination. Diagnose
-        // that case in a scratch index, never staging the unapproved changes in the real one.
+        // that case in a scratch index. Keep the porcelain refusal if Git found no pair.
         let refusal = if status.unpaired && matches!(refusal, LandV1Error::OutOfScope { .. }) {
-            scan.diagnose_rename(base, refusal).await
+            let index = scan.stage_index(base, &hooks).await?;
+            let (_, refused) = scan.diff(&["--cached", base.as_str()], &index.env).await?;
+            match refused.into_error() {
+                Some(error @ LandV1Error::RenameOutsideScope { .. }) => error,
+                _ => refusal,
+            }
         } else {
-            Ok(refusal)
+            refusal
         };
-        scan.unstage().await?;
-        return Err(refusal?);
+        return Err(refusal);
     }
 
-    let commit = match scan.commit(base, author, message).await {
-        Ok(commit) => commit,
-        Err(error) => {
-            scan.unstage().await?;
-            return Err(error);
-        }
-    };
-    // Check HEAD again and update the pinned ref with a compare-and-swap. Never follow a ref
-    // that an agent may have switched during the scan.
-    scan.check_head(base).await?;
-    git::ok(
+    let index = scan.stage_index(base, &hooks).await?;
+    let (changed, refused) = scan.diff(&["--cached", base.as_str()], &index.env).await?;
+    if let Some(error) = refused.into_error() {
+        return Err(error);
+    }
+    if changed.is_empty() {
+        return Err(LandV1Error::NothingToCommit);
+    }
+    let tree = git::ok(
         root,
-        &[
-            "-c",
-            "core.hooksPath=/dev/null",
-            "update-ref",
-            "--no-deref",
-            reference,
-            commit.0.as_str(),
-            base.as_str(),
-        ],
-        &[],
+        &hooks.args(&["-c", "core.fsmonitor=false", "write-tree"]),
+        &index.env,
     )
     .await?;
-    scan.check_head(&commit.0).await?;
+    let commit = commit_tree(root, &hooks, tree.trim(), &[base], author, message).await?;
+    scan.check_head(base).await?;
+    scan.check_branch(task_ref).await?;
     Ok(StagedCommit {
-        commit: commit.0,
+        commit,
         base: base.clone(),
-        changed: commit.1,
+        changed,
         ignored: status.ignored,
     })
+}
+
+async fn commit_tree(
+    root: &Path,
+    hooks: &git::EmptyHooks,
+    tree: &str,
+    parents: &[&CommitId],
+    author: &Author,
+    message: &str,
+) -> Result<CommitId, LandV1Error> {
+    let env = [
+        ("GIT_AUTHOR_NAME".to_owned(), author.name.clone()),
+        ("GIT_AUTHOR_EMAIL".to_owned(), author.email.clone()),
+        ("GIT_COMMITTER_NAME".to_owned(), author.name.clone()),
+        ("GIT_COMMITTER_EMAIL".to_owned(), author.email.clone()),
+    ];
+    let mut args = hooks.args(&["-c", "commit.gpgsign=false", "commit-tree", tree]);
+    for parent in parents {
+        args.extend(["-p", parent.as_str()]);
+    }
+    args.extend(["-m", message]);
+    let out = git::ok(root, &args, &env).await?;
+    Ok(out.trim().parse().map_err(Error::from)?)
+}
+
+async fn validate_tree(root: &Path, commit: &CommitId) -> Result<(), LandV1Error> {
+    let args = ["ls-tree", "-r", "-z", "--name-only", commit.as_str()];
+    let raw = git::ok_raw(root, &args, &[], None).await?;
+    let paths = nul_fields(&raw, "ls-tree")?
+        .map(|path| repo_path(path, false))
+        .collect::<Result<Vec<_>, _>>()?;
+    let protected: Vec<_> = paths
+        .iter()
+        .filter(|path| git_metadata(path))
+        .map(ToString::to_string)
+        .collect();
+    if !protected.is_empty() {
+        return Err(LandV1Error::ProtectedPath { paths: protected });
+    }
+    if let Some((_, path)) = detect_case_collisions(&paths).into_iter().next() {
+        return Err(Error::CaseCollision(path.to_string()).into());
+    }
+    // Also check parent segments: `Src/a` and `src/b` have distinct leaf names, but
+    // their directories would be merged on a case-insensitive filesystem.
+    checkout::refuse_case_collisions(paths.iter().map(RepoPath::as_str))?;
+    Ok(())
 }
 
 const STATUS: &[&str] = &[
@@ -220,8 +357,6 @@ const STATUS: &[&str] = &[
     "core.quotepath=false",
     "-c",
     "core.fsmonitor=false",
-    "-c",
-    "core.hooksPath=/dev/null",
     "status",
     "--porcelain=v2",
     "-z",
@@ -230,14 +365,10 @@ const STATUS: &[&str] = &[
     "--ignore-submodules=none",
     "--find-renames",
 ];
-const ADD: &[&str] = &[
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "core.fsmonitor=false",
-    "add",
-    "-A",
-];
+struct ScratchIndex {
+    _dir: tempfile::TempDir,
+    env: [(String, String); 1],
+}
 
 struct Scan<'a> {
     root: &'a Path,
@@ -262,25 +393,87 @@ impl Scan<'_> {
         Ok(())
     }
 
-    // Reset only the index, not a ref or any file in the checkout.
-    async fn unstage(&self) -> Result<(), LandV1Error> {
-        let args = [
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "reset",
-            "--quiet",
-            "HEAD",
-            "--",
-            ":/",
-        ];
-        git::ok(self.root, &args, &[]).await?;
+    async fn check_branch(&self, task_ref: Option<&str>) -> Result<(), LandV1Error> {
+        if let Some(task_ref) = task_ref {
+            let args = ["symbolic-ref", "-q", "HEAD"];
+            let out = git::run(self.root, &args, &[]).await?;
+            if out.status.code() == Some(1) || git::ensure_ok(out, &args)?.trim() != task_ref {
+                return Err(bad_output(
+                    "symbolic-ref HEAD",
+                    "the checkout left the task branch",
+                ));
+            }
+        }
         Ok(())
     }
 
-    async fn status(&self) -> Result<WorktreeStatus, LandV1Error> {
-        let raw = git::ok_raw(self.root, STATUS, &[], None).await?;
+    // Git can hide nested metadata entirely, particularly in tracked and ignored
+    // directories. Walk the filesystem without following links or relying on status.
+    async fn walk_worktree(&self, canonical_root: &Path) -> Result<(), LandV1Error> {
+        let mut pending = vec![(self.root.to_path_buf(), String::new())];
+        let mut protected = BTreeSet::new();
+        let mut links = Vec::new();
+        while let Some((dir, prefix)) = pending.pop() {
+            let mut entries = tokio::fs::read_dir(dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let name = entry.file_name();
+                if prefix.is_empty() && name == ".git" {
+                    continue;
+                }
+                let path = if prefix.is_empty() {
+                    name.to_string_lossy().into_owned()
+                } else {
+                    format!("{prefix}/{}", name.to_string_lossy())
+                };
+                if name.eq_ignore_ascii_case(".git") {
+                    protected.insert(path);
+                    continue;
+                }
+                let kind = entry.file_type().await?;
+                if kind.is_symlink() {
+                    links.push((entry.path(), path));
+                } else if kind.is_dir() {
+                    pending.push((entry.path(), path));
+                }
+            }
+        }
+        if !protected.is_empty() {
+            return Err(LandV1Error::ProtectedPath {
+                paths: protected.into_iter().collect(),
+            });
+        }
+        for (entry, path) in links {
+            match tokio::fs::canonicalize(entry).await {
+                Ok(target) if target.starts_with(canonical_root) => {}
+                Ok(_) => return Err(LandV1Error::EscapeRefused { path }),
+                // A dangling or cyclic link cannot be proven to stay inside the worktree.
+                Err(_) => return Err(LandV1Error::SymlinkRefused { path }),
+            }
+            let link = repo_path(path.as_bytes(), false)?;
+            let args = [
+                "-c",
+                "core.fsmonitor=false",
+                "check-ignore",
+                "-q",
+                "--",
+                link.as_str(),
+            ];
+            let out = git::run(self.root, &args, &[]).await?;
+            match out.status.code() {
+                Some(0) => {}
+                Some(1) => return Err(LandV1Error::SymlinkRefused { path }),
+                _ => {
+                    git::ensure_ok(out, &args)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn status(&self, hooks: &git::EmptyHooks) -> Result<WorktreeStatus, LandV1Error> {
+        // Inspect pre-staged entries for protection and modes without refreshing the real index.
+        let env = [("GIT_OPTIONAL_LOCKS".to_owned(), "0".to_owned())];
+        let raw = git::ok_raw(self.root, &hooks.args(STATUS), &env, None).await?;
         let mut fields = nul_fields(&raw, "status")?;
         let mut status = WorktreeStatus::default();
         let mut ignored_refusals = BTreeSet::new();
@@ -293,17 +486,7 @@ impl Scan<'_> {
                 }
                 Some(b'?') => {
                     let path = repo_path(short_status_path(record)?, true)?;
-                    let on_disk = self.check_disk(&path).await?;
-                    if on_disk.is_some_and(|m| m.is_dir())
-                        && metadata(&self.root.join(path.as_str()).join(".git"))
-                            .await?
-                            .is_some()
-                    {
-                        return Err(LandV1Error::SubmoduleRefused {
-                            path: path.to_string(),
-                        });
-                    }
-                    status.changed = true;
+                    self.check_disk(&path).await?;
                     status.unpaired = true;
                     status.refusals.add(self.classify(&path), &path, None);
                 }
@@ -332,7 +515,6 @@ impl Scan<'_> {
                         status.unpaired |= columns[1].contains(&b'A');
                         None
                     };
-                    status.changed = true;
                     self.check_coverage(&path, from.as_ref(), &mut status.refusals);
                 }
                 _ => return Err(bad_output("status", "unknown porcelain entry")),
@@ -354,24 +536,15 @@ impl Scan<'_> {
         ignored: &mut Vec<String>,
         refused: &mut BTreeSet<String>,
     ) -> Result<(), LandV1Error> {
-        let Some(meta) = self.check_disk(&start).await? else {
+        let Some(meta) = metadata(&self.root.join(start.as_str())).await? else {
             return Ok(());
         };
         // `--ignored=matching` collapses a directly ignored directory. Enumerate its
         // contents, not just its name, without walking into any symlink.
         let mut pending = vec![(start, meta.file_type(), false)];
         while let Some((path, kind, protected_parent)) = pending.pop() {
-            if kind.is_symlink() {
-                return Err(LandV1Error::SymlinkRefused {
-                    path: path.to_string(),
-                });
-            }
             let protected = protected_parent || self.is_protected(&path);
-            // Git's own root metadata is not reported by status. A nested .git entry
-            // discovered on disk is not ours; refuse it without opening its contents.
-            if git_metadata(&path) {
-                refused.insert(path.to_string());
-            } else if kind.is_dir() {
+            if kind.is_dir() {
                 let mut dir = tokio::fs::read_dir(self.root.join(path.as_str())).await?;
                 let mut any = false;
                 while let Some(child) = dir.next_entry().await? {
@@ -445,80 +618,22 @@ impl Scan<'_> {
         refused.add(self.classify(path), path, from.map(|from| (from, path)));
     }
 
-    async fn diagnose_rename(
+    async fn stage_index(
         &self,
         base: &CommitId,
-        refusal: LandV1Error,
-    ) -> Result<LandV1Error, LandV1Error> {
-        let scratch = tempfile::tempdir()?;
-        let index = scratch.path().join("index");
+        hooks: &git::EmptyHooks,
+    ) -> Result<ScratchIndex, LandV1Error> {
+        let dir = tempfile::tempdir()?;
+        let index = dir.path().join("index");
         let env = [(
             "GIT_INDEX_FILE".to_owned(),
             crate::repo::path_str(&index)?.to_owned(),
         )];
-        let args = ["-c", "core.hooksPath=/dev/null", "read-tree", base.as_str()];
+        let args = hooks.args(&["-c", "core.fsmonitor=false", "read-tree", base.as_str()]);
         git::ok(self.root, &args, &env).await?;
-        git::ok(self.root, ADD, &env).await?;
-        let (_changed, refused) = self.diff(&["--cached", base.as_str()], &env).await?;
-        // Keep the porcelain refusal if the scratch index did not explain it as a pair.
-        Ok(match refused.into_error() {
-            Some(error @ LandV1Error::RenameOutsideScope { .. }) => error,
-            _ => refusal,
-        })
-    }
-
-    async fn commit(
-        &self,
-        base: &CommitId,
-        author: &Author,
-        message: &str,
-    ) -> Result<(CommitId, Vec<ChangedFile>), LandV1Error> {
-        git::ok(self.root, ADD, &[]).await?;
-        let (changed, refused) = self.diff(&["--cached", base.as_str()], &[]).await?;
-        if let Some(error) = refused.into_error() {
-            return Err(error);
-        }
-        if changed.is_empty() {
-            return Err(LandV1Error::NothingToCommit);
-        }
-        let args = [
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "write-tree",
-        ];
-        let tree = git::ok(self.root, &args, &[]).await?;
-        let env = [
-            ("GIT_AUTHOR_NAME".to_owned(), author.name.clone()),
-            ("GIT_AUTHOR_EMAIL".to_owned(), author.email.clone()),
-            ("GIT_COMMITTER_NAME".to_owned(), author.name.clone()),
-            ("GIT_COMMITTER_EMAIL".to_owned(), author.email.clone()),
-        ];
-        // Commit the written tree with exactly one parent. A pending merge or a repo hook
-        // cannot introduce unapproved history or edit the index during the commit.
-        let args = [
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "commit.gpgsign=false",
-            "commit-tree",
-            tree.trim(),
-            "-p",
-            base.as_str(),
-            "-m",
-            message,
-        ];
-        let out = git::ok(self.root, &args, &env).await?;
-        let commit: CommitId = out.trim().parse().map_err(Error::from)?;
-        let (changed, refused) = self.diff(&[base.as_str(), commit.as_str()], &[]).await?;
-        if let Some(error) = refused.into_error() {
-            return Err(error);
-        }
-        if changed.is_empty() {
-            return Err(LandV1Error::NothingToCommit);
-        }
-        Ok((commit, changed))
+        let args = hooks.args(&["-c", "core.fsmonitor=false", "add", "-A"]);
+        git::ok(self.root, &args, &env).await?;
+        Ok(ScratchIndex { _dir: dir, env })
     }
 
     async fn diff(
@@ -568,10 +683,6 @@ impl Scan<'_> {
             };
             check_mode(old_mode, from.as_ref().unwrap_or(&path))?;
             check_mode(new_mode, &path)?;
-            self.check_disk(&path).await?;
-            if let Some(from) = &from {
-                self.check_disk(from).await?;
-            }
             self.check_coverage(&path, from.as_ref(), &mut refused);
             let status = match kind.first() {
                 Some(b'A' | b'C') => ChangeStatus::Added,
@@ -594,7 +705,6 @@ impl Scan<'_> {
 
 #[derive(Default)]
 struct WorktreeStatus {
-    changed: bool,
     unpaired: bool,
     refusals: Refusals,
     ignored: IgnoredAccounting,

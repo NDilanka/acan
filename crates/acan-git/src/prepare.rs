@@ -370,12 +370,29 @@ impl Repo {
         preparation: &Preparation,
         dir: &Path,
     ) -> Result<OverlayHash, Error> {
-        let listing = self.list_tree(preparation.merged_commit.as_str()).await?;
+        self.materialize_tree(
+            preparation.merged_commit.as_str(),
+            Some(&preparation.protected),
+            dir,
+        )
+        .await?;
+        self.restore_protected(preparation, dir).await
+    }
+
+    /// Materialize an already scanned V1 candidate in a fresh directory. Read straight
+    /// from its blobs: no Git metadata, smudge filters, or export attributes.
+    pub(crate) async fn materialize_tree(
+        &self,
+        tree: &str,
+        excluded: Option<&ProtectedPaths>,
+        dir: &Path,
+    ) -> Result<(), Error> {
+        let listing = self.list_tree(tree).await?;
         let entries = tree_entries(&listing)?;
         checkout::refuse_case_collisions(entries.iter().map(|entry| entry.path))?;
         let mut files = Vec::new();
         for entry in &entries {
-            if preparation.protected.covers(entry.path) {
+            if excluded.is_some_and(|protected| protected.covers(entry.path)) {
                 continue;
             }
             let executable = match entry.mode {
@@ -399,8 +416,7 @@ impl Repo {
             .await?;
         let files: Vec<(BlobFile, Vec<u8>)> = files.into_iter().zip(blobs).collect();
         let root = dir.to_path_buf();
-        blocking(move || checkout::write_files(&root, &files)).await?;
-        self.restore_protected(preparation, dir).await
+        blocking(move || checkout::write_files(&root, &files)).await
     }
 
     /// Restore every protected path of `dir` from the protected head: remove whatever is

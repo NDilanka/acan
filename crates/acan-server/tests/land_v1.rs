@@ -100,6 +100,7 @@ impl Fixture {
     fn sink(&self) -> RecordingSink<'_> {
         RecordingSink {
             fixture: self,
+            expected_head: self.base.clone(),
             fail: false,
             records: Mutex::new(Vec::new()),
         }
@@ -121,6 +122,7 @@ impl Fixture {
 
 struct RecordingSink<'a> {
     fixture: &'a Fixture,
+    expected_head: CommitId,
     fail: bool,
     records: Mutex<Vec<LandingAuditRecord>>,
 }
@@ -131,8 +133,15 @@ impl LandingEventSink for RecordingSink<'_> {
         record: &'a LandingAuditRecord,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            self.fixture.assert_protected_head_unchanged().await;
-            assert_eq!(record.expected_protected_head, self.fixture.base);
+            assert_eq!(
+                self.fixture
+                    .repo
+                    .protected_head()
+                    .await
+                    .expect("protected head"),
+                self.expected_head
+            );
+            assert_eq!(record.expected_protected_head, self.expected_head);
             if self.fail {
                 anyhow::bail!("event storage unavailable");
             }
@@ -166,31 +175,68 @@ fn freeze(policy: CheckPolicy) -> FrozenCheckSet {
 const LITERAL: &str = "fake-long-secret-value";
 const SK_TOKEN: &str = "sk-fake_token_0123456789";
 const BEARER: &str = "Bearer demo.header.signature";
+const FINE_PAT: &str = "github_pat_0123456789abcdef_test";
+const SLACK_TOKEN: &str = "xoxb-0000000000-test";
+const DAEMON_SECRET_VAR: &str = "ACAN_LANDING_REGRESSION_SECRET";
 
 // Run this binary as a check so the command/args and timeouts work on both Unix and Windows
-// without relying on shell quoting, available interpreters or process descendants.
+// without relying on shell quoting or available interpreters.
 #[test]
 #[ignore = "executed as a subprocess by the landing checks"]
 fn check_fixture() {
     match fs::read_to_string("app.txt")
-        .expect("check ran in the task worktree")
+        .expect("check ran in a materialized candidate")
         .trim()
     {
         "pass" => println!("the check passed"),
         "wait" => std::thread::sleep(Duration::from_secs(10)),
+        "merged" => assert_eq!(
+            fs::read_to_string("protected.txt").expect("protected-head addition"),
+            "from protected\n"
+        ),
+        "isolation" => {
+            assert!(!Path::new(".git").exists());
+            assert!(!Path::new("ignored.log").exists());
+            assert!(std::env::var_os(DAEMON_SECRET_VAR).is_none());
+            // A later check must not run in the snapshot this check dirtied.
+            fs::write(".git", "check-created file").expect("create test file");
+            fs::write("ignored.log", "check-created artifact").expect("create test file");
+        }
         "output" => {
             print!("{}", "o".repeat(200 * 1024));
             eprint!("{}", "e".repeat(200 * 1024));
         }
         "secrets" => {
-            println!("{LITERAL} {SK_TOKEN} {BEARER}");
-            eprintln!("{LITERAL} {SK_TOKEN} {BEARER}");
+            println!("{LITERAL} {SK_TOKEN} {BEARER} {FINE_PAT} {SLACK_TOKEN}");
+            eprintln!("{LITERAL} {SK_TOKEN} {BEARER} {FINE_PAT} {SLACK_TOKEN}");
         }
         "cut secret" => {
             // The cap lands inside the literal on stderr, with no other output on that stream.
             eprint!("{}{LITERAL}{}", "x".repeat(1012), "z".repeat(4096));
         }
         "failure" => panic!("failed with {LITERAL}"),
+        #[cfg(unix)]
+        other if other.starts_with("tree ") => {
+            use std::io::Write;
+
+            let (mode, address) = other[5..].split_once(' ').expect("mode and address");
+            let mut connection = std::net::TcpStream::connect(address).expect("connect leader");
+            connection.write_all(b"L").expect("identify leader");
+            #[expect(
+                clippy::zombie_processes,
+                reason = "exercise timeout with a leader that exits before its descendant"
+            )]
+            let mut descendant =
+                std::process::Command::new(std::env::current_exe().expect("test binary"))
+                    .args(["--ignored", "--exact", "check_descendant", "--nocapture"])
+                    .spawn()
+                    .expect("spawn descendant keeping stdout open");
+            if mode == "wait" {
+                descendant.wait().expect("wait for descendant");
+            } else {
+                std::process::exit(0);
+            }
+        }
         other => panic!("unexpected check mode {other:?}"),
     }
 }
@@ -212,10 +258,7 @@ async fn persisting_the_audit_precedes_advancing_the_protected_branch() {
         f.repo.protected_head().await.expect("protected head"),
         receipt.audit.staged.commit
     );
-    assert_eq!(
-        f.worktree.head().await.expect("task head"),
-        receipt.audit.staged.commit
-    );
+    assert_eq!(f.worktree.head().await.expect("task head"), f.base);
     assert_eq!(
         fs::read_to_string(f.dir.path().join("app.txt"))
             .expect("landed")
@@ -226,6 +269,125 @@ async fn persisting_the_audit_precedes_advancing_the_protected_branch() {
     assert_eq!(receipt.audit.checks[0].status, CheckStatus::Passed);
     assert!(receipt.audit.checks[0].stdout.contains("the check passed"));
     assert_eq!(*sink.records.lock().expect("lock records"), [receipt.audit]);
+}
+
+#[tokio::test]
+async fn checks_and_audits_the_exact_merge_installed_on_a_newer_protected_head() {
+    let f = fixture("merged").await;
+    fs::write(f.dir.path().join("protected.txt"), "from protected\n").expect("protected file");
+    fs::write(
+        f.dir.path().join(".gitattributes"),
+        "protected.txt export-ignore\n",
+    )
+    .expect("attributes must not change the materialized file set");
+    git(f.dir.path(), &["add", ".gitattributes", "protected.txt"]);
+    git(f.dir.path(), &["commit", "-qm", "advance protected"]);
+    let head = f.repo.protected_head().await.expect("advanced head");
+    let checks = freeze(CheckPolicy::default());
+    let sink = RecordingSink {
+        expected_head: head.clone(),
+        ..f.sink()
+    };
+    let masker = SecretMasker::default();
+    let mut request = f.request(&checks, &masker, &sink);
+    request.expected_protected_head = &head;
+    let receipt = execute_v1_landing(request).await.expect("land exact merge");
+    let candidate = receipt.audit.staged.commit.as_str();
+    assert_eq!(receipt.audit.checks[0].status, CheckStatus::Passed);
+    assert_eq!(
+        receipt.landed_commit.as_ref(),
+        Some(&receipt.audit.staged.commit)
+    );
+    assert_eq!(
+        f.repo
+            .protected_head()
+            .await
+            .expect("protected head")
+            .as_str(),
+        candidate
+    );
+    assert_eq!(f.worktree.head().await.expect("unmoved task head"), f.base);
+    let first = format!("{candidate}^1");
+    let second_parent = format!("{candidate}^2^");
+    assert_eq!(
+        git(f.dir.path(), &["rev-parse", &first, &second_parent]),
+        format!("{head}\n{}", f.base)
+    );
+    assert_eq!(receipt.audit.staged.changed.len(), 1);
+    assert_eq!(receipt.audit.staged.changed[0].path, "app.txt");
+    assert_eq!(*sink.records.lock().expect("lock records"), [receipt.audit]);
+}
+
+#[tokio::test]
+async fn merge_conflicts_leave_both_branches_and_the_sink_untouched() {
+    let f = fixture("pass").await;
+    fs::write(f.dir.path().join("app.txt"), "conflicting protected edit\n")
+        .expect("protected edit");
+    git(f.dir.path(), &["commit", "-qam", "conflicting edit"]);
+    let head = f.repo.protected_head().await.expect("advanced head");
+    let checks = freeze(CheckPolicy::default());
+    let sink = f.sink();
+    let masker = SecretMasker::default();
+    let mut request = f.request(&checks, &masker, &sink);
+    request.expected_protected_head = &head;
+    let error = execute_v1_landing(request)
+        .await
+        .expect_err("refuse conflict");
+    assert!(
+        matches!(error, LandGateError::Stage(detail) if detail.contains("conflicts with protected head"))
+    );
+    assert_eq!(f.repo.protected_head().await.expect("protected head"), head);
+    assert_eq!(f.worktree.head().await.expect("task head"), f.base);
+    assert!(sink.records.lock().expect("lock records").is_empty());
+}
+
+#[test]
+fn checks_get_fresh_snapshots_and_do_not_inherit_daemon_secrets() {
+    let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--ignored",
+            "--exact",
+            "isolated_check_driver",
+            "--nocapture",
+        ])
+        .env(DAEMON_SECRET_VAR, "fake-daemon-secret")
+        .status()
+        .expect("start daemon fixture");
+    assert!(status.success());
+}
+
+#[tokio::test]
+#[ignore = "run in a subprocess with a synthetic daemon secret"]
+async fn isolated_check_driver() {
+    use std::io::Write;
+
+    assert_eq!(
+        std::env::var(DAEMON_SECRET_VAR).as_deref(),
+        Ok("fake-daemon-secret")
+    );
+    let f = fixture("isolation").await;
+    let mut exclude = fs::OpenOptions::new()
+        .append(true)
+        .open(f.dir.path().join(".git/info/exclude"))
+        .expect("open exclude");
+    writeln!(exclude, "/ignored.log").expect("configure ignore");
+    fs::write(
+        f.worktree.path().join("ignored.log"),
+        "ignored task artifact",
+    )
+    .expect("write ignored artifact");
+    assert!(f.worktree.path().join(".git").exists());
+    let checks = FrozenCheckSet::freeze(
+        vec![command("first"), command("second")],
+        CheckPolicy::default(),
+    )
+    .expect("freeze");
+    let sink = f.sink();
+    let receipt = execute_v1_landing(f.request(&checks, &SecretMasker::default(), &sink))
+        .await
+        .expect("both clean-snapshot checks pass");
+    assert_eq!(receipt.audit.staged.ignored.paths, ["ignored.log"]);
+    assert_eq!(receipt.audit.checks.len(), 2);
 }
 
 #[tokio::test]
@@ -337,6 +499,68 @@ async fn a_timed_out_check_is_killed_and_never_lands() {
     assert!(sink.records.lock().expect("lock records").is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+#[ignore = "executed by the Unix check process as its descendant"]
+fn check_descendant() {
+    use std::io::Write;
+
+    let app = fs::read_to_string("app.txt").expect("read check mode");
+    let (_, address) = app.trim().rsplit_once(' ').expect("test address");
+    let mut connection = std::net::TcpStream::connect(address).expect("connect descendant");
+    connection.write_all(b"D").expect("identify descendant");
+    std::thread::sleep(Duration::from_secs(10));
+    drop(connection);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn timeout_kills_the_leader_and_a_descendant_holding_stdout_open() {
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
+    for mode in ["wait", "exit"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+        let address = listener.local_addr().expect("listener address");
+        let f = fixture(&format!("tree {mode} {address}\n")).await;
+        let checks = freeze(CheckPolicy {
+            timeout: Duration::from_secs(1),
+            ..CheckPolicy::default()
+        });
+        let sink = f.sink();
+        let masker = SecretMasker::default();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            execute_v1_landing(f.request(&checks, &masker, &sink)),
+        )
+        .await
+        .expect("timed-out tree terminates promptly");
+        let Err(LandGateError::ChecksFailed { receipt }) = result else {
+            panic!("expected failed check, got {result:?}");
+        };
+        assert_eq!(receipt.audit.checks[0].status, CheckStatus::TimedOut);
+        // Each process owned a separate connection. EOF proves death even when the
+        // descendant is orphaned and its PID is still present as a zombie.
+        let ids = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut ids = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("check process connected");
+                stream
+                    .read_to_end(&mut ids)
+                    .await
+                    .expect("process terminated and closed socket");
+            }
+            ids.sort_unstable();
+            ids
+        })
+        .await
+        .expect("both processes terminated promptly");
+        assert_eq!(ids, b"DL");
+        f.assert_protected_head_unchanged().await;
+        assert!(sink.records.lock().expect("lock records").is_empty());
+    }
+}
+
 #[tokio::test]
 async fn drains_both_streams_without_retaining_bytes_past_the_cap() {
     let f = fixture("output").await;
@@ -371,8 +595,8 @@ async fn masks_check_output_before_returning_or_persisting_it() {
         &receipt.audit.checks[0].stdout,
         &records[0].checks[0].stderr,
     ] {
-        assert!(output.contains("[REDACTED] [REDACTED] [REDACTED]"));
-        for secret in [LITERAL, SK_TOKEN, BEARER] {
+        assert!(output.contains("[REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED]"));
+        for secret in [LITERAL, SK_TOKEN, BEARER, FINE_PAT, SLACK_TOKEN] {
             assert!(!output.contains(secret));
         }
     }
@@ -435,7 +659,7 @@ async fn a_failed_check_returns_masked_output_and_does_not_stop_the_other_checks
 }
 
 #[tokio::test]
-async fn an_event_write_failure_leaves_the_protected_branch_untouched() {
+async fn a_transient_event_write_failure_leaves_both_branches_unchanged_and_can_be_retried() {
     let f = fixture("pass").await;
     let checks = freeze(CheckPolicy::default());
     let sink = RecordingSink {
@@ -447,11 +671,76 @@ async fn an_event_write_failure_leaves_the_protected_branch_untouched() {
         matches!(result, Err(LandGateError::EventWriteHalted(error)) if error == "event storage unavailable")
     );
     f.assert_protected_head_unchanged().await;
-    assert_ne!(
+    assert_eq!(
         f.worktree.head().await.expect("task head"),
         f.base,
-        "staging did succeed"
+        "the same task base remains available for retry"
     );
+    assert_eq!(
+        git(f.worktree.path(), &["diff", "--cached", "--name-only"]),
+        ""
+    );
+    let sink = f.sink();
+    let receipt = execute_v1_landing(f.request(&checks, &SecretMasker::default(), &sink))
+        .await
+        .expect("retry with the same task base");
+    assert_eq!(
+        f.repo.protected_head().await.expect("protected head"),
+        receipt.audit.staged.commit
+    );
+    assert_eq!(*sink.records.lock().expect("lock records"), [receipt.audit]);
+}
+
+#[tokio::test]
+async fn masks_diagnostics_from_staging_check_spawn_and_install() {
+    let f = fixture("pass").await;
+    let checks = freeze(CheckPolicy::default());
+    let masker = SecretMasker::default();
+    let sink = f.sink();
+
+    let outside = f.worktree.path().join(SLACK_TOKEN);
+    fs::write(&outside, "outside scope").expect("create outside-scope file");
+    let staged = execute_v1_landing(f.request(&checks, &masker, &sink))
+        .await
+        .expect_err("refuse out-of-scope file");
+    assert!(matches!(&staged, LandGateError::Stage(detail) if detail.contains("[REDACTED]")));
+    assert!(!format!("{staged:?} {staged}").contains(SLACK_TOKEN));
+    fs::remove_file(outside).expect("restore task worktree");
+
+    let missing = FrozenCheckSet::freeze(
+        vec![CheckCommand {
+            program: format!("./{SLACK_TOKEN}"),
+            ..command("missing")
+        }],
+        CheckPolicy::default(),
+    )
+    .expect("freeze missing executable");
+    let failed = execute_v1_landing(f.request(&missing, &masker, &sink)).await;
+    let Err(LandGateError::ChecksFailed { receipt }) = failed else {
+        panic!("expected spawn failure, got {failed:?}");
+    };
+    assert_eq!(receipt.audit.checks[0].status, CheckStatus::FailedToRun);
+    assert!(
+        receipt.audit.checks[0]
+            .stderr
+            .contains("could not start ./[REDACTED]")
+    );
+    assert!(!format!("{receipt:?}").contains(SLACK_TOKEN));
+
+    git(f.dir.path(), &["branch", FINE_PAT]);
+    let repo = Repo::open_with_protected(f.dir.path(), FINE_PAT)
+        .await
+        .expect("alternate protected branch");
+    let lock = format!(".git/refs/heads/{FINE_PAT}.lock");
+    fs::write(f.dir.path().join(lock), "").expect("block ref install");
+    let mut request = f.request(&checks, &masker, &sink);
+    request.repo = &repo;
+    let install = execute_v1_landing(request)
+        .await
+        .expect_err("locked ref prevents install");
+    assert!(matches!(&install, LandGateError::Install(detail) if detail.contains("[REDACTED]")));
+    assert!(!format!("{install:?} {install}").contains(FINE_PAT));
+    assert_eq!(repo.protected_head().await.expect("alternate head"), f.base);
 }
 
 #[tokio::test]
@@ -501,6 +790,8 @@ async fn the_event_store_persists_the_masked_audit_separately_from_origin_events
         .expect("read persisted audit event");
     let found: LandingAuditRecord = serde_json::from_str(&json).expect("decode audit event");
     assert_eq!(found, receipt.audit);
-    assert!(!json.contains(LITERAL) && !json.contains(SK_TOKEN) && !json.contains(BEARER));
+    for secret in [LITERAL, SK_TOKEN, BEARER, FINE_PAT, SLACK_TOKEN] {
+        assert!(!json.contains(secret));
+    }
     pool.close().await;
 }

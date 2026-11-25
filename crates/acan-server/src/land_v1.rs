@@ -1,5 +1,5 @@
-//! The V1 landing gate: verify the approved checks, test an Acan-made task commit, and
-//! persist permission to land it before moving the protected branch.
+//! The V1 landing gate: verify the approved checks, test the exact landing candidate, and
+//! persist permission to install it before moving the protected branch.
 
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use acan_core::{CommitId, TaskId};
-use acan_git::{Author, LandOutcome, LandV1Error, Repo, StagedCommit, TaskWorktree};
+use acan_git::{Author, LandOutcome, Repo, StagedCommit, TaskWorktree};
 use acan_intent::{PathScope, RepoRules, canonical_json};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -151,6 +151,8 @@ static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
         r"(?:-----END (?:[^\r\n]+? )?PRIVATE KEY-----|\z)",
         r"|sk-[A-Za-z0-9_-]{16,}",
         r"|gh[pousr]_[A-Za-z0-9_]{16,}",
+        r"|github_pat_[A-Za-z0-9_]{16,}",
+        r"|xox[baprs]-[A-Za-z0-9-]{10,}",
         r"|acan_[a-z_]*[0-9a-f]{16,}",
         r"|(?i:\bBearer)[ \t]+[A-Za-z0-9._~+/-]+=*",
         r"|AKIA[0-9A-Z]{16}",
@@ -161,7 +163,8 @@ static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
 // Recognizable token starts that may have been cut off before their full shape was retained.
 static PARTIAL_TOKENS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
-        r"(?:sk-[A-Za-z0-9_-]*|gh[pousr]_[A-Za-z0-9_]*|acan_[a-z_0-9]*",
+        r"(?:sk-[A-Za-z0-9_-]*|gh[pousr]_[A-Za-z0-9_]*|github_pat_[A-Za-z0-9_]*",
+        r"|xox[baprs]-[A-Za-z0-9-]*|acan_[a-z_0-9]*",
         r"|AKIA[0-9A-Z]*|(?i:\bBearer)[ \t]+|-----BEGIN [A-Z0-9 -]*)\z",
     ))
     .expect("valid partial secret patterns")
@@ -190,16 +193,31 @@ impl SecretMasker {
     /// Replace secrets with `[REDACTED]`.
     #[must_use]
     pub fn mask(&self, text: &str) -> String {
-        self.mask_text(text, false)
+        self.mask_text(text, false, false)
     }
 
-    fn mask_text(&self, text: &str, incomplete: bool) -> String {
+    fn mask_diagnostic(&self, text: &str) -> String {
+        self.mask_text(text, false, true)
+    }
+
+    fn mask_text(&self, text: &str, incomplete: bool, diagnostic: bool) -> String {
         let mut spans: Vec<_> = TOKENS.find_iter(text).map(|m| m.range()).collect();
         for literal in &self.literals {
             spans.extend(
                 text.match_indices(literal)
                     .map(|(at, value)| at..at + value.len()),
             );
+            if diagnostic {
+                // Some errors render paths using Debug (e.g. backslashes on Windows).
+                let quoted = format!("{literal:?}");
+                let escaped = &quoted[1..quoted.len() - 1];
+                if escaped != literal {
+                    spans.extend(
+                        text.match_indices(escaped)
+                            .map(|(at, value)| at..at + value.len()),
+                    );
+                }
+            }
             if incomplete {
                 // Even the partial prefix of a literal at the capture boundary must not be stored.
                 let start = text.ceil_char_boundary(text.len().saturating_sub(literal.len()));
@@ -303,11 +321,40 @@ impl Capture {
         {
             self.bytes.truncate(self.bytes.len() - last.invalid().len());
         }
-        let mut output = masker.mask_text(&String::from_utf8_lossy(&self.bytes), incomplete);
+        let mut output = masker.mask_text(&String::from_utf8_lossy(&self.bytes), incomplete, false);
         let truncated = incomplete || output.len() > self.cap;
         output.truncate(output.floor_char_boundary(self.cap));
         (output, truncated)
     }
+}
+
+const CHECK_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "SYSTEMROOT",
+    "COMSPEC",
+    "PATHEXT",
+    "LANG",
+    "LC_ALL",
+    "RUSTUP_HOME",
+    "CARGO_HOME",
+];
+
+async fn terminate_check(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pgid) = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok())
+        && pgid > 1
+    {
+        // SAFETY: The unreaped child leads its own process group, created at spawn.
+        // A negative PID sends SIGKILL to that entire group, not Acan's group.
+        unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    }
+    // Also reap the leader, or kill it directly if the group signal could not be sent.
+    let _ = child.kill().await;
 }
 
 async fn run_check(
@@ -324,46 +371,58 @@ async fn run_check(
     } else {
         Command::new(program)
     };
-    acan_git::git_env::prepare(command.as_std_mut());
     command
+        .env_clear()
+        .envs(
+            CHECK_ENV
+                .iter()
+                .filter_map(|&name| std::env::var_os(name).map(|value| (name, value))),
+        )
         .args(&check.args)
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
     let mut stdout = Capture::new(policy.max_output_bytes);
     let mut stderr = Capture::new(policy.max_output_bytes);
     let status = match command.spawn() {
         Ok(mut child) => {
             let out = child.stdout.take().expect("stdout is piped");
             let err = child.stderr.take().expect("stderr is piped");
-            // Include the pipe drains in the deadline: a descendant may hold a pipe open
-            // even after the command exits. Dropping these futures also closes the pipes.
+            // Don't reap the leader while a descendant can still keep either pipe open.
+            // The group's ID must still be safe to signal if those drains time out.
             let result = tokio::time::timeout(policy.timeout, async {
-                tokio::try_join!(child.wait(), stdout.drain(out), stderr.drain(err))
+                tokio::try_join!(stdout.drain(out), stderr.drain(err))?;
+                child.wait().await
             })
             .await;
             match result {
-                Ok(Ok((exit, (), ()))) if exit.success() => CheckStatus::Passed,
-                Ok(Ok((exit, (), ()))) => CheckStatus::Failed { code: exit.code() },
+                Ok(Ok(exit)) if exit.success() => CheckStatus::Passed,
+                Ok(Ok(exit)) => CheckStatus::Failed { code: exit.code() },
                 Ok(Err(error)) => {
-                    let _ = child.kill().await;
+                    terminate_check(&mut child).await;
                     // Do not concatenate a diagnostic with incomplete data from the child.
                     stderr = Capture::new(policy.max_output_bytes);
-                    stderr.push(error.to_string().as_bytes());
+                    stderr.push(masker.mask_diagnostic(&error.to_string()).as_bytes());
                     stderr.finished = true;
                     CheckStatus::FailedToRun
                 }
                 Err(_) => {
-                    let _ = child.kill().await;
+                    terminate_check(&mut child).await;
                     CheckStatus::TimedOut
                 }
             }
         }
         Err(error) => {
             stdout.finished = true;
-            stderr.push(error.to_string().as_bytes());
+            let diagnostic = format!("could not start {}: {error}", program.display());
+            stderr.push(masker.mask_diagnostic(&diagnostic).as_bytes());
             stderr.finished = true;
             CheckStatus::FailedToRun
         }
@@ -445,18 +504,20 @@ pub enum LandGateError {
     ChecksFailed { receipt: Box<V1LandReceipt> },
     #[error("landing halted because the event could not be written: {0}")]
     EventWriteHalted(String),
-    #[error("the protected branch did not advance: {0:?}")]
-    InstallRefused(LandOutcome),
-    #[error(transparent)]
-    Stage(#[from] LandV1Error),
-    #[error(transparent)]
-    Git(#[from] acan_git::Error),
+    #[error("the protected branch did not advance: {0}")]
+    InstallRefused(String),
+    #[error("could not stage the landing candidate: {0}")]
+    Stage(String),
+    #[error("could not materialize the landing candidate: {0}")]
+    Snapshot(String),
+    #[error("could not install the landing candidate: {0}")]
+    Install(String),
     #[error(transparent)]
     Canonical(#[from] acan_intent::CanonicalError),
 }
 
 /// Stage approved task edits, run the frozen checks, persist authorization, then attempt
-/// to install the tested task commit against the expected protected head.
+/// to install the tested candidate against the expected protected head.
 ///
 /// # Errors
 ///
@@ -485,23 +546,34 @@ pub async fn execute_v1_landing(req: V1LandRequest<'_>) -> Result<V1LandReceipt,
             req.author,
             req.message,
         )
-        .await?;
+        .await
+        .map_err(|error| LandGateError::Stage(req.masker.mask_diagnostic(&error.to_string())))?;
+    let candidate = req
+        .repo
+        .prepare_v1_candidate(
+            staged,
+            req.expected_protected_head,
+            req.scope,
+            req.rules,
+            req.author,
+        )
+        .await
+        .map_err(|error| LandGateError::Stage(req.masker.mask_diagnostic(&error.to_string())))?;
     let mut checks = Vec::with_capacity(req.frozen_checks.checks.len());
     for check in &req.frozen_checks.checks {
-        checks.push(
-            run_check(
-                req.worktree.path(),
-                check,
-                req.frozen_checks.policy,
-                req.masker,
-            )
-            .await,
-        );
+        let snapshot = req
+            .repo
+            .materialize_v1_candidate(&candidate)
+            .await
+            .map_err(|error| {
+                LandGateError::Snapshot(req.masker.mask_diagnostic(&error.to_string()))
+            })?;
+        checks.push(run_check(snapshot.path(), check, req.frozen_checks.policy, req.masker).await);
     }
     let audit = LandingAuditRecord {
         task: req.task,
         expected_protected_head: req.expected_protected_head.clone(),
-        staged,
+        staged: candidate.staged().clone(),
         check_hash: req.frozen_checks.sha256.clone(),
         checks,
     };
@@ -525,18 +597,21 @@ pub async fn execute_v1_landing(req: V1LandRequest<'_>) -> Result<V1LandReceipt,
     req.event_sink
         .record_landing(&receipt.audit)
         .await
-        .map_err(|error| LandGateError::EventWriteHalted(req.masker.mask(&error.to_string())))?;
+        .map_err(|error| {
+            LandGateError::EventWriteHalted(req.masker.mask_diagnostic(&error.to_string()))
+        })?;
     match req
         .repo
-        .land(
-            req.task,
-            &receipt.audit.staged.commit,
-            req.expected_protected_head,
-        )
-        .await?
+        .install_v1_candidate(&candidate)
+        .await
+        .map_err(|error| LandGateError::Install(req.masker.mask_diagnostic(&error.to_string())))?
     {
         LandOutcome::Landed { commit } => receipt.landed_commit = Some(commit),
-        outcome => return Err(LandGateError::InstallRefused(outcome)),
+        outcome => {
+            return Err(LandGateError::InstallRefused(
+                req.masker.mask_diagnostic(&format!("{outcome:?}")),
+            ));
+        }
     }
     Ok(receipt)
 }

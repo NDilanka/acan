@@ -13,6 +13,26 @@ use crate::Error;
 /// second; this only bounds a wedged process, and the child is killed on expiry.
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// An empty hooks directory kept alive for the Git commands that use it.
+pub(crate) struct EmptyHooks {
+    _dir: tempfile::TempDir,
+    config: String,
+}
+
+impl EmptyHooks {
+    pub(crate) fn new() -> Result<Self, Error> {
+        let dir = tempfile::tempdir()?;
+        let config = format!("core.hooksPath={}", crate::repo::path_str(dir.path())?);
+        Ok(Self { _dir: dir, config })
+    }
+
+    pub(crate) fn args<'a>(&'a self, args: &[&'a str]) -> Vec<&'a str> {
+        let mut suppressed = vec!["-c", &self.config];
+        suppressed.extend_from_slice(args);
+        suppressed
+    }
+}
+
 /// What a git invocation produced.
 pub(crate) struct GitOutput {
     pub(crate) status: ExitStatus,
@@ -65,7 +85,11 @@ pub(crate) async fn run_raw(
     input: Option<&[u8]>,
 ) -> Result<RawOutput, Error> {
     let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(dir).args(args);
+    // A ref in refs/replace must not alter the contents read or installed under an exact ID.
+    cmd.arg("--no-replace-objects")
+        .arg("-C")
+        .arg(dir)
+        .args(args);
     // Before the caller's variables, so a variable the caller names still applies.
     crate::git_env::prepare(cmd.as_std_mut());
     cmd.env("GIT_TERMINAL_PROMPT", "0");

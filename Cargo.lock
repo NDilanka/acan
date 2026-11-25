@@ -96,6 +96,7 @@ dependencies = [
  "clap",
  "dotenvy",
  "futures-util",
+ "libc",
  "percent-encoding",
  "regex",
  "reqwest",

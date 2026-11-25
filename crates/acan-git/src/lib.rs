@@ -27,7 +27,7 @@ pub use acan_core;
 
 pub use error::Error;
 pub use land_v1::{
-    ChangeStatus, ChangedFile, IgnoredAccounting, LandV1Error, StagedCommit,
+    ChangeStatus, ChangedFile, IgnoredAccounting, LandV1Error, StagedCommit, V1Candidate,
     stage_and_commit_worktree,
 };
 pub use prepare::{InstallOutcome, Preparation, PrepareOutcome, ProtectedExport};

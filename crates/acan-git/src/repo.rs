@@ -105,7 +105,7 @@ impl Repo {
     ///
     /// A checkout that has the protected branch checked out, the user's main one
     /// included, moves with the branch. A clean checkout gets the new files through
-    /// its own `git merge --ff-only`. A checkout with uncommitted changes stops the
+    /// a two-tree read, without running hooks. A checkout with uncommitted changes stops the
     /// land with [`LandOutcome::CheckoutDirty`]. An untracked or ignored file the land
     /// would overwrite stops it with [`LandOutcome::CheckoutBlocked`]. A checkout that
     /// switched branches between the decision and the merge is
@@ -176,7 +176,8 @@ impl Repo {
 
         let message = format!("acan: land task {task}");
         let envs = self.author_env();
-        let args = [
+        let hooks = git::EmptyHooks::new()?;
+        let args = hooks.args(&[
             "-c",
             "commit.gpgsign=false",
             "commit-tree",
@@ -187,7 +188,7 @@ impl Repo {
             gated.as_str(),
             "-m",
             &message,
-        ];
+        ]);
         let merged: CommitId = git::ok(&self.root, &args, &envs).await?.trim().parse()?;
         self.advance(&merged, expected_head)
             .await
@@ -217,12 +218,13 @@ impl Repo {
         expected_head: &CommitId,
     ) -> Result<Advance, Error> {
         let protected_ref = format!("refs/heads/{}", self.protected);
-        let args = [
+        let hooks = git::EmptyHooks::new()?;
+        let args = hooks.args(&[
             "update-ref",
             protected_ref.as_str(),
             commit.as_str(),
             expected_head.as_str(),
-        ];
+        ]);
         let out = git::run(&self.root, &args, &[]).await?;
         if out.status.success() {
             return Ok(Advance::Landed {
@@ -264,12 +266,16 @@ impl Repo {
         checkout: &Path,
         expected_head: &CommitId,
     ) -> Result<Option<Advance>, Error> {
-        let dirty = git::ok(
-            checkout,
-            &["status", "--porcelain", "--untracked-files=no"],
-            &[],
-        )
-        .await?;
+        let hooks = git::EmptyHooks::new()?;
+        let args = hooks.args(&[
+            "-c",
+            "core.fsmonitor=false",
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ]);
+        let env = [("GIT_OPTIONAL_LOCKS".to_owned(), "0".to_owned())];
+        let dirty = git::ok(checkout, &args, &env).await?;
         if !dirty.trim().is_empty() {
             return Ok(Some(Advance::CheckoutDirty {
                 path: checkout.to_path_buf(),
@@ -345,12 +351,13 @@ impl Repo {
             });
         }
         let protected_ref = format!("refs/heads/{}", self.protected);
-        let ref_args = [
+        let hooks = git::EmptyHooks::new()?;
+        let ref_args = hooks.args(&[
             "update-ref",
             protected_ref.as_str(),
             commit.as_str(),
             expected_head.as_str(),
-        ];
+        ]);
         let out = git::run(&self.root, &ref_args, &[]).await?;
         if !out.status.success() {
             let current = self.protected_head().await?;
@@ -359,17 +366,15 @@ impl Repo {
             }
             return Err(git::ensure_ok(out, &ref_args).expect_err("status was not success"));
         }
-        let hooks = self.empty_hooks_dir().await?;
-        let hooks_arg = format!("core.hooksPath={hooks}");
-        let tree_args = [
+        let tree_args = hooks.args(&[
             "-c",
-            hooks_arg.as_str(),
+            "core.fsmonitor=false",
             "read-tree",
             "-m",
             "-u",
             expected_head.as_str(),
             commit.as_str(),
-        ];
+        ]);
         let out = git::run(checkout, &tree_args, &[]).await?;
         if out.status.success() {
             // Only the postcondition says the land happened: the ref names `commit`.
@@ -384,12 +389,12 @@ impl Repo {
             });
         }
         // The checkout did not move, so the branch goes back to the head it had.
-        let revert_args = [
+        let revert_args = hooks.args(&[
             "update-ref",
             protected_ref.as_str(),
             expected_head.as_str(),
             commit.as_str(),
-        ];
+        ]);
         let revert = git::run(&self.root, &revert_args, &[]).await?;
         if !revert.status.success() {
             return Err(git::ensure_ok(revert, &revert_args).expect_err("status was not success"));
@@ -409,13 +414,6 @@ impl Repo {
             return Ok(None);
         }
         Ok(Some(out.stdout.trim().to_owned()))
-    }
-
-    /// An empty hooks directory, so the automated merge runs no hooks.
-    async fn empty_hooks_dir(&self) -> Result<String, Error> {
-        let hooks = self.common_dir().await?.join("acan-hooks");
-        tokio::fs::create_dir_all(&hooks).await?;
-        path_str(&hooks).map(str::to_owned)
     }
 
     /// The repository's common git directory, shared by every worktree.
