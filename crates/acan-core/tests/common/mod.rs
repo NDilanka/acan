@@ -171,7 +171,7 @@ impl Fx {
             brief: String::new(),
             scope: vec![machine("api")],
         };
-        fx.system(SystemCmd::SplitReady {
+        fx.human(&owner, HumanCmd::SplitOrder {
             order: fx.order,
             rev,
             tasks: vec![spec("limiter"), spec("routes")],
@@ -211,17 +211,6 @@ impl Fx {
         self.run(Command::System(cmd))
     }
 
-    /// Runs `cmd` through the origin's advisory path, which skips every maintenance step.
-    pub fn advise(&mut self, cmd: SystemCmd) -> Result<Vec<Stamped>, Rejection> {
-        let ctx = Ctx {
-            now: self.now,
-            index: &self.index,
-        };
-        let batch = self.origin.execute_advisory(&ctx, Command::System(cmd))?;
-        self.log.extend(batch.iter().cloned());
-        Ok(batch)
-    }
-
     /// Appends `event` to the stored log as the next system event and replays the origin
     /// from that log, as a host would after restarting on a damaged or forged store.
     pub fn append_stored(&mut self, event: Event) -> Result<(), ReplayError> {
@@ -231,6 +220,7 @@ impl Fx {
             seq: Seq::new(last.get() + 1),
             at: self.now,
             actor: Actor::System,
+            shareable: false,
             event,
         });
         self.origin = Origin::replay(stored(&log))?;

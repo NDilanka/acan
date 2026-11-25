@@ -2,7 +2,7 @@ mod common;
 
 use acan_core::{
     AgentCmd, Clash, ClashKey, ClashState, CodeRev, CommitId, ContractRef, Declaration,
-    DeclarationInput, Event, Explanation, Generation, HumanCmd, IndexedSymbol, Job, LEASE_TTL_MS,
+    DeclarationInput, Event, Generation, HumanCmd, IndexedSymbol, LEASE_TTL_MS,
     Locus, Overlap, OverlapKind, Rejection, SettleRight, Settlement, Stage, SystemCmd, TaskId,
     TaskState, WitnessOutcome, detect,
 };
@@ -676,29 +676,6 @@ fn an_index_update_finds_new_overlaps_once_per_revision() {
         .system(SystemCmd::IndexUpdated)
         .expect("same revision accepted");
     assert!(again.is_empty(), "got {again:?}");
-}
-
-#[test]
-fn an_explanation_never_suggests_a_choice_off_the_menu() {
-    let mut fx = clashing();
-    let clash = fx.origin.world().clashes().next().expect("clash").id;
-    assert!(fx.origin.world().jobs().contains(&Job::Explain { clash }));
-    let explanation = Explanation {
-        consequence: "both rewrite the limiter".to_owned(),
-        breaks: None,
-        suggested: Some(Settlement::Narrow { task: task(99) }),
-    };
-    fx.system(SystemCmd::ClashExplained { clash, explanation })
-        .expect("explanation accepted");
-    let stored = fx.origin.world().clash(clash).expect("clash");
-    assert_eq!(
-        stored
-            .explanation
-            .as_ref()
-            .and_then(|e| e.suggested.clone()),
-        None
-    );
-    assert!(!fx.origin.world().jobs().contains(&Job::Explain { clash }));
 }
 
 #[test]

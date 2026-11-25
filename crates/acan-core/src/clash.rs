@@ -6,7 +6,6 @@
 //!
 //! ```text
 //! (none) --ClashFound--> Open
-//! Open --ClashExplained--> Open (explanation attached; settling never waits for it)
 //! Open --SettleClash with Propose right--> Proposed
 //! Open|Proposed --SettleClash with Settle right--> Settled
 //! Open|Proposed --redetection no longer finds the key, or a party has no declaration--> Dissolved
@@ -24,7 +23,6 @@ use serde::{Deserialize, Serialize};
 use crate::event::{Event, Rejection};
 use crate::ids::{
     AgentId, ClashId, CodeRev, FilePath, Generation, MachineKey, MemberId, TaskId, Timestamp,
-    WitnessId,
 };
 use crate::index::{CodeIndex, Locus};
 use crate::lease::{self, Fence, LEASE_TTL_MS};
@@ -450,8 +448,6 @@ pub struct Clash {
     pub found_at: CodeRev,
     /// Who owns the interface, for a `Contract` clash. `None` for every other kind.
     pub contract: Option<ContractRef>,
-    /// The foreman's explanation, once the explain job has run.
-    pub explanation: Option<Explanation>,
     /// Where the clash is in its lifecycle.
     pub state: ClashState,
 }
@@ -478,17 +474,6 @@ pub enum ClashState {
     },
     /// A later declaration or rescan removed the overlap.
     Dissolved,
-}
-
-/// The foreman's account of a clash, written by a model. It never changes the legal menu.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Explanation {
-    /// What goes wrong if both proceed.
-    pub consequence: String,
-    /// The witness that would break, if any.
-    pub breaks: Option<WitnessId>,
-    /// The suggested choice. Ignored unless it is on [`Clash::menu`].
-    pub suggested: Option<Settlement>,
 }
 
 /// A way to settle a clash.
@@ -776,33 +761,6 @@ pub(crate) fn decide_settle(
         }
     };
     Ok(vec![event])
-}
-
-/// `ClashExplained`: attaches the model's explanation to an open or proposed clash.
-/// A suggestion off the menu is dropped, so the UI never offers an illegal choice.
-pub(crate) fn decide_explained(
-    world: &World,
-    clash: ClashId,
-    mut explanation: Explanation,
-) -> Result<Vec<Event>, Rejection> {
-    let c = world
-        .clash(clash)
-        .ok_or_else(|| Rejection::unknown("clash", clash))?;
-    if !c.blocking() {
-        return Err(Rejection::wrong_state("clash", "closed"));
-    }
-    if c.explanation.is_some() {
-        return Err(Rejection::wrong_state("clash", "explained"));
-    }
-    let menu = c.menu();
-    if explanation
-        .suggested
-        .as_ref()
-        .is_some_and(|s| !menu.contains(s))
-    {
-        explanation.suggested = None;
-    }
-    Ok(vec![Event::ClashExplained { clash, explanation }])
 }
 
 /// `BarrierExpired` for every armed barrier of a split order whose deadline is at or before

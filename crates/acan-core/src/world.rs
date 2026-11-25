@@ -5,13 +5,13 @@ use std::{fmt, mem};
 
 use acan_intent::{ContestStatus, DiscrepancyEpisode, EpisodeState, OrderRef, ScopeRevision};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::clash::{
     self, Barrier, BarrierHold, Clash, ClashKey, ClashState, Declaration, Settlement,
 };
 use crate::event::{
-    Actor, AgentCmd, CallFailure, Command, Event, HumanCmd, Rejection, ReplayError, Stamped,
-    SystemCmd,
+    Actor, AgentCmd, Command, Event, HumanCmd, Rejection, ReplayError, Stamped, SystemCmd,
 };
 use crate::gate::{self, GateRun, GateVerdict};
 use crate::ids::{
@@ -21,7 +21,7 @@ use crate::ids::{
 use crate::index::CodeIndex;
 use crate::job::Job;
 use crate::lane::{
-    self, ConfirmedInputs, LaneRun, PendingContrast, ScopeDraftOutcome, ScopeLane, ScopedReadback,
+    self, ConfirmedInputs, LaneRun, PendingContrast, ScopeLane, ScopedReadback,
 };
 use crate::lease::{self, Claim, DECLARE_BARRIER_MS};
 use crate::member::{self, AgentPrincipal, Member, Role, SettleRight};
@@ -50,42 +50,21 @@ pub struct Ctx<'a> {
     pub index: &'a CodeIndex,
 }
 
-/// Which loop step made a model call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Step {
-    /// Splitting an order.
-    Split,
-    /// Reviewing readbacks.
-    Review,
-    /// Explaining a clash.
-    Explain,
-    /// Comparing a screenshot witness.
-    Screenshot,
-    /// Comparing a page's screenshots with a vision model.
-    Vision,
-    /// Drafting a scope.
-    Scope,
-    /// Asking the director for a tour.
-    Director,
-}
-
-/// Token totals.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenCount {
-    /// Prompt tokens.
-    pub input: u64,
-    /// Completion tokens.
-    pub output: u64,
-    /// Number of calls.
-    pub calls: u32,
-}
-
-/// Model usage per model and step, for the usage panel.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelUsage {
-    /// Totals keyed by model name, then step. Nested rather than tuple-keyed so it serializes to JSON.
-    pub totals: BTreeMap<String, BTreeMap<Step, TokenCount>>,
+/// A log entry whose event kind this version does not interpret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnknownEvent {
+    /// Position in the world log.
+    pub seq: Seq,
+    /// When the origin accepted it.
+    pub at: Timestamp,
+    /// Who caused it.
+    pub actor: Actor,
+    /// Whether it may be shared outside its local world log.
+    pub shareable: bool,
+    /// The original wire tag.
+    pub event_type: String,
+    /// The other fields of the event object, excluding `type`.
+    pub payload: Value,
 }
 
 // Wider than the ids they mint, so one past `u32::MAX` marks a kind as exhausted
@@ -119,15 +98,12 @@ pub struct World {
     pub(crate) clashes: BTreeMap<ClashId, Clash>,
     pub(crate) clash_keys: BTreeMap<ClashKey, ClashId>,
     pub(crate) gates: BTreeMap<GateRunId, GateRun>,
-    pub(crate) usage: ModelUsage,
     pub(crate) lanes: BTreeMap<OrderId, ScopeLane>,
-    // What the scope-draft job reported, by order and the order revision it was derived at. A
-    // drafted scope carries no authority; the lane holds the only scope a claim may rest on.
-    pub(crate) scope_drafts: BTreeMap<(OrderId, OrderRev), ScopeDraftOutcome>,
     // Shares the readback id counter with the legacy readbacks, so a claim's readback id
     // names exactly one readback of either kind.
     pub(crate) scoped_readbacks: BTreeMap<ReadbackId, ScopedReadback>,
     pub(crate) ledger: Ledger,
+    unknown_events: Vec<UnknownEvent>,
 }
 
 impl World {
@@ -141,6 +117,12 @@ impl World {
     #[must_use]
     pub fn next_seq(&self) -> Seq {
         self.next_seq
+    }
+
+    /// Events whose kinds this version does not interpret, in log order.
+    #[must_use]
+    pub fn unknown_events(&self) -> &[UnknownEvent] {
+        &self.unknown_events
     }
 
     /// The index revision of the last `IndexUpdated`, if any.
@@ -230,35 +212,10 @@ impl World {
         self.gates.get(&id)
     }
 
-    /// Model usage so far.
-    #[must_use]
-    pub fn usage(&self) -> &ModelUsage {
-        &self.usage
-    }
-
     /// The scope-first state of an order. `None` for an order in the legacy lane.
     #[must_use]
     pub fn lane(&self, order: OrderId) -> Option<&ScopeLane> {
         self.lanes.get(&order)
-    }
-
-    /// The latest scope-draft outcome of an order, with the order revision it was for. A drafted
-    /// scope confirms nothing: the scope a claim rests on is [`World::lane`]'s.
-    #[must_use]
-    pub fn scope_draft(&self, order: OrderId) -> Option<(OrderRev, &ScopeDraftOutcome)> {
-        self.scope_drafts
-            .range((order, OrderRev::ZERO)..=(order, OrderRev::new(u32::MAX)))
-            .next_back()
-            .map(|((_, rev), outcome)| (*rev, outcome))
-    }
-
-    /// The scope-draft outcome recorded for an order at one of its revisions.
-    pub(crate) fn scope_draft_at(
-        &self,
-        order: OrderId,
-        rev: OrderRev,
-    ) -> Option<&ScopeDraftOutcome> {
-        self.scope_drafts.get(&(order, rev))
     }
 
     /// Every scope-first order's lane, in order id order.
@@ -483,44 +440,22 @@ impl World {
 
     /// The jobs the host should be running now. See [`Job`] for the contract.
     ///
-    /// `Split` for each splitting order; `Barrier` for each split order whose declare barrier is
-    /// armed; `DraftScope` for each order that still needs a scope draft (see
-    /// `wants_scope_draft`). The legacy model review is not derived: no order gets a `Review`
-    /// job. `Explain` for each blocking clash without an explanation; `RunWitness` for each
-    /// frozen witness of a current gate run without a result; `Land` for the front of the land
-    /// queue only.
+    /// `Barrier` for each split order with an armed declare barrier; `RunWitness` for each
+    /// frozen witness of a current gate run without a result; `Land` for the front of the
+    /// land queue only.
     #[must_use]
     pub fn jobs(&self) -> Vec<Job> {
         let mut jobs = Vec::new();
         for order in self.orders.values() {
-            match order.state {
-                OrderState::Splitting => jobs.push(Job::Split {
+            if order.state == OrderState::Split
+                && let Barrier::Armed { deadline } = order.barrier
+            {
+                jobs.push(Job::Barrier {
                     order: order.id,
-                    rev: order.rev,
-                }),
-                OrderState::Split => {
-                    if let Barrier::Armed { deadline } = order.barrier {
-                        jobs.push(Job::Barrier {
-                            order: order.id,
-                            deadline,
-                        });
-                    }
-                }
-                OrderState::Cancelled => {}
-            }
-            if self.wants_scope_draft(order) {
-                jobs.push(Job::DraftScope {
-                    order: order.id,
-                    rev: order.rev,
+                    deadline,
                 });
             }
         }
-        jobs.extend(
-            self.clashes
-                .values()
-                .filter(|c| c.blocking() && c.explanation.is_none())
-                .map(|c| Job::Explain { clash: c.id }),
-        );
         for task in self.tasks.values() {
             let TaskState::Claimed {
                 stage: Stage::Gating { run, .. },
@@ -556,22 +491,6 @@ impl World {
             });
         }
         jobs
-    }
-
-    /// Whether an order needs a scope draft: it is not cancelled, has no scope, has no drafted
-    /// scope at its current revision, and has no claimed or landed work. A draft is requested
-    /// once per revision; a failed draft is retried by the job loop and not stored as a draft.
-    fn wants_scope_draft(&self, order: &Order) -> bool {
-        order.state != OrderState::Cancelled
-            && self.lane(order.id).is_none()
-            && !matches!(
-                self.scope_draft_at(order.id, order.rev),
-                Some(ScopeDraftOutcome::Drafted { .. })
-            )
-            && matches!(
-                self.phase(order.id),
-                Some(OrderPhase::Splitting | OrderPhase::ReadingBack)
-            )
     }
 
     /// The readbacks of the order that the legacy review command may still judge, ignoring
@@ -694,11 +613,10 @@ impl World {
             clashes: BTreeMap::new(),
             clash_keys: BTreeMap::new(),
             gates: BTreeMap::new(),
-            usage: ModelUsage::default(),
             lanes: BTreeMap::new(),
-            scope_drafts: BTreeMap::new(),
             scoped_readbacks: BTreeMap::new(),
             ledger: Ledger::default(),
+            unknown_events: Vec::new(),
         }
     }
 
@@ -745,11 +663,7 @@ impl World {
             Event::MemberAdded { .. }
             | Event::AgentRegistered { .. }
             | Event::IndexUpdated { .. }
-            | Event::ModelUsed { .. } => Ok(()),
-            Event::VisionChecked { task, gate_run, .. } => match self.gates.get(gate_run) {
-                Some(gate) if gate.task == *task => Ok(()),
-                _ => Err(format!("unknown gate run {gate_run} of task {task}")),
-            },
+            | Event::Unknown { .. } => Ok(()),
             Event::OrderPosted {
                 order, witnesses, ..
             } => {
@@ -816,7 +730,6 @@ impl World {
                 known(&self.tasks, &key.b(), "task")
             }
             Event::ClashDissolved { clash }
-            | Event::ClashExplained { clash, .. }
             | Event::ClashProposed { clash, .. }
             | Event::ClashSettled { clash, .. } => known(&self.clashes, clash, "clash"),
             Event::BuildReported {
@@ -853,23 +766,6 @@ impl World {
                     _ => Ok(()),
                 }
             }
-            Event::ScopeDrafted { order, rev, draft } => {
-                known(&self.orders, order, "order")?;
-                if draft.order.as_str() != order.to_string() {
-                    return Err(format!("the draft of order {order} names another order"));
-                }
-                if self.lanes.contains_key(order) {
-                    return Err(format!("order {order} is drafted after it has a scope"));
-                }
-                if matches!(
-                    self.scope_draft_at(*order, *rev),
-                    Some(ScopeDraftOutcome::Drafted { .. })
-                ) {
-                    return Err(format!("order {order} is drafted twice at {rev:?}"));
-                }
-                Ok(())
-            }
-            Event::ScopeDraftFailed { order, .. } => known(&self.orders, order, "order"),
             Event::ScopeConfirmed {
                 order,
                 confirmation,
@@ -978,6 +874,7 @@ impl World {
                 seq: self.next_seq,
                 at,
                 actor: actor.clone(),
+                shareable: false,
                 event,
             };
             self.apply(&stamped);
@@ -1143,7 +1040,6 @@ impl World {
                     kind: *kind,
                     found_at: found_at.clone(),
                     contract: contract.clone(),
-                    explanation: None,
                     state: ClashState::Open,
                 };
                 self.clashes.insert(*clash, found);
@@ -1162,11 +1058,6 @@ impl World {
             Event::ClashDissolved { clash } => {
                 if let Some(c) = self.clashes.get_mut(clash) {
                     c.state = ClashState::Dissolved;
-                }
-            }
-            Event::ClashExplained { clash, explanation } => {
-                if let Some(c) = self.clashes.get_mut(clash) {
-                    c.explanation = Some(explanation.clone());
                 }
             }
             Event::ClashProposed { clash, choice, by } => {
@@ -1269,47 +1160,6 @@ impl World {
                         t.state = TaskState::Dropped;
                     }
                 }
-            }
-            Event::ModelUsed {
-                model,
-                step,
-                input_tokens,
-                output_tokens,
-                failure,
-                ..
-            } => {
-                // A call that gave no reply is in the log and counts for nothing: it touches no
-                // total, not even to open an entry for its model and step.
-                if failure.is_none() {
-                    let count = self
-                        .usage
-                        .totals
-                        .entry(model.clone())
-                        .or_default()
-                        .entry(*step)
-                        .or_default();
-                    // A reply always carries its token counts. A missing count is a writer bug,
-                    // and it adds nothing rather than failing the fold.
-                    count.input += u64::from(input_tokens.unwrap_or(0));
-                    count.output += u64::from(output_tokens.unwrap_or(0));
-                    count.calls = count.calls.saturating_add(1);
-                }
-            }
-            Event::ScopeDrafted { order, rev, draft } => {
-                self.scope_drafts.insert(
-                    (*order, *rev),
-                    ScopeDraftOutcome::Drafted {
-                        draft: draft.clone(),
-                    },
-                );
-            }
-            Event::ScopeDraftFailed { order, rev, reason } => {
-                self.scope_drafts.insert(
-                    (*order, *rev),
-                    ScopeDraftOutcome::Failed {
-                        reason: reason.clone(),
-                    },
-                );
             }
             Event::ScopeRevised {
                 order,
@@ -1422,7 +1272,14 @@ impl World {
                 }
             }
             Event::RulingRecorded { event } => self.ledger.append((**event).clone()),
-            Event::VisionChecked { .. } => {}
+            Event::Unknown { event_type, payload } => self.unknown_events.push(UnknownEvent {
+                seq: stamped.seq,
+                at: stamped.at,
+                actor: stamped.actor.clone(),
+                shareable: stamped.shareable,
+                event_type: event_type.clone(),
+                payload: Value::Object(payload.clone()),
+            }),
         }
         self.next_seq = stamped.seq.next();
     }
@@ -1592,6 +1449,7 @@ impl Origin {
             seq: Seq::ZERO,
             at: now,
             actor: Actor::Member(founder.clone()),
+            shareable: false,
             event: Event::WorldOpened {
                 world: world.clone(),
                 founder,
@@ -1636,33 +1494,6 @@ impl Origin {
         let cleared = clash::build_clear(&next);
         next.record(ctx.now, &Actor::System, cleared, &mut batch);
         self.world = next;
-        Ok(batch)
-    }
-
-    /// Decides an advisory command and applies its events, and nothing else.
-    ///
-    /// An advisory command (`VisionChecked`, `ModelUsed`) reports what a check or a model call
-    /// saw; it never moves gate state. So this path skips lease expiry, barrier expiry, orphan
-    /// dissolution and build clearing on purpose: a lease or barrier already due stays in place
-    /// until the next ordinary command expires it.
-    ///
-    /// # Errors
-    /// Returns [`Rejection::Invalid`] for any command that is not advisory, and [`Rejection`]
-    /// when the advisory command is not allowed in the current state. Either way nothing changes.
-    pub fn execute_advisory(
-        &mut self,
-        ctx: &Ctx<'_>,
-        cmd: Command,
-    ) -> Result<Vec<Stamped>, Rejection> {
-        if !matches!(
-            cmd,
-            Command::System(SystemCmd::VisionChecked { .. } | SystemCmd::ModelUsed { .. })
-        ) {
-            return Err(Rejection::invalid("not an advisory command"));
-        }
-        let (actor, decided) = decide(&self.world, ctx, cmd)?;
-        let mut batch = Vec::new();
-        self.world.record(ctx.now, &actor, decided, &mut batch);
         Ok(batch)
     }
 
@@ -1778,6 +1609,9 @@ fn decide_human(world: &World, member: &MemberId, cmd: HumanCmd) -> Result<Vec<E
             sentence,
             witnesses,
         } => order::decide_post_order(world, member, machine, sentence, witnesses),
+        HumanCmd::SplitOrder { order, rev, tasks } => {
+            order::decide_split(world, member, order, rev, tasks)
+        }
         HumanCmd::AnswerQuestion { question, option } => {
             order::decide_answer(world, member, question, option)
         }
@@ -1854,64 +1688,15 @@ fn decide_agent(
     }
 }
 
-/// The most words a usage detail holds. The detail is a short note, so a usage row stays readable.
-/// The server's person-facing card cap, `caps::CARD_WORDS` in acan-server, is the same 100.
-const USAGE_DETAIL_WORDS: usize = 100;
-
-/// Decides one usage row. A call that gave no reply is a failure and carries no token counts, and
-/// a call that gave a reply carries both counts. A detail holds at most [`USAGE_DETAIL_WORDS`]
-/// words.
-fn decide_model_used(
-    model: String,
-    provider: Option<String>,
-    step: Step,
-    input_tokens: Option<u32>,
-    output_tokens: Option<u32>,
-    failure: Option<CallFailure>,
-    detail: Option<String>,
-) -> Result<Vec<Event>, Rejection> {
-    let counted = input_tokens.is_some() && output_tokens.is_some();
-    let uncounted = input_tokens.is_none() && output_tokens.is_none();
-    if failure.is_some() && !uncounted {
-        return Err(Rejection::invalid("a failed call has no token counts"));
-    }
-    if failure.is_none() && !counted {
-        return Err(Rejection::invalid(
-            "a call that gave a reply has both token counts",
-        ));
-    }
-    if detail
-        .as_deref()
-        .is_some_and(|text| text.split_whitespace().count() > USAGE_DETAIL_WORDS)
-    {
-        return Err(Rejection::invalid("a usage detail has at most 100 words"));
-    }
-    Ok(vec![Event::ModelUsed {
-        model,
-        provider,
-        step,
-        input_tokens,
-        output_tokens,
-        failure,
-        detail,
-    }])
-}
-
 fn decide_system(world: &World, ctx: &Ctx<'_>, cmd: SystemCmd) -> Result<Vec<Event>, Rejection> {
     match cmd {
         SystemCmd::IndexUpdated => clash::decide_index_updated(world, ctx),
-        SystemCmd::SplitReady { order, rev, tasks } => {
-            order::decide_split_ready(world, order, rev, tasks)
-        }
         SystemCmd::ReadbacksReviewed {
             order,
             rev,
             verdicts,
             question,
         } => order::decide_reviewed(world, order, rev, verdicts, question),
-        SystemCmd::ClashExplained { clash, explanation } => {
-            clash::decide_explained(world, clash, explanation)
-        }
         SystemCmd::WitnessResult {
             run,
             witness,
@@ -1922,23 +1707,6 @@ fn decide_system(world: &World, ctx: &Ctx<'_>, cmd: SystemCmd) -> Result<Vec<Eve
         }
         SystemCmd::CandidateConflicted { run, files } => gate::decide_conflicted(world, run, files),
         SystemCmd::RefuseRun { run, reason } => gate::decide_refused(world, run, reason),
-        SystemCmd::ModelUsed {
-            model,
-            provider,
-            step,
-            input_tokens,
-            output_tokens,
-            failure,
-            detail,
-        } => decide_model_used(
-            model,
-            provider,
-            step,
-            input_tokens,
-            output_tokens,
-            failure,
-            detail,
-        ),
         SystemCmd::Tick => Ok(Vec::new()),
         SystemCmd::CandidatePrepared { run, prepared } => {
             lane::decide_prepared(world, run, *prepared)
@@ -1957,27 +1725,5 @@ fn decide_system(world: &World, ctx: &Ctx<'_>, cmd: SystemCmd) -> Result<Vec<Eve
             base,
             inputs,
         } => lane::decide_record_inputs(world, order, revision, &base, *inputs),
-        SystemCmd::ScopeDrafted { order, rev, draft } => {
-            lane::decide_drafted(world, order, rev, *draft)
-        }
-        SystemCmd::ScopeDraftFailed { order, rev, reason } => {
-            lane::decide_draft_failed(world, order, rev, reason)
-        }
-        SystemCmd::VisionChecked {
-            task,
-            gate_run,
-            status,
-            counts,
-            human_questions,
-        } => match world.gate(gate_run) {
-            Some(gate) if gate.task == task => Ok(vec![Event::VisionChecked {
-                task,
-                gate_run,
-                status,
-                counts,
-                human_questions,
-            }]),
-            _ => Err(Rejection::unknown("gate run", gate_run)),
-        },
     }
 }
