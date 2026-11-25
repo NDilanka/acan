@@ -468,7 +468,7 @@ fn text_rejects_bidi_controls_and_single_line_separators() {
             "summary",
         );
     }
-    for c in BIDI_CONTROLS {
+    for c in BIDI_CONTROLS.into_iter().chain(LINE_SEPARATORS) {
         let text = format!("a{c}b");
         for (block, field) in [
             (json!({"kind":"text","text":text}), "text"),
@@ -495,7 +495,7 @@ fn text_rejects_bidi_controls_and_single_line_separators() {
         }
     }
     assert!(parse_block(json!({"kind":"heading","level":1,"text":"עברית العربية"})).is_ok());
-    assert!(parse_block(json!({"kind":"text","text":"a\u{2028}b\u{2029}c\n\td"})).is_ok());
+    assert!(parse_block(json!({"kind":"text","text":"a\nb\tc"})).is_ok());
 }
 
 #[test]
@@ -515,6 +515,11 @@ fn refs_scope_paths_and_repo_links_share_the_portable_repo_grammar() {
         "src/a\0b",
         "src/a\tb",
         "file.txt:stream",
+        "src/%2e%2E/file",
+        "src/a%2fb",
+        "src/a%2Fb",
+        "src/a%5cb",
+        "src/a%5Cb",
         "COM¹",
         "src/cOm².txt",
         "CoM³/nested/file.txt",
@@ -608,6 +613,8 @@ fn links_classify_strict_web_urls_and_literal_repo_paths() {
         "https://user:pass@example.com",
         "https://user@[::1]",
         "https://%65xample.com",
+        "https://xn--a.example/",
+        "https://XN--a.example/",
         "https://exa_mple.com",
         "https://exämple.com",
         "https://-example.com",

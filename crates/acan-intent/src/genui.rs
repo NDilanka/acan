@@ -734,8 +734,8 @@ fn validate_text(
     }
     if value.chars().any(|c| {
         is_bidi_control(c)
+            || is_line_separator(c)
             || (c.is_control() && !(multiline && matches!(c, '\n' | '\t')))
-            || (!multiline && is_line_separator(c))
     }) {
         return Err(invalid_field(
             field,
@@ -768,12 +768,22 @@ fn validate_path(field: &'static str, path: &str) -> Result<(), GenUiError> {
         || path
             .chars()
             .any(|c| is_bidi_control(c) || is_line_separator(c))
+        || has_encoded_traversal(path)
         || path.split('/').any(is_superscript_device)
         || path.parse::<RepoPath>().is_err()
     {
         return Err(GenUiError::InvalidPath { field });
     }
     Ok(())
+}
+
+fn has_encoded_traversal(path: &str) -> bool {
+    path.as_bytes().windows(3).any(|bytes| {
+        matches!(
+            bytes,
+            [b'%', b'2', b'e' | b'E' | b'f' | b'F'] | [b'%', b'5', b'c' | b'C']
+        )
+    })
 }
 
 fn is_superscript_device(segment: &str) -> bool {
@@ -803,15 +813,6 @@ pub fn classify_link_target(target: &str) -> Result<LinkTarget<'_>, GenUiError> 
         {
             return Ok(LinkTarget::WebUrl(target));
         }
-        return Err(GenUiError::InvalidLink);
-    }
-    // RepoPath rejects colons. Also refuse encoded dots and separators in literal paths.
-    if target.as_bytes().windows(3).any(|bytes| {
-        matches!(
-            bytes,
-            [b'%', b'2', b'e' | b'E' | b'f' | b'F'] | [b'%', b'5', b'c' | b'C']
-        )
-    }) {
         return Err(GenUiError::InvalidLink);
     }
     validate_path("target", target).map_err(|_| GenUiError::InvalidLink)?;
@@ -856,6 +857,9 @@ fn valid_web_authority(authority: &str) -> bool {
             (1..=63).contains(&label.len())
                 && !label.starts_with('-')
                 && !label.ends_with('-')
+                && !label
+                    .get(..4)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("xn--"))
                 && label
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-')
