@@ -26,6 +26,7 @@ mod jobs;
     reason = "the ruling answer path and its folds have no caller yet; intent_api owns the route"
 )]
 mod land;
+pub mod land_v1;
 mod mcp;
 #[allow(
     dead_code,

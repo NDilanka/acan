@@ -10,8 +10,7 @@ description = "Per-task git worktrees and queue-ordered landing onto the protect
 [dependencies]
 acan-core = { path = "../acan-core" }
 acan-intent = { path = "../acan-intent" }
+serde.workspace = true
+tempfile = "3"
 thiserror.workspace = true
 tokio.workspace = true
-
-[dev-dependencies]
-tempfile = "3"

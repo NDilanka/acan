@@ -17,6 +17,7 @@ mod checkout;
 mod error;
 mod git;
 pub mod git_env;
+pub mod land_v1;
 mod prepare;
 mod protected;
 mod repo;
@@ -25,6 +26,10 @@ mod worktree;
 pub use acan_core;
 
 pub use error::Error;
+pub use land_v1::{
+    ChangeStatus, ChangedFile, IgnoredAccounting, LandV1Error, StagedCommit, V1Candidate,
+    stage_and_commit_worktree,
+};
 pub use prepare::{InstallOutcome, Preparation, PrepareOutcome, ProtectedExport};
 pub use protected::ProtectedPaths;
 pub use repo::{LandOutcome, Repo, Worktrees};
