@@ -9,7 +9,7 @@ use crate::HookError;
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Why the hook is asking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestKind {
     /// Droid session start: a heartbeat the daemon records for the order.
@@ -19,7 +19,7 @@ pub enum RequestKind {
 }
 
 /// One question from the hook to the daemon.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct HookRequest {
     pub version: u32,
     pub kind: RequestKind,
@@ -36,15 +36,16 @@ pub struct HookRequest {
 }
 
 /// The daemon's answer to one request.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct HookResponse {
     pub version: u32,
     pub decision: Decision,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
 
 /// The daemon's decision. Any other value makes the reply malformed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Decision {
     Allow,
@@ -83,6 +84,31 @@ pub fn encode_request(request: &HookRequest) -> Result<String, HookError> {
         .map_err(|err| HookError::Internal(format!("cannot encode request: {err}")))?;
     line.push('\n');
     Ok(line)
+}
+
+/// Parses a newline-terminated request received by the daemon.
+///
+/// # Errors
+///
+/// Returns [`HookError::BadInput`] when the line is incomplete, is not a single JSON
+/// object with unique keys and a known request kind, or has the wrong version.
+pub fn parse_request(line: &str) -> Result<HookRequest, HookError> {
+    let body = line
+        .strip_suffix('\n')
+        .ok_or_else(|| HookError::BadInput("the request is not newline-terminated".to_owned()))?;
+    if body.contains('\n') {
+        return Err(HookError::BadInput(
+            "expected a single request line".to_owned(),
+        ));
+    }
+    let request: HookRequest = crate::parse_object(body).map_err(HookError::BadInput)?;
+    if request.version != PROTOCOL_VERSION {
+        return Err(HookError::BadInput(format!(
+            "protocol version {} (expected {PROTOCOL_VERSION})",
+            request.version
+        )));
+    }
+    Ok(request)
 }
 
 /// Parses the daemon's reply line. The line must end in a newline and be one JSON object.

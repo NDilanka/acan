@@ -87,6 +87,7 @@ version = "0.1.0"
 dependencies = [
  "acan-core",
  "acan-git",
+ "acan-hook",
  "acan-intent",
  "acan-scan",
  "acan-witness",

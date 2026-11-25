@@ -165,9 +165,24 @@ fn check_reply(line: String) -> Result<String, HookError> {
 
 #[cfg(windows)]
 fn exchange_local(path: &Path, request: &[u8]) -> io::Result<String> {
+    use std::time::{Duration, Instant};
+
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let deadline = Instant::now() + Duration::from_millis(100);
     // One read-write handle serves both directions; the daemon writes its reply to the same
-    // pipe instance.
-    let pipe = OpenOptions::new().read(true).write(true).open(path)?;
+    // pipe instance. A burst can briefly take every waiting instance before the listener
+    // replenishes them. Retry only that error, within the hook's overall deadline.
+    let pipe = loop {
+        match OpenOptions::new().read(true).write(true).open(path) {
+            Ok(pipe) => break pipe,
+            Err(err)
+                if err.raw_os_error() == Some(ERROR_PIPE_BUSY) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(err) => return Err(err),
+        }
+    };
     exchange_stream(pipe, request)
 }
 
