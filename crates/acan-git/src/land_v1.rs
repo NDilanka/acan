@@ -646,14 +646,16 @@ impl Scan<'_> {
         };
         if existing_index.is_file() {
             // Rebuild from logical staged entries rather than byte-copying `.git/index`:
-            // this preserves staged filemode changes and force-added ignored files while
-            // stripping assume-unchanged/stat-cache state and split-index sharedindex links.
+            // this preserves staged filemode changes, force-added ignored files, and
+            // skip-worktree bits while stripping assume-unchanged/stat-cache state and
+            // split-index sharedindex links.
             let ls_args = hooks.args(&[
                 "-c",
                 "core.fsmonitor=false",
                 "-c",
                 "core.splitIndex=false",
                 "ls-files",
+                "-v",
                 "--stage",
                 "-z",
             ]);
@@ -662,6 +664,28 @@ impl Scan<'_> {
                 return Err(staged.into_error(&ls_args).into());
             }
             if !staged.stdout.is_empty() {
+                let mut index_info = Vec::with_capacity(staged.stdout.len());
+                let mut skip_worktree = Vec::new();
+                for record in staged
+                    .stdout
+                    .split(|b| *b == 0)
+                    .filter(|record| !record.is_empty())
+                {
+                    if record.len() < 3 || record[1] != b' ' {
+                        return Err(bad_output("ls-files", "malformed staged entry"));
+                    }
+                    let tag = record[0];
+                    let entry = &record[2..];
+                    index_info.extend_from_slice(entry);
+                    index_info.push(0);
+                    if matches!(tag, b'S' | b's') {
+                        let Some(tab) = entry.iter().position(|b| *b == b'\t') else {
+                            return Err(bad_output("ls-files", "staged entry missing path"));
+                        };
+                        skip_worktree.extend_from_slice(&entry[tab + 1..]);
+                        skip_worktree.push(0);
+                    }
+                }
                 let update_args = hooks.args(&[
                     "-c",
                     "core.fsmonitor=false",
@@ -674,9 +698,28 @@ impl Scan<'_> {
                     "--index-info",
                 ]);
                 let updated =
-                    git::run_raw(self.root, &update_args, &env, Some(&staged.stdout)).await?;
+                    git::run_raw(self.root, &update_args, &env, Some(&index_info)).await?;
                 if !updated.status.success() {
                     return Err(updated.into_error(&update_args).into());
+                }
+                if !skip_worktree.is_empty() {
+                    let skip_args = hooks.args(&[
+                        "-c",
+                        "core.fsmonitor=false",
+                        "-c",
+                        "core.splitIndex=false",
+                        "-c",
+                        "splitIndex.sharedIndexExpire=never",
+                        "update-index",
+                        "--skip-worktree",
+                        "-z",
+                        "--stdin",
+                    ]);
+                    let skipped =
+                        git::run_raw(self.root, &skip_args, &env, Some(&skip_worktree)).await?;
+                    if !skipped.status.success() {
+                        return Err(skipped.into_error(&skip_args).into());
+                    }
                 }
             }
         } else {

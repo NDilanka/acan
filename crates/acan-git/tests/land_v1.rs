@@ -606,3 +606,27 @@ async fn rebuilds_scratch_index_without_assume_unchanged_or_split_index_side_eff
     let status = git(f.task.path(), &["status", "--porcelain"]);
     assert!(status.contains("A  src/other.txt"));
 }
+
+#[tokio::test]
+async fn preserves_absent_skip_worktree_entries_without_staging_deletions() {
+    let f = fixture().await;
+    let original = fs::read_to_string(f.task.path().join("src/app.txt")).expect("read app.txt");
+    git(
+        f.task.path(),
+        &["update-index", "--skip-worktree", "src/app.txt"],
+    );
+    fs::remove_file(f.task.path().join("src/app.txt")).expect("remove skip-worktree file");
+    write(f.task.path(), "src/new.txt", "new in scope\n");
+
+    let scope = scope("src/");
+    let staged = f
+        .stage(&scope, &RepoRules::default())
+        .await
+        .expect("stage keeps skip-worktree entry intact");
+    let preserved = git(
+        &f.repo.root,
+        &["show", &format!("{}:src/app.txt", staged.commit)],
+    );
+    assert_eq!(preserved, original.trim_end_matches('\n'));
+    assert!(staged.changed.iter().all(|c| c.path != "src/app.txt"));
+}
