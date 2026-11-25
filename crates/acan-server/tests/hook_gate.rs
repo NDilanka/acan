@@ -703,24 +703,39 @@ async fn git_commands_allow_only_read_only_subcommands_without_unsafe_options() 
     );
     for (arguments, reason) in [
         ("status", "requires --no-optional-locks"),
-        ("diff", "requires --no-ext-diff and --no-textconv"),
+        ("diff", "requires --no-optional-locks"),
         (
-            "diff --no-ext-diff",
-            "requires --no-ext-diff and --no-textconv",
+            "diff --no-ext-diff --no-textconv",
+            "requires --no-optional-locks",
         ),
         (
-            "diff --no-textconv",
-            "requires --no-ext-diff and --no-textconv",
+            "--no-optional-locks diff",
+            "requires leading --no-ext-diff and --no-textconv",
         ),
-        ("log", "requires --no-ext-diff and --no-textconv"),
-        ("show HEAD", "requires --no-ext-diff and --no-textconv"),
+        (
+            "--no-optional-locks diff --no-ext-diff",
+            "requires leading --no-ext-diff and --no-textconv",
+        ),
+        (
+            "--no-optional-locks diff --no-textconv",
+            "requires leading --no-ext-diff and --no-textconv",
+        ),
+        (
+            "--no-optional-locks diff -S --no-ext-diff --no-textconv",
+            "requires leading --no-ext-diff and --no-textconv",
+        ),
+        ("log", "requires leading --no-ext-diff and --no-textconv"),
+        (
+            "show HEAD",
+            "requires leading --no-ext-diff and --no-textconv",
+        ),
         (
             "blame src/lib.rs",
-            "requires --no-ext-diff and --no-textconv",
+            "requires leading --no-ext-diff and --no-textconv",
         ),
         (
-            "diff -- --no-ext-diff --no-textconv",
-            "requires --no-ext-diff and --no-textconv",
+            "--no-optional-locks diff -- --no-ext-diff --no-textconv",
+            "requires leading --no-ext-diff and --no-textconv",
         ),
         ("show-ref", "only read-only git commands"),
         ("diff --output result.txt", "git argument"),
@@ -770,6 +785,26 @@ async fn git_commands_allow_only_read_only_subcommands_without_unsafe_options() 
         .await,
         "git environment overrides",
     );
+    for (command, reason) in [
+        (
+            "echo GIT_OPTIONAL_LOCKS=0 && git status",
+            "requires --no-optional-locks",
+        ),
+        (
+            "git status GIT_OPTIONAL_LOCKS=0",
+            "requires --no-optional-locks",
+        ),
+        #[cfg(unix)]
+        (
+            "git_optional_locks=0 git status",
+            "requires --no-optional-locks",
+        ),
+    ] {
+        denied(
+            tool(&server, dir.path(), "Execute", json!({"command": command})).await,
+            reason,
+        );
+    }
     server.shutdown().await.expect("shutdown");
 }
 

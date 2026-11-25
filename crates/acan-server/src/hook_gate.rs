@@ -656,20 +656,38 @@ fn check_shell(command: &str) -> Result<(), String> {
             if has_redirection_or_grouping {
                 return Err("git commands cannot use redirection or grouping".to_owned());
             }
-            let mut env_no_optional_locks = false;
             if words.iter().any(|word| {
                 word.split_once('=').is_some_and(|(name, value)| {
-                    let name = name.trim().to_ascii_uppercase();
-                    if name == "GIT_OPTIONAL_LOCKS" && value == "0" {
-                        env_no_optional_locks = true;
-                        false
-                    } else {
-                        name.starts_with("GIT_")
-                    }
+                    let upper = name.trim().to_ascii_uppercase();
+                    upper.starts_with("GIT_") && !(upper == "GIT_OPTIONAL_LOCKS" && value == "0")
                 })
             }) {
                 return Err("git environment overrides are not allowed".to_owned());
             }
+            let cmd_start = words[..index]
+                .iter()
+                .rposition(String::is_empty)
+                .map_or(0, |sep| sep + 1);
+            let prefix = &words[cmd_start..index];
+            let assignments = match prefix.first().map(String::as_str) {
+                Some("env") => &prefix[1..],
+                _ => prefix,
+            };
+            let env_no_optional_locks = !assignments.is_empty()
+                && assignments.iter().all(|word| {
+                    word.split_once('=')
+                        .is_some_and(|(name, _)| !name.is_empty() && !name.starts_with('-'))
+                })
+                && assignments.iter().any(|word| {
+                    word.split_once('=').is_some_and(|(name, value)| {
+                        let matches_name = if cfg!(windows) {
+                            name.eq_ignore_ascii_case("GIT_OPTIONAL_LOCKS")
+                        } else {
+                            name == "GIT_OPTIONAL_LOCKS"
+                        };
+                        matches_name && value == "0"
+                    })
+                });
             check_git(&words[index + 1..], env_no_optional_locks)?;
         }
     }
@@ -746,23 +764,20 @@ fn check_git(words: &[String], env_no_optional_locks: bool) -> Result<(), String
     ) {
         return Err("only read-only git commands are allowed".to_owned());
     }
-    if subcommand == Some("status") && !has_no_optional_locks {
-        return Err(
-            "git status requires --no-optional-locks or GIT_OPTIONAL_LOCKS=0 to stay read-only"
-                .to_owned(),
-        );
+    if matches!(subcommand, Some("status" | "diff")) && !has_no_optional_locks {
+        return Err(format!(
+            "git {} requires --no-optional-locks or GIT_OPTIONAL_LOCKS=0 to stay read-only",
+            subcommand.unwrap_or_default()
+        ));
     }
     if matches!(subcommand, Some("diff" | "log" | "show" | "blame")) {
-        let opts_before_sep: Vec<&str> = sub_args
-            .iter()
-            .copied()
-            .take_while(|arg| *arg != "--")
-            .collect();
-        let has_no_ext_diff = opts_before_sep.contains(&"--no-ext-diff");
-        let has_no_textconv = opts_before_sep.contains(&"--no-textconv");
-        if !(has_no_ext_diff && has_no_textconv) {
+        let has_leading_readonly_flags = matches!(
+            sub_args.get(..2),
+            Some(["--no-ext-diff", "--no-textconv"] | ["--no-textconv", "--no-ext-diff"])
+        );
+        if !has_leading_readonly_flags {
             return Err(format!(
-                "git {} requires --no-ext-diff and --no-textconv to stay read-only",
+                "git {} requires leading --no-ext-diff and --no-textconv to stay read-only",
                 subcommand.unwrap_or_default()
             ));
         }
