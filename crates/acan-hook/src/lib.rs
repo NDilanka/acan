@@ -143,7 +143,7 @@ pub fn run_from_process(started: Instant) -> Result<(), HookError> {
 ///
 /// Returns the parse error text when `raw` is not JSON, is not an object that fits `T`, or
 /// repeats a key.
-fn parse_object<T: DeserializeOwned>(raw: &str) -> Result<T, String> {
+pub fn parse_object<T: DeserializeOwned>(raw: &str) -> Result<T, String> {
     if raw.trim_start().as_bytes().first() != Some(&b'{') {
         return Err("expected a JSON object".to_owned());
     }
